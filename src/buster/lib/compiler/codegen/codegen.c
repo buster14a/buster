@@ -7006,8 +7006,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         if (instruction->opcode == IR_OPCODE_FUNCTION && direct_call_uses[instruction->result.value] == 1)
                         {
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc0);
+                            BusterX86MetadataPhysicalOperand zero_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_operands,
+                                                                       BUSTER_ARRAY_LENGTH(zero_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             C_X64_STORE_RESULT();
                             instruction_id = instruction->next;
                             continue;
@@ -9756,28 +9764,29 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 u64 remaining = element->layout.size - copied;
                                 u32 chunk = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-                                if (chunk == 8)
+                                u16 memory_width = (u16)(chunk * 8);
+                                u16 register_width = chunk <= 2 ? 32 : memory_width;
+                                String8 load_mnemonic = chunk <= 2 ? S8("MOVZX") : S8("MOV");
+                                BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, register_width),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, memory_width,
+                                        C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[element_index].value]) + (s32)copied),
+                                };
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, memory_width,
+                                        result_displacement + (s32)(element_index * element->layout.size + copied)),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, memory_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, load_mnemonic, load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else if (chunk == 2)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, chunk == 1 ? 0x8a : 0x8b);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[element_index].value]) + (s32)copied));
-                                if (chunk == 8)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                else if (chunk == 2)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, chunk == 1 ? 0x88 : 0x89);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)(element_index * element->layout.size + copied)));
                                 copied += chunk;
                             }
                         }
@@ -9795,19 +9804,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             u64 remaining = aggregate->layout.size - aggregate_copied;
                             u32 chunk = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            if (chunk == 8)
+                            u16 memory_width = (u16)(chunk * 8);
+                            BusterX86MetadataPhysicalOperand zero_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand zero_store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, memory_width,
+                                                                      result_displacement + (s32)aggregate_copied),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, memory_width),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_operands,
+                                                                       BUSTER_ARRAY_LENGTH(zero_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), zero_store_operands,
+                                                                       BUSTER_ARRAY_LENGTH(zero_store_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            else if (chunk == 2)
-                            {
-                                codegen_emit_u8(&buffer, 0x66);
-                            }
-                            codegen_emit_u8(&buffer, chunk == 1 ? 0x88 : 0x89);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)aggregate_copied));
                             aggregate_copied += chunk;
                         }
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
@@ -9841,31 +9855,47 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 C_X64_LOAD(0x85, instruction->operands[operand_index]);
                                 if (field->bit_width < 64)
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0xba);
-                                    codegen_emit_u64(&buffer, ((u64)1 << field->bit_width) - 1);
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x21);
-                                    codegen_emit_u8(&buffer, 0xd0);
+                                    BusterX86MetadataPhysicalOperand mask_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_unsigned_immediate(((u64)1 << field->bit_width) - 1, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand mask_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), mask_load_operands,
+                                                                               BUSTER_ARRAY_LENGTH(mask_load_operands)) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), mask_operands,
+                                                                               BUSTER_ARRAY_LENGTH(mask_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 if (field->bit_offset)
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0xc1);
-                                    codegen_emit_u8(&buffer, 0xe0);
-                                    codegen_emit_u8(&buffer, (u8)field->bit_offset);
+                                    BusterX86MetadataPhysicalOperand shift_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_immediate(field->bit_offset, 8),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_operands,
+                                                                               BUSTER_ARRAY_LENGTH(shift_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
-                                if (field_type->layout.size == 8)
+                                BusterX86MetadataPhysicalOperand bitfield_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)(field_type->layout.size * 8),
+                                                                          field_displacement),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(field_type->layout.size * 8)),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), bitfield_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(bitfield_store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else if (field_type->layout.size == 2)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, field_type->layout.size == 1 ? 0x08 : 0x09);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)field_displacement);
                                 continue;
                             }
                             u64 field_copied = 0;
@@ -9873,28 +9903,28 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 u64 remaining = field_type->layout.size - field_copied;
                                 u32 chunk = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-                                if (chunk == 8)
+                                u16 memory_width = (u16)(chunk * 8);
+                                u16 register_width = chunk <= 2 ? 32 : memory_width;
+                                String8 load_mnemonic = chunk <= 2 ? S8("MOVZX") : S8("MOV");
+                                BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, register_width),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, memory_width,
+                                        C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[operand_index].value]) + (s32)field_copied),
+                                };
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, memory_width,
+                                                                          field_displacement + (s32)field_copied),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, memory_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, load_mnemonic, load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else if (chunk == 2)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, chunk == 1 ? 0x8a : 0x8b);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[operand_index].value]) + (s32)field_copied));
-                                if (chunk == 8)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                else if (chunk == 2)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, chunk == 1 ? 0x88 : 0x89);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(field_displacement + (s32)field_copied));
                                 field_copied += chunk;
                             }
                         }
