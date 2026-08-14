@@ -11416,14 +11416,74 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     if (mmx_instruction)
     {
-        // MMX memory operands are always qword packed elements.  Intel and
-        // AT&T spellings commonly omit a ptr qualifier; preserve that source
-        // semantics for metadata rows such as MOVQ/PADDQ before selection.
+        // MMX memory operands use the generated row's element width.  Packed
+        // byte/word operations (PUNPCKLBW, PACKSSWB, PCMPGTB, ...) differ
+        // from qword rows such as PADDB/PADDQ, so a blanket 64-bit default
+        // rejects otherwise valid unqualified Intel/AT&T memory spellings.
+        // Infer the width from the MMX candidate's published memory shape;
+        // explicit source qualifiers remain authoritative and are validated
+        // by the selector.
+        BusterX86MetadataCandidateRange mmx_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
         for (u32 index = 0; index < operand_count; index += 1)
         {
-            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || physical[index].width ||
+                operands[index].memory.width_explicit)
             {
-                physical[index].width = 64;
+                continue;
+            }
+            u16 inferred_width = 0;
+            for (u32 candidate_index = 0; candidate_index < mmx_candidates.count; candidate_index += 1)
+            {
+                u32 form_id = 0;
+                BusterX86MetadataForm form = {0};
+                if (!buster_x86_metadata_candidate_at(mmx_candidates, candidate_index, &form_id) ||
+                    !buster_x86_metadata_form(form_id, &form) || form.operand_count != operand_count)
+                {
+                    continue;
+                }
+                bool has_mmx_register = false;
+                u16 candidate_memory_width = 0;
+                for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+                {
+                    BusterX86MetadataOperand metadata_operand = {0};
+                    if (!buster_x86_metadata_operand(form_id, operand_index, &metadata_operand))
+                    {
+                        continue;
+                    }
+                    if (metadata_operand.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+                        metadata_operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX)
+                    {
+                        has_mmx_register = true;
+                    }
+                    if (metadata_operand.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+                    {
+                        u16 width_flags = metadata_operand.physical_width_flags;
+                        candidate_memory_width = width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_8
+                                                    ? 8
+                                                    : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_16
+                                                        ? 16
+                                                        : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_32
+                                                            ? 32
+                                                            : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_64 ? 64 : 0;
+                    }
+                }
+                if (!has_mmx_register || !candidate_memory_width)
+                {
+                    continue;
+                }
+                if (!inferred_width)
+                {
+                    inferred_width = candidate_memory_width;
+                }
+                else if (inferred_width != candidate_memory_width)
+                {
+                    inferred_width = UINT16_MAX;
+                    break;
+                }
+            }
+            if (inferred_width && inferred_width != UINT16_MAX)
+            {
+                physical[index].width = inferred_width;
             }
         }
     }
@@ -11695,6 +11755,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    // XED classifies a subset of legacy MMX rows under SSE2MMX even though
+    // the assembler's baseline MMX contract accepts them without SSE2.  The
+    // physical query is already restricted to MMX rows above, so supplying
+    // the feature token here cannot make an XMM form pass the selector.
+    if (mmx_instruction && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2) &&
+        feature_count < BUSTER_ARRAY_LENGTH(feature_names))
+    {
+        feature_names[feature_count++] = S8("sse2");
+    }
     u8 address_size = source_address_size;
     bool memory_address_size_seen = false;
     for (u32 index = 0; index < operand_count; index += 1)
@@ -12801,6 +12870,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     if (instruction->metadata_operand_count)
     {
         memcpy(operands, instruction->metadata_operands, instruction->metadata_operand_count * sizeof(*operands));
+    }
+    bool mmx_instruction = false;
+    for (u32 operand_index = 0; operand_index < instruction->metadata_operand_count; operand_index += 1)
+    {
+        if (operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            operands[operand_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX)
+        {
+            mmx_instruction = true;
+            break;
+        }
+    }
+    if (mmx_instruction && !target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_SSE2) &&
+        feature_count < BUSTER_ARRAY_LENGTH(feature_names))
+    {
+        // Keep the legacy MMX baseline accepted even though normalized XED
+        // rows are tagged SSE2MMX.  The physical operands have already
+        // excluded XMM forms, so this compatibility token cannot authorize
+        // an SSE2-only instruction.
+        feature_names[feature_count++] = S8("sse2");
     }
     BusterX86MetadataPhysicalQuery physical = {
         .mnemonic = instruction->metadata_mnemonic,
