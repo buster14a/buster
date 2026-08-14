@@ -1590,6 +1590,71 @@ static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transfo
     {S8_INITIALIZER("fsub v0.2d, v1.2d, v2.2d\n"), {0x20, 0xd4, 0xe2, 0x4e}},
 };
 
+/* M1 mnemonic-collision cohort: every legal direct row arrangement, with
+ * bytes independently obtained from llvm-mc 22.1.8. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_m1_collision_cases[] = {
+    {S8_INITIALIZER("add v0.8b, v1.8b, v2.8b\n"), {0x20, 0x84, 0x22, 0x0e}},
+    {S8_INITIALIZER("add v0.16b, v1.16b, v2.16b\n"), {0x20, 0x84, 0x22, 0x4e}},
+    {S8_INITIALIZER("add v0.4h, v1.4h, v2.4h\n"), {0x20, 0x84, 0x62, 0x0e}},
+    {S8_INITIALIZER("add v0.8h, v1.8h, v2.8h\n"), {0x20, 0x84, 0x62, 0x4e}},
+    {S8_INITIALIZER("add v0.2s, v1.2s, v2.2s\n"), {0x20, 0x84, 0xa2, 0x0e}},
+    {S8_INITIALIZER("add v0.4s, v1.4s, v2.4s\n"), {0x20, 0x84, 0xa2, 0x4e}},
+    {S8_INITIALIZER("add v0.2d, v1.2d, v2.2d\n"), {0x20, 0x84, 0xe2, 0x4e}},
+    {S8_INITIALIZER("add d0, d1, d2\n"), {0x20, 0x84, 0xe2, 0x5e}},
+    {S8_INITIALIZER("and v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0x22, 0x0e}},
+    {S8_INITIALIZER("and v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0x22, 0x4e}},
+    {S8_INITIALIZER("bic v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0x62, 0x0e}},
+    {S8_INITIALIZER("bic v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0x62, 0x4e}},
+    {S8_INITIALIZER("cls v0.8b, v1.8b\n"), {0x20, 0x48, 0x20, 0x0e}},
+    {S8_INITIALIZER("cls v0.16b, v1.16b\n"), {0x20, 0x48, 0x20, 0x4e}},
+    {S8_INITIALIZER("cls v0.4h, v1.4h\n"), {0x20, 0x48, 0x60, 0x0e}},
+    {S8_INITIALIZER("cls v0.8h, v1.8h\n"), {0x20, 0x48, 0x60, 0x4e}},
+    {S8_INITIALIZER("cls v0.2s, v1.2s\n"), {0x20, 0x48, 0xa0, 0x0e}},
+    {S8_INITIALIZER("cls v0.4s, v1.4s\n"), {0x20, 0x48, 0xa0, 0x4e}},
+    {S8_INITIALIZER("clz v0.8b, v1.8b\n"), {0x20, 0x48, 0x20, 0x2e}},
+    {S8_INITIALIZER("clz v0.16b, v1.16b\n"), {0x20, 0x48, 0x20, 0x6e}},
+    {S8_INITIALIZER("clz v0.4h, v1.4h\n"), {0x20, 0x48, 0x60, 0x2e}},
+    {S8_INITIALIZER("clz v0.8h, v1.8h\n"), {0x20, 0x48, 0x60, 0x6e}},
+    {S8_INITIALIZER("clz v0.2s, v1.2s\n"), {0x20, 0x48, 0xa0, 0x2e}},
+    {S8_INITIALIZER("clz v0.4s, v1.4s\n"), {0x20, 0x48, 0xa0, 0x6e}},
+    {S8_INITIALIZER("eor v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0x22, 0x2e}},
+    {S8_INITIALIZER("eor v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0x22, 0x6e}},
+    {S8_INITIALIZER("orn v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0xe2, 0x0e}},
+    {S8_INITIALIZER("orn v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("rbit v0.8b, v1.8b\n"), {0x20, 0x58, 0x60, 0x2e}},
+    {S8_INITIALIZER("rbit v0.16b, v1.16b\n"), {0x20, 0x58, 0x60, 0x6e}},
+    {S8_INITIALIZER("rev16 v0.8b, v1.8b\n"), {0x20, 0x18, 0x20, 0x0e}},
+    {S8_INITIALIZER("rev16 v0.16b, v1.16b\n"), {0x20, 0x18, 0x20, 0x4e}},
+    {S8_INITIALIZER("rev32 v0.8b, v1.8b\n"), {0x20, 0x08, 0x20, 0x2e}},
+    {S8_INITIALIZER("rev32 v0.16b, v1.16b\n"), {0x20, 0x08, 0x20, 0x6e}},
+    {S8_INITIALIZER("rev32 v0.4h, v1.4h\n"), {0x20, 0x08, 0x60, 0x2e}},
+    {S8_INITIALIZER("rev32 v0.8h, v1.8h\n"), {0x20, 0x08, 0x60, 0x6e}},
+    {S8_INITIALIZER("sub v0.8b, v1.8b, v2.8b\n"), {0x20, 0x84, 0x22, 0x2e}},
+    {S8_INITIALIZER("sub v0.16b, v1.16b, v2.16b\n"), {0x20, 0x84, 0x22, 0x6e}},
+    {S8_INITIALIZER("sub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x84, 0x62, 0x2e}},
+    {S8_INITIALIZER("sub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x84, 0x62, 0x6e}},
+    {S8_INITIALIZER("sub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x84, 0xa2, 0x2e}},
+    {S8_INITIALIZER("sub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x84, 0xa2, 0x6e}},
+    {S8_INITIALIZER("sub v0.2d, v1.2d, v2.2d\n"), {0x20, 0x84, 0xe2, 0x6e}},
+    {S8_INITIALIZER("sub d0, d1, d2\n"), {0x20, 0x84, 0xe2, 0x7e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_m1_collision_boundary_cases[] = {
+    {S8_INITIALIZER("ADD V31.2D, V30.2D, V29.2D\n"), {0xdf, 0x87, 0xfd, 0x4e}},
+    {S8_INITIALIZER("ADD D31, D30, D29\n"), {0xdf, 0x87, 0xfd, 0x5e}},
+    {S8_INITIALIZER("AND V31.16B, V30.16B, V29.16B\n"), {0xdf, 0x1f, 0x3d, 0x4e}},
+    {S8_INITIALIZER("BIC V31.16B, V30.16B, V29.16B\n"), {0xdf, 0x1f, 0x7d, 0x4e}},
+    {S8_INITIALIZER("CLS V31.4S, V30.4S\n"), {0xdf, 0x4b, 0xa0, 0x4e}},
+    {S8_INITIALIZER("CLZ V31.4S, V30.4S\n"), {0xdf, 0x4b, 0xa0, 0x6e}},
+    {S8_INITIALIZER("EOR V31.16B, V30.16B, V29.16B\n"), {0xdf, 0x1f, 0x3d, 0x6e}},
+    {S8_INITIALIZER("ORN V31.16B, V30.16B, V29.16B\n"), {0xdf, 0x1f, 0xfd, 0x4e}},
+    {S8_INITIALIZER("RBIT V31.16B, V30.16B\n"), {0xdf, 0x5b, 0x60, 0x6e}},
+    {S8_INITIALIZER("REV16 V31.16B, V30.16B\n"), {0xdf, 0x1b, 0x20, 0x4e}},
+    {S8_INITIALIZER("REV32 V31.8H, V30.8H\n"), {0xdf, 0x0b, 0x60, 0x6e}},
+    {S8_INITIALIZER("SUB V31.2D, V30.2D, V29.2D\n"), {0xdf, 0x87, 0xfd, 0x6e}},
+    {S8_INITIALIZER("SUB D31, D30, D29\n"), {0xdf, 0x87, 0xfd, 0x7e}},
+};
+
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
 // public encoder matrix below separately exercises register-31 roles), and
 // every expected byte is an independent llvm-mc 22.1.8 literal.
@@ -1984,13 +2049,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 376);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 374);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 16);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 249);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 14);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 389);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 387);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 3);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 260);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 127);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 3);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 0);
     BUSTER_TEST(arguments, direct_simd_covered_count + 2 == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fhm_requirement_count == 4 && direct_simd_fhm_requirement_exact);
@@ -2000,6 +2065,78 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_simd_rdm_requirement_count == 4 && direct_simd_rdm_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
+    static AssemblyA64DirectSIMDSpellingExpectation const m1_collision_spellings[] = {
+        {S8_INITIALIZER("arm-a64@2026-06:ADD_asimdsame_only"), UINT64_C(0x979101fa1dd62d38), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:ADD_asisdsame_only"), UINT64_C(0x1f1182a2f55aaad9), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:AND_asimdsame_only"), UINT64_C(0x52df93db3d4db99d), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:BIC_asimdsame_only"), UINT64_C(0x70338c1f69cbc030), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:CLS_asimdmisc_R"), UINT64_C(0xc9168638e385e157), 2,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:CLZ_asimdmisc_R"), UINT64_C(0x0b1fe309be6bba71), 2,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:EOR_asimdsame_only"), UINT64_C(0xa6d57e7ad7709737), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:ORN_asimdsame_only"), UINT64_C(0xfb87dd553345428c), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:RBIT_asimdmisc_R"), UINT64_C(0x15375b291dd8409f), 2,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:REV16_asimdmisc_R"), UINT64_C(0x85e55f83cf9406e7), 2,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:REV32_asimdmisc_R"), UINT64_C(0x6be39e0e8b2edb2c), 2,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:SUB_asimdsame_only"), UINT64_C(0x9353fa8f698b9abb), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+        {S8_INITIALIZER("arm-a64@2026-06:SUB_asisdsame_only"), UINT64_C(0x5d1dde1d88b9da52), 3,
+         {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
+          BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}, 0, 0},
+    };
+    u32 m1_collision_first_spelling = UINT32_MAX;
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(m1_collision_spellings); expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = m1_collision_spellings[expected_index];
+        u32 found_count = 0;
+        u32 found_index = UINT32_MAX;
+        bool exact = true;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (!assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) ||
+                spelling.source_digest != expected.source_digest)
+            {
+                continue;
+            }
+            found_count += 1;
+            found_index = spelling_index;
+            exact = exact && string_equal(spelling.semantic_id, expected.semantic_id) && spelling.operand_count == expected.operand_count &&
+                    spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON &&
+                    memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0;
+        }
+        BUSTER_TEST(arguments, found_count == 1 && exact);
+        if (expected_index == 0)
+        {
+            m1_collision_first_spelling = found_index;
+        }
+        else
+        {
+            BUSTER_TEST(arguments, found_index == m1_collision_first_spelling + expected_index);
+        }
+    }
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_spellings); expected_index += 1)
     {
         AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_fcvt_suffix_spellings[expected_index];
@@ -5322,6 +5459,61 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, transform_case.bytes, 4));
     }
 
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_m1_collision_cases) == 44);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_m1_collision_boundary_cases) == 13);
+    for (u32 collision_index = 0; collision_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_m1_collision_cases);
+         collision_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase collision_case = assembly_a64_direct_simd_m1_collision_cases[collision_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, collision_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, collision_case.bytes, 4));
+        AssemblyEncodeResult without_neon = assembly_encode(
+            arguments->arena, collision_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, without_neon.diagnostic_count == 1 && without_neon.bytes.length == 0 &&
+                                   without_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    for (u32 collision_index = 0; collision_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_m1_collision_boundary_cases);
+         collision_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase collision_case = assembly_a64_direct_simd_m1_collision_boundary_cases[collision_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, collision_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, collision_case.bytes, 4));
+    }
+    static String8 const malformed_aarch64_m1_collision[] = {
+        S8_INITIALIZER("add v0.8b, v1.8b\n"),
+        S8_INITIALIZER("add v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("add q0, q1, q2\n"),
+        S8_INITIALIZER("add v32.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("and v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("and d0, d1, d2\n"),
+        S8_INITIALIZER("bic v0.8b, v1.8b\n"),
+        S8_INITIALIZER("cls v0.2d, v1.2d\n"),
+        S8_INITIALIZER("cls v0.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("cls q0, q1\n"),
+        S8_INITIALIZER("clz v0.8b, v1.8b[0]\n"),
+        S8_INITIALIZER("eor v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("orn v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("rbit v0.4h, v1.4h\n"),
+        S8_INITIALIZER("rev16 v0.4h, v1.4h\n"),
+        S8_INITIALIZER("rev32 v0.4s, v1.4s\n"),
+        S8_INITIALIZER("rev32 v0.8h, v1.8h, v2.8h\n"),
+        S8_INITIALIZER("sub s0, s1, s2\n"),
+        S8_INITIALIZER("sub d0.2d, d1.2d, d2.2d\n"),
+        S8_INITIALIZER("sub v0.2d, v1.2d, v2.2d, v3.2d\n"),
+        S8_INITIALIZER("sub v0.2d, v1.2d[0], v2.2d\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_m1_collision);
+         malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_m1_collision[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     /* FCVTL/FCVTN expose the generated fixed literal `2` as an optional
      * spelling suffix.  Keep the parser grammar at two public vector
      * operands while the generic semantic builder supplies the hidden
@@ -7743,7 +7935,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                       sizeof(expected_aarch64_scalar_integer)) == 0);
     AssemblyEncodeResult aarch64_m1_gpr_collision_regression = assembly_encode(
         arguments->arena,
-        S8("and wzr, w1, w2, lsr #3\n"
+        S8("add w0, w1, w2\n"
+           "add x0, x1, x2\n"
+           "sub w0, w1, w2\n"
+           "sub x0, x1, x2\n"
+           "and wzr, w1, w2, lsr #3\n"
            "bic wzr, w1, w2, lsr #3\n"
            "eor wzr, w1, w2, lsr #3\n"
            "orn wzr, w1, w2, lsr #3\n"
@@ -7751,12 +7947,40 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
     BUSTER_TEST(arguments, aarch64_m1_gpr_collision_regression.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_m1_gpr_collision_regression.bytes,
-                                                         (u8 const[]){0x3f, 0x0c, 0x42, 0x0a,
+                                                         (u8 const[]){0x20, 0x00, 0x02, 0x0b,
+                                                                      0x20, 0x00, 0x02, 0x8b,
+                                                                      0x20, 0x00, 0x02, 0x4b,
+                                                                      0x20, 0x00, 0x02, 0xcb,
+                                                                      0x3f, 0x0c, 0x42, 0x0a,
                                                                       0x3f, 0x0c, 0x62, 0x0a,
                                                                       0x3f, 0x0c, 0x42, 0x4a,
                                                                       0x3f, 0x0c, 0x62, 0x2a,
                                                                       0x3f, 0x0c, 0x42, 0x2a},
-                                                         20));
+                                                         36));
+    AssemblyEncodeResult aarch64_m1_unary_gpr_collision_regression = assembly_encode(
+        arguments->arena,
+        S8("cls w0, w1\n"
+           "cls x0, x1\n"
+           "clz w0, w1\n"
+           "clz x0, x1\n"
+           "rbit w0, w1\n"
+           "rbit x0, x1\n"
+           "rev16 w0, w1\n"
+           "rev16 x0, x1\n"
+           "rev32 x0, x1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_m1_unary_gpr_collision_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_m1_unary_gpr_collision_regression.bytes,
+                                                         (u8 const[]){0x20, 0x14, 0xc0, 0x5a,
+                                                                      0x20, 0x14, 0xc0, 0xda,
+                                                                      0x20, 0x10, 0xc0, 0x5a,
+                                                                      0x20, 0x10, 0xc0, 0xda,
+                                                                      0x20, 0x00, 0xc0, 0x5a,
+                                                                      0x20, 0x00, 0xc0, 0xda,
+                                                                      0x20, 0x04, 0xc0, 0x5a,
+                                                                      0x20, 0x04, 0xc0, 0xda,
+                                                                      0x20, 0x08, 0xc0, 0xda},
+                                                         36));
     static String8 const invalid_aarch64_scalar_integer[] = {
         S8_INITIALIZER("add lsl #1, x0, x1, x2\n"),
         S8_INITIALIZER("add x0, lsl #1, x1, x2\n"),

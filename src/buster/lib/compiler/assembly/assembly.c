@@ -3364,6 +3364,58 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      S8_INITIALIZER("arm-a64@2026-06:UHSUB_asimdsame_only"), 3, BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("add"), UINT64_C(0x979101fa1dd62d38), S8_INITIALIZER("arm-a64@2026-06:ADD_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("add"), UINT64_C(0x1f1182a2f55aaad9), S8_INITIALIZER("arm-a64@2026-06:ADD_asisdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("and"), UINT64_C(0x52df93db3d4db99d), S8_INITIALIZER("arm-a64@2026-06:AND_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("bic"), UINT64_C(0x70338c1f69cbc030), S8_INITIALIZER("arm-a64@2026-06:BIC_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("cls"), UINT64_C(0xc9168638e385e157), S8_INITIALIZER("arm-a64@2026-06:CLS_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("clz"), UINT64_C(0x0b1fe309be6bba71), S8_INITIALIZER("arm-a64@2026-06:CLZ_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("eor"), UINT64_C(0xa6d57e7ad7709737), S8_INITIALIZER("arm-a64@2026-06:EOR_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("orn"), UINT64_C(0xfb87dd553345428c), S8_INITIALIZER("arm-a64@2026-06:ORN_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("rbit"), UINT64_C(0x15375b291dd8409f), S8_INITIALIZER("arm-a64@2026-06:RBIT_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("rev16"), UINT64_C(0x85e55f83cf9406e7), S8_INITIALIZER("arm-a64@2026-06:REV16_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("rev32"), UINT64_C(0x6be39e0e8b2edb2c), S8_INITIALIZER("arm-a64@2026-06:REV32_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("sub"), UINT64_C(0x9353fa8f698b9abb), S8_INITIALIZER("arm-a64@2026-06:SUB_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("sub"), UINT64_C(0x5d1dde1d88b9da52), S8_INITIALIZER("arm-a64@2026-06:SUB_asisdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("cnt"), UINT64_C(0x79f29c4b7493d8fc), S8_INITIALIZER("arm-a64@2026-06:CNT_asimdmisc_R"), 2,
      BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
@@ -7600,6 +7652,161 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     return true;
 }
 
+/* Direct AdvSIMD spellings intentionally win mnemonic lookup so their vector
+ * grammar can be selected without a second global dispatch table.  A handful
+ * of those mnemonics are also present in the M1 scalar/GPR projections.  If
+ * the direct candidate rejects the operands, retry the existing M1 parsers
+ * transactionally: no direct-parser partial state or diagnostic may leak into
+ * the fallback, and a direct unsupported-feature diagnostic remains the final
+ * answer when neither M1 grammar matches. */
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text,
+                                                             AssemblyInstruction* instruction, u32 line, u32 column)
+{
+    if (!builder || !instruction)
+    {
+        return false;
+    }
+    u32 initial_diagnostic_count = builder->result.diagnostic_count;
+    u32 saved_diagnostic_count = initial_diagnostic_count;
+
+    bool scalar_known = false;
+    u8 scalar_operand_count = 0;
+    for (u32 form_index = 0; buster_aarch64_arm_m1_scalar_integer_target(builder->target) &&
+                              form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerForm form = {0};
+        if (!buster_aarch64_arm_m1_scalar_integer_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
+        {
+            continue;
+        }
+        if (!scalar_known)
+        {
+            scalar_known = true;
+            scalar_operand_count = form.operand_count;
+        }
+        else if (scalar_operand_count != form.operand_count)
+        {
+            scalar_known = false;
+            break;
+        }
+    }
+    (void)scalar_operand_count;
+    if (scalar_known)
+    {
+        AssemblyInstruction candidate = *instruction;
+        if (assembly_aarch64_scalar_instruction_parse(builder, mnemonic, operands_text, &candidate, line, column))
+        {
+            candidate.opcode = ASSEMBLY_OPCODE_COUNT;
+            candidate.encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER;
+            *instruction = candidate;
+            return true;
+        }
+        saved_diagnostic_count = builder->result.diagnostic_count > saved_diagnostic_count
+                                    ? builder->result.diagnostic_count
+                                    : saved_diagnostic_count;
+        builder->result.diagnostic_count = initial_diagnostic_count;
+    }
+
+    bool gpr_known = false;
+    u8 gpr_operand_count = 0;
+    for (u32 form_index = 0; buster_aarch64_arm_m1_gpr_target(builder->target) &&
+                              form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+    {
+        BusterAarch64ArmM1GprForm form = {0};
+        if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
+        {
+            continue;
+        }
+        if (!gpr_known)
+        {
+            gpr_known = true;
+            gpr_operand_count = form.operand_count;
+        }
+        else if (gpr_operand_count != form.operand_count)
+        {
+            gpr_known = false;
+            break;
+        }
+    }
+    if (gpr_known)
+    {
+        String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
+        u32 token_count = 0;
+        bool token_stream_valid = true;
+        u64 cursor = 0;
+        while (cursor < operands_text.length)
+        {
+            if (token_count >= BUSTER_ARRAY_LENGTH(tokens))
+            {
+                token_stream_valid = false;
+                break;
+            }
+            String8 token = {0};
+            if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+            {
+                token_stream_valid = false;
+                break;
+            }
+            tokens[token_count++] = assembly_trim(token);
+        }
+        if (token_stream_valid && token_count <= ASSEMBLY_MAX_OPERANDS)
+        {
+            A64GprOperand gpr_operands[4] = {0};
+            AssemblyInstruction candidate = *instruction;
+            bool parsed = token_count <= BUSTER_ARRAY_LENGTH(gpr_operands);
+            for (u32 operand_index = 0; parsed && operand_index < token_count; operand_index += 1)
+            {
+                AssemblyRegister reg = {0};
+                parsed = assembly_aarch64_gpr_register_parse(tokens[operand_index], &reg) &&
+                         reg.class == ASSEMBLY_REGISTER_GPR;
+                if (parsed)
+                {
+                    gpr_operands[operand_index] = (A64GprOperand){
+                        .index = reg.index,
+                        .width = (u8)reg.width,
+                        .stack_pointer = reg.stack_pointer,
+                    };
+                    candidate.operands[operand_index] = (AssemblyOperand){
+                        .reg = reg,
+                        .kind = ASSEMBLY_OPERAND_REGISTER,
+                    };
+                }
+            }
+            u32 form_index = UINT32_MAX;
+            parsed = parsed && buster_aarch64_arm_m1_gpr_find_form(mnemonic, gpr_operands, token_count, &form_index);
+            if (parsed)
+            {
+                BusterAarch64ArmM1GprForm form = {0};
+                parsed = buster_aarch64_arm_m1_gpr_form(form_index, &form);
+                if (parsed && form.required_feature != TARGET_CPU_FEATURE_NONE &&
+                    !target_cpu_feature_has(builder->target, form.required_feature))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column,
+                                        (u32)mnemonic.length,
+                                        S8("instruction requires an enabled AArch64 target feature"));
+                    parsed = false;
+                }
+            }
+            if (parsed)
+            {
+                candidate.operand_count = (u8)token_count;
+                candidate.opcode = ASSEMBLY_OPCODE_COUNT;
+                candidate.encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_GPR;
+                candidate.aarch64_gpr_form_index = form_index;
+                candidate.size = 4;
+                *instruction = candidate;
+                return true;
+            }
+        }
+        saved_diagnostic_count = builder->result.diagnostic_count > saved_diagnostic_count
+                                    ? builder->result.diagnostic_count
+                                    : saved_diagnostic_count;
+        builder->result.diagnostic_count = initial_diagnostic_count;
+    }
+    builder->result.diagnostic_count = saved_diagnostic_count;
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 text, BusterA64DirectSIMDArrangement arrangement, u32* number)
 {
     text = assembly_trim(text);
@@ -9337,29 +9544,49 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     }
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD)
     {
+        AssemblyInstruction direct_instruction = instruction;
         u32 diagnostic_count = builder->result.diagnostic_count;
         bool parsed_direct_simd = info.aarch64_direct_simd_generated || info.aarch64_direct_simd_spelling_count > 1
             ? assembly_aarch64_direct_simd_instruction_parse_generated(
-                  builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_spelling_first,
+                  builder, mnemonic, operands, &direct_instruction, info.aarch64_direct_simd_spelling_first,
                   info.aarch64_direct_simd_spelling_count, line, column)
             : assembly_aarch64_direct_simd_instruction_parse(
-                  builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_row_index, info.operand_count,
+                  builder, mnemonic, operands, &direct_instruction, info.aarch64_direct_simd_row_index, info.operand_count,
                   info.aarch64_direct_simd_requirement, info.aarch64_direct_simd_arrangements, line, column);
-        if (!parsed_direct_simd)
+        if (parsed_direct_simd)
         {
-            if (builder->result.diagnostic_count == diagnostic_count)
+            instruction = direct_instruction;
+            if (!info.aarch64_direct_simd_generated && info.aarch64_direct_simd_spelling_count <= 1)
             {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                    (u32)operands.length, S8("invalid AArch64 direct SIMD instruction operands"));
+                instruction.aarch64_direct_simd_fixed_field_kind = info.aarch64_direct_simd_fixed_field_kind;
+                instruction.aarch64_direct_simd_fixed_field_value = info.aarch64_direct_simd_fixed_field_value;
             }
+            builder->instructions[builder->instruction_count++] = instruction;
             return;
         }
-        if (!info.aarch64_direct_simd_generated && info.aarch64_direct_simd_spelling_count <= 1)
+        u32 direct_diagnostic_count = builder->result.diagnostic_count;
+        builder->result.diagnostic_count = diagnostic_count;
+        AssemblyInstruction fallback_instruction = instruction;
+        if (assembly_aarch64_m1_collision_parse(builder, mnemonic, operands, &fallback_instruction, line, column))
         {
-            instruction.aarch64_direct_simd_fixed_field_kind = info.aarch64_direct_simd_fixed_field_kind;
-            instruction.aarch64_direct_simd_fixed_field_value = info.aarch64_direct_simd_fixed_field_value;
+            instruction = fallback_instruction;
+            builder->instructions[builder->instruction_count++] = instruction;
+            return;
         }
-        builder->instructions[builder->instruction_count++] = instruction;
+        u32 fallback_diagnostic_count = builder->result.diagnostic_count;
+        if (direct_diagnostic_count > diagnostic_count)
+        {
+            builder->result.diagnostic_count = direct_diagnostic_count;
+        }
+        else if (fallback_diagnostic_count > diagnostic_count)
+        {
+            builder->result.diagnostic_count = fallback_diagnostic_count;
+        }
+        else
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 direct SIMD instruction operands"));
+        }
         return;
     }
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_CONTROL)
