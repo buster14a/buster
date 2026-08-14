@@ -277,6 +277,8 @@ static bool buster_a64_direct_simd_fixed_field_local(BusterA64SemanticForm form,
     {
     case BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE:
         return buster_a64_direct_simd_find_field_cstr(form, "size", local);
+    case BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT:
+        return buster_a64_direct_simd_find_field_cstr(form, "Q", local);
     default:
         return false;
     }

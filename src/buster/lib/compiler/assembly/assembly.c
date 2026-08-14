@@ -2416,6 +2416,22 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("fcvtl"), UINT64_C(0x3605be7c9c5b5cdf), S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
+    {S8_INITIALIZER("fcvtl2"), UINT64_C(0x3605be7c9c5b5cdf), S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
+    {S8_INITIALIZER("fcvtn"), UINT64_C(0x3fe51307652789ca), S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
+    {S8_INITIALIZER("fcvtn2"), UINT64_C(0x3fe51307652789ca), S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
     {S8_INITIALIZER("fcvtns"), UINT64_C(0xdfee5c10fef16fc2), S8_INITIALIZER("arm-a64@2026-06:FCVTNS_asimdmisc_R"), 2,
     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
@@ -3682,7 +3698,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
             else if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
                      operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
                      operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR &&
-                     operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR)
+                     operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR &&
+                     operand.kind != BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT)
             {
                 return false;
             }
@@ -7865,7 +7882,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
         }
         else if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
                  operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
-                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
+                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR &&
+                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT)
         {
             if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_CONDITION ||
                 (operand.flags & BUSTER_A64_SEMANTIC_FLAG_CONDITION_FIELD) == 0)
@@ -7954,6 +7972,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
                 return false;
             }
             instruction.operands[operand_index] = buster_a64_semantic_vm_value_condition(conditions[operand_index]);
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT)
+        {
+            if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_FIXED_LITERAL_2) == 0 || operand.symbol.length != 1 ||
+                buster_a64_semantic_string_byte(operand.symbol, 0) != '2')
+            {
+                return false;
+            }
+            instruction.operands[operand_index] = buster_a64_semantic_vm_value_unsigned(2, 2);
         }
         else
         {
@@ -8254,6 +8281,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_CONDITION)
         {
             return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;

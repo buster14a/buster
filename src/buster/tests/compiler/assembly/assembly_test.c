@@ -63,6 +63,52 @@ struct AssemblyA64DirectSIMDSpellingExpectation
     u64 source_digest;
     u8 operand_count;
     u8 arrangements[4];
+    u8 fixed_field_kind;
+    u8 fixed_field_value;
+};
+
+/* FCVTL/FCVTN use the generated fixed literal `2` as a public suffix.  The
+ * no-suffix and `{2}` spellings share one canonical row; a spelling-owned
+ * COUNT override selects Q=0 or Q=1 respectively. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_suffix_cases[] = {
+    {S8_INITIALIZER("fcvtl v0.4s, v1.4h\n"), {0x20, 0x78, 0x21, 0x0e}},
+    {S8_INITIALIZER("fcvtl2 v0.4s, v1.8h\n"), {0x20, 0x78, 0x21, 0x4e}},
+    {S8_INITIALIZER("fcvtl v0.2d, v1.2s\n"), {0x20, 0x78, 0x61, 0x0e}},
+    {S8_INITIALIZER("fcvtl2 v0.2d, v1.4s\n"), {0x20, 0x78, 0x61, 0x4e}},
+    {S8_INITIALIZER("fcvtn v0.4h, v1.4s\n"), {0x20, 0x68, 0x21, 0x0e}},
+    {S8_INITIALIZER("fcvtn2 v0.8h, v1.4s\n"), {0x20, 0x68, 0x21, 0x4e}},
+    {S8_INITIALIZER("fcvtn v0.2s, v1.2d\n"), {0x20, 0x68, 0x61, 0x0e}},
+    {S8_INITIALIZER("fcvtn2 v0.4s, v1.2d\n"), {0x20, 0x68, 0x61, 0x4e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_suffix_boundary_cases[] = {
+    {S8_INITIALIZER("FCVTL V31.4S, V30.4H\n"), {0xdf, 0x7b, 0x21, 0x0e}},
+    {S8_INITIALIZER("FCVTL2 V31.4S, V30.8H\n"), {0xdf, 0x7b, 0x21, 0x4e}},
+    {S8_INITIALIZER("FCVTL V31.2D, V30.2S\n"), {0xdf, 0x7b, 0x61, 0x0e}},
+    {S8_INITIALIZER("FCVTL2 V31.2D, V30.4S\n"), {0xdf, 0x7b, 0x61, 0x4e}},
+    {S8_INITIALIZER("FCVTN V31.4H, V30.4S\n"), {0xdf, 0x6b, 0x21, 0x0e}},
+    {S8_INITIALIZER("FCVTN2 V31.8H, V30.4S\n"), {0xdf, 0x6b, 0x21, 0x4e}},
+    {S8_INITIALIZER("FCVTN V31.2S, V30.2D\n"), {0xdf, 0x6b, 0x61, 0x0e}},
+    {S8_INITIALIZER("FCVTN2 V31.4S, V30.2D\n"), {0xdf, 0x6b, 0x61, 0x4e}},
+};
+
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_fcvt_suffix_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), UINT64_C(0x3605be7c9c5b5cdf), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
+    {S8_INITIALIZER("arm-a64@2026-06:FCVTL_asimdmisc_L"), UINT64_C(0x3605be7c9c5b5cdf), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
+    {S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), UINT64_C(0x3fe51307652789ca), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 0},
+    {S8_INITIALIZER("arm-a64@2026-06:FCVTN_asimdmisc_N"), UINT64_C(0x3fe51307652789ca), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT, 1},
 };
 
 /* SHA-1 AdvSIMD spellings are selected by the generated rows' HasSHA2
@@ -1793,8 +1839,15 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         {
             AssemblyAarch64DirectSIMDSpellingTest prior = {0};
             bool prior_valid = assembly_test_aarch64_direct_simd_spelling_at(prior_index, &prior);
+            bool suffix_pair = prior_valid && spelling_valid && prior.source_digest == spelling.source_digest &&
+                               string_equal(prior.semantic_id, spelling.semantic_id) &&
+                               ((prior.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT &&
+                                 prior.fixed_field_value == 0 && spelling.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT &&
+                                 spelling.fixed_field_value == 1) ||
+                                (spelling.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT && spelling.fixed_field_value == 0 &&
+                                 prior.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT && prior.fixed_field_value == 1));
             bool unique = !prior_valid || !spelling_valid ||
-                          (prior.source_digest != spelling.source_digest && !string_equal(prior.semantic_id, spelling.semantic_id));
+                          suffix_pair || (prior.source_digest != spelling.source_digest && !string_equal(prior.semantic_id, spelling.semantic_id));
             direct_simd_spellings_unique = direct_simd_spellings_unique && unique;
             direct_simd_duplicate_spelling_count += (u32)!unique;
         }
@@ -1886,25 +1939,30 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        bool duplicate_row = row_index < direct_simd_row_count && direct_simd_covered_rows[row_index];
+        bool suffix_spelling = spelling.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT && spelling.fixed_field_value == 1;
         bool resolved = spelling_valid && buster_a64_direct_simd_find_source_digest(spelling.source_digest, &row_index) &&
                         buster_a64_direct_simd_row(row_index, &row) && row.executable && public_operand_count == spelling.operand_count &&
                         string_equal(row.id, spelling.semantic_id) && arrangements_valid && row_index < direct_simd_row_count &&
-                        !direct_simd_covered_rows[row_index];
+                        (!direct_simd_covered_rows[row_index] || suffix_spelling);
         BUSTER_TEST(arguments, resolved);
         if (!resolved)
         {
             direct_simd_invalid_spelling_count += 1;
             continue;
         }
-        direct_simd_covered_rows[row_index] = 1;
-        direct_simd_covered_count += 1;
-        if (row.transform_bearing)
+        if (!duplicate_row)
         {
-            direct_simd_covered_transform_count += 1;
-        }
-        else
-        {
-            direct_simd_covered_no_transform_count += 1;
+            direct_simd_covered_rows[row_index] = 1;
+            direct_simd_covered_count += 1;
+            if (row.transform_bearing)
+            {
+                direct_simd_covered_transform_count += 1;
+            }
+            else
+            {
+                direct_simd_covered_no_transform_count += 1;
+            }
         }
     }
 
@@ -1926,14 +1984,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 372);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 372);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 18);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 247);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 376);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 374);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 16);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 249);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 16);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 14);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
-    BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
+    BUSTER_TEST(arguments, direct_simd_covered_count + 2 == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fhm_requirement_count == 4 && direct_simd_fhm_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_frintts_requirement_count == 4 && direct_simd_frintts_requirement_exact);
@@ -1942,6 +2000,27 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_simd_rdm_requirement_count == 4 && direct_simd_rdm_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_spellings); expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_fcvt_suffix_spellings[expected_index];
+        u32 found_count = 0;
+        bool exact = true;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (!assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) ||
+                !string_equal(spelling.semantic_id, expected.semantic_id) || spelling.source_digest != expected.source_digest ||
+                spelling.fixed_field_kind != expected.fixed_field_kind || spelling.fixed_field_value != expected.fixed_field_value)
+            {
+                continue;
+            }
+            found_count += 1;
+            exact = exact && spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON &&
+                    spelling.operand_count == expected.operand_count &&
+                    memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0;
+        }
+        BUSTER_TEST(arguments, found_count == 1 && exact);
+    }
     arguments->show(arguments,
                     S8("A64_DIRECT_SIMD_COVERAGE rows={u32} executable={u32} transform={u32} bindings={u32} spellings={u32} covered={u32} remaining={u32} covered_transform={u32} covered_no_transform={u32} uncovered_transform={u32} uncovered_no_transform={u32}\n"),
                     direct_simd_row_count, direct_simd_executable_count, direct_simd_transform_count, direct_simd_binding_count,
@@ -5241,6 +5320,71 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         AssemblyEncodeResult encoded = assembly_encode(
             arguments->arena, transform_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, transform_case.bytes, 4));
+    }
+
+    /* FCVTL/FCVTN expose the generated fixed literal `2` as an optional
+     * spelling suffix.  Keep the parser grammar at two public vector
+     * operands while the generic semantic builder supplies the hidden
+     * fixed-constant operand and the spelling-owned Q override. */
+    Target aarch64_fcvt_suffix_target = aarch64_advsimd_target;
+    aarch64_fcvt_suffix_target.cpu_model = CPU_MODEL_BASELINE;
+    aarch64_fcvt_suffix_target.cpu_features_explicit = true;
+    aarch64_fcvt_suffix_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_NEON}, 2);
+    Target aarch64_fcvt_suffix_no_neon = aarch64_fcvt_suffix_target;
+    aarch64_fcvt_suffix_no_neon.cpu_features = target_cpu_features_remove(aarch64_fcvt_suffix_no_neon.cpu_features,
+                                                                            TARGET_CPU_FEATURE_AARCH64_NEON);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fcvt_suffix_target) &&
+                               target_cpu_features_are_valid(aarch64_fcvt_suffix_no_neon));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_cases) == 8 &&
+                               BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_boundary_cases) == 8);
+    for (u32 fcvt_index = 0; fcvt_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_cases); fcvt_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fcvt_case = assembly_a64_direct_simd_fcvt_suffix_cases[fcvt_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fcvt_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_no_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    for (u32 fcvt_index = 0; fcvt_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_suffix_boundary_cases); fcvt_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fcvt_case = assembly_a64_direct_simd_fcvt_suffix_boundary_cases[fcvt_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fcvt_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_no_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    static String8 const invalid_aarch64_fcvt_suffix[] = {
+        S8_INITIALIZER("fcvtl3 v0.4s, v1.4h\n"),
+        S8_INITIALIZER("fcvtn3 v0.4h, v1.4s\n"),
+        S8_INITIALIZER("fcvtl.2 v0.4s, v1.8h\n"),
+        S8_INITIALIZER("fcvtn.2 v0.8h, v1.4s\n"),
+        S8_INITIALIZER("fcvtl v0.8s, v1.4h\n"),
+        S8_INITIALIZER("fcvtl v0.4s, v1.4s\n"),
+        S8_INITIALIZER("fcvtl2 v0.2d, v1.2d\n"),
+        S8_INITIALIZER("fcvtn v0.8h, v1.4s\n"),
+        S8_INITIALIZER("fcvtn2 v0.4h, v1.4s\n"),
+        S8_INITIALIZER("fcvtl v32.4s, v1.4h\n"),
+        S8_INITIALIZER("fcvtl v0.4s, v32.4h\n"),
+        S8_INITIALIZER("fcvtl s0, s1\n"),
+        S8_INITIALIZER("fcvtl v0.4s, v1.4h[0]\n"),
+        S8_INITIALIZER("fcvtl v0.4s, {v1.4h}\n"),
+        S8_INITIALIZER("fcvtl v0.4s\n"),
+        S8_INITIALIZER("fcvtn2 v0.4s, v1.2d, v2.2d\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_fcvt_suffix); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_fcvt = assembly_encode(
+            arguments->arena, invalid_aarch64_fcvt_suffix[invalid_index], (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+        BUSTER_TEST(arguments, invalid_fcvt.diagnostic_count == 1 && invalid_fcvt.bytes.length == 0 &&
+                                   (invalid_fcvt.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS ||
+                                    invalid_fcvt.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION));
     }
     Target aarch64_fp16_both = aarch64_advsimd_target;
     aarch64_fp16_both.cpu_model = CPU_MODEL_BASELINE;
