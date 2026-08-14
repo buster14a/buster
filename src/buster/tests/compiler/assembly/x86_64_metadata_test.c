@@ -3420,6 +3420,138 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // CL is represented as an implicit XED operand, but the checked
+        // physical interface accepts the source-visible control register.
+        // Keep both source and codegen-style projections on the canonical
+        // D3 /4 spelling.
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 8),
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalQuery query = x86_64_metadata_test_physical_query(
+            S8("shl"), operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        u8 source_bytes[16] = {0};
+        BusterX86MetadataEmitResult source = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = (BusterX86MetadataPhysicalQuery){
+                .mnemonic = query.mnemonic,
+                .operands = query.operands,
+                .operand_count = query.operand_count,
+                .features = query.features,
+                .attributes = query.attributes,
+                .address_size = query.address_size,
+                .execution_mode = query.execution_mode,
+                .source_semantics = true,
+            },
+            .output = source_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(source_bytes),
+        });
+        u8 codegen_bytes[16] = {0};
+        query.source_semantics = false;
+        BusterX86MetadataEmitResult codegen = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query,
+            .output = codegen_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(codegen_bytes),
+        });
+        static u8 const expected[] = {0x48, 0xd3, 0xe0};
+        bool shift_cl = source.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                        codegen.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                        source.byte_count == BUSTER_ARRAY_LENGTH(expected) && codegen.byte_count == source.byte_count &&
+                        memcmp(source_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0 &&
+                        memcmp(codegen_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, shift_cl);
+    }
+
+    {
+        // A non-sign-extended 64-bit literal must select MOV's B8+rd
+        // immediate form instead of failing the shorter C7 imm32 row.
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_imm_u64(UINT64_C(0x1122334455667788), 64),
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalQuery query = x86_64_metadata_test_physical_query(
+            S8("mov"), operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        u8 output[16] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query,
+            .output = output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(output),
+        });
+        static u8 const expected[] = {0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        bool mov_imm64 = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == BUSTER_ARRAY_LENGTH(expected) &&
+                         memcmp(output, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, mov_imm64);
+    }
+
+    {
+        // MMX MOVQ memory transfers use 0F6F/0F7F, never the REX.W GPR
+        // aliases 0F6E/0F7E.  Width inference for MMX must also avoid a
+        // synthetic REX.W on PADDQ's qword memory source.
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand load_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 0, 64),
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        load_operands[1].memory.address_size = 32;
+        load_operands[1].memory.base.width = 32;
+        BusterX86MetadataPhysicalQuery load_query = x86_64_metadata_test_physical_query(
+            S8("movq"), load_operands, BUSTER_ARRAY_LENGTH(load_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        load_query.address_size = 32;
+        u8 load_bytes[16] = {0};
+        BusterX86MetadataEmitResult load = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = load_query,
+            .output = load_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(load_bytes),
+        });
+
+        BusterX86MetadataPhysicalOperand store_operands[2] = {
+            load_operands[1],
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 0, 64),
+        };
+        BusterX86MetadataPhysicalQuery store_query = x86_64_metadata_test_physical_query(
+            S8("movq"), store_operands, BUSTER_ARRAY_LENGTH(store_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        store_query.address_size = 32;
+        u8 store_bytes[16] = {0};
+        BusterX86MetadataEmitResult store = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = store_query,
+            .output = store_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(store_bytes),
+        });
+
+        BusterX86MetadataPhysicalOperand paddq_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 0, 64),
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        BusterX86MetadataPhysicalQuery paddq_query = x86_64_metadata_test_physical_query(
+            S8("paddq"), paddq_operands, BUSTER_ARRAY_LENGTH(paddq_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        u8 paddq_bytes[16] = {0};
+        BusterX86MetadataEmitResult paddq = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = paddq_query,
+            .output = paddq_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(paddq_bytes),
+        });
+        static u8 const expected_load[] = {0x67, 0x0f, 0x6f, 0x00};
+        static u8 const expected_store[] = {0x67, 0x0f, 0x7f, 0x00};
+        static u8 const expected_paddq[] = {0x0f, 0xd4, 0x00};
+        bool mmx_memory = load.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                          load.byte_count == BUSTER_ARRAY_LENGTH(expected_load) &&
+                          memcmp(load_bytes, expected_load, BUSTER_ARRAY_LENGTH(expected_load)) == 0 &&
+                          store.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                          store.byte_count == BUSTER_ARRAY_LENGTH(expected_store) &&
+                          memcmp(store_bytes, expected_store, BUSTER_ARRAY_LENGTH(expected_store)) == 0 &&
+                          paddq.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                          paddq.byte_count == BUSTER_ARRAY_LENGTH(expected_paddq) &&
+                          memcmp(paddq_bytes, expected_paddq, BUSTER_ARRAY_LENGTH(expected_paddq)) == 0;
+        BUSTER_TEST(arguments, mmx_memory);
+    }
+
+    {
         // The sparse plan table is populated by the serial prewarm contract;
         // each representative migrated shape must remain byte/result
         // equivalent to the checked exact query.
