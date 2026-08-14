@@ -3144,15 +3144,15 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                          BUSTER_ARRAY_LENGTH(expected_x86_att_absolute)));
     BUSTER_TEST(arguments, x86_att_absolute.relocation_count == 2 &&
                                x86_att_absolute.relocations[0].offset == 19 &&
-                               x86_att_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               x86_att_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
                                x86_att_absolute.relocations[1].offset == 26 &&
-                               x86_att_absolute.relocations[1].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               x86_att_absolute.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
                                string_equal(x86_att_absolute.symbols[x86_att_absolute.relocations[0].symbol].name, S8("external")) &&
                                string_equal(x86_att_absolute.symbols[x86_att_absolute.relocations[1].symbol].name, S8("external")));
     AssemblyEncodeResult x86_att_immediate = assembly_encode(
         arguments->arena, S8("movq $0x10, %rax\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
-    u8 expected_x86_att_immediate[] = {0x48, 0xb8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_x86_att_immediate[] = {0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00};
     BUSTER_TEST(arguments, x86_att_immediate.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(x86_att_immediate.bytes, expected_x86_att_immediate,
                                                          BUSTER_ARRAY_LENGTH(expected_x86_att_immediate)));
@@ -3263,7 +3263,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(x86_absolute_memory.bytes.pointer, expected_x86_absolute_memory, sizeof(expected_x86_absolute_memory)) == 0);
     BUSTER_TEST(arguments, x86_absolute_memory.relocation_count == 1 && x86_absolute_memory.relocations[0].offset == 3 &&
                                x86_absolute_memory.relocations[0].addend == 8 &&
-                               x86_absolute_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
+                               x86_absolute_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED);
 
     // MOV moffs is the one legacy absolute-memory encoding whose accumulator
     // is implicit in the opcode.  Keep the accumulator written in source so
@@ -4901,7 +4901,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_lea_absolute.diagnostic_count == 0 && x86_lea_absolute.bytes.length == sizeof(expected_x86_lea_absolute) &&
                                memcmp(x86_lea_absolute.bytes.pointer, expected_x86_lea_absolute, sizeof(expected_x86_lea_absolute)) == 0 &&
                                x86_lea_absolute.relocation_count == 1 && x86_lea_absolute.relocations[0].offset == 4 &&
-                               x86_lea_absolute.relocations[0].addend == 8 && x86_lea_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
+                               x86_lea_absolute.relocations[0].addend == 8 &&
+                               x86_lea_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED);
 
     u8 expected_x86_scalar_extend[] = {
         0x66, 0x0f, 0xb6, 0xc0,
