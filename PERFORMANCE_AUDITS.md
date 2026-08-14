@@ -19,7 +19,7 @@ When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
 `2026-08-14b` (Linux x86_64, Zen 4 7940HS; single metadata authority for the
-x86-64 machine encoder, based on `23dd8d0e`). The MIR x86-64 encoder no longer
+x86-64 machine encoder, based on `3dec8b04`). The MIR x86-64 encoder no longer
 contains a second opcode/prefix/REX/ModRM/EVEX byte construction path. Its
 dense 122-row registry now contains 77 exact forms, 19 exact sequences, and 26
 metadata-driven expansion policies, with zero `LEGACY_RAW` rows. All complete
@@ -37,11 +37,12 @@ silently omitting an instruction. Differential coverage includes scalar,
 memory, immediate, relative, implicit DIV/IDIV, SSE, EVEX/mask, atomic/lock,
 prologue/epilogue, aggregate-copy, variadic, and fixup-bearing expansions.
 
-One same-session, isolated Release self-host A/B was taken against current
-`origin/main` (`e7df02b5`); the documented gate stops repetitions when the
-machine-stage regression exceeds 10%. Both sides reached a deterministic
-stage-1/stage-2 fixed point. Baseline output was 43,255,256 bytes and 2,837,403
-preprocessed tokens; the candidate was 43,835,808 bytes and 2,880,239 tokens.
+One same-session, isolated Release self-host A/B was taken against the
+then-current `origin/main` (`e7df02b5`); the documented gate stops repetitions
+when the machine-stage regression exceeds 10%. Both sides reached a
+deterministic stage-1/stage-2 fixed point. Baseline output was 43,255,256 bytes
+and 2,837,403 preprocessed tokens; the candidate was 43,835,808 bytes and
+2,880,239 tokens.
 Stage-1 instructions rose from 8,802,558,370 to 8,966,954,627 (+1.868%), and
 stage 2 from 124,542,574,336 to 126,821,664,800 (+1.830%). Machine-stage
 instructions rose from 222,226,384,606 to 251,061,881,870 (+12.976%). The
