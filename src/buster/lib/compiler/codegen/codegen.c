@@ -3298,60 +3298,170 @@ struct X64Evex
     bool wide;  // EVEX.W — every operation in this vocabulary is W0 today
 };
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_prefix(CodegenBuffer* buffer, X64Evex evex)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureInput codegen_canonical_x64_evex_features(void)
 {
-    codegen_emit_u8(buffer, 0x62);
-    codegen_emit_u8(buffer, (u8)(0xf0 | evex.map));
-    codegen_emit_u8(buffer, (u8)((evex.wide ? 0x80 : 0) | ((~evex.vvvv & 0xf) << 3) | 0x04 | evex.prefix));
-    codegen_emit_u8(buffer, (u8)((evex.zeroing ? 0x80 : 0) | 0x48 | evex.mask));
-    codegen_emit_u8(buffer, evex.opcode);
+    // The SIMD vocabulary is selected only after the target gate above has
+    // established these capabilities.  Supplying the complete vocabulary to
+    // metadata keeps the bridge fail-closed while allowing each row to check
+    // its own required subset (for example VBMI2 for VPCOMPRESSB).
+    static String8 features[] = {S8("avx512f"), S8("avx512bw"), S8("avx512vbmi"), S8("avx512vbmi2")};
+    return (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)};
 }
 
-// A frame slot, always as mod=10/disp32: EVEX would otherwise read a disp8 as
-// a multiple of the operand size, and mod=00 with an RBP base means
-// RIP-relative rather than the frame.
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_frame(CodegenBuffer* buffer, X64Evex evex, s32 displacement)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_mask(u32 register_index)
 {
-    codegen_canonical_x64_evex_prefix(buffer, evex);
-    codegen_emit_u8(buffer, (u8)(0x85 | ((evex.reg & 7) << 3)));
-    codegen_emit_u32(buffer, (u32)displacement);
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = 64,
+        .reg = {
+            .index = (u16)register_index,
+            .width = 64,
+            .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK,
+        },
+    };
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_indirect(CodegenBuffer* buffer, X64Evex evex, X64Register base)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_evex_memory(X64Register base, u16 element_width,
+                                                                                                  u16 source_width, s64 displacement)
 {
-    codegen_canonical_x64_evex_prefix(buffer, evex);
-    codegen_emit_u8(buffer, (u8)((((u32)evex.reg & 7) << 3) | ((u32)base & 7)));
+    BusterX86MetadataPhysicalOperand result = codegen_canonical_x64_metadata_memory(base, element_width, displacement);
+    result.memory.source_width = source_width;
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_register(CodegenBuffer* buffer, X64Evex evex, u8 rm)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalAttributes codegen_canonical_x64_evex_attributes(X64Evex evex)
 {
-    codegen_canonical_x64_evex_prefix(buffer, evex);
-    codegen_emit_u8(buffer, (u8)(0xc0 | ((evex.reg & 7) << 3) | (rm & 7)));
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    if (evex.mask)
+    {
+        attributes.decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK |
+                                     (evex.zeroing ? BUSTER_X86_METADATA_DECORATOR_ZEROING : 0);
+        attributes.has_mask_register = true;
+        attributes.mask_register = evex.mask;
+        attributes.zeroing = evex.zeroing;
+        if (evex.zeroing)
+        {
+            attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ZEROING;
+        }
+    }
+    return attributes;
+}
+
+// The descriptor is intentionally kept at the call sites so the vocabulary
+// remains easy to audit.  It now only chooses a checked metadata shape; the
+// metadata encoder owns prefix, ModRM/SIB, displacement, and register bits.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_evex_frame(CodegenBuffer* buffer, X64Evex evex, s32 displacement)
+{
+    BusterX86MetadataPhysicalOperand operands[3] = {0};
+    u32 operand_count = 0;
+    String8 mnemonic = {0};
+    u16 memory_width = 8;
+    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_evex_memory(X64_REGISTER_RBP, memory_width, 512, displacement);
+    switch (((u32)evex.map << 16) | ((u32)evex.prefix << 8) | evex.opcode)
+    {
+    case (1u << 16) | (3u << 8) | 0x6f: // VMOVDQU8 load
+        mnemonic = S8("VMOVDQU8");
+        operands[0] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operands[1] = memory;
+        operand_count = 2;
+        break;
+    case (1u << 16) | (3u << 8) | 0x7f: // VMOVDQU8 store
+        mnemonic = S8("VMOVDQU8");
+        operands[0] = memory;
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operand_count = 2;
+        break;
+    case (2u << 16) | (1u << 8) | 0x63: // VPCOMPRESSB store
+        mnemonic = S8("VPCOMPRESSB");
+        operands[0] = memory;
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operand_count = 2;
+        break;
+    case (1u << 16) | (1u << 8) | 0x74: // VPCMPEQB
+        mnemonic = S8("VPCMPEQB");
+        operands[0] = codegen_canonical_x64_metadata_mask(evex.reg);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.vvvv, 512);
+        operands[2] = memory;
+        operand_count = 3;
+        break;
+    case (3u << 16) | (1u << 8) | 0x3e: // VPCMPUB (predicate is emitted by its caller)
+        mnemonic = S8("VPCMPUB");
+        operands[0] = codegen_canonical_x64_metadata_mask(evex.reg);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.vvvv, 512);
+        operands[2] = memory;
+        operand_count = 3;
+        break;
+    case (2u << 16) | (1u << 8) | 0x26: // VPTESTMB
+        mnemonic = S8("VPTESTMB");
+        operands[0] = codegen_canonical_x64_metadata_mask(evex.reg);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.vvvv, 512);
+        operands[2] = memory;
+        operand_count = 3;
+        break;
+    case (2u << 16) | (1u << 8) | 0x7d: // VPERMT2B
+        mnemonic = S8("VPERMT2B");
+        operands[0] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.vvvv, 512);
+        operands[2] = memory;
+        operand_count = 3;
+        break;
+    case (2u << 16) | (1u << 8) | 0x31: // VPMOVZXBD
+        mnemonic = S8("VPMOVZXBD");
+        memory.width = 8;
+        memory.memory.source_width = 128;
+        operands[0] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operands[1] = memory;
+        operand_count = 2;
+        break;
+    case (1u << 16) | (1u << 8) | 0x72: // VPSLLD has a caller-emitted immediate
+    case (3u << 16) | (1u << 8) | 0x25: // VPTERNLOGD has a caller-emitted immediate
+        // These forms carry an immediate byte after ModRM.  Their producers
+        // are migrated separately with the immediate in the metadata query;
+        // accepting a partial instruction here would violate fail-closed.
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return false;
+    default:
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, operand_count,
+                                                           codegen_canonical_x64_evex_features(),
+                                                           codegen_canonical_x64_evex_attributes(evex));
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_evex_register(CodegenBuffer* buffer, X64Evex evex, u8 rm)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    String8 mnemonic = {0};
+    switch (((u32)evex.map << 16) | ((u32)evex.prefix << 8) | evex.opcode)
+    {
+    case (2u << 16) | (1u << 8) | 0x63: // VPCOMPRESSB zmm/mask
+        mnemonic = S8("VPCOMPRESSB");
+        operands[0] = codegen_canonical_x64_metadata_vector(rm, 512);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        break;
+    case (2u << 16) | (1u << 8) | 0x7a: // VPBROADCASTB zmm, r32
+        mnemonic = S8("VPBROADCASTB");
+        operands[0] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        operands[1] = codegen_canonical_x64_metadata_gpr((X64Register)rm, 32);
+        break;
+    case (2u << 16) | (2u << 8) | 0x29: // VPMOVB2M k, zmm
+        mnemonic = S8("VPMOVB2M");
+        operands[0] = codegen_canonical_x64_metadata_mask(evex.reg);
+        operands[1] = codegen_canonical_x64_metadata_vector(rm, 512);
+        break;
+    default:
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, 2,
+                                                           codegen_canonical_x64_evex_features(),
+                                                           codegen_canonical_x64_evex_attributes(evex));
 }
 
 // KMOVQ moves a whole 64-lane mask between a k register and a frame slot in
 // one instruction, so a mask never needs a general-purpose register on the way
 // through memory. VEX.L0.W1 0F 90 loads, 91 stores.
-// mov reg, [rbp+disp32] — the address operand of a SIMD load or store lives in
-// a frame slot like every other canonical value.
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_load_frame_pointer(CodegenBuffer* buffer, X64Register target, s32 displacement)
-{
-    codegen_emit_u8(buffer, (u8)(target >= X64_REGISTER_R8 ? 0x4c : 0x48));
-    codegen_emit_u8(buffer, 0x8b);
-    codegen_emit_u8(buffer, (u8)(0x85 | ((target & 7) << 3)));
-    codegen_emit_u32(buffer, (u32)displacement);
-}
-
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_kmov_frame(CodegenBuffer* buffer, u8 mask, bool store, s32 displacement)
-{
-    codegen_emit_u8(buffer, 0xc4);
-    codegen_emit_u8(buffer, 0xe1);
-    codegen_emit_u8(buffer, 0xf8);
-    codegen_emit_u8(buffer, store ? 0x91 : 0x90);
-    codegen_emit_u8(buffer, (u8)(0x85 | ((mask & 7) << 3)));
-    codegen_emit_u32(buffer, (u32)displacement);
-}
-
 // Moves one ABI part between an SSE/AVX register and a frame slot. This is the
 // only thing that decides which part sizes the canonical ABI can carry in a
 // vector register — every caller reports CODEGEN_ERROR_UNSUPPORTED_ABI on a
@@ -3370,30 +3480,56 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
     {
         return false;
     }
+    u16 vector_width = 0;
+    u16 memory_width = (u16)(size * 8);
+    String8 mnemonic = {0};
+    String8 feature_names[2] = {0};
+    u32 feature_count = 0;
     if (size == 64)
     {
-        // vmovdqu8 zmm, m512 — the same move every other 512-bit spill and
-        // reload in this file uses.
-        X64Evex move = {.map = 1, .prefix = 3, .opcode = store ? 0x7f : 0x6f, .reg = (u8)vector_register};
-        codegen_canonical_x64_evex_frame(buffer, move, displacement);
-        return true;
+        vector_width = 512;
+        mnemonic = S8("VMOVDQU8");
+        feature_names[0] = S8("avx512f");
+        feature_names[1] = S8("avx512bw");
+        feature_count = 2;
     }
-    if (size == 32)
+    else if (size == 32)
     {
-        // vmovdqu ymm, m256 — VEX.256.F3.0F.WIG 6F/7F.
-        codegen_emit_u8(buffer, 0xc5);
-        codegen_emit_u8(buffer, 0xfe);
-        codegen_emit_u8(buffer, store ? 0x7f : 0x6f);
-        codegen_emit_u8(buffer, (u8)(0x85 | (vector_register << 3)));
-        codegen_emit_u32(buffer, (u32)displacement);
-        return true;
+        vector_width = 256;
+        mnemonic = S8("VMOVDQU");
+        feature_names[0] = S8("avx2");
+        feature_count = 1;
     }
-    codegen_emit_u8(buffer, size == 4 || size == 16 ? 0xf3 : 0xf2);
-    codegen_emit_u8(buffer, 0x0f);
-    codegen_emit_u8(buffer, size == 16 ? (store ? 0x7f : 0x6f) : (store ? 0x11 : 0x10));
-    codegen_emit_u8(buffer, (u8)(0x85 | (vector_register << 3)));
-    codegen_emit_u32(buffer, (u32)displacement);
-    return true;
+    else if (size == 16)
+    {
+        vector_width = 128;
+        mnemonic = S8("MOVDQU");
+        feature_names[0] = S8("sse2");
+        feature_count = 1;
+    }
+    else if (size == 8)
+    {
+        vector_width = 128;
+        memory_width = 64;
+        mnemonic = S8("MOVSD");
+        feature_names[0] = S8("sse2");
+        feature_count = 1;
+    }
+    else
+    {
+        vector_width = 128;
+        memory_width = 32;
+        mnemonic = S8("MOVSS");
+        feature_names[0] = S8("sse");
+        feature_count = 1;
+    }
+    BusterX86MetadataPhysicalOperand memory = size == 64
+                                                  ? codegen_canonical_x64_metadata_evex_memory(X64_REGISTER_RBP, 8, 512, displacement)
+                                                  : codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, memory_width, displacement);
+    BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(vector_register, vector_width);
+    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
+    return codegen_canonical_x64_metadata_emit_features(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                         (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
 }
 
 // Raw x87 memory forms keep the backend independent of the host C ABI.  A
@@ -3401,19 +3537,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
 // RSP/R12 unambiguous and keeps every frame access the same fixed shape.
 BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement)
 {
-    if (base >= X64_REGISTER_R8)
-    {
-        codegen_emit_u8(buffer, 0x41); // REX.B
-    }
-    codegen_emit_u8(buffer, 0xdb);
-    u8 x87_reg = store ? 7 : 5;
-    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)x87_reg << 3) | (u32)(base & 7)));
-    if ((base & 7) == 4)
-    {
-        // SIB with no index, preserving the selected base register.
-        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
-    }
-    codegen_emit_u32(buffer, (u32)displacement);
+    BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_memory(base, 80, displacement);
+    String8 features[] = {S8("sse2")};
+    (void)codegen_canonical_x64_metadata_emit_features(buffer, store ? S8("FSTP") : S8("FLD"), &operand, 1,
+                                                        (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)});
 }
 
 BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement)
@@ -3423,34 +3550,17 @@ BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer,
     // path deliberately holds its address there.  The two stores avoid an
     // unaligned eight-byte access while covering exactly the six padding
     // bytes following the x87 ten-byte semantic value.
-    u8 zero_register = base == X64_REGISTER_RAX ? 1 : 0; // ECX when base is RAX, otherwise EAX.
-    codegen_emit_u8(buffer, 0x31);
-    codegen_emit_u8(buffer, (u8)(0xc0u | ((u32)zero_register << 3) | (u32)zero_register));
-    codegen_emit_u8(buffer, 0x66);
-    // REX prefixes follow legacy prefixes; putting REX.B before 0x66 would
-    // make the CPU treat the extended base as an unextended register.
-    if (base >= X64_REGISTER_R8)
-    {
-        codegen_emit_u8(buffer, 0x41);
-    }
-    codegen_emit_u8(buffer, 0x89);
-    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)zero_register << 3) | (u32)(base & 7)));
-    if ((base & 7) == 4)
-    {
-        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
-    }
-    codegen_emit_u32(buffer, (u32)(displacement + 10));
-    if (base >= X64_REGISTER_R8)
-    {
-        codegen_emit_u8(buffer, 0x41);
-    }
-    codegen_emit_u8(buffer, 0x89);
-    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)zero_register << 3) | (u32)(base & 7)));
-    if ((base & 7) == 4)
-    {
-        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
-    }
-    codegen_emit_u32(buffer, (u32)(displacement + 12));
+    X64Register zero_register = base == X64_REGISTER_RAX ? X64_REGISTER_RCX : X64_REGISTER_RAX;
+    BusterX86MetadataPhysicalOperand zero32 = codegen_canonical_x64_metadata_gpr(zero_register, 32);
+    BusterX86MetadataPhysicalOperand zero16 = codegen_canonical_x64_metadata_gpr(zero_register, 16);
+    BusterX86MetadataPhysicalOperand xor_operands[2] = {zero32, zero32};
+    BusterX86MetadataPhysicalOperand word_store[2] = {
+        codegen_canonical_x64_metadata_memory(base, 16, displacement + 10), zero16};
+    BusterX86MetadataPhysicalOperand dword_store[2] = {
+        codegen_canonical_x64_metadata_memory(base, 32, displacement + 12), zero32};
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("XOR"), xor_operands, BUSTER_ARRAY_LENGTH(xor_operands));
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), word_store, BUSTER_ARRAY_LENGTH(word_store));
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), dword_store, BUSTER_ARRAY_LENGTH(dword_store));
 }
 
 BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X64Register source_base, s32 source_displacement,
@@ -3486,19 +3596,24 @@ BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffe
 
 BUSTER_F_DECL bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displacement, u64 significand, u16 sign_exponent)
 {
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0xb8);
-    codegen_emit_u64(buffer, significand);
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0x89);
-    codegen_emit_u8(buffer, 0x85);
-    codegen_emit_u32(buffer, (u32)displacement);
-    codegen_emit_u8(buffer, 0xb8);
-    codegen_emit_u32(buffer, sign_exponent);
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x89);
-    codegen_emit_u8(buffer, 0x85);
-    codegen_emit_u32(buffer, (u32)(displacement + 8));
+    BusterX86MetadataPhysicalOperand rax64 = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+    BusterX86MetadataPhysicalOperand rax32 = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+    BusterX86MetadataPhysicalOperand rax16 = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 16);
+    BusterX86MetadataPhysicalOperand significand_operand = codegen_canonical_x64_metadata_unsigned_immediate(significand, 64);
+    BusterX86MetadataPhysicalOperand exponent_operand = codegen_canonical_x64_metadata_unsigned_immediate(sign_exponent, 32);
+    BusterX86MetadataPhysicalOperand load_significand[2] = {rax64, significand_operand};
+    BusterX86MetadataPhysicalOperand store_significand[2] = {
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement), rax64};
+    BusterX86MetadataPhysicalOperand load_exponent[2] = {rax32, exponent_operand};
+    BusterX86MetadataPhysicalOperand store_exponent[2] = {
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, displacement + 8), rax16};
+    if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), load_significand, BUSTER_ARRAY_LENGTH(load_significand)) ||
+        !codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_significand, BUSTER_ARRAY_LENGTH(store_significand)) ||
+        !codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), load_exponent, BUSTER_ARRAY_LENGTH(load_exponent)) ||
+        !codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_exponent, BUSTER_ARRAY_LENGTH(store_exponent)))
+    {
+        return false;
+    }
     codegen_canonical_x64_zero_f80_padding(buffer, X64_REGISTER_RBP, displacement);
     return buffer->error == CODEGEN_ERROR_NONE;
 }
@@ -3747,7 +3862,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
                 {
                     if (target.cpu_arch == CPU_ARCH_X86_64)
                     {
-                        codegen_emit_u8(buffer, 0x90);
+                        if (!codegen_canonical_x64_metadata_emit(buffer, S8("NOP"), 0, 0))
+                        {
+                            return false;
+                        }
                     }
                     else
                     {
