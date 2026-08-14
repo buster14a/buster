@@ -4360,13 +4360,18 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 x64_emit_store_float_bits(&builder, X64_REGISTER_R10, offset, 0, lane_size);
                 continue;
             }
-            if (element->bit_width == 64)
+            BusterX86MetadataPhysicalOperand compare_operands[2] = {
+                codegen_canonical_x64_metadata_vector(0, (u16)element->bit_width),
+                codegen_canonical_x64_metadata_vector(1, (u16)element->bit_width),
+            };
+            String8 feature_names[] = {element->bit_width == 32 ? S8("sse") : S8("sse2")};
+            String8 mnemonic = element->bit_width == 32 ? S8("UCOMISS") : S8("UCOMISD");
+            if (!codegen_canonical_x64_metadata_emit_features(
+                    &builder.buffer, mnemonic, compare_operands, BUSTER_ARRAY_LENGTH(compare_operands),
+                    (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
             {
-                codegen_emit_u8(&builder.buffer, 0x66);
+                return false;
             }
-            codegen_emit_u8(&builder.buffer, 0x0f);
-            codegen_emit_u8(&builder.buffer, 0x2e);
-            codegen_emit_u8(&builder.buffer, 0xc1);
         }
         else
         {
@@ -4464,31 +4469,76 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 x64_emit_store_memory(&builder, X64_REGISTER_R10, offset, X64_REGISTER_RAX, lane_size);
                 continue;
             }
-            if (lane_size == 2)
+            BusterX86MetadataPhysicalOperand compare_operands[2] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(lane_size * 8)),
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, (u16)(lane_size * 8)),
+            };
+            if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("CMP"), compare_operands,
+                                                      BUSTER_ARRAY_LENGTH(compare_operands)))
             {
-                codegen_emit_u8(&builder.buffer, 0x66);
+                return false;
             }
-            codegen_emit_u8(&builder.buffer, lane_size == 8 ? 0x48 : 0x40);
-            codegen_emit_u8(&builder.buffer, lane_size == 1 ? 0x38 : 0x39);
-            codegen_emit_u8(&builder.buffer, 0xc8);
         }
-        codegen_emit_u8(&builder.buffer, 0x0f);
-        codegen_emit_u8(&builder.buffer, condition);
-        codegen_emit_u8(&builder.buffer, 0xc0);
+        String8 condition_mnemonic = condition == 0x94 ? S8("SETZ")
+                                      : condition == 0x95 ? S8("SETNZ")
+                                      : condition == 0x9c ? S8("SETL")
+                                      : condition == 0x9e ? S8("SETLE")
+                                      : condition == 0x9f ? S8("SETNLE")
+                                      : condition == 0x9d ? S8("SETNL")
+                                      : condition == 0x92 ? S8("SETB")
+                                      : condition == 0x96 ? S8("SETBE")
+                                      : condition == 0x97 ? S8("SETNBE")
+                                      : condition == 0x93 ? S8("SETNB")
+                                                         : (String8){0};
+        if (!condition_mnemonic.length)
+        {
+            return false;
+        }
+        BusterX86MetadataPhysicalOperand set_operands[] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+        };
+        if (!codegen_canonical_x64_metadata_emit(&builder.buffer, condition_mnemonic, set_operands,
+                                                  BUSTER_ARRAY_LENGTH(set_operands)))
+        {
+            return false;
+        }
         if (ordered || unordered)
         {
-            codegen_emit_u8(&builder.buffer, 0x0f);
-            codegen_emit_u8(&builder.buffer, unordered ? 0x9a : 0x9b);
-            codegen_emit_u8(&builder.buffer, 0xc2);
-            codegen_emit_u8(&builder.buffer, unordered ? 0x08 : 0x20);
-            codegen_emit_u8(&builder.buffer, 0xd0);
+            BusterX86MetadataPhysicalOperand unordered_operands[] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+            };
+            if (!codegen_canonical_x64_metadata_emit(&builder.buffer, unordered ? S8("SETP") : S8("SETNP"), unordered_operands,
+                                                      BUSTER_ARRAY_LENGTH(unordered_operands)))
+            {
+                return false;
+            }
+            BusterX86MetadataPhysicalOperand ordered_operands[2] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+            };
+            if (!codegen_canonical_x64_metadata_emit(&builder.buffer, unordered ? S8("OR") : S8("AND"), ordered_operands,
+                                                      BUSTER_ARRAY_LENGTH(ordered_operands)))
+            {
+                return false;
+            }
         }
-        codegen_emit_u8(&builder.buffer, 0x0f);
-        codegen_emit_u8(&builder.buffer, 0xb6);
-        codegen_emit_u8(&builder.buffer, 0xc0);
-        codegen_emit_u8(&builder.buffer, 0x48);
-        codegen_emit_u8(&builder.buffer, 0xf7);
-        codegen_emit_u8(&builder.buffer, 0xd8);
+        BusterX86MetadataPhysicalOperand widen_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+        };
+        if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOVZX"), widen_operands,
+                                                  BUSTER_ARRAY_LENGTH(widen_operands)))
+        {
+            return false;
+        }
+        BusterX86MetadataPhysicalOperand negate_operands[] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+        };
+        if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NEG"), negate_operands,
+                                                  BUSTER_ARRAY_LENGTH(negate_operands)))
+        {
+            return false;
+        }
         x64_emit_store_memory(&builder, X64_REGISTER_R10, offset, X64_REGISTER_RAX, lane_size);
     }
     *output = builder.buffer;
