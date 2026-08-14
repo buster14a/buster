@@ -220,6 +220,41 @@ static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_t
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
 };
 
+/* Final canonical direct-SIMD rows.  DUP exercises the mixed vector/GPR
+ * transform path; NOT and ORR remain canonical spellings even though LLVM's
+ * disassembler prefers the MVN/MOV aliases for some encodings. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_final3_cases[] = {
+    {S8_INITIALIZER("dup v0.8b, w1\n"), {0x20, 0x0c, 0x01, 0x0e}},
+    {S8_INITIALIZER("dup v0.16b, w1\n"), {0x20, 0x0c, 0x01, 0x4e}},
+    {S8_INITIALIZER("dup v0.4h, w1\n"), {0x20, 0x0c, 0x02, 0x0e}},
+    {S8_INITIALIZER("dup v0.8h, w1\n"), {0x20, 0x0c, 0x02, 0x4e}},
+    {S8_INITIALIZER("dup v0.2s, w1\n"), {0x20, 0x0c, 0x04, 0x0e}},
+    {S8_INITIALIZER("dup v0.4s, w1\n"), {0x20, 0x0c, 0x04, 0x4e}},
+    {S8_INITIALIZER("dup v0.2d, x1\n"), {0x20, 0x0c, 0x08, 0x4e}},
+    {S8_INITIALIZER("not v0.8b, v1.8b\n"), {0x20, 0x58, 0x20, 0x2e}},
+    {S8_INITIALIZER("not v0.16b, v1.16b\n"), {0x20, 0x58, 0x20, 0x6e}},
+    {S8_INITIALIZER("orr v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("orr v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0xa2, 0x4e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_final3_boundary_cases[] = {
+    {S8_INITIALIZER("DUP V31.2D, XZR\n"), {0xff, 0x0f, 0x08, 0x4e}},
+    {S8_INITIALIZER("NOT V31.16B, V30.16B\n"), {0xdf, 0x5b, 0x20, 0x6e}},
+    {S8_INITIALIZER("ORR V31.16B, V30.16B, V29.16B\n"), {0xdf, 0x1f, 0xbd, 0x4e}},
+};
+
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_final3_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:DUP_asimdins_DR_r"), UINT64_C(0xe6799413838aec2f), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:NOT_asimdmisc_R"), UINT64_C(0xb4fad81197ef56dd), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:ORR_asimdsame_only"), UINT64_C(0xc6e29afad4e09fb3), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
 /* FHM AdvSIMD rows require LLVM's HasNEON && HasFP16FML predicate.  The
  * compact direct-SIMD requirement additionally relies on target validation to
  * reject FP16FML without its FULLFP16/NEON dependencies. */
@@ -1766,7 +1801,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_simd_executable_count == 390);
     BUSTER_TEST(arguments, direct_simd_transform_count == 263);
     BUSTER_TEST(arguments, direct_simd_binding_count == 658);
-    BUSTER_TEST(arguments, direct_simd_spelling_count > 0 && direct_simd_spelling_count <= direct_simd_row_count);
+    /* The two FCVT{L,N} suffix spellings intentionally share canonical rows;
+     * all other public entries are one-to-one with generated rows. */
+    BUSTER_TEST(arguments, direct_simd_spelling_count > 0 && direct_simd_spelling_count <= direct_simd_row_count + 2);
 
     u8 direct_simd_covered_rows[390] = {0};
     u32 direct_simd_covered_count = 0;
@@ -2049,12 +2086,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 389);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 387);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 3);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 260);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 392);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 390);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 0);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 263);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 127);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 3);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 0);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 0);
     BUSTER_TEST(arguments, direct_simd_covered_count + 2 == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -7729,6 +7766,85 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         AssemblyEncodeResult malformed = assembly_encode(
             arguments->arena, malformed_aarch64_tbl_tbx[malformed_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_final3_cases) == 11);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_final3_boundary_cases) == 3);
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_final3_spellings); expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_final3_spellings[expected_index];
+        u32 found_count = 0;
+        for (u32 spelling_index = 0; spelling_index < assembly_test_aarch64_direct_simd_spelling_count(); spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) && spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+    }
+    for (u32 final3_index = 0; final3_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_final3_cases); final3_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase final3_case = assembly_a64_direct_simd_final3_cases[final3_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, final3_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, final3_case.bytes, 4));
+        AssemblyEncodeResult without_neon = assembly_encode(
+            arguments->arena, final3_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_no_neon});
+        BUSTER_TEST(arguments, without_neon.diagnostic_count == 1 && without_neon.bytes.length == 0 &&
+                                   without_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    for (u32 final3_index = 0; final3_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_final3_boundary_cases); final3_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase final3_case = assembly_a64_direct_simd_final3_boundary_cases[final3_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, final3_case.source, (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, final3_case.bytes, 4));
+    }
+    /* ORR remains canonical when the MOV alias condition Rm == Rn holds. */
+    AssemblyEncodeResult orr_alias_condition = assembly_encode(
+        arguments->arena, S8("orr v0.8b, v1.8b, v1.8b\n"), (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+    static u8 const expected_orr_alias_condition[] = {0x20, 0x1c, 0xa1, 0x0e};
+    BUSTER_TEST(arguments, orr_alias_condition.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(orr_alias_condition.bytes, expected_orr_alias_condition, 4));
+    /* MVN/MOV aliases stay outside the direct canonical spelling table. */
+    AssemblyEncodeResult mvn_alias = assembly_encode(
+        arguments->arena, S8("mvn v0.8b, v1.8b\n"), (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+    AssemblyEncodeResult mov_alias = assembly_encode(
+        arguments->arena, S8("mov v0.8b, v1.8b\n"), (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
+    BUSTER_TEST(arguments, mvn_alias.diagnostic_count == 1 && mvn_alias.bytes.length == 0);
+    BUSTER_TEST(arguments, mov_alias.diagnostic_count == 1 && mov_alias.bytes.length == 0);
+    static String8 const malformed_aarch64_direct_simd_final3[] = {
+        S8_INITIALIZER("dup v0.2d, w1\n"),
+        S8_INITIALIZER("dup v0.2d, wzr\n"),
+        S8_INITIALIZER("dup v0.8b, x1\n"),
+        S8_INITIALIZER("dup v0.8b, sp\n"),
+        S8_INITIALIZER("dup v0.2d, sp\n"),
+        S8_INITIALIZER("dup v32.8b, w1\n"),
+        S8_INITIALIZER("dup v0.8b, w32\n"),
+        S8_INITIALIZER("dup v0.8b, {v1.8b}\n"),
+        S8_INITIALIZER("dup v0.8b, w1, v2.8b\n"),
+        S8_INITIALIZER("dup v0.8b\n"),
+        S8_INITIALIZER("not v0.8b, v1.8b[0]\n"),
+        S8_INITIALIZER("not v0.8b\n"),
+        S8_INITIALIZER("not v32.8b, v1.8b\n"),
+        S8_INITIALIZER("orr v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("orr v0.8b, v1.8b\n"),
+        S8_INITIALIZER("orr v0.8b, v1.8b, v32.8b\n"),
+        S8_INITIALIZER("orr v0.8b, {v1.8b}, v2.8b\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_direct_simd_final3); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_direct_simd_final3[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_fcvt_suffix_target});
         BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
                                    malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }

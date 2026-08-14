@@ -3643,6 +3643,18 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("dup"), UINT64_C(0xe6799413838aec2f), S8_INITIALIZER("arm-a64@2026-06:DUP_asimdins_DR_r"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("not"), UINT64_C(0xb4fad81197ef56dd), S8_INITIALIZER("arm-a64@2026-06:NOT_asimdmisc_R"), 2,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("orr"), UINT64_C(0xc6e29afad4e09fb3), S8_INITIALIZER("arm-a64@2026-06:ORR_asimdsame_only"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
 };
 
 #if BUSTER_INCLUDE_TESTS
@@ -8031,7 +8043,7 @@ typedef enum AssemblyAarch64DirectSIMDCandidateResult
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
     u32 row_index, BusterA64SemanticForm form, u32 const* registers, BusterA64DirectSIMDArrangement const* arrangements,
-    u32 const* conditions, BusterA64DirectSIMDInstruction* result)
+    u32 const* conditions, u8 const* gpr_widths, BusterA64DirectSIMDInstruction* result)
 {
     if (!registers || !arrangements || !conditions || !result || form.operand_count > BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
     {
@@ -8087,9 +8099,19 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
             source_index[operand_index] = source_count;
             source_count += 1;
         }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+        {
+            if (source_count >= 4)
+            {
+                return false;
+            }
+            source_index[operand_index] = source_count;
+            source_count += 1;
+        }
         else if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
                  operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
                  operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR &&
+                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR &&
                  operand.kind != BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT)
         {
             if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_CONDITION ||
@@ -8171,6 +8193,39 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
             instruction.operands[operand_index] = scalar
                 ? buster_a64_direct_simd_value_scalar(registers[source], arrangements[source])
                 : buster_a64_direct_simd_value_vector(registers[source], arrangements[source]);
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+        {
+            u32 source = source_index[operand_index];
+            if (source >= source_count || !gpr_widths || (gpr_widths[source] != 32 && gpr_widths[source] != 64))
+            {
+                return false;
+            }
+            instruction.operands[operand_index] = buster_a64_direct_simd_value_gpr(
+                registers[source], gpr_widths[source], registers[source] == 31);
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR)
+        {
+            u32 gpr_source = UINT32_MAX;
+            for (u32 candidate_index = 0; candidate_index < form.operand_count; candidate_index += 1)
+            {
+                BusterA64SemanticOperand candidate = {0};
+                if (!buster_a64_semantic_operand(form.operand_first + candidate_index, &candidate))
+                {
+                    return false;
+                }
+                if (candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+                {
+                    gpr_source = source_index[candidate_index];
+                    break;
+                }
+            }
+            if (gpr_source == UINT32_MAX || !gpr_widths ||
+                (gpr_widths[gpr_source] != 32 && gpr_widths[gpr_source] != 64))
+            {
+                return false;
+            }
+            instruction.operands[operand_index] = buster_a64_direct_simd_value_gpr_width(gpr_widths[gpr_source]);
         }
         else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_CONDITION)
         {
@@ -8458,7 +8513,8 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
         arrangements[1] = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B;
         arrangements[2] = index.arrangement;
         BusterA64DirectSIMDInstruction instruction = {0};
-        if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, conditions, &instruction))
+        u8 zero_gpr_widths[4] = {0};
+        if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, conditions, zero_gpr_widths, &instruction))
         {
             return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
         }
@@ -8477,6 +8533,8 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
     }
     u32 source_count = 0;
     u32 token_index = 0;
+    u32 gpr_source_count = 0;
+    u32 gpr_width_selector_count = 0;
     for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
     {
         BusterA64SemanticOperand operand = {0};
@@ -8488,6 +8546,8 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT &&
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_CONDITION)
         {
@@ -8544,13 +8604,74 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
             source_count += 1;
             token_index += 1;
         }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+        {
+            if (source_count >= 4 || token_count <= token_index || gpr_source_count != 0)
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            AssemblyRegister parsed = {0};
+            if (!assembly_aarch64_gpr_register_parse(tokens[token_index], &parsed) || parsed.class != ASSEMBLY_REGISTER_GPR ||
+                parsed.stack_pointer)
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            registers[source_count] = parsed.index;
+            arrangements[source_count] = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+            gpr_widths[source_count] = (u8)parsed.width;
+            source_count += 1;
+            gpr_source_count += 1;
+            token_index += 1;
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_WIDTH_SELECTOR)
+        {
+            gpr_width_selector_count += 1;
+        }
     }
-    if (token_index != token_count)
+    if (token_index != token_count || gpr_source_count != gpr_width_selector_count)
     {
         return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
     }
+    if (gpr_source_count != 0)
+    {
+        /* The generated DUP transform links the vector arrangement to the
+         * GPR width selector: every legal byte/halfword/single arrangement
+         * uses W, while 2D uses X.  Keep this compatibility check semantic
+         * and independent of mnemonic spelling; the generated encoder then
+         * validates the actual imm5/Q field mapping. */
+        BusterA64DirectSIMDArrangement vector_arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+        for (u32 source_index = 0; source_index < source_count; source_index += 1)
+        {
+            if (arrangements[source_index] != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID)
+            {
+                vector_arrangement = arrangements[source_index];
+                break;
+            }
+        }
+        bool vector_arrangement_valid = vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8B ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4H ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8H ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2S ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S ||
+                                        vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2D;
+        u8 expected_width = vector_arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2D ? 64 : 32;
+        u32 gpr_source_index = UINT32_MAX;
+        for (u32 source_index = 0; source_index < source_count; source_index += 1)
+        {
+            if (gpr_widths[source_index] != 0)
+            {
+                gpr_source_index = source_index;
+                break;
+            }
+        }
+        if (!vector_arrangement_valid || gpr_source_index == UINT32_MAX || gpr_widths[gpr_source_index] != expected_width)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+    }
     BusterA64DirectSIMDInstruction instruction = {0};
-    if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, conditions, &instruction))
+    if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, conditions, gpr_widths, &instruction))
     {
         return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
     }
@@ -13727,17 +13848,19 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 u32 registers[4] = {0};
                 BusterA64DirectSIMDArrangement arrangements[4] = {0};
                 u32 conditions[4] = {0};
+                u8 gpr_widths[4] = {0};
                 for (u32 operand_index = 0; operand_index < instruction->operand_count && operand_index < 4; operand_index += 1)
                 {
                     registers[operand_index] = instruction->aarch64_direct_simd_registers[operand_index];
                     arrangements[operand_index] =
                         (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index];
                     conditions[operand_index] = instruction->aarch64_direct_simd_conditions[operand_index];
+                    gpr_widths[operand_index] = instruction->aarch64_direct_simd_gpr_widths[operand_index];
                 }
                 values_built = buster_a64_semantic_form(row_info.semantic_form_id, &form) &&
                                assembly_aarch64_direct_simd_semantic_values_build(
                                    instruction->aarch64_direct_simd_row_index, form, registers, arrangements, conditions,
-                                   &direct_simd_instruction);
+                                   gpr_widths, &direct_simd_instruction);
             }
             else
             {
