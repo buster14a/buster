@@ -2795,12 +2795,13 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_relative_absolute_skeleton(
                         syntaxes[index], 9805, case_success);
     }
 
-    // A symbolic short displacement carries a non-zero addend.  This keeps
-    // the metadata PC8 relocation and the public source relocation aligned in
-    // both dialects without comparing their placeholder bytes.
+    // An unresolved symbolic displacement must remain near-width: the linker
+    // cannot prove that an external target fits in an 8-bit field.  The source
+    // adapter therefore upgrades this spelling to canonical near JZ while
+    // retaining the addend and PC32 relocation.
     BusterX86MetadataPhysicalOperand short_symbol = {
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
-        .width = 8,
+        .width = 32,
         .symbol = S8("external"),
         .addend = 7,
         .has_symbol = true,
@@ -2809,43 +2810,45 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_relative_absolute_skeleton(
         S8("JZ"), &short_symbol, 1,
         (BusterX86MetadataPhysicalAttributes){.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN}, wildcard,
         BUSTER_ARRAY_LENGTH(wildcard));
+    BusterX86MetadataSelectResult short_symbol_select = buster_x86_metadata_select_form(short_symbol_query);
+    bool short_symbol_form_selected = short_symbol_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                      short_symbol_select.selected_byte_count == 7;
+    all_success &= short_symbol_form_selected;
     static String8 const short_symbol_source = S8_INITIALIZER("cs jz external+7\n");
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+    if (short_symbol_form_selected)
     {
-        bool case_success = x86_64_metadata_test_source_relocation_case(
-            arguments->arena, target, short_symbol_source, syntaxes[index], 9805, short_symbol_query,
-            ASSEMBLY_RELOCATION_X86_PC8);
-        all_success &= case_success;
-        arguments->show(arguments, S8("X86_SOURCE_RELATIVE_ADDEND syntax={u32} form={u32} success={u32}\n"),
-                        syntaxes[index], 9805, case_success);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+        {
+            bool case_success = x86_64_metadata_test_source_relocation_case(
+                arguments->arena, target, short_symbol_source, syntaxes[index], short_symbol_select.form_id,
+                short_symbol_query, ASSEMBLY_RELOCATION_X86_PC32);
+            all_success &= case_success;
+            arguments->show(arguments, S8("X86_SOURCE_RELATIVE_ADDEND syntax={u32} form={u32} success={u32}\n"),
+                            syntaxes[index], short_symbol_select.form_id, case_success);
+        }
     }
 
-    // Plain `jmp expression` is intentionally the handwritten near-default,
-    // not a short-form candidate: assembly_x86_instruction_size assigns an
-    // expression operand five bytes, and the x86 branch in
-    // assembly_instructions_emit writes E9 plus rel32 before metadata
-    // fallback is considered.  The local spelling below therefore checks an
-    // exact five-byte E9 encoding against form 10060; the external spelling
-    // checks the source/direct relocation contract and its addend in Intel and
-    // AT&T syntax.
-    BusterX86MetadataPhysicalOperand near_local = x86_64_metadata_test_physical_relative(-5, 32);
+    // A resolved local JMP uses the canonical short form when its
+    // displacement fits.  The unresolved spelling below remains near-width
+    // for the linker.
+    BusterX86MetadataPhysicalOperand near_local = x86_64_metadata_test_physical_relative(-2, 8);
     BusterX86MetadataPhysicalQuery near_local_query = x86_64_metadata_test_physical_query(
         S8("JMP"), &near_local, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
-    BusterX86MetadataSelectResult near_select = buster_x86_metadata_select_form(near_local_query);
-    bool near_form_selected = near_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && near_select.form_id == 10060 &&
-                              near_select.selected_byte_count == 5;
-    all_success &= near_form_selected;
-    if (near_form_selected)
+    BusterX86MetadataSelectResult near_local_select = buster_x86_metadata_select_form(near_local_query);
+    bool near_local_form_selected = near_local_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                    near_local_select.selected_byte_count == 2;
+    all_success &= near_local_form_selected;
+    if (near_local_form_selected)
     {
         static String8 const near_local_source = S8_INITIALIZER("target:\njmp target\n");
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
         {
             bool case_success = x86_64_metadata_test_source_relocation_case(
-                arguments->arena, target, near_local_source, syntaxes[index], near_select.form_id,
+                arguments->arena, target, near_local_source, syntaxes[index], near_local_select.form_id,
                 near_local_query, ASSEMBLY_RELOCATION_COUNT);
             all_success &= case_success;
             arguments->show(arguments, S8("X86_SOURCE_RELATIVE_NEAR_LOCAL syntax={u32} form={u32} success={u32}\n"),
-                            syntaxes[index], near_select.form_id, case_success);
+                            syntaxes[index], near_local_select.form_id, case_success);
         }
     }
     BusterX86MetadataPhysicalOperand near_symbol = {
@@ -2857,17 +2860,21 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_relative_absolute_skeleton(
     };
     BusterX86MetadataPhysicalQuery near_symbol_query = x86_64_metadata_test_physical_query(
         S8("JMP"), &near_symbol, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
-    if (near_form_selected)
+    BusterX86MetadataSelectResult near_symbol_select = buster_x86_metadata_select_form(near_symbol_query);
+    bool near_symbol_form_selected = near_symbol_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                     near_symbol_select.selected_byte_count == 5;
+    all_success &= near_symbol_form_selected;
+    if (near_symbol_form_selected)
     {
         static String8 const near_symbol_source = S8_INITIALIZER("jmp external+7\n");
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
         {
             bool case_success = x86_64_metadata_test_source_relocation_case(
-                arguments->arena, target, near_symbol_source, syntaxes[index], near_select.form_id,
+                arguments->arena, target, near_symbol_source, syntaxes[index], near_symbol_select.form_id,
                 near_symbol_query, ASSEMBLY_RELOCATION_X86_PC32);
             all_success &= case_success;
             arguments->show(arguments, S8("X86_SOURCE_RELATIVE_NEAR_ADDEND syntax={u32} form={u32} success={u32}\n"),
-                            syntaxes[index], near_select.form_id, case_success);
+                            syntaxes[index], near_symbol_select.form_id, case_success);
         }
     }
 

@@ -11348,6 +11348,45 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operands[right] = temporary;
         }
     }
+    // AMD four-operand vector forms use Intel's source spelling for the
+    // selector register and memory operand, while metadata rows expose the
+    // ModRM operand before the fixed selector register.  Most mnemonics have
+    // both W=0 (memory in slot 2) and W=1 (memory in slot 3) rows, so the
+    // source order itself disambiguates them.  The MAC forms publish only a
+    // slot-2 memory row; move that source operand ahead of the selector before
+    // constructing the physical query.  AT&T has already been reversed into
+    // this metadata order above.
+    if (operand_count == 4 && operands[2].kind != ASSEMBLY_OPERAND_MEMORY &&
+        operands[3].kind == ASSEMBLY_OPERAND_MEMORY)
+    {
+        BusterX86MetadataCandidateRange amd_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+        bool has_memory_slot_2 = false;
+        bool has_memory_slot_3 = false;
+        for (u32 candidate_index = 0; candidate_index < amd_candidates.count; candidate_index += 1)
+        {
+            u32 form_id = 0;
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_candidate_at(amd_candidates, candidate_index, &form_id) ||
+                !buster_x86_metadata_form(form_id, &form) || form.operand_count != operand_count)
+            {
+                continue;
+            }
+            BusterX86MetadataOperand slot_2 = {0};
+            BusterX86MetadataOperand slot_3 = {0};
+            if (!buster_x86_metadata_operand(form_id, 2, &slot_2) || !buster_x86_metadata_operand(form_id, 3, &slot_3))
+            {
+                continue;
+            }
+            has_memory_slot_2 |= slot_2.kind == BUSTER_X86_METADATA_OPERAND_MEMORY;
+            has_memory_slot_3 |= slot_3.kind == BUSTER_X86_METADATA_OPERAND_MEMORY;
+        }
+        if (has_memory_slot_2 && !has_memory_slot_3)
+        {
+            AssemblyOperand temporary = operands[2];
+            operands[2] = operands[3];
+            operands[3] = temporary;
+        }
+    }
     // The metadata schema models implicit count-one shift/rotate forms as
     // ONE(), with no visible immediate operand.  Hide an explicit literal `1`
     // accepted by the handwritten syntax front end so both dialects select
@@ -11491,6 +11530,61 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             scalar_memory_width = 8;
         else if (assembly_word_equal(mnemonic, S8("vmovdqu16")))
             scalar_memory_width = 16;
+        if (!scalar_memory_width)
+        {
+            // AMD/XOP and FMA4 rows publish the scalar memory element on the
+            // generated operand (for example i16 for VPMACSSWW and f32 for
+            // VFMADDPS) even though the legacy parser records the aggregate
+            // vector qualifier.  Infer a width only when every memory form
+            // for this mnemonic agrees; unknown/ambiguous rows remain
+            // unresolved for the metadata selector.
+            BusterX86MetadataCandidateRange vector_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+            u16 candidate_memory_width = 0;
+            bool candidate_memory_width_ambiguous = false;
+            for (u32 candidate_index = 0; candidate_index < vector_candidates.count; candidate_index += 1)
+            {
+                u32 form_id = 0;
+                BusterX86MetadataForm form = {0};
+                if (!buster_x86_metadata_candidate_at(vector_candidates, candidate_index, &form_id) ||
+                    !buster_x86_metadata_form(form_id, &form) || form.operand_count != operand_count)
+                {
+                    continue;
+                }
+                for (u32 form_operand_index = 0; form_operand_index < form.operand_count; form_operand_index += 1)
+                {
+                    BusterX86MetadataOperand metadata_operand = {0};
+                    if (!buster_x86_metadata_operand(form_id, form_operand_index, &metadata_operand) ||
+                        metadata_operand.kind != BUSTER_X86_METADATA_OPERAND_MEMORY)
+                    {
+                        continue;
+                    }
+                    u16 width_flags = metadata_operand.physical_width_flags;
+                    u16 width = width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_8
+                                     ? 8
+                                     : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_16
+                                         ? 16
+                                         : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_32
+                                             ? 32
+                                             : width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_64 ? 64 : 0;
+                    if (!width)
+                    {
+                        continue;
+                    }
+                    if (!candidate_memory_width)
+                    {
+                        candidate_memory_width = width;
+                    }
+                    else if (candidate_memory_width != width)
+                    {
+                        candidate_memory_width_ambiguous = true;
+                    }
+                }
+            }
+            if (!candidate_memory_width_ambiguous)
+            {
+                scalar_memory_width = candidate_memory_width;
+            }
+        }
         for (u32 index = 0; index < operand_count; index += 1)
         {
             if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
@@ -11582,7 +11676,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && physical[index].has_symbol)
             {
-                physical[index].width = 32;
+                // A label already defined in this source stream can use the
+                // canonical short form when the resolved displacement fits.
+                // Keep forward/unknown symbols at the near width so an
+                // external linker relocation never depends on an 8-bit range.
+                u32 symbol_index = assembly_symbol_find(builder, physical[index].symbol);
+                bool symbol_defined = symbol_index != UINT32_MAX && builder->result.symbols[symbol_index].defined;
+                if (!symbol_defined)
+                {
+                    physical[index].width = 32;
+                }
             }
         }
     }
