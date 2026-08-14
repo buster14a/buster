@@ -1,0 +1,7 @@
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    data number: s32 = 1;
+    data p: &s32 = &number;
+    p.& = 0;
+    return p.&;
+}

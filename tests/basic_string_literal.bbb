@@ -1,0 +1,6 @@
+code main[export] : fn[cc(c)] () s32
+{
+    data greeting = "hello, world";
+    data escaped = "line\n\x42\u{1F600}";
+    return @cast(greeting[0] - 'h');
+}

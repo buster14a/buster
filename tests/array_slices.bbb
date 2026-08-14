@@ -1,0 +1,24 @@
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    data array_a: [_]s32 = [ 2, 3, 4 ];
+    data array_b: [3]s32 = [ 2, 3, 4 ];
+    data slice_a = array_a[..];
+    data slice_b: []s32 = array_b[..];
+    data slice_from = array_a[1..];
+    data slice_to: []s32 = array_b[..2];
+    data slice_between = array_a[1..2];
+
+    data total_a: s32 = 0;
+    for (data a = slice_a)
+    {
+        total_a += a;
+    }
+
+    data total_b: s32 = 0;
+    for (data b = slice_b)
+    {
+        total_b += b;
+    }
+
+    return total_a - total_b;
+}

@@ -21,12 +21,16 @@ C source -> preprocessing/parsing/semantic analysis -> canonical IR
          -> direct core Wasm64 emission for wasm64 targets
 ```
 
-The former experimental custom-language frontend, its semantic model, its
-source-level interpreter/JIT entrypoints, and the editor model built around it
-are intentionally absent. Shared facilities remain: the canonical IR,
-optimizers, machine selection and scheduling, register allocators, x86-64 and
-AArch64 encoders, debug emitters, object formats, linker, generic object JIT,
-assembler, and Wasm64 backend.
+The experimental custom-language frontend, its semantic model, its
+source-level interpreter/JIT entrypoints, the editor model built around it,
+their tests, and the `.bbb` fixture corpus are retained as dormant source for
+future work. They are intentionally absent from the generated build graph,
+unity translation unit, test registration, benchmarks, and CI execution, so
+preserving them adds no compiler or test-time cost. Detailed former guidance
+is preserved in `DORMANT_CUSTOM_COMPILER.md`. Shared active facilities remain:
+the canonical IR, optimizers, machine selection and scheduling, register
+allocators, x86-64 and AArch64 encoders, debug emitters, object formats,
+linker, generic object JIT, assembler, and Wasm64 backend.
 
 ## Current compiler priority
 
@@ -218,6 +222,9 @@ compilation is explicitly enabled.
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
+- Dormant `.bbb` fixtures remain under `tests/` as preservation material. Do
+  not register, compile, parse, benchmark, package, or execute them in the
+  default build or CI until the custom frontend is deliberately reactivated.
 - A new production module or public behavior must receive a focused module
   test. Frontend changes should cover preprocessing, parsing/diagnostics,
   semantic typing, canonical-IR lowering, and driver behavior as applicable.

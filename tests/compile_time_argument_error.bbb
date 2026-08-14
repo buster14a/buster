@@ -1,0 +1,9 @@
+code choose : fn ($value: s32) s32
+{
+    return value;
+}
+
+code main : fn (runtime_value: s32) s32
+{
+    return choose(runtime_value);
+}

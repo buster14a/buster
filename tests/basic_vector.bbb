@@ -1,0 +1,17 @@
+type Float4 = vector[4]f32
+
+code identity : fn (value: Float4) Float4
+{
+    return value;
+}
+
+code main[export] : fn [cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32
+{
+    data left: Float4 = [ 1.0, 2.0, 3.0, 4.0 ];
+    data right: Float4 = [ 4.0, 3.0, 2.0, 1.0 ];
+    data sum: Float4 = left + right;
+    data negated: Float4 = -sum;
+    data less: vector[4]u32 = left < right;
+    data equal: vector[4]u32 = left == right;
+    return @cast(negated[0]);
+}

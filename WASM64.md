@@ -18,6 +18,14 @@ sets the Memory64 limits flag.
 build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc -O1 -o app.wasm app.c
 ```
 
+The dormant Buster-language frontend previously supported the corresponding
+`.bbb` command below. It is retained as reactivation documentation and is not
+accepted by the current C-only driver:
+
+```sh
+build/Release/ide cc -target wasm64-unknown-freestanding -O1 -o app.wasm app.bbb
+```
+
 `-c source.c` writes `source.wasm`; a link action without `-o` writes
 `a.wasm`. Native object files, archives, libraries, frameworks, linker
 arguments, textual assembly, and non-freestanding Wasm64 triples are rejected.
