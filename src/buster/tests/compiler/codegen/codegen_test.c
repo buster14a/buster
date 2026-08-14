@@ -747,13 +747,18 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (unsigned_remainder_divide & 31) == 11);
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
-    Target avx512f_target = target;
-    avx512f_target.cpu_model = CPU_MODEL_BASELINE;
-    avx512f_target.cpu_features_explicit = true;
-    avx512f_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[])
-    {
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
-    }, 4);
+    // This target drives the System V stack-argument test below. Keep its ABI
+    // fixed when the test executable itself was built on Windows.
+    Target avx512f_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[])
+        {
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+        }, 4),
+    };
     Target aarch64_target = target;
     aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
     aarch64_target.cpu_features_explicit = true;
