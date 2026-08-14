@@ -3732,15 +3732,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             body_stack_adjust_valid &= full_body_scan.valid;
             bool has_outgoing_stack_store = false;
             u32 maximum_stack_store_end = 0;
-            for (u64 byte_index = cursor; byte_index + 8 <= function_end; byte_index += 1)
+            for (u64 byte_index = cursor; byte_index + 4 <= function_end; byte_index += 1)
             {
                 u8 rex = text.pointer[byte_index];
                 u8 modrm = text.pointer[byte_index + 2];
-                if ((rex == 0x48 || rex == 0x4c) && text.pointer[byte_index + 1] == 0x89 && (modrm & 0xc7) == 0x84 &&
-                    text.pointer[byte_index + 3] == 0x24)
+                u8 mod = modrm >> 6;
+                u32 displacement_size = mod == 1 ? 1 : mod == 2 ? 4 : 0;
+                if ((rex == 0x48 || rex == 0x4c) && text.pointer[byte_index + 1] == 0x89 && mod != 3 && (modrm & 7) == 4 &&
+                    text.pointer[byte_index + 3] == 0x24 && displacement_size && byte_index + 4 + displacement_size <= function_end)
                 {
                     u32 displacement = 0;
-                    memcpy(&displacement, text.pointer + byte_index + 4, sizeof(displacement));
+                    if (displacement_size == 1)
+                    {
+                        displacement = text.pointer[byte_index + 4];
+                    }
+                    else
+                    {
+                        memcpy(&displacement, text.pointer + byte_index + 4, sizeof(displacement));
+                    }
                     if (displacement <= UINT32_MAX - 8)
                     {
                         has_outgoing_stack_store = true;
