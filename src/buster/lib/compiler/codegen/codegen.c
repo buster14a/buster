@@ -805,54 +805,110 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_a64_nop_count(String8 literal)
     return count;
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_gpr(X64Register register_index, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = width,
+        .reg = {
+            .index = (u16)register_index,
+            .width = width,
+            .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_memory(X64Register base, u16 width, s64 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = width,
+        .memory = {
+            .base = {
+                .index = (u16)base,
+                .width = 64,
+                .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+            },
+            .displacement = displacement,
+            .address_size = 64,
+            .scale = 1,
+            .has_base = true,
+            // Keep the frame/reference displacement explicit.  In
+            // particular, [rbp] without a displacement is not the same
+            // ModRM shape as [rbp+0], because rm=5 is RIP-relative in
+            // address modes that omit a displacement.
+            .has_displacement = true,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit(CodegenBuffer* buffer, String8 mnemonic,
+                                                              BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
+{
+    if (!buffer)
+    {
+        return false;
+    }
+    if (!operands || !operand_count || buffer->error || buffer->count > buffer->capacity)
+    {
+        if (!buffer->error)
+        {
+            buffer->error = buffer->count > buffer->capacity ? CODEGEN_ERROR_CAPACITY : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        }
+        return false;
+    }
+
+    BusterX86MetadataPhysicalQuery physical = {
+        .mnemonic = mnemonic,
+        .operands = operands,
+        .operand_count = operand_count,
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = false,
+        .include_not64 = false,
+        .include_implicit = false,
+        .source_semantics = false,
+    };
+    u64 remaining = buffer->capacity - buffer->count;
+    u32 output_capacity = remaining > UINT32_MAX ? UINT32_MAX : (u32)remaining;
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = physical,
+        .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
+        .output_capacity = output_capacity,
+        .relocations = 0,
+        .relocation_capacity = 0,
+    });
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
+        emitted.byte_count > output_capacity)
+    {
+        buffer->error = emitted.status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY ? CODEGEN_ERROR_CAPACITY
+                                                                                       : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
+    buffer->count += emitted.byte_count;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_load(CodegenBuffer* buffer, X64Register target, X64Register base, u32 displacement, u32 width)
 {
-    u8 rex = 0x40;
-    rex |= target >= X64_REGISTER_R8 ? 0x04 : 0;
-    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
-    rex |= width == 8 ? 0x08 : 0;
-    if (width == 2)
-    {
-        codegen_emit_u8(buffer, 0x66);
-    }
-    if (rex)
-    {
-        codegen_emit_u8(buffer, rex);
-    }
-    if (width == 1 || width == 2)
-    {
-        codegen_emit_u8(buffer, 0x0f);
-        codegen_emit_u8(buffer, width == 1 ? 0xb6 : 0xb7);
-    }
-    else
-    {
-        codegen_emit_u8(buffer, 0x8b);
-    }
-    codegen_emit_u8(buffer, (u8)(0x80 | ((target & 7) << 3) | (base & 7)));
-    codegen_emit_u32(buffer, displacement);
+    String8 mnemonic = width == 1 || width == 2 ? S8("MOVZX") : S8("MOV");
+    u16 memory_width = (u16)(width * 8);
+    u16 register_width = width <= 2 ? 32 : memory_width;
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_gpr(target, register_width),
+        codegen_canonical_x64_metadata_memory(base, memory_width, (s64)(s32)displacement),
+    };
+    (void)codegen_canonical_x64_metadata_emit(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_store(CodegenBuffer* buffer, X64Register base, X64Register source, u32 displacement, u32 width)
 {
-    if (width == 2)
-    {
-        codegen_emit_u8(buffer, 0x66);
-    }
-    u8 rex = 0x40;
-    rex |= source >= X64_REGISTER_R8 ? 0x04 : 0;
-    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
-    rex |= width == 8 ? 0x08 : 0;
-    if (width == 1 && source >= X64_REGISTER_RSP && source <= X64_REGISTER_RDI)
-    {
-        rex |= 0x40;
-    }
-    if (rex)
-    {
-        codegen_emit_u8(buffer, rex);
-    }
-    codegen_emit_u8(buffer, width == 1 ? 0x88 : 0x89);
-    codegen_emit_u8(buffer, (u8)(0x80 | ((source & 7) << 3) | (base & 7)));
-    codegen_emit_u32(buffer, displacement);
+    u16 memory_width = (u16)(width * 8);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_memory(base, memory_width, (s64)(s32)displacement),
+        codegen_canonical_x64_metadata_gpr(source, memory_width),
+    };
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 
@@ -1158,55 +1214,24 @@ struct CodegenRegisterAllocation
 
 BUSTER_GLOBAL_LOCAL void x64_emit_load_memory(X64Builder* builder, X64Register target, X64Register base, u32 offset, u32 size)
 {
-    u8 rex = 0x40;
-    rex |= target >= X64_REGISTER_R8 ? 0x04 : 0;
-    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
-    if (size == 8)
-    {
-        rex |= 0x08;
-    }
-    if (size == 1 || size == 2)
-    {
-        if (size == 2)
-        {
-            codegen_emit_u8(&builder->buffer, 0x66);
-        }
-        if (rex != 0x40)
-        {
-            codegen_emit_u8(&builder->buffer, rex);
-        }
-        codegen_emit_u8(&builder->buffer, 0x0f);
-        codegen_emit_u8(&builder->buffer, size == 1 ? 0xb6 : 0xb7);
-    }
-    else
-    {
-        if (rex != 0x40)
-        {
-            codegen_emit_u8(&builder->buffer, rex);
-        }
-        codegen_emit_u8(&builder->buffer, 0x8b);
-    }
-    codegen_emit_u8(&builder->buffer, (u8)(0x80 | ((target & 7) << 3) | (base & 7)));
-    codegen_emit_u32(&builder->buffer, offset);
+    String8 mnemonic = size == 1 || size == 2 ? S8("MOVZX") : S8("MOV");
+    u16 memory_width = (u16)(size * 8);
+    u16 register_width = size <= 2 ? 32 : memory_width;
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_gpr(target, register_width),
+        codegen_canonical_x64_metadata_memory(base, memory_width, (s64)(s32)offset),
+    };
+    (void)codegen_canonical_x64_metadata_emit(&builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 BUSTER_GLOBAL_LOCAL void x64_emit_store_memory(X64Builder* builder, X64Register base, u32 offset, X64Register source, u32 size)
 {
-    if (size == 2)
-    {
-        codegen_emit_u8(&builder->buffer, 0x66);
-    }
-    u8 rex = 0x40;
-    rex |= source >= X64_REGISTER_R8 ? 0x04 : 0;
-    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
-    rex |= size == 8 ? 0x08 : 0;
-    if (rex != 0x40)
-    {
-        codegen_emit_u8(&builder->buffer, rex);
-    }
-    codegen_emit_u8(&builder->buffer, size == 1 ? 0x88 : 0x89);
-    codegen_emit_u8(&builder->buffer, (u8)(0x80 | ((source & 7) << 3) | (base & 7)));
-    codegen_emit_u32(&builder->buffer, offset);
+    u16 memory_width = (u16)(size * 8);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_memory(base, memory_width, (s64)(s32)offset),
+        codegen_canonical_x64_metadata_gpr(source, memory_width),
+    };
+    (void)codegen_canonical_x64_metadata_emit(&builder->buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 BUSTER_GLOBAL_LOCAL void x64_emit_load_float_bits(X64Builder* builder, u32 target, X64Register base, u32 offset, u32 size)
@@ -5993,18 +6018,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {                                                                                                                                                      \
             break;                                                                                                                                             \
         }                                                                                                                                                      \
-        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x8b);                                                                                                                        \
-        codegen_emit_u8(&buffer, c_x64_load_modrm);                                                                                                            \
-        codegen_emit_u32(&buffer, (u32)c_x64_load_displacement);                                                                                               \
+        codegen_canonical_x64_asm_load(&buffer, (X64Register)((c_x64_load_modrm >> 3) & 7), X64_REGISTER_RBP,                                   \
+                                       (u32)c_x64_load_displacement, 8);                                                                                       \
     } while (0)
 #define C_X64_STORE_RESULT()                                                                                                                                   \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
-        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x89);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x85);                                                                                                                        \
-        codegen_emit_u32(&buffer, (u32)result_displacement);                                                                                                   \
+        codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_RBP, X64_REGISTER_RAX, (u32)result_displacement, 8);                              \
         if (!buffer.error)                                                                                                                                     \
         {                                                                                                                                                      \
             x64_forwarded_store_end = buffer.count;                                                                                                            \
@@ -6014,18 +6034,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
 #define C_X64_LOAD_HIGH(register_opcode, value_id)                                                                                                             \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
-        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x8b);                                                                                                                        \
-        codegen_emit_u8(&buffer, (u8)(register_opcode));                                                                                                       \
-        codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]) + 8));                                                      \
+        s32 c_x64_load_high_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]);                                                         \
+        codegen_canonical_x64_asm_load(&buffer, (X64Register)(((u8)(register_opcode) >> 3) & 7), X64_REGISTER_RBP,                                \
+                                       (u32)(c_x64_load_high_displacement + 8), 8);                                                                            \
     } while (0)
 #define C_X64_STORE_HIGH_RDX()                                                                                                                                 \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
-        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x89);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x95);                                                                                                                        \
-        codegen_emit_u32(&buffer, (u32)(result_displacement + 8));                                                                                            \
+        codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_RBP, X64_REGISTER_RDX, (u32)(result_displacement + 8), 8);                        \
     } while (0)
 #define C_X64_ATOMIC_ADDRESS(place_id, indirect_place)                                                                                                         \
     do                                                                                                                                                         \

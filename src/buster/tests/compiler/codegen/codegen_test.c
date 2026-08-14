@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
 
 typedef u64 CodegenTestFunction2(u64 left, u64 right);
@@ -768,6 +769,146 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_WINDOWS,
     };
+    // Scalar frame/memory emission in the canonical backend is routed through
+    // the same checked physical metadata encoder used here.  Keep a few
+    // representative ModRM/SIB shapes as a byte-level differential oracle:
+    // frame-pointer disp8, byte zero-extension through RSP, and an extended
+    // register base/source through R8.  These checks deliberately exercise
+    // shortest-form displacement selection rather than the old forced-disp32
+    // spelling.
+    {
+        BusterX86MetadataPhysicalOperand mov_rbp_operands[2] = {
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 64,
+                .reg = {
+                    .index = 0,
+                    .width = 64,
+                    .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                },
+            },
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = 64,
+                .memory = {
+                    .base = {
+                        .index = 5,
+                        .width = 64,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                    },
+                    .displacement = 8,
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = true,
+                },
+            },
+        };
+        u8 mov_rbp_bytes[16] = {0};
+        BusterX86MetadataEmitResult mov_rbp_result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = {
+                .mnemonic = S8("MOV"),
+                .operands = mov_rbp_operands,
+                .operand_count = BUSTER_ARRAY_LENGTH(mov_rbp_operands),
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            },
+            .output = mov_rbp_bytes,
+            .output_capacity = sizeof(mov_rbp_bytes),
+        });
+        u8 expected_mov_rbp[] = {0x48, 0x8b, 0x45, 0x08};
+        BUSTER_TEST(arguments, mov_rbp_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BUSTER_TEST(arguments, mov_rbp_result.byte_count == sizeof(expected_mov_rbp));
+        BUSTER_TEST(arguments, !memcmp(mov_rbp_bytes, expected_mov_rbp, sizeof(expected_mov_rbp)));
+
+        BusterX86MetadataPhysicalOperand movzx_rsp_operands[2] = {
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 32,
+                .reg = {
+                    .index = 0,
+                    .width = 32,
+                    .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                },
+            },
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = 8,
+                .memory = {
+                    .base = {
+                        .index = 4,
+                        .width = 64,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                    },
+                    .displacement = 16,
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = true,
+                },
+            },
+        };
+        u8 movzx_rsp_bytes[16] = {0};
+        BusterX86MetadataEmitResult movzx_rsp_result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = {
+                .mnemonic = S8("MOVZX"),
+                .operands = movzx_rsp_operands,
+                .operand_count = BUSTER_ARRAY_LENGTH(movzx_rsp_operands),
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            },
+            .output = movzx_rsp_bytes,
+            .output_capacity = sizeof(movzx_rsp_bytes),
+        });
+        u8 expected_movzx_rsp[] = {0x0f, 0xb6, 0x44, 0x24, 0x10};
+        BUSTER_TEST(arguments, movzx_rsp_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BUSTER_TEST(arguments, movzx_rsp_result.byte_count == sizeof(expected_movzx_rsp));
+        BUSTER_TEST(arguments, !memcmp(movzx_rsp_bytes, expected_movzx_rsp, sizeof(expected_movzx_rsp)));
+
+        BusterX86MetadataPhysicalOperand mov_r8_operands[2] = {
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = 64,
+                .memory = {
+                    .base = {
+                        .index = 8,
+                        .width = 64,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                    },
+                    .displacement = 32,
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = true,
+                },
+            },
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 64,
+                .reg = {
+                    .index = 8,
+                    .width = 64,
+                    .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                },
+            },
+        };
+        u8 mov_r8_bytes[16] = {0};
+        BusterX86MetadataEmitResult mov_r8_result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = {
+                .mnemonic = S8("MOV"),
+                .operands = mov_r8_operands,
+                .operand_count = BUSTER_ARRAY_LENGTH(mov_r8_operands),
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            },
+            .output = mov_r8_bytes,
+            .output_capacity = sizeof(mov_r8_bytes),
+        });
+        u8 expected_mov_r8[] = {0x4d, 0x89, 0x40, 0x20};
+        BUSTER_TEST(arguments, mov_r8_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BUSTER_TEST(arguments, mov_r8_result.byte_count == sizeof(expected_mov_r8));
+        BUSTER_TEST(arguments, !memcmp(mov_r8_bytes, expected_mov_r8, sizeof(expected_mov_r8)));
+    }
     // The optimized canonical path must carry exact-form telemetry from the
     // C frontend all the way through machine emission.  This source contains
     // exactly one MFENCE-producing seq_cst fence and one INT3-producing debug
