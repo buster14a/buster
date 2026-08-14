@@ -10,6 +10,8 @@ typedef enum CpuArch
     // distinct architecture rather than a feature of wasm32: pointers,
     // linear-memory addresses, and the C data model are all 64-bit.
     CPU_ARCH_WASM64,
+    // Linux eBPF, emitted as little-endian ELF64 relocatable objects.
+    CPU_ARCH_BPFEL,
     CPU_ARCH_COUNT,
 } CpuArch;
 

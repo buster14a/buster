@@ -197,12 +197,13 @@ TargetDataLayout target_data_layout(Target target)
     bool llp64 = target_uses_llp64_data_model(target);
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
+    bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
     u32 long_size = llp64 ? 4 : 8;
-    bool double_long_double = llp64 || wasm64 || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     u32 long_double_bits = double_long_double ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
-    u32 va_list_size = llp64 || wasm64 ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
+    u32 va_list_size = llp64 || wasm64 || bpfel ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -225,13 +226,13 @@ TargetDataLayout target_data_layout(Target target)
         .pointer = {.size = 8, .alignment = 8, .bit_width = 64},
         .va_list = {.size = va_list_size, .alignment = 8, .bit_width = va_list_size * 8},
         .atomic_min_width = 8,
-        .atomic_max_width = wasm64 ? 64 : 128,
-        .atomic_alignment = wasm64 ? 8 : 16,
-        .abi_stack_alignment = 16,
-        .abi_max_alignment = 16,
+        .atomic_max_width = wasm64 || bpfel ? 64 : 128,
+        .atomic_alignment = wasm64 || bpfel ? 8 : 16,
+        .abi_stack_alignment = bpfel ? 8 : 16,
+        .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
         .plain_char_is_signed = !arm_plain_char_unsigned,
-        .has_128_bit_integer = !wasm64,
+        .has_128_bit_integer = !wasm64 && !bpfel,
     };
     return layout;
 }
@@ -398,6 +399,11 @@ TargetParseResult target_parse_triple(String8 triple)
             {
                 result.target.cpu_arch = CPU_ARCH_WASM64;
             }
+            else if (target_component_equal(component, S8("bpfel")) || target_component_equal(component, S8("bpf")) ||
+                     target_component_equal(component, S8("ebpf")))
+            {
+                result.target.cpu_arch = CPU_ARCH_BPFEL;
+            }
             else
             {
                 result.invalid_component = component;
@@ -530,7 +536,7 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 {
     if (model == CPU_MODEL_BASELINE)
     {
-        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM64;
+        return arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_AARCH64 || arch == CPU_ARCH_WASM64 || arch == CPU_ARCH_BPFEL;
     }
     if (model == CPU_MODEL_NATIVE)
     {
@@ -855,7 +861,7 @@ bool target_cpu_features_are_valid(Target target)
         return true;
     }
     TargetCpuFeatures features = target.cpu_features;
-    if (target.cpu_arch == CPU_ARCH_WASM64)
+    if (target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
     {
         return !target_cpu_features_any(features);
     }
@@ -1444,6 +1450,9 @@ String8 cpu_arch_to_string_os(CpuArch arch)
         break;
     case CPU_ARCH_WASM64:
         return S8("wasm64");
+        break;
+    case CPU_ARCH_BPFEL:
+        return S8("bpfel");
         break;
     default:
         return S8("");

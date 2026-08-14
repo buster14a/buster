@@ -6,6 +6,7 @@
 #include <buster/lib/compiler/gpu/gpu.h>
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
+#include <buster/lib/compiler/ebpf/ebpf.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
@@ -27,6 +28,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_CODEGEN,
     COMPILER_DRIVER_ERROR_WASM64,
     COMPILER_DRIVER_ERROR_GPU,
+    COMPILER_DRIVER_ERROR_EBPF,
     COMPILER_DRIVER_ERROR_OBJECT,
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_COUNT,
@@ -139,6 +141,7 @@ struct CompilerDriverResult
     Wasm64Artifact wasm64;
     GpuArtifact gpu;
     LlvmBitcodeArtifact llvm_bitcode;
+    EbpfArtifact ebpf;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
     // What the C frontend consumed, per inclusion and per distinct file, and
@@ -157,6 +160,7 @@ struct CompilerDriverResult
     bool has_wasm64;
     bool has_gpu;
     bool has_llvm_bitcode;
+    bool has_ebpf;
     u8 reserved;
 };
 

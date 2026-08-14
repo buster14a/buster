@@ -975,8 +975,9 @@ CodegenAbi codegen_abi_for_target(Target target)
     break;
         break;
     case CPU_ARCH_WASM64:
-        // Wasm64 is emitted directly from canonical IR and does not use a
-        // native platform ABI or the native machine-code pipeline.
+    case CPU_ARCH_BPFEL:
+        // Wasm64 and eBPF are emitted directly from canonical IR and do not
+        // use a native platform ABI or the native machine-code pipeline.
         return CODEGEN_ABI_COUNT;
         break;
     case CPU_ARCH_COUNT:

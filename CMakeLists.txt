@@ -849,6 +849,7 @@ buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${C
 buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${COMMON_EXTENSION}")
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
+buster_register_module(compiler_ebpf "${BUSTER_SOURCE_DIR}/compiler/ebpf/ebpf${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1771,6 +1772,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_wasm
     compiler_gpu
     compiler_llvm_bitcode
+    compiler_ebpf
     compiler_driver
     simd
     file

@@ -3768,10 +3768,17 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
                                                   : options->target.cpu_arch == CPU_ARCH_WASM64 ? string_equal(argument, S8("wasm64"))
-                                                                                               : string_equal(argument, S8("x86_64")))
+                                                  : options->target.cpu_arch == CPU_ARCH_BPFEL
+                                                      ? string_equal(argument, S8("bpfel")) || string_equal(argument, S8("bpf")) ||
+                                                            string_equal(argument, S8("ebpf"))
+                                                      : string_equal(argument, S8("x86_64")))
                         : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
                                                        ? string_equal(argument, S8("macos"))
-                                                       : options->target.os == OPERATING_SYSTEM_IOS && string_equal(argument, S8("ios")))
+                                                   : options->target.os == OPERATING_SYSTEM_IOS
+                                                       ? string_equal(argument, S8("ios"))
+                                                   : options->target.os == OPERATING_SYSTEM_LINUX
+                                                       ? string_equal(argument, S8("linux"))
+                                                       : false)
                         : is_target_vendor      ? (options->target.os == OPERATING_SYSTEM_MACOS || options->target.os == OPERATING_SYSTEM_IOS) &&
                                                       string_equal(argument, S8("apple"))
                         : is_target_environment ? false
@@ -5510,12 +5517,19 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
+                               : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
     if (options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
         c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__wasm_memory64__"), standard_replacement, 1, 0, 0, false, false);
+    }
+    if (options.target.cpu_arch == CPU_ARCH_BPFEL)
+    {
+        c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__bpf__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__BPF__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__BUSTER_EBPF__"), standard_replacement, 1, 0, 0, false, false);
     }
     if ((options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS) && options.target.cpu_arch == CPU_ARCH_AARCH64)
     {
@@ -5535,7 +5549,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
     }
     CToken hosted_replacement = standard_replacement[0];
-    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI)
+    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
+        options.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         hosted_replacement.offset = C_SPELLING_ZERO;
     }

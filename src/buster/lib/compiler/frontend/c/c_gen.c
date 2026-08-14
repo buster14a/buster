@@ -25,6 +25,33 @@ BUSTER_C_INTERNAL bool c_declaration_has_token(CPreprocessResult preprocess, CDe
     return false;
 }
 
+BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    for (u32 index = declaration.token_start; index + 3 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            (!string_equal(c_token_spelling(preprocess.spelling_base, token), S8("section")) &&
+             !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__section__"))) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            continue;
+        }
+        ByteSlice decoded = {0};
+        if (c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), '"', &decoded) && decoded.length)
+        {
+            return (String8){
+                .pointer = (char8*)decoded.pointer,
+                .length = decoded.length,
+            };
+        }
+    }
+    return (String8){0};
+}
+
 BUSTER_C_INTERNAL String8 c_declaration_link_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
@@ -30398,6 +30425,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
+                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_DATA,
@@ -30507,6 +30535,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
+                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -30553,6 +30582,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         entity_symbols[entity_index] = ir_program_add_symbol(program, (IrSymbol){
                                                                           .name = entity->name,
                                                                           .link_name = c_declaration_link_name(arena, preprocess, *first),
+                                                                          .section_name = c_declaration_section_name(arena, preprocess, definition ? *definition : *first),
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
@@ -30871,6 +30901,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 IrSymbol* symbol = ir_symbol_from_id(&program->symbols, existing_function->symbol);
                 symbol->is_definition = true;
+                String8 section_name = c_declaration_section_name(arena, preprocess, declaration);
+                if (section_name.length)
+                {
+                    symbol->section_name = section_name;
+                }
                 existing_function->source = c_ir_source_range(declaration.location, declaration.name.length);
                 existing_function->state = IR_FUNCTION_REJECTED;
             }
@@ -30893,7 +30928,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index])
+        if ((internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
+            !c_declaration_section_name(arena, preprocess, declaration).length)
         {
             continue;
         }
@@ -30904,6 +30940,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             symbol = ir_program_add_symbol(program, (IrSymbol){
                                                         .name = declaration.name,
                                                         .link_name = c_declaration_link_name(arena, preprocess, declaration),
+                                                        .section_name = c_declaration_section_name(arena, preprocess, declaration),
                                                         .source = source,
                                                         .type = function_type,
                                                         .kind = IR_SYMBOL_FUNCTION,
@@ -30959,7 +30996,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && !function_needed[declaration_index])
+        if ((internal || inline_definition) && !function_needed[declaration_index] &&
+            !c_declaration_section_name(arena, preprocess, declaration).length)
         {
             continue;
         }

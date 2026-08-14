@@ -1872,6 +1872,10 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
     {
         return S8("wasm64-unknown-unknown");
     }
+    if (target.cpu_arch == CPU_ARCH_BPFEL)
+    {
+        return S8("bpfel-unknown-linux");
+    }
     bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
     if (!aarch64 && target.cpu_arch != CPU_ARCH_X86_64)
     {
@@ -1925,6 +1929,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
         return S8("e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
     case CPU_ARCH_WASM64:
         return S8("e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
+    case CPU_ARCH_BPFEL:
+        return S8("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128");
     case CPU_ARCH_COUNT:
         break;
     }
@@ -2036,6 +2042,36 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm64(Arena* arena, CompilerDriv
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_wasm64_path(arena, invocation.input_paths[0])
                          : S8("a.wasm");
+    if (!file_write(output, artifact.bytes))
+    {
+        result->error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriverInvocation invocation, EbpfArtifact artifact,
+                                                     CompilerDriverResult* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    result->ebpf = artifact;
+    if (artifact.error.code != EBPF_ERROR_NONE)
+    {
+        result->error = COMPILER_DRIVER_ERROR_EBPF;
+        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                             : artifact.error.message.length  ? artifact.error.message
+                                                               : S8("eBPF code generation failed");
+        return false;
+    }
+    result->has_ebpf = true;
+    String8 output = invocation.output_path.length ? invocation.output_path
+                     : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
+                         ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
+                         : S8("a.o");
     if (!file_write(output, artifact.bytes))
     {
         result->error = COMPILER_DRIVER_ERROR_FILE_READ;
@@ -2196,6 +2232,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         Wasm64Artifact artifact = wasm64_emit(arena, lowered.program, module, 1);
         compiler_driver_write_wasm64(arena, invocation, artifact, &result);
+        goto end;
+    }
+    if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
+    {
+        EbpfArtifact artifact = ebpf_emit(arena, lowered.program, module, 1);
+        compiler_driver_write_ebpf(arena, invocation, artifact, &result);
         goto end;
     }
     CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target,
@@ -2518,6 +2560,35 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = S8("native objects and archives cannot be linked into a Wasm64 module");
+            goto finish;
+        }
+    }
+    if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
+    {
+        if (invocation.target.os != OPERATING_SYSTEM_LINUX)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("eBPF currently requires the bpfel-unknown-linux target");
+            goto finish;
+        }
+        if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("-S is not supported for direct eBPF object output");
+            goto finish;
+        }
+        if (invocation.input_count > 1 || invocation.library_count || invocation.library_path_count || invocation.framework_count ||
+            invocation.framework_path_count || invocation.linker_argument_count)
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("eBPF accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments");
+            goto finish;
+        }
+        if (invocation.input_count &&
+            (compiler_driver_object_input(invocation.input_paths[0]) || compiler_driver_archive_input(invocation.input_paths[0])))
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("native objects and archives cannot be linked into an eBPF object");
             goto finish;
         }
     }

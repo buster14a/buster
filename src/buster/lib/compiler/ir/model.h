@@ -362,6 +362,9 @@ struct IrSymbol
 {
     String8 name;
     String8 link_name;
+    // Optional object-format section requested by the source declaration.
+    // Direct object backends consume this without frontend-specific parsing.
+    String8 section_name;
     IrSourceRange source;
     IrTypeId type;
     IrSymbolId id;
