@@ -4336,6 +4336,33 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
     return true;
 }
 
+// Indirect CALL/JMP rows carry the architectural stack and instruction-pointer
+// effects as suppressed metadata operands.  Those effects are not source
+// operands, and their normalized pattern contains XED control tokens that do
+// not have a source-width proof.  Keep source semantics authoritative for the
+// visible GPR while projecting only this exact hidden-control topology out of
+// the semantic-width pass.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_hidden_control_projection(BusterX86MetadataPhysicalQuery query,
+                                                                              BusterX86MetadataForm form)
+{
+    bool call_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CALL")) ||
+                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CALL_NEAR"));
+    bool jmp_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JMP"));
+    if (query.include_implicit || query.operand_count != 1 || (!call_form && !jmp_form))
+        return false;
+    BusterX86MetadataPhysicalOperand visible = query.operands[0];
+    if (visible.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+        visible.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ||
+        form.prefix_kind != BUSTER_X86_METADATA_PREFIX_REX2)
+        return false;
+    // The REX2 indirect rows are the only CALL/JMP forms with one visible
+    // GPR and suppressed stack/RIP effects.  Their normalized operand counts
+    // are stable shape evidence (CALL: visible+stack+RIP, JMP: visible+RIP);
+    // avoid re-reading the suppressed XED atoms here because those records
+    // intentionally have no source-width proof.
+    return (call_form && form.operand_count == 3) || (jmp_form && form.operand_count == 2);
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_df64_operands_match(BusterX86MetadataPatternSemantics pattern,
                                                                         BusterX86MetadataPhysicalBinding* bindings,
                                                                         u32 binding_count)
@@ -4947,7 +4974,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (!buster_x86_metadata_emit_df64_operands_match(pattern, bindings, binding_count))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-    if (query.source_semantics && !buster_x86_metadata_emit_form_operand_semantics(form, bindings, binding_count))
+    bool hidden_control_projection = buster_x86_metadata_emit_hidden_control_projection(query, form);
+    if (query.source_semantics && !hidden_control_projection &&
+        !buster_x86_metadata_emit_form_operand_semantics(form, bindings, binding_count))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     for (u32 index = 0; index < binding_count; index += 1)
     {
@@ -5170,6 +5199,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // bits.  Their source schema fixes W=0 even though the visible GPR is
     // 64-bit.  Keep this predicate tied to the exact fixed-width ISA sets
     // and pattern shape; ordinary APX arithmetic remains width-derived.
+    bool apx_stack_pair = (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PUSH2")) ||
+                           buster_x86_metadata_string_input_equal(form.iclass.offset, S8("POP2"))) &&
+                          pattern.has_nd && pattern.nd_value;
     bool apx_evex_fixed_width_no_w = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX &&
                                      (form.apx_flags & BUSTER_X86_METADATA_APX) != 0 && !pattern.has_w &&
                                      pattern.no_vector_source && pattern.vector_length == 128 && pattern.has_modrm &&
@@ -5184,6 +5216,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                       (buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("APX_F_MSR_IMM")) &&
                                        pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER && pattern.has_ubit &&
                                       pattern.ubit_value == 1 && pattern.immediate_width == 4));
+    apx_evex_fixed_width_no_w = apx_evex_fixed_width_no_w ||
+                                (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX &&
+                                 (form.apx_flags & BUSTER_X86_METADATA_APX) != 0 && apx_stack_pair);
     bool rex_w = pattern.w != 0;
     bool has_mmx_operand = false;
     bool has_xmm_operand = false;
@@ -6893,6 +6928,38 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_xchg_accumulator_projection(
     return true;
 }
 
+// APX NDD rows carry one additional source operand (or the second explicit
+// register of PUSH2/POP2), while the parser's physical query intentionally
+// leaves APX_NDD unset unless an explicit {ndd} decorator was written.  Infer
+// the form-controlled flag only when a metadata candidate proves both the NDD
+// pattern and the exact visible operand count.  This keeps ordinary two-op
+// legacy/APX forms unchanged and does not infer an APX capability without a
+// matching generated NDD row.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_apx_ndd_projection(BusterX86MetadataPhysicalQuery query,
+                                                                  BusterX86MetadataPhysicalQuery* projected_query)
+{
+    if (!projected_query || (query.attributes.apx_flags & BUSTER_X86_METADATA_APX_NDD) || !query.operand_count)
+        return false;
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(query.mnemonic);
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(form_id, &form) || !(form.apx_flags & BUSTER_X86_METADATA_APX_NDD)) continue;
+        BusterX86MetadataPatternSemantics pattern = {0};
+        if (!buster_x86_metadata_emit_parse_pattern(form, &pattern) || !pattern.has_nd || !pattern.nd_value) continue;
+        u32 expected_operand_count = 0;
+        if (!buster_x86_metadata_emit_form_operand_count(query, form, &expected_operand_count) ||
+            expected_operand_count != query.operand_count)
+            continue;
+        *projected_query = query;
+        projected_query->attributes.apx_flags |= BUSTER_X86_METADATA_APX_NDD;
+        return true;
+    }
+    return false;
+}
+
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
     BusterX86MetadataSelectResult result = {
@@ -6902,6 +6969,14 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         .selected_memory_operand = UINT8_MAX,
     };
     if (!buster_x86_metadata_emit_physical_query_valid(query)) return result;
+    BusterX86MetadataPhysicalQuery apx_projected_query = {0};
+    if (buster_x86_metadata_apx_ndd_projection(query, &apx_projected_query))
+    {
+        BusterX86MetadataSelectResult projected = buster_x86_metadata_select_form(apx_projected_query);
+        if (projected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS ||
+            projected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+            return projected;
+    }
     BusterX86MetadataPhysicalOperand projected_operand = {0};
     BusterX86MetadataPhysicalQuery projected_query = {0};
     if (buster_x86_metadata_xchg_accumulator_projection(query, &projected_operand, &projected_query))
@@ -7120,6 +7195,8 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
         operands[selection.selected_memory_operand].width = selection.selected_memory_width;
         physical.operands = operands;
     }
+    BusterX86MetadataPhysicalQuery apx_projected_query = {0};
+    if (buster_x86_metadata_apx_ndd_projection(physical, &apx_projected_query)) physical = apx_projected_query;
     BusterX86MetadataPhysicalOperand projected_operand = {0};
     BusterX86MetadataPhysicalQuery projected_query = {0};
     if (selection.form_id != UINT32_MAX &&
