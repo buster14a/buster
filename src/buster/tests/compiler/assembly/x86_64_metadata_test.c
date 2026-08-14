@@ -3326,6 +3326,39 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // A folded qword data operand carries the width on the memory
+        // binding, not on a GPR binding.  Keep the checked and prepared exact
+        // paths differential here: both must derive REX.W for SUB r/m64,
+        // imm8 and retain the extended base bit for R8.
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_mem_base(8, 64, 0),
+            x86_64_metadata_test_physical_imm(1, 8),
+        };
+        BusterX86MetadataFormKey key = {0};
+        bool key_ready = buster_x86_metadata_form_key(9330, &key);
+        u8 checked_bytes[16] = {0};
+        u8 exact_bytes[16] = {0};
+        BusterX86MetadataEmitResult checked = x86_64_metadata_test_emit_form(
+            S8("SUB"), 9330, operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features), checked_bytes, BUSTER_ARRAY_LENGTH(checked_bytes), 0, 0);
+        BusterX86MetadataEmitResult exact = key_ready
+                                                ? x86_64_metadata_test_emit_named_exact(
+                                                      key, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                      (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                      BUSTER_ARRAY_LENGTH(wildcard_features), exact_bytes,
+                                                      BUSTER_ARRAY_LENGTH(exact_bytes), 0, 0)
+                                                : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+        static u8 const expected[] = {0x49, 0x83, 0x28, 0x01};
+        bool sub_qword_rexw = key_ready && checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                              exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                              checked.byte_count == BUSTER_ARRAY_LENGTH(expected) && exact.byte_count == checked.byte_count &&
+                              memcmp(checked_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0 &&
+                              memcmp(exact_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, sub_qword_rexw);
+    }
+
+    {
         // The sparse plan table is populated by the serial prewarm contract;
         // each representative migrated shape must remain byte/result
         // equivalent to the checked exact query.

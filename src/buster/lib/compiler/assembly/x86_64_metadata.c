@@ -5167,6 +5167,18 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
             if (!pattern.has_w && !apx_evex_fixed_width_no_w) rex_w = true;
+        // Variable-width scalar forms derive REX.W from a 64-bit data
+        // register.  A folded memory source carries that same semantic width
+        // in the physical operand rather than in a register binding; without
+        // this arm, e.g. `sub qword ptr [r8], imm8` selected the right form
+        // but emitted 41 83 instead of 49 83.  Explicit W controls and the
+        // fixed-width APX EVEX rows remain authoritative.
+        if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
+            physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w)
+        {
+            u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
+            if (memory_width == 64) rex_w = true;
+        }
     }
     // DF64 rows encode their 64-bit default without a synthetic REX.W.  An
     // explicit W token remains authoritative for the small subset whose XED
