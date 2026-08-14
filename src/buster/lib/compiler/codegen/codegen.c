@@ -4094,6 +4094,93 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_supported(Target target, IrS
 
 BUSTER_GLOBAL_LOCAL s32 codegen_canonical_x64_rebase_frame_displacement(CodegenBuffer* buffer, s64 displacement, u32 frame_base_offset);
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureInput codegen_canonical_x64_simd_features(void)
+{
+    static String8 const names[] = {S8("avx512f"), S8("avx512bw"), S8("avx512vbmi"), S8("avx512vbmi2")};
+    return (BusterX86MetadataFeatureInput){.names = names, .count = BUSTER_ARRAY_LENGTH(names)};
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_zmm_memory(CodegenBuffer* buffer, String8 mnemonic, u32 vector_index,
+                                                                     X64Register base, s32 displacement, bool store, u16 memory_width,
+                                                                     BusterX86MetadataPhysicalAttributes attributes)
+{
+    BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(vector_index, 512);
+    u16 element_width = memory_width == 512 ? 8 : memory_width;
+    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_evex_memory(base, element_width, 512, displacement);
+    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), attributes);
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_zmm_gpr(CodegenBuffer* buffer, String8 mnemonic, u32 destination,
+                                                                  X64Register source, BusterX86MetadataPhysicalAttributes attributes)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_vector(destination, 512),
+        codegen_canonical_x64_metadata_gpr(source, 32),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), attributes);
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_mask_zmm_memory(CodegenBuffer* buffer, String8 mnemonic, u32 mask, u32 vector_index,
+                                                                          X64Register base, s32 displacement, u16 memory_width,
+                                                                          u8 immediate, bool has_immediate)
+{
+    BusterX86MetadataPhysicalOperand operands[4] = {
+        codegen_canonical_x64_metadata_mask(mask),
+        codegen_canonical_x64_metadata_vector(vector_index, 512),
+        codegen_canonical_x64_metadata_memory(base, memory_width, displacement),
+        codegen_canonical_x64_metadata_immediate(immediate, 8),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, has_immediate ? 4 : 3,
+                                                          codegen_canonical_x64_simd_features(), (BusterX86MetadataPhysicalAttributes){0});
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_mask_zmm_register(CodegenBuffer* buffer, String8 mnemonic, u32 mask, u32 vector_index)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_mask(mask),
+        codegen_canonical_x64_metadata_vector(vector_index, 512),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), (BusterX86MetadataPhysicalAttributes){0});
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_zmm_register_immediate(CodegenBuffer* buffer, String8 mnemonic, u32 destination,
+                                                                                  u32 source, u8 immediate)
+{
+    BusterX86MetadataPhysicalOperand operands[3] = {
+        codegen_canonical_x64_metadata_vector(destination, 512),
+        codegen_canonical_x64_metadata_vector(source, 512),
+        codegen_canonical_x64_metadata_immediate(immediate, 8),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), (BusterX86MetadataPhysicalAttributes){0});
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_zmm_ternary_immediate(CodegenBuffer* buffer, String8 mnemonic, u32 destination,
+                                                                                u32 source_one, u32 source_two, u8 immediate)
+{
+    BusterX86MetadataPhysicalOperand operands[4] = {
+        codegen_canonical_x64_metadata_vector(destination, 512),
+        codegen_canonical_x64_metadata_vector(source_one, 512),
+        codegen_canonical_x64_metadata_vector(source_two, 512),
+        codegen_canonical_x64_metadata_immediate(immediate, 8),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), (BusterX86MetadataPhysicalAttributes){0});
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_emit_kmov_frame(CodegenBuffer* buffer, u32 mask, bool store, s32 displacement)
+{
+    BusterX86MetadataPhysicalOperand mask_operand = codegen_canonical_x64_metadata_mask(mask);
+    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement);
+    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : mask_operand, store ? mask_operand : memory};
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, S8("KMOVQ"), operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          codegen_canonical_x64_simd_features(), (BusterX86MetadataPhysicalAttributes){0});
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buffer, IrInstruction* instruction, u32 const* value_offsets,
                                                               u32 frame_base_offset, Target target)
 {
@@ -4114,7 +4201,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
                           ? codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->result.value], frame_base_offset)
                           : 0;
     u8 immediate = instruction->immediate_count ? (u8)instruction->immediates[0] : 0;
-    // vmovdqu8, the one move this vocabulary uses in either direction.
     X64Evex const move_load = {.map = 1, .prefix = 3, .opcode = 0x6f};
     X64Evex const move_store = {.map = 1, .prefix = 3, .opcode = 0x7f};
     switch (operation)
@@ -4125,18 +4211,32 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
         bool masked = operation == IR_SIMD_LOAD_MASKED;
         if (masked)
         {
-            codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]);
+            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+            {
+                return false;
+            }
         }
-        codegen_canonical_x64_load_frame_pointer(buffer, X64_REGISTER_RAX, slots[0]);
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        load.mask = masked ? X64_SIMD_MASK : 0;
-        load.zeroing = masked;
-        codegen_canonical_x64_evex_indirect(buffer, load, X64_REGISTER_RAX);
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        BusterX86MetadataPhysicalOperand pointer_load[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
+        };
+        BusterX86MetadataPhysicalAttributes attributes = masked
+                                                              ? (BusterX86MetadataPhysicalAttributes){
+                                                                    .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK | BUSTER_X86_METADATA_DECORATOR_ZEROING,
+                                                                    .mask_register = X64_SIMD_MASK,
+                                                                    .has_mask_register = true,
+                                                                    .zeroing = true,
+                                                                }
+                                                              : (BusterX86MetadataPhysicalAttributes){0};
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
+            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, false, 8,
+                                                        attributes) ||
+            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
+                                                        (BusterX86MetadataPhysicalAttributes){0}))
+        {
+            return false;
+        }
+        return buffer->error == CODEGEN_ERROR_NONE;
     }
     case IR_SIMD_STORE:
     case IR_SIMD_STORE_MASKED:
@@ -4146,76 +4246,98 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
         u32 vector_operand = masked ? 2 : 1;
         if (masked)
         {
-            codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]);
+            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+            {
+                return false;
+            }
         }
-        codegen_canonical_x64_load_frame_pointer(buffer, X64_REGISTER_RAX, slots[0]);
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[vector_operand]);
+        BusterX86MetadataPhysicalOperand pointer_load[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
+        };
+        BusterX86MetadataPhysicalAttributes attributes = masked
+                                                              ? (BusterX86MetadataPhysicalAttributes){
+                                                                    .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+                                                                    .mask_register = X64_SIMD_MASK,
+                                                                    .has_mask_register = true,
+                                                                }
+                                                              : (BusterX86MetadataPhysicalAttributes){0};
         // vpcompressb writes its destination through the rm operand, so the
         // compressing store and the plain store share this shape exactly.
-        X64Evex store = operation == IR_SIMD_COMPRESS_STORE_BYTE ? (X64Evex){.map = 2, .prefix = 1, .opcode = 0x63} : move_store;
-        store.reg = X64_SIMD_VECTOR_FIRST;
-        store.mask = masked ? X64_SIMD_MASK : 0;
-        codegen_canonical_x64_evex_indirect(buffer, store, X64_REGISTER_RAX);
-        return true;
+        String8 store_mnemonic = operation == IR_SIMD_COMPRESS_STORE_BYTE ? S8("VPCOMPRESSB") : S8("VMOVDQU8");
+        u16 store_memory_width = 8;
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
+            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP,
+                                                        slots[vector_operand], false, 8, (BusterX86MetadataPhysicalAttributes){0}) ||
+            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, store_mnemonic, X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, true, store_memory_width,
+                                                        attributes))
+        {
+            return false;
+        }
+        return buffer->error == CODEGEN_ERROR_NONE;
     }
     case IR_SIMD_SPLAT_BYTE:
     {
-        // movzx eax, byte [rbp+slot]
-        codegen_emit_u8(buffer, 0x0f);
-        codegen_emit_u8(buffer, 0xb6);
-        codegen_emit_u8(buffer, 0x85);
-        codegen_emit_u32(buffer, (u32)slots[0]);
-        X64Evex broadcast = {.map = 2, .prefix = 1, .opcode = 0x7a, .reg = X64_SIMD_VECTOR_FIRST};
-        codegen_canonical_x64_evex_register(buffer, broadcast, X64_REGISTER_RAX);
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        BusterX86MetadataPhysicalOperand load_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 8, slots[0]),
+        };
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOVZX"), load_operands, BUSTER_ARRAY_LENGTH(load_operands)) ||
+            !codegen_canonical_x64_simd_emit_zmm_gpr(buffer, S8("VPBROADCASTB"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX,
+                                                     (BusterX86MetadataPhysicalAttributes){0}) ||
+            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
+                                                        (BusterX86MetadataPhysicalAttributes){0}))
+        {
+            return false;
+        }
+        return buffer->error == CODEGEN_ERROR_NONE;
     }
     case IR_SIMD_COMPARE_EQUAL_BYTE:
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
     {
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
-        // vpcmpeqb and vptestmb take the second source from memory directly;
-        // vpcmpub is the three-operand compare with an explicit predicate, 1
-        // being unsigned less-than.
-        X64Evex compare = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? (X64Evex){.map = 1, .prefix = 1, .opcode = 0x74}
-                          : operation == IR_SIMD_COMPARE_LESS_BYTE ? (X64Evex){.map = 3, .prefix = 1, .opcode = 0x3e}
-                                                                   : (X64Evex){.map = 2, .prefix = 1, .opcode = 0x26};
-        compare.reg = X64_SIMD_MASK;
-        compare.vvvv = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, compare, slots[1]);
-        if (operation == IR_SIMD_COMPARE_LESS_BYTE)
+        String8 mnemonic = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? S8("VPCMPEQB")
+                            : operation == IR_SIMD_COMPARE_LESS_BYTE ? S8("VPCMPUB")
+                                                                      : S8("VPTESTMB");
+        if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
+                                                        (BusterX86MetadataPhysicalAttributes){0}) ||
+            !codegen_canonical_x64_simd_emit_mask_zmm_memory(buffer, mnemonic, X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST,
+                                                             X64_REGISTER_RBP, slots[1], 8, operation == IR_SIMD_COMPARE_LESS_BYTE ? 1 : 0,
+                                                             operation == IR_SIMD_COMPARE_LESS_BYTE) ||
+            !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
         {
-            codegen_emit_u8(buffer, 1);
+            return false;
         }
-        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot);
-        return true;
+        return buffer->error == CODEGEN_ERROR_NONE;
     }
     case IR_SIMD_SIGN_MASK_BYTE:
     {
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
-        // vpmovb2m has no memory form; the source has to be in a register.
-        X64Evex extract = {.map = 2, .prefix = 2, .opcode = 0x29, .reg = X64_SIMD_MASK};
-        codegen_canonical_x64_evex_register(buffer, extract, X64_SIMD_VECTOR_FIRST);
-        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot);
-        return true;
+        if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
+                                                        (BusterX86MetadataPhysicalAttributes){0}) ||
+            !codegen_canonical_x64_simd_emit_mask_zmm_register(buffer, S8("VPMOVB2M"), X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST) ||
+            !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
+        {
+            return false;
+        }
+        return buffer->error == CODEGEN_ERROR_NONE;
     }
     case IR_SIMD_PERMUTE2_BYTE:
     {
-        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]);
+        if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
+        {
+            return false;
+        }
         X64Evex load = move_load;
         load.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+        {
+            return false;
+        }
         load.reg = X64_SIMD_VECTOR_SECOND;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[2]);
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]))
+        {
+            return false;
+        }
         // vpermt2b reads the low table from its destination and the high table
         // from rm, so the destination is loaded with the low table first and
         // the masked write lands on top of it.
@@ -4228,18 +4350,26 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
             .mask = X64_SIMD_MASK,
             .zeroing = true,
         };
-        codegen_canonical_x64_evex_frame(buffer, permute, slots[3]);
+        if (!codegen_canonical_x64_evex_frame(buffer, permute, slots[3]))
+        {
+            return false;
+        }
         X64Evex spill = move_store;
         spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
     }
     case IR_SIMD_COMPRESS_BYTE:
     {
-        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]);
+        if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
+        {
+            return false;
+        }
         X64Evex load = move_load;
         load.reg = X64_SIMD_VECTOR_SECOND;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+        {
+            return false;
+        }
         // Register form: rm is the destination and reg is the source, so the
         // source is the one that gets loaded and the result lands in the
         // first register like every other operation's does.
@@ -4251,11 +4381,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
             .mask = X64_SIMD_MASK,
             .zeroing = true,
         };
-        codegen_canonical_x64_evex_register(buffer, compress, X64_SIMD_VECTOR_FIRST);
+        if (!codegen_canonical_x64_evex_register(buffer, compress, X64_SIMD_VECTOR_FIRST))
+        {
+            return false;
+        }
         X64Evex spill = move_store;
         spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
     }
     case IR_SIMD_WIDEN_BYTE_TO_WORD:
     {
@@ -4263,44 +4395,49 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
         // address offset and vpmovzxbd reads its 16 bytes straight from there
         // — no vextracti32x4 in front of it.
         X64Evex widen = {.map = 2, .prefix = 1, .opcode = 0x31, .reg = X64_SIMD_VECTOR_FIRST};
-        codegen_canonical_x64_evex_frame(buffer, widen, slots[0] + (s32)immediate * 16);
+        if (!codegen_canonical_x64_evex_frame(buffer, widen, slots[0] + (s32)immediate * 16))
+        {
+            return false;
+        }
         X64Evex spill = move_store;
         spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
     }
     case IR_SIMD_SHIFT_LEFT_WORD:
     {
-        // vpslld with an immediate names its destination in vvvv and takes the
-        // source through rm, with /6 in the reg field.
-        X64Evex shift = {.map = 1, .prefix = 1, .opcode = 0x72, .reg = 6, .vvvv = X64_SIMD_VECTOR_FIRST};
-        codegen_canonical_x64_evex_frame(buffer, shift, slots[0]);
-        codegen_emit_u8(buffer, immediate);
+        if (!codegen_canonical_x64_evex_frame(buffer, move_load, slots[0]) ||
+            !codegen_canonical_x64_simd_emit_zmm_register_immediate(buffer, S8("VPSLLD"), X64_SIMD_VECTOR_FIRST,
+                                                                      X64_SIMD_VECTOR_FIRST, immediate))
+        {
+            return false;
+        }
         X64Evex spill = move_store;
         spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
     }
     case IR_SIMD_TERNARY_WORD:
     {
         X64Evex load = move_load;
         load.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[0]))
+        {
+            return false;
+        }
         load.reg = X64_SIMD_VECTOR_SECOND;
-        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
-        X64Evex ternary = {
-            .map = 3,
-            .prefix = 1,
-            .opcode = 0x25,
-            .reg = X64_SIMD_VECTOR_FIRST,
-            .vvvv = X64_SIMD_VECTOR_SECOND,
-        };
-        codegen_canonical_x64_evex_frame(buffer, ternary, slots[2]);
-        codegen_emit_u8(buffer, immediate);
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+        {
+            return false;
+        }
+        load.reg = X64_SIMD_VECTOR_THIRD;
+        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]) ||
+            !codegen_canonical_x64_simd_emit_zmm_ternary_immediate(buffer, S8("VPTERNLOGD"), X64_SIMD_VECTOR_FIRST,
+                                                                     X64_SIMD_VECTOR_SECOND, X64_SIMD_VECTOR_THIRD, immediate))
+        {
+            return false;
+        }
         X64Evex spill = move_store;
         spill.reg = X64_SIMD_VECTOR_FIRST;
-        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-        return true;
+        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
     }
     case IR_SIMD_COUNT:
         break;
@@ -4407,6 +4544,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
         codegen_canonical_x64_address(&builder.buffer, X64_REGISTER_R9, right_displacement);
     }
     codegen_canonical_x64_address(&builder.buffer, X64_REGISTER_R10, result_displacement);
+    if (builder.buffer.error != CODEGEN_ERROR_NONE)
+    {
+        return false;
+    }
     bool comparison = instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
                       instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
     u8 condition = 0;
@@ -4488,25 +4629,44 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             native = operation != 0;
             if (native)
             {
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x10);
-                codegen_emit_u8(&builder.buffer, 0x00);
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x10);
-                codegen_emit_u8(&builder.buffer, 0x09);
-                if (element->bit_width == 64)
-                {
-                    codegen_emit_u8(&builder.buffer, 0x66);
-                }
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, operation);
-                codegen_emit_u8(&builder.buffer, 0xc1);
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x11);
-                codegen_emit_u8(&builder.buffer, 0x02);
+                String8 load_mnemonic = S8("MOVUPS");
+                String8 arithmetic_mnemonic = element->bit_width == 32
+                                                   ? (operation == 0x58 ? S8("ADDPS")
+                                                      : operation == 0x5c ? S8("SUBPS")
+                                                      : operation == 0x59 ? S8("MULPS")
+                                                                          : S8("DIVPS"))
+                                                   : (operation == 0x58 ? S8("ADDPD")
+                                                      : operation == 0x5c ? S8("SUBPD")
+                                                      : operation == 0x59 ? S8("MULPD")
+                                                                          : S8("DIVPD"));
+                String8 store_mnemonic = S8("MOVUPS");
+                BusterX86MetadataFeatureInput features = {
+                    .names = (String8[]){element->bit_width == 32 ? S8("sse") : S8("sse2")}, .count = 1,
+                };
+                BusterX86MetadataPhysicalOperand load_left[2] = {
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R8, 32, 0),
+                };
+                BusterX86MetadataPhysicalOperand load_right[2] = {
+                    codegen_canonical_x64_metadata_vector(1, 128),
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R9, 32, 0),
+                };
+                BusterX86MetadataPhysicalOperand arithmetic[2] = {
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                    codegen_canonical_x64_metadata_vector(1, 128),
+                };
+                BusterX86MetadataPhysicalOperand store[2] = {
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, 32, 0),
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                };
+                native = codegen_canonical_x64_metadata_emit_features(&builder.buffer, load_mnemonic, load_left,
+                                                                        BUSTER_ARRAY_LENGTH(load_left), features) &&
+                        codegen_canonical_x64_metadata_emit_features(&builder.buffer, load_mnemonic, load_right,
+                                                                        BUSTER_ARRAY_LENGTH(load_right), features) &&
+                        codegen_canonical_x64_metadata_emit_features(&builder.buffer, arithmetic_mnemonic, arithmetic,
+                                                                        BUSTER_ARRAY_LENGTH(arithmetic), features) &&
+                        codegen_canonical_x64_metadata_emit_features(&builder.buffer, store_mnemonic, store,
+                                                                        BUSTER_ARRAY_LENGTH(store), features);
             }
         }
         else
@@ -4530,25 +4690,48 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             }
             if (native)
             {
-                codegen_emit_u8(&builder.buffer, 0xf3);
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x6f);
-                codegen_emit_u8(&builder.buffer, 0x00);
-                codegen_emit_u8(&builder.buffer, 0xf3);
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x6f);
-                codegen_emit_u8(&builder.buffer, 0x09);
-                codegen_emit_u8(&builder.buffer, 0x66);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, operation);
-                codegen_emit_u8(&builder.buffer, 0xc1);
-                codegen_emit_u8(&builder.buffer, 0xf3);
-                codegen_emit_u8(&builder.buffer, 0x41);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, 0x7f);
-                codegen_emit_u8(&builder.buffer, 0x02);
+                String8 arithmetic_mnemonic = binary == IR_BINARY_VECTOR_INTEGER_ADD
+                                                   ? (element->bit_width == 8 ? S8("PADDB")
+                                                      : element->bit_width == 16 ? S8("PADDW")
+                                                      : element->bit_width == 32 ? S8("PADDD")
+                                                                                  : S8("PADDQ"))
+                                                   : binary == IR_BINARY_VECTOR_INTEGER_SUBTRACT
+                                                   ? (element->bit_width == 8 ? S8("PSUBB")
+                                                      : element->bit_width == 16 ? S8("PSUBW")
+                                                      : element->bit_width == 32 ? S8("PSUBD")
+                                                                                  : S8("PSUBQ"))
+                                                   : binary == IR_BINARY_VECTOR_INTEGER_BITWISE_AND ? S8("PAND")
+                                                   : binary == IR_BINARY_VECTOR_INTEGER_BITWISE_OR  ? S8("POR")
+                                                                                                     : S8("PXOR");
+                String8 features[] = {S8("sse2")};
+                BusterX86MetadataPhysicalOperand load_left[2] = {
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R8, 128, 0),
+                };
+                BusterX86MetadataPhysicalOperand load_right[2] = {
+                    codegen_canonical_x64_metadata_vector(1, 128),
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R9, 128, 0),
+                };
+                BusterX86MetadataPhysicalOperand arithmetic[2] = {
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                    codegen_canonical_x64_metadata_vector(1, 128),
+                };
+                BusterX86MetadataPhysicalOperand store[2] = {
+                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, 128, 0),
+                    codegen_canonical_x64_metadata_vector(0, 128),
+                };
+                native = codegen_canonical_x64_metadata_emit_features(
+                             &builder.buffer, S8("MOVDQU"), load_left, BUSTER_ARRAY_LENGTH(load_left),
+                             (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)}) &&
+                         codegen_canonical_x64_metadata_emit_features(
+                             &builder.buffer, S8("MOVDQU"), load_right, BUSTER_ARRAY_LENGTH(load_right),
+                             (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)}) &&
+                         codegen_canonical_x64_metadata_emit_features(
+                             &builder.buffer, arithmetic_mnemonic, arithmetic, BUSTER_ARRAY_LENGTH(arithmetic),
+                             (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)}) &&
+                         codegen_canonical_x64_metadata_emit_features(
+                             &builder.buffer, S8("MOVDQU"), store, BUSTER_ARRAY_LENGTH(store),
+                             (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)});
             }
         }
         if (native)
@@ -4568,6 +4751,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
         if (instruction->opcode == IR_OPCODE_UNARY)
         {
             x64_emit_load_memory(&builder, X64_REGISTER_RAX, X64_REGISTER_R8, offset, lane_size);
+            if (builder.buffer.error != CODEGEN_ERROR_NONE)
+            {
+                return false;
+            }
             if (instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE)
             {
                 if (element->kind != IR_TYPE_FLOAT || (element->bit_width != 32 && element->bit_width != 64))
@@ -4578,22 +4765,31 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
                     codegen_canonical_x64_metadata_immediate(INT64_C(0x80000000), 32),
                 };
-                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), sign_mask_operands,
-                                                           BUSTER_ARRAY_LENGTH(sign_mask_operands));
+                if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), sign_mask_operands,
+                                                          BUSTER_ARRAY_LENGTH(sign_mask_operands)))
+                {
+                    return false;
+                }
                 if (element->bit_width == 64)
                 {
                     BusterX86MetadataPhysicalOperand shift_operands[2] = {
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
                         codegen_canonical_x64_metadata_immediate(32, 8),
                     };
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("SHL"), shift_operands,
-                                                               BUSTER_ARRAY_LENGTH(shift_operands));
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("SHL"), shift_operands,
+                                                              BUSTER_ARRAY_LENGTH(shift_operands)))
+                    {
+                        return false;
+                    }
                 }
                 BusterX86MetadataPhysicalOperand xor_operands[2] = {
                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
                 };
-                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), xor_operands, BUSTER_ARRAY_LENGTH(xor_operands));
+                if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), xor_operands, BUSTER_ARRAY_LENGTH(xor_operands)))
+                {
+                    return false;
+                }
             }
             else if (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE)
             {
@@ -4602,7 +4798,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     return false;
                 }
                 BusterX86MetadataPhysicalOperand unary_operands[] = {codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64)};
-                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NEG"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands));
+                if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NEG"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands)))
+                {
+                    return false;
+                }
             }
             else if (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
             {
@@ -4611,13 +4810,20 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     return false;
                 }
                 BusterX86MetadataPhysicalOperand unary_operands[] = {codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64)};
-                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NOT"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands));
+                if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NOT"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands)))
+                {
+                    return false;
+                }
             }
             else
             {
                 return false;
             }
             x64_emit_store_memory(&builder, X64_REGISTER_R10, offset, X64_REGISTER_RAX, lane_size);
+            if (builder.buffer.error != CODEGEN_ERROR_NONE)
+            {
+                return false;
+            }
             continue;
         }
         if (instruction->operand_count != 2)
@@ -4632,6 +4838,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             }
             x64_emit_load_float_bits(&builder, 0, X64_REGISTER_R8, offset, lane_size);
             x64_emit_load_float_bits(&builder, 1, X64_REGISTER_R9, offset, lane_size);
+            if (builder.buffer.error != CODEGEN_ERROR_NONE)
+            {
+                return false;
+            }
             if (!comparison)
             {
                 u8 opcode = instruction->binary_operation == IR_BINARY_VECTOR_FLOAT_ADD        ? 0x58
@@ -4657,10 +4867,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     codegen_canonical_x64_metadata_vector(1, (u16)element->bit_width),
                 };
                 String8 feature_names[] = {element->bit_width == 32 ? S8("sse") : S8("sse2")};
-                (void)codegen_canonical_x64_metadata_emit_features(
-                    &builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
-                    (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
+                if (!codegen_canonical_x64_metadata_emit_features(
+                        &builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
+                {
+                    return false;
+                }
                 x64_emit_store_float_bits(&builder, X64_REGISTER_R10, offset, 0, lane_size);
+                if (builder.buffer.error != CODEGEN_ERROR_NONE)
+                {
+                    return false;
+                }
                 continue;
             }
             BusterX86MetadataPhysicalOperand compare_operands[2] = {
@@ -4680,6 +4897,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
         {
             x64_emit_load_memory(&builder, X64_REGISTER_RAX, X64_REGISTER_R8, offset, lane_size);
             x64_emit_load_memory(&builder, X64_REGISTER_RCX, X64_REGISTER_R9, offset, lane_size);
+            if (builder.buffer.error != CODEGEN_ERROR_NONE)
+            {
+                return false;
+            }
             IrBinaryOperation operation = instruction->binary_operation;
             bool signed_semantics = operation == IR_BINARY_VECTOR_SIGNED_DIVIDE || operation == IR_BINARY_VECTOR_SIGNED_REMAINDER ||
                                     (operation >= IR_BINARY_VECTOR_SIGNED_LESS && operation <= IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL);
@@ -4709,35 +4930,56 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
                     };
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands));
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands)))
+                    {
+                        return false;
+                    }
                     break;
                 }
                 case IR_BINARY_VECTOR_SHIFT_LEFT:
                 case IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT:
                 case IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0xd3);
-                    codegen_emit_u8(&builder.buffer, operation == IR_BINARY_VECTOR_SHIFT_LEFT           ? 0xe0
-                                                     : operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ? 0xf8
-                                                                                                        : 0xe8);
+                {
+                    BusterX86MetadataPhysicalOperand shift_operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 8),
+                    };
+                    String8 shift_mnemonic = operation == IR_BINARY_VECTOR_SHIFT_LEFT
+                                                 ? S8("SHL")
+                                                 : operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ? S8("SAR") : S8("SHR");
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, shift_mnemonic, shift_operands,
+                                                               BUSTER_ARRAY_LENGTH(shift_operands)))
+                    {
+                        return false;
+                    }
                     break;
+                }
                 case IR_BINARY_VECTOR_SIGNED_DIVIDE:
                 case IR_BINARY_VECTOR_SIGNED_REMAINDER:
                 {
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("CQO"), 0, 0);
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("CQO"), 0, 0))
+                    {
+                        return false;
+                    }
                     BusterX86MetadataPhysicalOperand divide_operands[] = {
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
                     };
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("IDIV"), divide_operands,
-                                                               BUSTER_ARRAY_LENGTH(divide_operands));
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("IDIV"), divide_operands,
+                                                              BUSTER_ARRAY_LENGTH(divide_operands)))
+                    {
+                        return false;
+                    }
                     if (operation == IR_BINARY_VECTOR_SIGNED_REMAINDER)
                     {
                         BusterX86MetadataPhysicalOperand move_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
                         };
-                        (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
-                                                                   BUSTER_ARRAY_LENGTH(move_operands));
+                        if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
+                                                                  BUSTER_ARRAY_LENGTH(move_operands)))
+                        {
+                            return false;
+                        }
                     }
                     break;
                 }
@@ -4748,21 +4990,30 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
                     };
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), zero_operands,
-                                                               BUSTER_ARRAY_LENGTH(zero_operands));
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), zero_operands,
+                                                              BUSTER_ARRAY_LENGTH(zero_operands)))
+                    {
+                        return false;
+                    }
                     BusterX86MetadataPhysicalOperand divide_operands[] = {
                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
                     };
-                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("DIV"), divide_operands,
-                                                               BUSTER_ARRAY_LENGTH(divide_operands));
+                    if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("DIV"), divide_operands,
+                                                              BUSTER_ARRAY_LENGTH(divide_operands)))
+                    {
+                        return false;
+                    }
                     if (operation == IR_BINARY_VECTOR_UNSIGNED_REMAINDER)
                     {
                         BusterX86MetadataPhysicalOperand move_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
                         };
-                        (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
-                                                                   BUSTER_ARRAY_LENGTH(move_operands));
+                        if (!codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
+                                                                  BUSTER_ARRAY_LENGTH(move_operands)))
+                        {
+                            return false;
+                        }
                     }
                     break;
                 }
@@ -4770,6 +5021,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     return false;
                 }
                 x64_emit_store_memory(&builder, X64_REGISTER_R10, offset, X64_REGISTER_RAX, lane_size);
+                if (builder.buffer.error != CODEGEN_ERROR_NONE)
+                {
+                    return false;
+                }
                 continue;
             }
             BusterX86MetadataPhysicalOperand compare_operands[2] = {
@@ -4843,6 +5098,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             return false;
         }
         x64_emit_store_memory(&builder, X64_REGISTER_R10, offset, X64_REGISTER_RAX, lane_size);
+        if (builder.buffer.error != CODEGEN_ERROR_NONE)
+        {
+            return false;
+        }
     }
     *output = builder.buffer;
     return true;
@@ -4997,41 +5256,21 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_frame_to_rsp(CodegenBuffer* 
         {
             return false;
         }
-        if (chunk == 8)
+        u16 width = (u16)(chunk * 8);
+        BusterX86MetadataPhysicalOperand load_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, chunk <= 2 ? 32 : width),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, width, source),
+        };
+        String8 load_mnemonic = chunk <= 2 ? S8("MOVZX") : S8("MOV");
+        if (!codegen_canonical_x64_metadata_emit(buffer, load_mnemonic, load_operands, BUSTER_ARRAY_LENGTH(load_operands)))
         {
-            codegen_emit_u8(buffer, 0x48);
+            return false;
         }
-        if (chunk == 1 || chunk == 2)
-        {
-            codegen_emit_u8(buffer, 0x0f);
-            codegen_emit_u8(buffer, chunk == 1 ? 0xb6 : 0xb7);
-        }
-        else
-        {
-            codegen_emit_u8(buffer, 0x8b);
-        }
-        codegen_emit_u8(buffer, 0x85);
-        codegen_emit_u32(buffer, (u32)source);
-        if (chunk == 2)
-        {
-            codegen_emit_u8(buffer, 0x66);
-        }
-        if (chunk == 8 || through_scratch)
-        {
-            codegen_emit_u8(buffer, (u8)((chunk == 8 ? 0x48 : 0x40) | (through_scratch ? 0x01 : 0x00)));
-        }
-        codegen_emit_u8(buffer, chunk == 1 ? 0x88 : 0x89);
-        if (through_scratch)
-        {
-            codegen_emit_u8(buffer, 0x83);
-        }
-        else
-        {
-            codegen_emit_u8(buffer, 0x84);
-            codegen_emit_u8(buffer, 0x24);
-        }
-        codegen_emit_u32(buffer, (u32)destination);
-        if (buffer->error != CODEGEN_ERROR_NONE)
+        BusterX86MetadataPhysicalOperand store_operands[2] = {
+            codegen_canonical_x64_metadata_memory(through_scratch ? X64_REGISTER_R11 : X64_REGISTER_RSP, width, through_scratch ? 0 : (s64)destination),
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, width),
+        };
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_operands, BUSTER_ARRAY_LENGTH(store_operands)))
         {
             return false;
         }
@@ -10488,25 +10727,35 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             C_X64_LOAD_HIGH(0x95, instruction->operands[0]);
                             if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xf7);
-                                codegen_emit_u8(&buffer, 0xd8);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x83);
-                                codegen_emit_u8(&buffer, 0xd2);
-                                codegen_emit_u8(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xf7);
-                                codegen_emit_u8(&buffer, 0xda);
+                                BusterX86MetadataPhysicalOperand negate_low_operand =
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                BusterX86MetadataPhysicalOperand carry_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_immediate(0, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand negate_high_operand =
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("NEG"), &negate_low_operand, 1) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("ADC"), carry_operands,
+                                                                           BUSTER_ARRAY_LENGTH(carry_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("NEG"), &negate_high_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             else
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xf7);
-                                codegen_emit_u8(&buffer, 0xd0);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xf7);
-                                codegen_emit_u8(&buffer, 0xd2);
+                                BusterX86MetadataPhysicalOperand not_low_operand =
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                BusterX86MetadataPhysicalOperand not_high_operand =
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("NOT"), &not_low_operand, 1) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("NOT"), &not_high_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             C_X64_STORE_RESULT();
                             C_X64_STORE_HIGH_RDX();
@@ -10516,15 +10765,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         C_X64_LOAD(0x85, instruction->operands[0]);
                         if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x94);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xb6);
-                            codegen_emit_u8(&buffer, 0xc0);
+                            BusterX86MetadataPhysicalOperand test_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand set_operand =
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8);
+                            BusterX86MetadataPhysicalOperand extend_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), test_operands,
+                                                                       BUSTER_ARRAY_LENGTH(test_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("SETZ"), &set_operand, 1) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), extend_operands,
+                                                                       BUSTER_ARRAY_LENGTH(extend_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         else if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
                         {
@@ -10535,12 +10794,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                             u64 sign = type->bit_width == 32 ? (u64)1 << 31 : (u64)1 << 63;
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0xb9);
-                            codegen_emit_u64(&buffer, sign);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc8);
+                            BusterX86MetadataPhysicalOperand sign_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_unsigned_immediate(sign, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand xor_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), sign_load_operands,
+                                                                       BUSTER_ARRAY_LENGTH(sign_load_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), xor_operands,
+                                                                       BUSTER_ARRAY_LENGTH(xor_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         else if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT)
                         {
@@ -10550,12 +10819,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
                             }
-                            if (type->bit_width > 32)
+                            BusterX86MetadataPhysicalOperand unary_operand = codegen_canonical_x64_metadata_gpr(
+                                X64_REGISTER_RAX, type->bit_width > 32 ? 64 : 32);
+                            if (!codegen_canonical_x64_metadata_emit(
+                                    &buffer, instruction->unary_operation == IR_UNARY_INTEGER_NEGATE ? S8("NEG") : S8("NOT"),
+                                    &unary_operand, 1))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0xf7);
-                            codegen_emit_u8(&buffer, instruction->unary_operation == IR_UNARY_INTEGER_NEGATE ? 0xd8 : 0xd0);
                         }
                         else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
                                  instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
@@ -10566,22 +10838,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
                             }
-                            if (type->bit_width > 32)
+                            u16 operation_width = type->bit_width > 32 ? 64 : 32;
+                            BusterX86MetadataPhysicalOperand count_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, operation_width),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, operation_width),
+                            };
+                            String8 count_mnemonic = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
+                                                         ? S8("BSF")
+                                                         : S8("BSR");
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, count_mnemonic, count_operands,
+                                                                       BUSTER_ARRAY_LENGTH(count_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ? 0xbc : 0xbd);
-                            codegen_emit_u8(&buffer, 0xc0);
                             if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
                             {
-                                if (type->bit_width > 32)
+                                BusterX86MetadataPhysicalOperand invert_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, operation_width),
+                                    codegen_canonical_x64_metadata_immediate((s64)type->bit_width - 1, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), invert_operands,
+                                                                           BUSTER_ARRAY_LENGTH(invert_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x83);
-                                codegen_emit_u8(&buffer, 0xf0);
-                                codegen_emit_u8(&buffer, (u8)(type->bit_width - 1));
                             }
                         }
                         else if (instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
