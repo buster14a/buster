@@ -28,6 +28,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/dwarf/dwarf.h>
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/compiler/pdb/pdb.h>
@@ -60,6 +61,7 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
+#include <buster/tests/compiler/llvm/bitcode_test.h>
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -102,6 +104,7 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
+#include <buster/tests/compiler/llvm/bitcode_test.c>
 #include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
@@ -241,6 +244,7 @@ typedef enum TestId
     TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
     TEST_ID_IR,
+    TEST_ID_LLVM_BITCODE,
     TEST_ID_MACHINE_SELECTION,
     TEST_ID_MACHINE,
     TEST_ID_CODEGEN,
@@ -286,6 +290,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
+    [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},

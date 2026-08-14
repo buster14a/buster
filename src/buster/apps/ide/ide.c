@@ -30,6 +30,7 @@
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/compiler/gpu/gpu.h>
+#include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
@@ -94,6 +95,7 @@
 #include <buster/lib/compiler/link/link.c>
 #include <buster/lib/compiler/wasm/wasm.c>
 #include <buster/lib/compiler/gpu/gpu.c>
+#include <buster/lib/compiler/llvm/bitcode.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
 #endif

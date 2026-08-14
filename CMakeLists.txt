@@ -848,6 +848,7 @@ buster_register_module(compiler_jit "${BUSTER_SOURCE_DIR}/compiler/jit/jit${COMM
 buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${COMMON_EXTENSION}")
 buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${COMMON_EXTENSION}")
 buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
+buster_register_module(compiler_llvm_bitcode "${BUSTER_SOURCE_DIR}/compiler/llvm/bitcode${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -889,6 +890,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/ir/ir_test.c
+    src/buster/tests/compiler/llvm/bitcode_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
     src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
@@ -929,6 +931,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
@@ -1767,6 +1770,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_link
     compiler_wasm
     compiler_gpu
+    compiler_llvm_bitcode
     compiler_driver
     simd
     file

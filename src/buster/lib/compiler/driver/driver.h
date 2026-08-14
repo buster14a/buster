@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/gpu/gpu.h>
 #include <buster/lib/compiler/wasm/wasm.h>
+#include <buster/lib/compiler/llvm/bitcode.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
@@ -22,6 +23,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_PARSE,
     COMPILER_DRIVER_ERROR_ANALYSIS,
     COMPILER_DRIVER_ERROR_IR,
+    COMPILER_DRIVER_ERROR_LLVM_BITCODE,
     COMPILER_DRIVER_ERROR_CODEGEN,
     COMPILER_DRIVER_ERROR_WASM64,
     COMPILER_DRIVER_ERROR_GPU,
@@ -113,6 +115,7 @@ struct CompilerDriverInvocation
     CompilerDriverCDialect c_dialect;
     CompilerDriverError error;
     AssemblySyntax assembly_syntax;
+    bool emit_llvm_bitcode;
     bool verbose;
     bool no_standard_includes;
     bool debug_info;
@@ -134,6 +137,7 @@ struct CompilerDriverResult
     NativeExecutableLinkResult native_link;
     Wasm64Artifact wasm64;
     GpuArtifact gpu;
+    LlvmBitcodeArtifact llvm_bitcode;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
     // What the C frontend consumed, per inclusion and per distinct file, and
@@ -151,6 +155,7 @@ struct CompilerDriverResult
     bool has_object;
     bool has_wasm64;
     bool has_gpu;
+    bool has_llvm_bitcode;
     u8 reserved;
 };
 

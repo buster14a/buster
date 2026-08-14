@@ -201,6 +201,11 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+`-emit-llvm` emits binary LLVM bitcode directly from canonical typed IR for C
+inputs. It writes `<input>.bc` by default, accepts `-o` for a single
+input, and rejects native objects, archives, libraries, frameworks, linker
+arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
+see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
@@ -759,6 +764,7 @@ Top level:
 | `.forgejo/` | Forgejo CI workflows and scripts. |
 | `PERFORMANCE_AUDITS.md` | Append-only measurement history; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |
+| `LLVM_BITCODE.md` | Direct LLVM bitcode output, driver usage, emitter API, validation, and current limitations. |
 | `build/` | Generated output. Never edit or archive it as source. |
 
 Compiler (`src/buster/lib/compiler/`):
@@ -781,7 +787,8 @@ Compiler (`src/buster/lib/compiler/`):
 | `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization. |
 | `wasm/wasm.{c,h}` | Direct canonical-IR-to-core-Wasm64 emitter using Memory64. |
 | `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |
-| `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, plus isolated external GPU-pipeline orchestration. |
+| `llvm/bitcode.{c,h}` | Dependency-free canonical typed-IR to binary LLVM bitcode emitter. It writes the bitstream directly, preserves deterministic value numbering, records target metadata, and diagnoses unsupported IR instead of routing through textual LLVM IR. |
+| `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, plus direct LLVM bitcode output and isolated external GPU-pipeline orchestration. |
 
 Applications:
 

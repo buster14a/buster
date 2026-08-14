@@ -377,6 +377,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.action = COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
             continue;
         }
+        if (string_equal(argument, S8("-emit-llvm")))
+        {
+            invocation.emit_llvm_bitcode = true;
+            continue;
+        }
         if (string_equal(argument, S8("-v")) || string_equal(argument, S8("--verbose")))
         {
             invocation.verbose = true;
@@ -867,6 +872,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     }
     if (invocation.has_gpu_target)
     {
+        if (invocation.emit_llvm_bitcode)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("-emit-llvm is not supported for external GPU target pipelines");
+            return invocation;
+        }
         GpuTargetKind gpu_kind = invocation.gpu_target.kind;
         bool spirv_target = compiler_driver_gpu_kind_is_spirv(gpu_kind);
         bool dxc_target = compiler_driver_gpu_target_uses_dxc(gpu_kind);
@@ -1126,6 +1137,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                                            invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT ? S8("att") : S8("intel"));
             return invocation;
         }
+    }
+    if (invocation.emit_llvm_bitcode &&
+        (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
+         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
+        return invocation;
     }
     if (!invocation.no_standard_includes && !invocation.has_gpu_target)
     {
@@ -1802,6 +1821,133 @@ BUSTER_GLOBAL_LOCAL CDiagnostic* compiler_driver_first_preprocess_error(CPreproc
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
+{
+    if (target.cpu_arch == CPU_ARCH_WASM64)
+    {
+        return S8("wasm64-unknown-unknown");
+    }
+    bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
+    if (!aarch64 && target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return (String8){0};
+    }
+    switch (target.os)
+    {
+    case OPERATING_SYSTEM_LINUX:
+        return aarch64 ? S8("aarch64-unknown-linux-gnu") : S8("x86_64-unknown-linux-gnu");
+    case OPERATING_SYSTEM_ANDROID:
+        return aarch64 ? S8("aarch64-unknown-linux-android") : S8("x86_64-unknown-linux-android");
+    case OPERATING_SYSTEM_MACOS:
+        return aarch64 ? S8("arm64-apple-macosx") : S8("x86_64-apple-macosx");
+    case OPERATING_SYSTEM_IOS:
+        return aarch64 ? S8("arm64-apple-ios") : S8("x86_64-apple-ios-simulator");
+    case OPERATING_SYSTEM_WINDOWS:
+        return aarch64 ? S8("aarch64-pc-windows-msvc") : S8("x86_64-pc-windows-msvc");
+    case OPERATING_SYSTEM_UEFI:
+        return aarch64 ? S8("aarch64-unknown-windows") : S8("x86_64-unknown-windows");
+    case OPERATING_SYSTEM_FREESTANDING:
+        return aarch64 ? S8("aarch64-unknown-none") : S8("x86_64-unknown-none");
+    case OPERATING_SYSTEM_COUNT:
+        break;
+    }
+    return (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
+{
+    switch (target.cpu_arch)
+    {
+    case CPU_ARCH_X86_64:
+        if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+        {
+            return S8("e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+        }
+        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+        {
+            return S8("e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+        }
+        return S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    case CPU_ARCH_AARCH64:
+        if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+        {
+            return S8("e-m:o-i64:64-i128:128-n32:64-S128-Fn32");
+        }
+        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+        {
+            return S8("e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32");
+        }
+        return S8("e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
+    case CPU_ARCH_WASM64:
+        return S8("e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
+    case CPU_ARCH_COUNT:
+        break;
+    }
+    return (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL LlvmBitcodeOptions compiler_driver_llvm_bitcode_options(Target target, String8 source_filename)
+{
+    return (LlvmBitcodeOptions){
+        .target_triple = compiler_driver_llvm_target_triple(target),
+        .data_layout = compiler_driver_llvm_data_layout(target),
+        .source_filename = source_filename,
+        .deterministic = true,
+        // Both driver pipelines validate immediately before reaching the
+        // emitter, so do not repeat a whole-module walk here.
+        .validate_ir = false,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* arena, String8 input)
+{
+    u64 extension = input.length;
+    for (u64 index = input.length; index != 0; index -= 1)
+    {
+        char8 byte = input.pointer[index - 1];
+        if (byte == '.')
+        {
+            extension = index - 1;
+            break;
+        }
+        if (byte == '/' || byte == '\\')
+        {
+            break;
+        }
+    }
+    return string_format_z(arena, S8("{S8}.bc"), (String8){
+                                                        .pointer = input.pointer,
+                                                        .length = extension,
+                                                    });
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, CompilerDriverInvocation invocation, LlvmBitcodeArtifact artifact,
+                                                              CompilerDriverResult* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    result->llvm_bitcode = artifact;
+    if (!llvm_bitcode_artifact_is_valid(artifact))
+    {
+        result->error = COMPILER_DRIVER_ERROR_LLVM_BITCODE;
+        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                             : artifact.error.message.length  ? artifact.error.message
+                                                               : S8("LLVM bitcode emission failed");
+        return false;
+    }
+    result->has_llvm_bitcode = true;
+    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0]);
+    if (!file_write(output, artifact.bytes))
+    {
+        result->error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
+        return false;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm64_path(Arena* arena, String8 input)
 {
     u64 extension = input.length;
@@ -1991,6 +2137,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),
                           (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
+        goto end;
+    }
+    if (invocation.emit_llvm_bitcode)
+    {
+        LlvmBitcodeArtifact artifact =
+            llvm_bitcode_emit_with_options(arena, lowered.program, module, 1,
+                                           compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0]));
+        compiler_driver_write_llvm_bitcode(arena, invocation, artifact, &result);
         goto end;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
@@ -2278,6 +2432,25 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
         goto finish;
     }
+    if (invocation.emit_llvm_bitcode)
+    {
+        if (invocation.library_count || invocation.library_path_count || invocation.framework_count || invocation.framework_path_count ||
+            invocation.linker_argument_count)
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("LLVM bitcode output does not accept native libraries, frameworks, or linker arguments");
+            goto finish;
+        }
+        for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
+        {
+            if (compiler_driver_object_input(invocation.input_paths[input_index]) || compiler_driver_archive_input(invocation.input_paths[input_index]))
+            {
+                result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+                result.diagnostic = S8("native objects and archives cannot be included in LLVM bitcode output");
+                goto finish;
+            }
+        }
+    }
     if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
     {
         if (invocation.target.os != OPERATING_SYSTEM_FREESTANDING)
@@ -2331,11 +2504,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
         goto finish;
     }
-    if ((invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
-         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY) && invocation.output_path.length)
+    if ((invocation.emit_llvm_bitcode || invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+         invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY || invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY) &&
+        invocation.output_path.length)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = invocation.action == COMPILER_DRIVER_ACTION_OBJECT   ? S8("cannot specify -o with -c and multiple input files")
+        result.diagnostic = invocation.emit_llvm_bitcode                         ? S8("cannot specify -o with -emit-llvm and multiple input files")
+                             : invocation.action == COMPILER_DRIVER_ACTION_OBJECT ? S8("cannot specify -o with -c and multiple input files")
                              : invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ? S8("cannot specify -o with -S and multiple input files")
                                                                                      : S8("cannot specify -o with -fsyntax-only and multiple input files");
         goto finish;
@@ -2445,8 +2620,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         single.input_paths = invocation.input_paths + input_index;
         single.input_count = 1;
         single.output_path = (String8){0};
-        bool suppress_object_write = invocation.action == COMPILER_DRIVER_ACTION_LINK;
-        if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
+        bool suppress_object_write = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
+        if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
         {
             String8 input = invocation.input_paths[input_index];
             u64 extension = input.length;
@@ -2469,7 +2644,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                    .length = extension,
                                                });
         }
-        else if (invocation.action == COMPILER_DRIVER_ACTION_LINK)
+        else if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK)
         {
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
         }
@@ -2603,6 +2778,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 added = true;
             }
         } while (added);
+    }
+    if (invocation.emit_llvm_bitcode)
+    {
+        goto finish;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
