@@ -540,6 +540,57 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
+// Phase-0 x86-64 producer census.  The registry is a contiguous projection
+// of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; keep these counts stable while
+// migration work moves encoders behind the recipe namespace.
+#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 122u
+#define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
+#define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 49u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 26u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT 46u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 26u
+#define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 50u
+#define MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT 12u
+
+typedef enum MachineX64EmitProducerStatus
+{
+    MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW,
+    MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM,
+    MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY,
+    MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT,
+} MachineX64EmitProducerStatus;
+
+typedef enum MachineX64RawProducerClass
+{
+    MACHINE_X64_RAW_PRODUCER_CLASS_CANONICAL_DIRECT,
+    MACHINE_X64_RAW_PRODUCER_CLASS_LEGACY_DIRECT,
+    MACHINE_X64_RAW_PRODUCER_CLASS_MIR,
+    MACHINE_X64_RAW_PRODUCER_CLASS_HANDWRITTEN_ASSEMBLER,
+    MACHINE_X64_RAW_PRODUCER_CLASS_METADATA_EXACT,
+    MACHINE_X64_RAW_PRODUCER_CLASS_TEST_HELPER,
+    MACHINE_X64_RAW_PRODUCER_CLASS_GLOBAL_ASM_MINI,
+    MACHINE_X64_RAW_PRODUCER_CLASS_FIXED_TEMPLATE,
+    MACHINE_X64_RAW_PRODUCER_CLASS_COUNT,
+} MachineX64RawProducerClass;
+
+typedef struct MachineX64RawProducerSite MachineX64RawProducerSite;
+struct MachineX64RawProducerSite
+{
+    MachineX64RawProducerClass producer_class;
+    String8 source_file;
+    String8 owner_symbol;
+};
+
+typedef struct MachineX64EmitRegistryEntry MachineX64EmitRegistryEntry;
+struct MachineX64EmitRegistryEntry
+{
+    MachineOpcode opcode;
+    MachineEmitRecipeId recipe;
+    u16 producer_ordinal;
+    u8 producer_status;
+    u8 reserved;
+};
+
 // Encoding forms are deliberately target-neutral.  An opcode may expose more
 // than one legal form (for example a register and a folded-memory form), so
 // MachineOpcodeInfo stores a bit set rather than a single enum value.
@@ -1128,6 +1179,11 @@ struct MachineEncodeResult
     u32 epilog_count;
     bool valid;
     u8 reserved[3];
+    // x86 exact-form encoder telemetry. A failed encode still returns the
+    // attempted counts so the caller can aggregate them before falling back.
+    u32 exact_attempts;
+    u32 exact_successes;
+    u32 exact_failures;
 };
 
 // Chunked construction: one selection pass appends rows into fixed-size arena
@@ -1215,6 +1271,12 @@ BUSTER_F_DECL MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmit
 BUSTER_F_DECL u16 machine_emit_recipe_index(MachineEmitRecipeId recipe);
 BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe);
 BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode);
+BUSTER_F_DECL u32 machine_x86_64_emit_registry_count(void);
+BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordinal);
+BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode);
+BUSTER_F_DECL u32 machine_x86_64_raw_producer_site_count(void);
+BUSTER_F_DECL MachineX64RawProducerSite const* machine_x86_64_raw_producer_site(u32 ordinal);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info);

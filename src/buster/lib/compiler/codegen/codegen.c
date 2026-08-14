@@ -757,34 +757,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_module_uses_ordinary_x86_assembly(IrModule* module)
-{
-    if (!module)
-    {
-        return false;
-    }
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-    {
-        IrFunction* function = module->functions + function_index;
-        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-        {
-            IrInstruction* instruction = function->instructions + instruction_index;
-            if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
-            {
-                continue;
-            }
-            IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
-            if (extra.literal.length && !string_equal(extra.literal, S8("cpuid")) && !string_equal(extra.literal, S8("xgetbv")) &&
-                !string_equal(extra.literal, S8("ud2")) && !string_equal(extra.literal, S8("nop")) && !string_equal(extra.literal, S8("pause")) &&
-                !string_equal(extra.literal, S8("int3")) && !codegen_inline_assembly_jump_target(function, instruction, extra.literal, S8("jmp %l"), 0))
-            {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_asm_memory_width(u32 width)
 {
     return width == 1 || width == 2 || width == 4 || width == 8;
@@ -1250,6 +1222,10 @@ Target codegen_target_for_abi(CodegenAbi abi)
 void codegen_prewarm(void)
 {
     (void)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V);
+    // Exact machine emission reads metadata tables from worker lanes without
+    // synchronization, so initialize them on the caller before any lane_run.
+    buster_x86_metadata_prewarm();
+    machine_x86_64_exact_prewarm();
 }
 
 BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_for_target(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
@@ -11557,6 +11533,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     MachineEncodeResult encoded = target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement)
                                                       : machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                    // Keep exact-form telemetry even when the encoder fails;
+                    // the function may still fall back to the canonical path.
+                    result.statistics.exact_attempts += encoded.exact_attempts;
+                    result.statistics.exact_successes += encoded.exact_successes;
+                    result.statistics.exact_failures += encoded.exact_failures;
                     bool encoded_fits = encoded.valid && buffer.count <= buffer.capacity &&
                                         encoded.byte_count <= buffer.capacity - buffer.count;
                     if (encoded.valid && !encoded_fits)
@@ -18772,6 +18753,9 @@ BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, 
     destination->allocator_split_register_count += source.allocator_split_register_count;
     destination->allocator_scheduled_function_count += source.allocator_scheduled_function_count;
     destination->allocator_schedule_kept_count += source.allocator_schedule_kept_count;
+    destination->exact_attempts += source.exact_attempts;
+    destination->exact_successes += source.exact_successes;
+    destination->exact_failures += source.exact_failures;
 }
 
 BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count)
@@ -19287,13 +19271,6 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
-        if (codegen_canonical_module_uses_ordinary_x86_assembly(module))
-        {
-            // The encoder's metadata caches are demand-filled and read by
-            // function lanes without locks.  Warm them before the parallel
-            // attempt, just as compiler_prewarm does for the other tables.
-            buster_x86_metadata_prewarm();
-        }
         f80_cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
         if (f80_cache.allocation_failed)
         {

@@ -3042,6 +3042,41 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The optimized canonical path must carry exact-form telemetry from the
+    // C frontend all the way through machine emission.  This source contains
+    // exactly one MFENCE-producing seq_cst fence and one INT3-producing debug
+    // trap, so FAST should report two exact attempts with no fallback.
+    String8 exact_encoder_stats_source = S8(
+        "void exact_encoder_stats(void) {\n"
+        "    __c11_atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
+        "    __builtin_debugtrap();\n"
+        "}\n");
+    Target exact_encoder_stats_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    CPreprocessResult exact_encoder_stats_tokens = c_preprocess(arguments->arena, exact_encoder_stats_source, (CPreprocessOptions){0});
+    CParseResult exact_encoder_stats_parse = c_parse(arguments->arena, exact_encoder_stats_tokens);
+    CIRLowerResult exact_encoder_stats_ir =
+        c_lower_to_ir(arguments->arena, S8("exact-encoder-stats.c"), exact_encoder_stats_tokens, exact_encoder_stats_parse, exact_encoder_stats_target);
+    BUSTER_TEST(arguments, exact_encoder_stats_tokens.error_count == 0);
+    BUSTER_TEST(arguments, exact_encoder_stats_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, exact_encoder_stats_ir.diagnostic_count == 0);
+    if (exact_encoder_stats_ir.program)
+    {
+        IrModule* exact_encoder_stats_module_ir = exact_encoder_stats_ir.program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(exact_encoder_stats_ir.program, exact_encoder_stats_module_ir).error == IR_VALIDATION_NONE);
+        CodegenModule exact_encoder_stats_module = codegen_generate_canonical_module(
+            arguments->arena, exact_encoder_stats_ir.program, exact_encoder_stats_module_ir, exact_encoder_stats_target,
+            (CodegenModuleOptions){
+                .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+            });
+        BUSTER_TEST(arguments, exact_encoder_stats_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_attempts == 2);
+        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == 2);
+        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_failures == 0);
+    }
     String8 canonical_windows_c_source = S8(
         "typedef void *va_list;\n"
         "struct Pair { int left; int right; };\n"

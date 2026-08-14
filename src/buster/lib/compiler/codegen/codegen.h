@@ -336,6 +336,11 @@ struct CodegenStatistics
     // and the subset whose scheduled placement modeled cheaper and shipped.
     u64 allocator_scheduled_function_count;
     u64 allocator_schedule_kept_count;
+    // Exact-form machine encoder telemetry. These remain append-only so
+    // existing statistics consumers retain their layout and meaning.
+    u64 exact_attempts;
+    u64 exact_successes;
+    u64 exact_failures;
 };
 
 struct CodegenModule
@@ -412,10 +417,11 @@ struct CodegenModuleOptions
     u8 assembly_syntax;
 };
 
-// Fills the per-abi target cache on the calling thread. Call before lane_run;
-// the cache is read without synchronization, so a gang that reaches it
-// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
-// racing. compiler_prewarm() covers this along with the rest of the compiler.
+// Fills the per-abi target cache and x86 metadata tables on the calling
+// thread. Call before lane_run; these caches are read without synchronization,
+// so a gang that reaches them unwarmed reports through
+// BUSTER_CHECK_SERIAL_INITIALIZATION instead of racing. compiler_prewarm()
+// covers this along with the rest of the compiler.
 BUSTER_F_DECL void codegen_prewarm(void);
 BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);

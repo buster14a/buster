@@ -810,6 +810,46 @@ struct BusterX86MetadataEmitQuery
     u32 relocation_capacity;
 };
 
+// Compiler-facing exact emission keeps the durable form identity and the
+// physical values in one query object.  Unlike BusterX86MetadataEmitQuery it
+// has no source mnemonic or duplicate dense form ID: the exact emitter fills
+// the internal canonical mnemonic from `key` and validates the row digest
+// before encoding.  Operand, feature-name, symbol, output, and relocation
+// storage are all borrowed for the duration of the call; relocation records
+// remain format-neutral until a downstream object/assembly adapter consumes
+// them.
+typedef struct BusterX86MetadataExactQuery BusterX86MetadataExactQuery;
+struct BusterX86MetadataExactQuery
+{
+    BusterX86MetadataFormKey key;
+    BusterX86MetadataPhysicalOperand const* operands;
+    u32 operand_count;
+    BusterX86MetadataFeatureInput features;
+    BusterX86MetadataPhysicalAttributes attributes;
+    u8 address_size;
+    u8 execution_mode;
+    bool include_privileged;
+    bool include_not64;
+    bool include_implicit;
+    u8 reserved;
+    u8* output;
+    u32 output_capacity;
+    BusterX86MetadataRelocation* relocations;
+    u32 relocation_capacity;
+};
+
+// A plan is a serially validated exact-form identity.  It is intentionally a
+// dense value rather than a heap/arena handle: the metadata module resolves it
+// to immutable process-lifetime state after prewarm, while the stable hash
+// keeps stale generated snapshots from selecting a different row.
+typedef struct BusterX86MetadataExactPlan BusterX86MetadataExactPlan;
+struct BusterX86MetadataExactPlan
+{
+    u32 form_id;
+    u64 stable_hash;
+};
+BUSTER_CT_CHECK(sizeof(BusterX86MetadataExactPlan) == 16);
+
 typedef struct BusterX86MetadataEmitResult BusterX86MetadataEmitResult;
 struct BusterX86MetadataEmitResult
 {
@@ -895,8 +935,9 @@ struct BusterX86MetadataCoverageAuditResult
 // write those caches on first use and read them back with plain loads, which
 // is only sound while nothing else can be reading. A gang that reaches one
 // unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
-// racing. Costs a full decode plus one normalization and pattern parse per
-// form, so a program that never queries x86 metadata should not call it.
+// racing. The first call costs a full decode plus one normalization and
+// pattern parse per form; later calls are idempotent no-ops, so a program that
+// never queries x86 metadata should not call it.
 BUSTER_F_DECL void buster_x86_metadata_prewarm(void);
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
@@ -970,6 +1011,27 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(Bust
                                                                               BusterX86MetadataFormKey key);
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX86MetadataEmitQuery query,
                                                                           BusterX86MetadataFormKey key);
+// Minimal compiler ABI for trusted exact emission.  This is the preferred
+// entry point for machine callers: no mnemonic lookup, candidate scan, or
+// source-level operand projection is performed, and the durable key appears
+// exactly once in the input object.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_query(BusterX86MetadataExactQuery query);
+// Prepare one durable key into immutable exact state.  Call this only from
+// the serial prewarm phase after buster_x86_metadata_prewarm(); duplicate
+// preparation of the same key is idempotent.  No heap or callback is used.
+BUSTER_F_DECL bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key,
+                                                           BusterX86MetadataExactPlan* result);
+// Resolve a durable key to an immutable exact plan prepared during the
+// serial metadata prewarm.  This returns false before prewarm, for unknown or
+// stale keys, and for rows whose pattern/operand schema cannot be prepared.
+BUSTER_F_DECL bool buster_x86_metadata_exact_plan_for_key(BusterX86MetadataFormKey key,
+                                                           BusterX86MetadataExactPlan* result);
+// Fast exact emission for a previously prepared plan.  The checked
+// `buster_x86_metadata_emit_exact_query` remains the public fallback; this
+// path skips repeated form-key and parsed-pattern lookup while retaining
+// physical-query, capacity, feature, and relocation validation.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX86MetadataExactPlan plan,
+                                                                                       BusterX86MetadataExactQuery query);
 // Build the deterministic physical query used by coverage consumers.  The
 // returned operands, feature slot, and mnemonic buffer are caller-owned and
 // are only borrowed by the query; they must remain live until the caller has

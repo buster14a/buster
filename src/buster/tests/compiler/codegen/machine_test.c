@@ -187,6 +187,170 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_cmpxchg16_function(Arena*
     return function;
 }
 
+// A zero-operand DIRECT pair used by the x86 exact-form migration tests.  The
+// rows deliberately sit before RET so the encoder must emit both metadata
+// forms in one ordinary placed function; no executable call is attempted
+// because INT3 is intentionally a trap.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_barrier_function(Arena* arena)
+{
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_MFENCE});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_INT3});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    return function;
+}
+
+// One physical-register fixture covering every migrated register-only DIRECT
+// row.  Alternating RAX/R9 makes the REX.R/REX.B projections observable while
+// the paired 32/64 and narrow-extension rows keep width projections exercised
+// in one encode; ALU/IMUL rows use their tied destination in slot 1.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_register_function(Arena* arena)
+{
+#define MACHINE_TEST_EXACT_PHYSICAL(reg) machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, (reg))
+#define MACHINE_TEST_EXACT_UNARY(op_value, reg) \
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = (op_value), .operands = {MACHINE_TEST_EXACT_PHYSICAL(reg)}})
+#define MACHINE_TEST_EXACT_BINARY(op_value, destination, source) \
+    machine_builder_instruction(&builder,                                                                                 \
+                                (MachineInstruction){.opcode = (op_value),                                             \
+                                                     .operands = {MACHINE_TEST_EXACT_PHYSICAL(destination),            \
+                                                                  MACHINE_TEST_EXACT_PHYSICAL(source)}})
+#define MACHINE_TEST_EXACT_TIED(op_value, destination, source) \
+    machine_builder_instruction(&builder,                                                                                 \
+                                (MachineInstruction){.opcode = (op_value),                                             \
+                                                     .operands = {MACHINE_TEST_EXACT_PHYSICAL(destination),            \
+                                                                  MACHINE_TEST_EXACT_PHYSICAL(destination),            \
+                                                                  MACHINE_TEST_EXACT_PHYSICAL(source)}})
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    machine_builder_block_begin(&builder);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOV_RR, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOV32_RR, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOVSX8_RR, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOVSX16_RR, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOVSX32_RR, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOVZX8_RR, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_MOVZX16_RR, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_ADD32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_ADD64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_SUB32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_SUB64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_AND32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_AND64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_OR32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_OR64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_XOR32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_XOR64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_IMUL32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_TIED(MACHINE_X64_IMUL64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_UNARY(MACHINE_X64_NEG32, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_UNARY(MACHINE_X64_NEG64, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_UNARY(MACHINE_X64_NOT32, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_UNARY(MACHINE_X64_NOT64, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_BSF32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_BSF64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_BSR32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_BSR64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_CMP32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_CMP64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_BINARY(MACHINE_X64_TEST_RR, MACHINE_X64_RAX, MACHINE_X64_R9);
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+#undef MACHINE_TEST_EXACT_TIED
+#undef MACHINE_TEST_EXACT_BINARY
+#undef MACHINE_TEST_EXACT_UNARY
+#undef MACHINE_TEST_EXACT_PHYSICAL
+    return function;
+}
+
+// The second exact DIRECT cohort exercises feature-gated POPCNT, the
+// implicit-CL shifts, XMM/GPR payload projections, and synthesized fixed-RSP
+// immediate operands. Physical RAX/RCX constraints mirror the selector rows;
+// MOVQ and the stack rows carry their non-machine-visible payloads directly.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_second_register_function(Arena* arena)
+{
+#define MACHINE_TEST_EXACT_SECOND_PHYSICAL(reg) machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, (reg))
+#define MACHINE_TEST_EXACT_SECOND_BINARY(op_value, destination, source) \
+    machine_builder_instruction(&builder,                                                                                 \
+                                (MachineInstruction){.opcode = (op_value),                                             \
+                                                     .operands = {MACHINE_TEST_EXACT_SECOND_PHYSICAL(destination),     \
+                                                                  MACHINE_TEST_EXACT_SECOND_PHYSICAL(source)}})
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    machine_builder_block_begin(&builder);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_POPCNT32, MACHINE_X64_RAX, MACHINE_X64_R9);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_POPCNT64, MACHINE_X64_R9, MACHINE_X64_RAX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SHL32, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SHL64, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SAR32, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SAR64, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SHR32, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    MACHINE_TEST_EXACT_SECOND_BINARY(MACHINE_X64_SHR64, MACHINE_X64_RAX, MACHINE_X64_RCX);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                      .payload = 0,
+                                                      .operands = {MACHINE_TEST_EXACT_SECOND_PHYSICAL(MACHINE_X64_R9)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_MOVQ_FROM_XMM,
+                                                      .payload = 1,
+                                                      .operands = {MACHINE_TEST_EXACT_SECOND_PHYSICAL(MACHINE_X64_RAX)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_PUSH_REGISTER,
+                                                      .operands = {MACHINE_TEST_EXACT_SECOND_PHYSICAL(MACHINE_X64_R9)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_ADD_RSP, .payload = 16});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+#undef MACHINE_TEST_EXACT_SECOND_BINARY
+#undef MACHINE_TEST_EXACT_SECOND_PHYSICAL
+    return function;
+}
+
+// Relative/symbolic DIRECT rows keep their canonical fixup streams: JMP is
+// queried with a neutral rel32 and patched to its block, while LEA_SYMBOL is
+// queried with a neutral RIP-relative AGEN and retained as a call-site row.
+// The block order gives one forward and one backward branch, and the two
+// destination registers make both low and extended REX.R projections visible.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_relative_function(Arena* arena)
+{
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_BLOCK, 2)},
+                                                      .opcode = MACHINE_X64_JMP,
+                                                  });
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_R8)},
+                                                      .payload = 1,
+                                                      .opcode = MACHINE_X64_LEA_SYMBOL,
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
+                                                      .payload = 0,
+                                                      .opcode = MACHINE_X64_LEA_SYMBOL,
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)},
+                                                      .opcode = MACHINE_X64_JMP,
+                                                  });
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    return function;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -311,6 +475,178 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 47);
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 49);
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 26);
+
+    // The x86-64 producer registry is the Phase-0 census used to keep the
+    // encoder switch and recipe projection from drifting independently.  It
+    // is indexed by the contiguous opcode span, while rows remain grouped by
+    // recipe category in the source registry for reviewability.
+    u32 registry_count = machine_x86_64_emit_registry_count();
+    BUSTER_TEST(arguments, registry_count == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
+    BUSTER_TEST(arguments, (u32)(MACHINE_X64_VBINARY - MACHINE_X64_MOV_RI + 1) == registry_count);
+    u32 registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
+    u32 registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT] = {0};
+    bool registry_entries_are_complete = true;
+    bool registry_recipes_match = true;
+    bool registry_statuses_are_valid = true;
+    bool exact_rows_are_explicit = true;
+    bool exact_rows_are_not_legacy = true;
+    bool exact_rows_have_direct_indices = true;
+    bool expansion_rows_are_policy = true;
+    bool remaining_rows_are_legacy = true;
+    for (u32 ordinal = 0; ordinal < registry_count; ordinal += 1)
+    {
+        MachineX64EmitRegistryEntry const* entry = machine_x86_64_emit_registry_entry(ordinal);
+        MachineOpcode expected_opcode = (MachineOpcode)(MACHINE_X64_MOV_RI + ordinal);
+        bool row_is_complete = entry && entry->opcode == expected_opcode && entry->producer_ordinal == ordinal;
+        registry_entries_are_complete &= row_is_complete;
+        if (row_is_complete)
+        {
+            MachineEmitRecipeCategory category = machine_emit_recipe_category(entry->recipe);
+            MachineX64EmitProducerStatus status = (MachineX64EmitProducerStatus)entry->producer_status;
+            bool status_is_valid = status < MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT;
+            // The direct cohort already migrated to exact-form recipes is
+            // explicit here rather than inferred from the opcode span: the
+            // x86 enum interleaves family and expansion rows between direct
+            // rows.  Keeping the expected recipe index beside each cohort
+            // catches a reordered row as well as a stale status token.
+            // LOAD_INCOMING (direct index 42) intentionally remains legacy:
+            // its fixed disp32 producer is not a strict metadata-exact form
+            // for every payload (the compact disp8 form changes by offset).
+            bool expected_exact = false;
+            u16 expected_exact_index = 0;
+            if (entry->opcode >= MACHINE_X64_MOV_RR && entry->opcode <= MACHINE_X64_NOT64)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(entry->opcode - MACHINE_X64_MOV_RR);
+            }
+            else if (entry->opcode >= MACHINE_X64_BSF32 && entry->opcode <= MACHINE_X64_BSR64)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(23 + (entry->opcode - MACHINE_X64_BSF32));
+            }
+            else if (entry->opcode >= MACHINE_X64_POPCNT32 && entry->opcode <= MACHINE_X64_POPCNT64)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(27 + (entry->opcode - MACHINE_X64_POPCNT32));
+            }
+            else if (entry->opcode >= MACHINE_X64_CMP32 && entry->opcode <= MACHINE_X64_TEST_RR)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(29 + (entry->opcode - MACHINE_X64_CMP32));
+            }
+            else if (entry->opcode == MACHINE_X64_JMP)
+            {
+                expected_exact = true;
+                expected_exact_index = 32;
+            }
+            else if (entry->opcode >= MACHINE_X64_SHL32 && entry->opcode <= MACHINE_X64_SHR64)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(33 + (entry->opcode - MACHINE_X64_SHL32));
+            }
+            else if (entry->opcode == MACHINE_X64_LEA_SYMBOL)
+            {
+                expected_exact = true;
+                expected_exact_index = 39;
+            }
+            else if (entry->opcode >= MACHINE_X64_MOVQ_TO_XMM && entry->opcode <= MACHINE_X64_MOVQ_FROM_XMM)
+            {
+                expected_exact = true;
+                expected_exact_index = (u16)(40 + (entry->opcode - MACHINE_X64_MOVQ_TO_XMM));
+            }
+            else if (entry->opcode == MACHINE_X64_PUSH_REGISTER || entry->opcode == MACHINE_X64_ADD_RSP)
+            {
+                expected_exact = true;
+                expected_exact_index = entry->opcode == MACHINE_X64_PUSH_REGISTER ? 43 : 44;
+            }
+            else if (entry->opcode == MACHINE_X64_MFENCE || entry->opcode == MACHINE_X64_INT3)
+            {
+                expected_exact = true;
+                expected_exact_index = entry->opcode == MACHINE_X64_MFENCE ? 45 : 46;
+            }
+            registry_statuses_are_valid &= status_is_valid;
+            registry_recipes_match &= machine_emit_recipe_is_valid(entry->recipe);
+            registry_recipes_match &= machine_opcode_emit_recipe((u16)entry->opcode) == entry->recipe;
+            registry_recipes_match &= machine_x86_64_emit_registry_find(entry->opcode) == entry;
+            exact_rows_are_explicit &= expected_exact ? status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM : status != MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM;
+            if (expected_exact)
+            {
+                exact_rows_are_not_legacy &= status != MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
+                exact_rows_have_direct_indices &= category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT && machine_emit_recipe_index(entry->recipe) == expected_exact_index;
+            }
+            if (category == MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION)
+            {
+                expansion_rows_are_policy &= status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY;
+            }
+            else if (!expected_exact)
+            {
+                remaining_rows_are_legacy &= status == MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
+            }
+            if (status_is_valid)
+            {
+                registry_status_counts[status] += 1;
+            }
+            if (category < MACHINE_EMIT_RECIPE_CATEGORY_COUNT)
+            {
+                registry_counts[category] += 1;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, registry_entries_are_complete);
+    BUSTER_TEST(arguments, registry_recipes_match);
+    BUSTER_TEST(arguments, registry_statuses_are_valid);
+    BUSTER_TEST(arguments, exact_rows_are_explicit);
+    BUSTER_TEST(arguments, exact_rows_are_not_legacy);
+    BUSTER_TEST(arguments, exact_rows_have_direct_indices);
+    BUSTER_TEST(arguments, expansion_rows_are_policy);
+    BUSTER_TEST(arguments, remaining_rows_are_legacy);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW] == MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM] == MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY] == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT);
+    BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT);
+    BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT);
+    BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(registry_count) == 0);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MOV_RI - 1) == 0);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_VBINARY + 1) == 0);
+
+    // The MIR census is only one raw-producer owner.  Pin the source-audited
+    // subsystem anchors separately so a new producer site has to be named,
+    // classified, and counted here instead of hiding behind a byte-literal
+    // search.
+    u32 producer_site_count = machine_x86_64_raw_producer_site_count();
+    BUSTER_TEST(arguments, producer_site_count == MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT);
+    u32 producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_COUNT] = {0};
+    bool producer_sites_are_well_formed = true;
+    bool producer_sites_are_unique = true;
+    for (u32 site_index = 0; site_index < producer_site_count; site_index += 1)
+    {
+        MachineX64RawProducerSite const* site = machine_x86_64_raw_producer_site(site_index);
+        bool site_is_well_formed = site && site->producer_class < MACHINE_X64_RAW_PRODUCER_CLASS_COUNT && site->source_file.length != 0 &&
+                                   site->owner_symbol.length != 0 && string_ends_with_sequence(site->source_file, S8(".c"));
+        producer_sites_are_well_formed &= site_is_well_formed;
+        if (site_is_well_formed)
+        {
+            producer_class_counts[site->producer_class] += 1;
+            for (u32 previous_index = 0; previous_index < site_index; previous_index += 1)
+            {
+                MachineX64RawProducerSite const* previous = machine_x86_64_raw_producer_site(previous_index);
+                producer_sites_are_unique &= !previous || !string_equal(site->source_file, previous->source_file) ||
+                                             !string_equal(site->owner_symbol, previous->owner_symbol);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, producer_sites_are_well_formed);
+    BUSTER_TEST(arguments, producer_sites_are_unique);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_CANONICAL_DIRECT] == 1);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_LEGACY_DIRECT] == 2);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_MIR] == 1);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_HANDWRITTEN_ASSEMBLER] == 2);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_METADATA_EXACT] == 2);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_TEST_HELPER] == 1);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_GLOBAL_ASM_MINI] == 1);
+    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_FIXED_TEMPLATE] == 2);
+    BUSTER_TEST(arguments, machine_x86_64_raw_producer_site(producer_site_count) == 0);
 
     u32 a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
     for (u16 opcode = MACHINE_A64_MOV_RI; opcode <= MACHINE_A64_LEA_SYMBOL; opcode += 1)
@@ -1684,6 +2020,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                          .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
                                                                      });
         BUSTER_TEST(arguments, mir_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, mir_module.statistics.exact_attempts >= 1);
+        BUSTER_TEST(arguments, mir_module.statistics.exact_successes == mir_module.statistics.exact_attempts);
+        BUSTER_TEST(arguments, mir_module.statistics.exact_failures == 0);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
         BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 2,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
@@ -1816,6 +2155,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                              .register_allocator = CODEGEN_REGISTER_ALLOCATOR_QUALITY,
                                                                          });
         BUSTER_TEST(arguments, quality_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, quality_module.statistics.exact_attempts >= 1);
+        BUSTER_TEST(arguments, quality_module.statistics.exact_successes == quality_module.statistics.exact_attempts);
+        BUSTER_TEST(arguments, quality_module.statistics.exact_failures == 0);
         for (u32 relocation_index = 0; relocation_index < quality_module.relocation_count; relocation_index += 1)
         {
             CodegenModuleRelocation* relocation = quality_module.relocations + relocation_index;
@@ -2009,6 +2351,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                           .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
                                                                       });
         BUSTER_TEST(arguments, fast_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, fast_module.statistics.exact_attempts >= 1);
+        BUSTER_TEST(arguments, fast_module.statistics.exact_successes == fast_module.statistics.exact_attempts);
+        BUSTER_TEST(arguments, fast_module.statistics.exact_failures == 0);
         BUSTER_TEST(arguments, fast_module.statistics.fallback_function_count == mir_module.statistics.fallback_function_count);
         for (u32 relocation_index = 0; relocation_index < fast_module.relocation_count; relocation_index += 1)
         {
@@ -2169,6 +2514,198 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         codegen_release_executable(mir_module_executable);
 #endif
     }
+
+    // DIRECT exact-form smoke: MFENCE and INT3 have no visible operands, so
+    // one tiny function exercises selection-independent placement and the
+    // metadata-backed encoder path.  Keep this separate from the recipe
+    // census above; the census owns registry counts, while this checks bytes.
+    MachineFunction exact_barrier_function = machine_test_build_exact_barrier_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&exact_barrier_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement exact_barrier_placement = machine_fast_placement_build(arguments->arena, &exact_barrier_function);
+    BUSTER_TEST(arguments, exact_barrier_placement.valid);
+    MachineEncodeResult exact_barrier_encoded = machine_encode_x86_64(arguments->arena, &exact_barrier_function, &exact_barrier_placement);
+    u32 exact_barrier_mfence_count = 0;
+    u32 exact_barrier_int3_count = 0;
+    for (u32 byte_index = 0; exact_barrier_encoded.valid && byte_index < exact_barrier_encoded.byte_count; byte_index += 1)
+    {
+        if (byte_index + 3 <= exact_barrier_encoded.byte_count && exact_barrier_encoded.bytes[byte_index] == 0x0f &&
+            exact_barrier_encoded.bytes[byte_index + 1] == 0xae && exact_barrier_encoded.bytes[byte_index + 2] == 0xf0)
+        {
+            exact_barrier_mfence_count += 1;
+        }
+        if (exact_barrier_encoded.bytes[byte_index] == 0xcc)
+        {
+            exact_barrier_int3_count += 1;
+        }
+    }
+    BUSTER_TEST(arguments, exact_barrier_encoded.valid && exact_barrier_mfence_count == 1 && exact_barrier_int3_count == 1);
+    BUSTER_TEST(arguments, exact_barrier_encoded.exact_attempts == 2);
+    BUSTER_TEST(arguments, exact_barrier_encoded.exact_successes == 2);
+    BUSTER_TEST(arguments, exact_barrier_encoded.exact_failures == 0);
+    BUSTER_TEST(arguments, exact_barrier_encoded.exact_attempts ==
+                                   exact_barrier_encoded.exact_successes + exact_barrier_encoded.exact_failures);
+
+    MachineFunction exact_register_function = machine_test_build_exact_register_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&exact_register_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement exact_register_placement = machine_stack_placement_build(arguments->arena, &exact_register_function);
+    BUSTER_TEST(arguments, exact_register_placement.valid && exact_register_placement.edit_count == 0);
+    MachineEncodeResult exact_register_encoded =
+        machine_encode_x86_64(arguments->arena, &exact_register_function, &exact_register_placement);
+    bool exact_register_offsets_monotonic = exact_register_encoded.valid && exact_register_encoded.row_offsets[0] == 4;
+    for (u32 row_index = 1; row_index < exact_register_function.instruction_count && exact_register_offsets_monotonic; row_index += 1)
+    {
+        exact_register_offsets_monotonic &= exact_register_encoded.row_offsets[row_index] > exact_register_encoded.row_offsets[row_index - 1];
+    }
+    // Check asymmetric low/extended encodings at representative widths and
+    // operand orientations. These bytes are the old switch's canonical
+    // spellings, so this catches a projection that happens to succeed in
+    // metadata but reverses RM/REG or drops a REX bit.
+    bool exact_register_asymmetric_bytes = exact_register_encoded.valid;
+    bool exact_register_mov64_bytes = false;
+    bool exact_register_add32_bytes = false;
+    bool exact_register_add64_bytes = false;
+    bool exact_register_bsf32_bytes = false;
+    bool exact_register_bsf64_bytes = false;
+    bool exact_register_test64_bytes = false;
+    if (exact_register_asymmetric_bytes)
+    {
+        u32 mov64 = exact_register_encoded.row_offsets[0];
+        u32 add32 = exact_register_encoded.row_offsets[7];
+        u32 add64 = exact_register_encoded.row_offsets[8];
+        u32 bsf32 = exact_register_encoded.row_offsets[23];
+        u32 bsf64 = exact_register_encoded.row_offsets[24];
+        u32 test64 = exact_register_encoded.row_offsets[29];
+        exact_register_mov64_bytes = exact_register_encoded.bytes[mov64 + 0] == 0x4c && exact_register_encoded.bytes[mov64 + 1] == 0x89 &&
+                                     exact_register_encoded.bytes[mov64 + 2] == 0xc8;
+        exact_register_add32_bytes = exact_register_encoded.bytes[add32 + 0] == 0x44 && exact_register_encoded.bytes[add32 + 1] == 0x01 &&
+                                     exact_register_encoded.bytes[add32 + 2] == 0xc8;
+        exact_register_add64_bytes = exact_register_encoded.bytes[add64 + 0] == 0x49 && exact_register_encoded.bytes[add64 + 1] == 0x01 &&
+                                     exact_register_encoded.bytes[add64 + 2] == 0xc1;
+        exact_register_bsf32_bytes = exact_register_encoded.bytes[bsf32 + 0] == 0x41 && exact_register_encoded.bytes[bsf32 + 1] == 0x0f &&
+                                     exact_register_encoded.bytes[bsf32 + 2] == 0xbc && exact_register_encoded.bytes[bsf32 + 3] == 0xc1;
+        exact_register_bsf64_bytes = exact_register_encoded.bytes[bsf64 + 0] == 0x4c && exact_register_encoded.bytes[bsf64 + 1] == 0x0f &&
+                                     exact_register_encoded.bytes[bsf64 + 2] == 0xbc && exact_register_encoded.bytes[bsf64 + 3] == 0xc8;
+        exact_register_test64_bytes = exact_register_encoded.bytes[test64 + 0] == 0x4c && exact_register_encoded.bytes[test64 + 1] == 0x85 &&
+                                      exact_register_encoded.bytes[test64 + 2] == 0xc8;
+        exact_register_asymmetric_bytes = exact_register_mov64_bytes && exact_register_add32_bytes && exact_register_add64_bytes &&
+                                          exact_register_bsf32_bytes && exact_register_bsf64_bytes && exact_register_test64_bytes;
+    }
+    BUSTER_TEST(arguments, exact_register_encoded.valid && exact_register_offsets_monotonic);
+    BUSTER_TEST(arguments, exact_register_mov64_bytes);
+    BUSTER_TEST(arguments, exact_register_add32_bytes);
+    BUSTER_TEST(arguments, exact_register_add64_bytes);
+    BUSTER_TEST(arguments, exact_register_bsf32_bytes);
+    BUSTER_TEST(arguments, exact_register_bsf64_bytes);
+    BUSTER_TEST(arguments, exact_register_test64_bytes);
+    BUSTER_TEST(arguments, exact_register_asymmetric_bytes);
+    BUSTER_TEST(arguments, exact_register_encoded.exact_attempts == 30);
+    BUSTER_TEST(arguments, exact_register_encoded.exact_successes == 30);
+    BUSTER_TEST(arguments, exact_register_encoded.exact_failures == 0);
+    BUSTER_TEST(arguments, exact_register_encoded.exact_attempts ==
+                                   exact_register_encoded.exact_successes + exact_register_encoded.exact_failures);
+
+    MachineFunction exact_second_function = machine_test_build_exact_second_register_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&exact_second_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement exact_second_placement = machine_stack_placement_build(arguments->arena, &exact_second_function);
+    BUSTER_TEST(arguments, exact_second_placement.valid && exact_second_placement.edit_count == 0);
+    MachineEncodeResult exact_second_encoded = machine_encode_x86_64(arguments->arena, &exact_second_function, &exact_second_placement);
+    bool exact_second_offsets_monotonic = exact_second_encoded.valid && exact_second_encoded.row_offsets[0] == 4;
+    for (u32 row_index = 1; row_index < exact_second_function.instruction_count && exact_second_offsets_monotonic; row_index += 1)
+    {
+        exact_second_offsets_monotonic &= exact_second_encoded.row_offsets[row_index] > exact_second_encoded.row_offsets[row_index - 1];
+    }
+    bool exact_second_bytes = exact_second_encoded.valid;
+    if (exact_second_bytes)
+    {
+        u32 popcnt32 = exact_second_encoded.row_offsets[0];
+        u32 popcnt64 = exact_second_encoded.row_offsets[1];
+        u32 shl32 = exact_second_encoded.row_offsets[2];
+        u32 shl64 = exact_second_encoded.row_offsets[3];
+        u32 movq_to = exact_second_encoded.row_offsets[8];
+        u32 movq_from = exact_second_encoded.row_offsets[9];
+        u32 push = exact_second_encoded.row_offsets[10];
+        u32 add_rsp = exact_second_encoded.row_offsets[11];
+        exact_second_bytes &= exact_second_encoded.bytes[popcnt32 + 0] == 0xf3 && exact_second_encoded.bytes[popcnt32 + 1] == 0x41 &&
+                              exact_second_encoded.bytes[popcnt32 + 2] == 0x0f && exact_second_encoded.bytes[popcnt32 + 3] == 0xb8 &&
+                              exact_second_encoded.bytes[popcnt32 + 4] == 0xc1;
+        exact_second_bytes &= exact_second_encoded.bytes[popcnt64 + 0] == 0xf3 && exact_second_encoded.bytes[popcnt64 + 1] == 0x4c &&
+                              exact_second_encoded.bytes[popcnt64 + 2] == 0x0f && exact_second_encoded.bytes[popcnt64 + 3] == 0xb8 &&
+                              exact_second_encoded.bytes[popcnt64 + 4] == 0xc8;
+        exact_second_bytes &= exact_second_encoded.bytes[shl32 + 0] == 0xd3 && exact_second_encoded.bytes[shl32 + 1] == 0xe0;
+        exact_second_bytes &= exact_second_encoded.bytes[shl64 + 0] == 0x48 && exact_second_encoded.bytes[shl64 + 1] == 0xd3 &&
+                              exact_second_encoded.bytes[shl64 + 2] == 0xe0;
+        exact_second_bytes &= exact_second_encoded.bytes[movq_to + 0] == 0x66 && exact_second_encoded.bytes[movq_to + 1] == 0x49 &&
+                              exact_second_encoded.bytes[movq_to + 2] == 0x0f && exact_second_encoded.bytes[movq_to + 3] == 0x6e &&
+                              exact_second_encoded.bytes[movq_to + 4] == 0xc1;
+        exact_second_bytes &= exact_second_encoded.bytes[movq_from + 0] == 0x66 && exact_second_encoded.bytes[movq_from + 1] == 0x48 &&
+                              exact_second_encoded.bytes[movq_from + 2] == 0x0f && exact_second_encoded.bytes[movq_from + 3] == 0x7e &&
+                              exact_second_encoded.bytes[movq_from + 4] == 0xc8;
+        exact_second_bytes &= exact_second_encoded.bytes[push + 0] == 0x41 && exact_second_encoded.bytes[push + 1] == 0x51;
+        exact_second_bytes &= exact_second_encoded.bytes[add_rsp + 0] == 0x48 && exact_second_encoded.bytes[add_rsp + 1] == 0x81 &&
+                              exact_second_encoded.bytes[add_rsp + 2] == 0xc4 && exact_second_encoded.bytes[add_rsp + 3] == 0x10 &&
+                              exact_second_encoded.bytes[add_rsp + 4] == 0x00 && exact_second_encoded.bytes[add_rsp + 5] == 0x00 &&
+                              exact_second_encoded.bytes[add_rsp + 6] == 0x00;
+    }
+    BUSTER_TEST(arguments, exact_second_encoded.valid && exact_second_offsets_monotonic);
+    BUSTER_TEST(arguments, exact_second_bytes);
+    BUSTER_TEST(arguments, exact_second_encoded.exact_attempts == 12);
+    BUSTER_TEST(arguments, exact_second_encoded.exact_successes == 12);
+    BUSTER_TEST(arguments, exact_second_encoded.exact_failures == 0);
+    BUSTER_TEST(arguments, exact_second_encoded.exact_attempts ==
+                                   exact_second_encoded.exact_successes + exact_second_encoded.exact_failures);
+
+    MachineFunction exact_relative_function = machine_test_build_exact_relative_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&exact_relative_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement exact_relative_placement = machine_stack_placement_build(arguments->arena, &exact_relative_function);
+    BUSTER_TEST(arguments, exact_relative_placement.valid && exact_relative_placement.edit_count == 0);
+    MachineEncodeResult exact_relative_encoded =
+        machine_encode_x86_64(arguments->arena, &exact_relative_function, &exact_relative_placement);
+    bool exact_relative_bytes = exact_relative_encoded.valid && exact_relative_encoded.byte_count >= 29;
+    bool exact_relative_sites = exact_relative_encoded.valid && exact_relative_encoded.call_site_count == 2;
+    if (exact_relative_bytes)
+    {
+        u32 forward_jmp = exact_relative_encoded.row_offsets[0];
+        u32 extended_lea = exact_relative_encoded.row_offsets[1];
+        u32 low_lea = exact_relative_encoded.row_offsets[3];
+        u32 backward_jmp = exact_relative_encoded.row_offsets[4];
+        // The branch fields are patched from the neutral E9+rel32 bytes;
+        // derive both displacements from the final block offsets so the test
+        // remains valid if RET's epilogue policy changes.
+        u32 forward_displacement = exact_relative_encoded.block_offsets[2] - (forward_jmp + 5);
+        u32 backward_displacement = exact_relative_encoded.block_offsets[1] - (backward_jmp + 5);
+        exact_relative_bytes &= exact_relative_encoded.bytes[forward_jmp + 0] == 0xe9 &&
+                               memcmp(exact_relative_encoded.bytes + forward_jmp + 1, &forward_displacement, sizeof(forward_displacement)) == 0;
+        exact_relative_bytes &= exact_relative_encoded.bytes[extended_lea + 0] == 0x4c &&
+                               exact_relative_encoded.bytes[extended_lea + 1] == 0x8d &&
+                               exact_relative_encoded.bytes[extended_lea + 2] == 0x05 &&
+                               exact_relative_encoded.bytes[extended_lea + 3] == 0x00 &&
+                               exact_relative_encoded.bytes[extended_lea + 4] == 0x00 &&
+                               exact_relative_encoded.bytes[extended_lea + 5] == 0x00 &&
+                               exact_relative_encoded.bytes[extended_lea + 6] == 0x00;
+        exact_relative_bytes &= exact_relative_encoded.bytes[low_lea + 0] == 0x48 &&
+                               exact_relative_encoded.bytes[low_lea + 1] == 0x8d &&
+                               exact_relative_encoded.bytes[low_lea + 2] == 0x05 &&
+                               exact_relative_encoded.bytes[low_lea + 3] == 0x00 &&
+                               exact_relative_encoded.bytes[low_lea + 4] == 0x00 &&
+                               exact_relative_encoded.bytes[low_lea + 5] == 0x00 &&
+                               exact_relative_encoded.bytes[low_lea + 6] == 0x00;
+        exact_relative_bytes &= exact_relative_encoded.bytes[backward_jmp + 0] == 0xe9 &&
+                               memcmp(exact_relative_encoded.bytes + backward_jmp + 1, &backward_displacement, sizeof(backward_displacement)) == 0;
+    }
+    if (exact_relative_sites)
+    {
+        exact_relative_sites &= exact_relative_encoded.call_sites[0].code_offset == exact_relative_encoded.row_offsets[1] + 3 &&
+                               exact_relative_encoded.call_sites[0].target == 1 &&
+                               exact_relative_encoded.call_sites[1].code_offset == exact_relative_encoded.row_offsets[3] + 3 &&
+                               exact_relative_encoded.call_sites[1].target == 0;
+    }
+    BUSTER_TEST(arguments, exact_relative_encoded.valid && exact_relative_bytes);
+    BUSTER_TEST(arguments, exact_relative_sites);
+    BUSTER_TEST(arguments, exact_relative_encoded.exact_attempts == 4);
+    BUSTER_TEST(arguments, exact_relative_encoded.exact_successes == 4);
+    BUSTER_TEST(arguments, exact_relative_encoded.exact_failures == 0);
+    BUSTER_TEST(arguments, exact_relative_encoded.exact_attempts ==
+                                   exact_relative_encoded.exact_successes + exact_relative_encoded.exact_failures);
 
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
     // target, which carries every feature the vocabulary needs, so
