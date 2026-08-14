@@ -175,7 +175,6 @@ BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDrive
     case COMPILER_DRIVER_LANGUAGE_LLVM_IR: return GPU_SOURCE_LANGUAGE_LLVM_IR;
     case COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY: return GPU_SOURCE_LANGUAGE_SPIRV_BINARY;
     case COMPILER_DRIVER_LANGUAGE_METAL_AIR: return GPU_SOURCE_LANGUAGE_METAL_AIR;
-    case COMPILER_DRIVER_LANGUAGE_BUSTER:
     case COMPILER_DRIVER_LANGUAGE_C:
     case COMPILER_DRIVER_LANGUAGE_COUNT: break;
     }
@@ -409,7 +408,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
             string_equal(argument, S8("-mcpu")) || string_equal(argument, S8("-mattr")) || string_equal(argument, S8("-masm")) ||
             string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")) ||
-            string_equal(argument, S8("-Xlinker")) || string_equal(argument, S8("-fmodule-root")) || string_equal(argument, S8("--module-root")) ||
+            string_equal(argument, S8("-Xlinker")) ||
             string_equal(argument, S8("--gpu-arch")) || string_equal(argument, S8("--gpu-stage")) || string_equal(argument, S8("--gpu-entry")) ||
             string_equal(argument, S8("--shader-model")) || string_equal(argument, S8("--metal-sdk")) || string_equal(argument, S8("--cuda-path")) ||
             string_equal(argument, S8("--rocm-path")) || string_equal(argument, S8("--gpu-clang")) || string_equal(argument, S8("--gpu-llc")) ||
@@ -535,10 +534,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             else if (string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")))
             {
                 invocation.sysroot = value;
-            }
-            else if (string_equal(argument, S8("-fmodule-root")) || string_equal(argument, S8("--module-root")))
-            {
-                invocation.module_root = value;
             }
             else if (string_equal(argument, S8("--gpu-arch")))
             {
@@ -900,20 +895,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                                            gpu_target_to_string(arena, invocation.gpu_target));
             return invocation;
         }
-        if (invocation.module_root.length)
-        {
-            compiler_driver_argument_error(arena, &invocation, S8("Buster module roots are not supported for GPU target: {S8}"), invocation.module_root);
-            return invocation;
-        }
         if (invocation.source_metrics_path.length)
         {
             compiler_driver_argument_error(arena, &invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation.source_metrics_path);
             return invocation;
         }
-        if (invocation.language == COMPILER_DRIVER_LANGUAGE_BUSTER || invocation.language == COMPILER_DRIVER_LANGUAGE_C)
+        if (invocation.language == COMPILER_DRIVER_LANGUAGE_C)
         {
             compiler_driver_argument_error(arena, &invocation, S8("native source language is incompatible with GPU target: {S8}"),
-                                           invocation.language == COMPILER_DRIVER_LANGUAGE_BUSTER ? S8("buster") : S8("c"));
+                                           S8("c"));
             return invocation;
         }
         if (invocation.library_path_count || invocation.library_count || invocation.framework_path_count || invocation.framework_count ||
