@@ -245,6 +245,53 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_boun
     {S8_INITIALIZER("SQRDMLSH V31.4S, V30.4S, V29.4S\n"), {0xdf, 0x8f, 0x9d, 0x6e}},
 };
 
+/* Scalar S/D AdvSIMD rows use the shared arrangement+width-selector grammar.
+ * These bytes are independent llvm-mc 22.1.8 encodings and cover both legal
+ * selectors for every row. */
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_scalar_selector_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:FRECPE_asisdmisc_R"), UINT64_C(0x374ec904f3062ae6), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:FRECPX_asisdmisc_R"), UINT64_C(0x8562c49063307536), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:FRSQRTE_asisdmisc_R"), UINT64_C(0xa8946616cf3a7d68), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SCVTF_asisdmisc_R"), UINT64_C(0x8fbf3a3a185ff928), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:UCVTF_asisdmisc_R"), UINT64_C(0x8a8e6b7c5213fb44), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_selector_cases[] = {
+    {S8_INITIALIZER("frecpe s0, s1\n"), {0x20, 0xd8, 0xa1, 0x5e}},
+    {S8_INITIALIZER("frecpe d0, d1\n"), {0x20, 0xd8, 0xe1, 0x5e}},
+    {S8_INITIALIZER("frecpx s0, s1\n"), {0x20, 0xf8, 0xa1, 0x5e}},
+    {S8_INITIALIZER("frecpx d0, d1\n"), {0x20, 0xf8, 0xe1, 0x5e}},
+    {S8_INITIALIZER("frsqrte s0, s1\n"), {0x20, 0xd8, 0xa1, 0x7e}},
+    {S8_INITIALIZER("frsqrte d0, d1\n"), {0x20, 0xd8, 0xe1, 0x7e}},
+    {S8_INITIALIZER("scvtf s0, s1\n"), {0x20, 0xd8, 0x21, 0x5e}},
+    {S8_INITIALIZER("scvtf d0, d1\n"), {0x20, 0xd8, 0x61, 0x5e}},
+    {S8_INITIALIZER("ucvtf s0, s1\n"), {0x20, 0xd8, 0x21, 0x7e}},
+    {S8_INITIALIZER("ucvtf d0, d1\n"), {0x20, 0xd8, 0x61, 0x7e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_selector_boundary_cases[] = {
+    {S8_INITIALIZER("FRECPE S31, S30\n"), {0xdf, 0xdb, 0xa1, 0x5e}},
+    {S8_INITIALIZER("FRECPE D31, D30\n"), {0xdf, 0xdb, 0xe1, 0x5e}},
+    {S8_INITIALIZER("FRECPX S31, S30\n"), {0xdf, 0xfb, 0xa1, 0x5e}},
+    {S8_INITIALIZER("FRECPX D31, D30\n"), {0xdf, 0xfb, 0xe1, 0x5e}},
+    {S8_INITIALIZER("FRSQRTE S31, S30\n"), {0xdf, 0xdb, 0xa1, 0x7e}},
+    {S8_INITIALIZER("FRSQRTE D31, D30\n"), {0xdf, 0xdb, 0xe1, 0x7e}},
+    {S8_INITIALIZER("SCVTF S31, S30\n"), {0xdf, 0xdb, 0x21, 0x5e}},
+    {S8_INITIALIZER("SCVTF D31, D30\n"), {0xdf, 0xdb, 0x61, 0x5e}},
+    {S8_INITIALIZER("UCVTF S31, S30\n"), {0xdf, 0xdb, 0x21, 0x7e}},
+    {S8_INITIALIZER("UCVTF D31, D30\n"), {0xdf, 0xdb, 0x61, 0x7e}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cases[] = {
     {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
     {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
@@ -1703,12 +1750,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 351);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 351);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 39);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 226);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 356);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 356);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 34);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 231);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 37);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 32);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -1895,6 +1942,57 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         {
             BUSTER_TEST(arguments, found_index == rdm_first_spelling_index + expected_index);
         }
+    }
+
+    /* Keep the five scalar S/D transform rows tied to their canonical IDs.
+     * The lookup census below independently proves that each same-mnemonic
+     * candidate group remains contiguous after insertion. */
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_selector_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_scalar_selector_spellings[expected_index];
+        u32 found_count = 0;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+    }
+    static String8 const scalar_selector_mnemonics[] = {
+        S8_INITIALIZER("frecpe"), S8_INITIALIZER("frecpx"), S8_INITIALIZER("frsqrte"), S8_INITIALIZER("scvtf"),
+        S8_INITIALIZER("ucvtf"),
+    };
+    static u32 const scalar_selector_group_counts[] = {4, 2, 4, 4, 4};
+    for (u32 mnemonic_index = 0; mnemonic_index < BUSTER_ARRAY_LENGTH(scalar_selector_mnemonics); mnemonic_index += 1)
+    {
+        u32 group_count = 0;
+        u32 last_index = UINT32_MAX;
+        bool contiguous = true;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (!assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) ||
+                !string_equal(spelling.mnemonic, scalar_selector_mnemonics[mnemonic_index]))
+            {
+                continue;
+            }
+            if (last_index != UINT32_MAX && spelling_index != last_index + 1)
+            {
+                contiguous = false;
+            }
+            last_index = spelling_index;
+            group_count += 1;
+        }
+        BUSTER_TEST(arguments, contiguous && group_count == scalar_selector_group_counts[mnemonic_index]);
     }
 
     Target x86_target = {
@@ -5269,6 +5367,56 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         AssemblyEncodeResult malformed = assembly_encode(
             arguments->arena, malformed_aarch64_rdm[malformed_index], (AssemblyEncodeOptions){.target = aarch64_rdm_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_selector_cases) == 10);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_selector_boundary_cases) == 10);
+    for (u32 scalar_selector_index = 0;
+         scalar_selector_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_selector_cases);
+         scalar_selector_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase scalar_selector_case =
+            assembly_a64_direct_simd_scalar_selector_cases[scalar_selector_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, scalar_selector_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, scalar_selector_case.bytes, 4));
+        AssemblyEncodeResult without_neon = assembly_encode(
+            arguments->arena, scalar_selector_case.source, (AssemblyEncodeOptions){.target = aarch64_fp_only});
+        BUSTER_TEST(arguments, without_neon.diagnostic_count == 1 && without_neon.bytes.length == 0 &&
+                                   without_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    for (u32 scalar_selector_index = 0;
+         scalar_selector_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_selector_boundary_cases);
+         scalar_selector_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase scalar_selector_case =
+            assembly_a64_direct_simd_scalar_selector_boundary_cases[scalar_selector_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, scalar_selector_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, scalar_selector_case.bytes, 4));
+    }
+    static String8 const malformed_aarch64_scalar_selector[] = {
+        S8_INITIALIZER("frecpe s0, d1\n"),
+        S8_INITIALIZER("frecpx d0, s1\n"),
+        S8_INITIALIZER("frsqrte b0, b1\n"),
+        S8_INITIALIZER("scvtf q0, q1\n"),
+        S8_INITIALIZER("ucvtf s0, s1, s2\n"),
+        S8_INITIALIZER("frecpe s32, s1\n"),
+        S8_INITIALIZER("frecpx s0, s32\n"),
+        S8_INITIALIZER("frsqrte s0\n"),
+        S8_INITIALIZER("scvtf s0, s1[0]\n"),
+        S8_INITIALIZER("ucvtf v0.2s, v1.2d\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_scalar_selector);
+         malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_scalar_selector[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
                                    malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
