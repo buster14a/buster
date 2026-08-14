@@ -3359,6 +3359,67 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // MOVSXD uses a `norexw_prefix` XED row, but a 64-bit GPRz
+        // destination still requires REX.W.  Keep the generic checked path
+        // and its prepared exact projection byte-identical.
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_mem_base(6, 32, 0),
+        };
+        BusterX86MetadataFormKey key = {0};
+        bool key_ready = buster_x86_metadata_form_key(9740, &key);
+        u8 checked_bytes[16] = {0};
+        u8 exact_bytes[16] = {0};
+        BusterX86MetadataEmitResult checked = x86_64_metadata_test_emit_form(
+            S8("MOVSXD"), 9740, operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features), checked_bytes, BUSTER_ARRAY_LENGTH(checked_bytes), 0, 0);
+        BusterX86MetadataEmitResult exact = key_ready
+                                                ? x86_64_metadata_test_emit_named_exact(
+                                                      key, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                      (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                      BUSTER_ARRAY_LENGTH(wildcard_features), exact_bytes,
+                                                      BUSTER_ARRAY_LENGTH(exact_bytes), 0, 0)
+                                                : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+        static u8 const expected[] = {0x48, 0x63, 0x06};
+        bool movsxd_rexw = key_ready && checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                           exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && checked.byte_count == BUSTER_ARRAY_LENGTH(expected) &&
+                           exact.byte_count == checked.byte_count && memcmp(checked_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0 &&
+                           memcmp(exact_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, movsxd_rexw);
+    }
+
+    {
+        // Source selection must skip XED's undocumented duplicate SHL /6
+        // row.  The architectural memory form uses ModRM /4 and therefore
+        // emits 48 d1 64 24 08 for `shlq $1, 8(%rsp)`.
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_mem_base(4, 64, 8),
+            x86_64_metadata_test_physical_imm(1, 8),
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalQuery source_query = x86_64_metadata_test_physical_query(
+            S8("shl"), operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        source_query.source_semantics = true;
+        BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(source_query);
+        BusterX86MetadataForm selected_form = {0};
+        bool selected_form_ready = selected.form_id != UINT32_MAX && buster_x86_metadata_form(selected.form_id, &selected_form);
+        u8 output[16] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = source_query,
+            .output = output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(output),
+        });
+        static u8 const expected[] = {0x48, 0xd1, 0x64, 0x24, 0x08};
+        bool canonical_shl = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && selected_form_ready &&
+                             !x86_64_metadata_test_string_contains(selected_form.attributes, S8("UNDOCUMENTED")) &&
+                             emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == BUSTER_ARRAY_LENGTH(expected) &&
+                             memcmp(output, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, canonical_shl);
+    }
+
+    {
         // The sparse plan table is populated by the serial prewarm contract;
         // each representative migrated shape must remain byte/result
         // equivalent to the checked exact query.

@@ -5160,13 +5160,18 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                        pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER && pattern.has_ubit &&
                                        pattern.ubit_value == 1 && pattern.immediate_width == 4));
     bool rex_w = pattern.w != 0;
+    // MOVSXD's XED row carries `norexw_prefix` even though its GPRz
+    // destination still requires REX.W when selected at 64-bit width.  The
+    // destination register is the semantic width authority for this one
+    // legacy row; retain the no-W spelling for a 32-bit destination.
+    bool movsxd_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOVSXD"));
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
         if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
-            if (!pattern.has_w && !apx_evex_fixed_width_no_w) rex_w = true;
+            if ((!pattern.has_w || movsxd_form) && !apx_evex_fixed_width_no_w) rex_w = true;
         // Variable-width scalar forms derive REX.W from a 64-bit data
         // register.  A folded memory source carries that same semantic width
         // in the physical operand rather than in a register binding; without
@@ -6778,12 +6783,19 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
     BusterX86MetadataString first_required_feature = {0};
     BusterX86MetadataForm first_failure_form = {0};
     bool first_failure_form_recorded = false;
+    bool selected_implicit_one = false;
     for (u32 position = 0; position < candidates.count; position += 1)
     {
         u32 form_id = 0;
         if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
         BusterX86MetadataForm form = {0};
         if (!buster_x86_metadata_form(form_id, &form)) continue;
+        // XED retains undocumented duplicate encodings (for example SHL's
+        // ModRM /6 alias beside the architectural /4 form).  The checked
+        // selector is the canonical source of instruction bytes, so it must
+        // never expose those rows; explicit exact-form identities remain
+        // available for provenance and machine plans.
+        if (buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) continue;
         BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form_id);
         BusterX86MetadataResolveQuery filter_query = {
             .include_privileged = query.include_privileged,
@@ -6886,12 +6898,16 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             continue;
         }
         result.candidate_count += 1;
-        if (result.form_id == UINT32_MAX || scratch.byte_count < result.selected_byte_count ||
-            (scratch.byte_count == result.selected_byte_count && form_id < result.form_id))
+        BusterX86MetadataPatternSemantics candidate_pattern = {0};
+        bool candidate_implicit_one = buster_x86_metadata_emit_parse_pattern(form, &candidate_pattern) && candidate_pattern.has_implicit_one;
+        bool prefer_implicit_one = scratch.byte_count == result.selected_byte_count && candidate_implicit_one && !selected_implicit_one;
+        if (result.form_id == UINT32_MAX || scratch.byte_count < result.selected_byte_count || prefer_implicit_one ||
+            (scratch.byte_count == result.selected_byte_count && candidate_implicit_one == selected_implicit_one && form_id < result.form_id))
         {
             result.form_id = form_id;
             result.stable_hash = form.stable_hash;
             result.selected_byte_count = scratch.byte_count;
+            selected_implicit_one = candidate_implicit_one;
             result.selected_memory_width = 0;
             result.selected_memory_operand = UINT8_MAX;
             if (inferred_memory_width)
@@ -9457,7 +9473,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_input_allows_apx(BusterX86M
     // caller-authorized feature bypass.  Keep this check canonical and
     // case-insensitive so APX gating is identical to the generated ISA
     // feature matcher.
-    return buster_x86_metadata_feature_input_contains_literal(input, S8("apx"));
+    // Public callers may name the generated APX_F family directly (the
+    // spelling used by x86_64 fixed-operation helpers), while the feature
+    // matcher itself uses the canonical `apx` capability token.  Treat the
+    // family alias as the same APX authorization for legacy REX2 promotion;
+    // APX_F_N3 rows still enforce their secondary conjunction in the normal
+    // form-feature matcher.
+    return buster_x86_metadata_feature_input_contains_literal(input, S8("apx")) ||
+           buster_x86_metadata_feature_input_contains_literal(input, S8("apx_f"));
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_input_contains_avx512_width(u32 offset,
