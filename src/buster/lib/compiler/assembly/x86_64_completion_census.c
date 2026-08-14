@@ -169,6 +169,85 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_mask_decorator(BusterX86MetadataF
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_is_mask_register(BusterX86MetadataPhysicalOperand operand)
+{
+    return operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+           operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
+}
+
+BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_typed_decorator(BusterX86MetadataPhysicalAttributes attributes)
+{
+    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST) return S8("rn-sae");
+    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_DOWN) return S8("rd-sae");
+    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_UP) return S8("ru-sae");
+    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_ZERO) return S8("rz-sae");
+    return S8("sae");
+}
+
+// The public decorator bridge is intentionally narrower than the metadata
+// decorator bit.  A MASKmskw topology proves that a mask slot is part of the
+// form; the memory path then accepts only ordinary 64-bit memory, while SAE
+// and rounding are limited to register-only vector forms.  This keeps legacy,
+// VSIB, segmented, APX, and alternate-address rows on their existing census
+// paths.
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_decorator_shape(BusterX86MetadataForm form,
+                                                                      BusterX86MetadataPhysicalQuery query)
+{
+    bool mask_slot = false;
+    bool has_memory = false;
+    u32 memory_count = 0;
+    u32 ordinary_memory_count = 0;
+    u32 vector_register_count = 0;
+    u32 metadata_index = 0;
+    u32 physical_index = 0;
+    u32 visible_index = 0;
+    BusterX86MetadataOperand metadata = {0};
+    BusterX86MetadataPhysicalOperand operand = {0};
+    if (form.encoder_family != BUSTER_X86_METADATA_ENCODER_EVEX || form.apx_flags || form.amx_flags ||
+        query.address_size != 64 || query.attributes.apx_flags || query.attributes.amx_flags ||
+        query.attributes.has_dfv || query.attributes.no_flags ||
+        query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE)
+        return false;
+    for (; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        metadata = (BusterX86MetadataOperand){0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        if (buster_x86_completion_mask_decorator(form, visible_index))
+        {
+            mask_slot = true;
+            visible_index += 1;
+            if (physical_index >= query.operand_count || !buster_x86_completion_is_mask_register(query.operands[physical_index]))
+                return false;
+            physical_index += 1;
+            continue;
+        }
+        visible_index += 1;
+        if (physical_index >= query.operand_count) return false;
+        operand = query.operands[physical_index++];
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            has_memory = true;
+            memory_count += 1;
+            if (!operand.memory.vsib && !operand.memory.has_segment &&
+                (!operand.memory.address_size || operand.memory.address_size == 64))
+                ordinary_memory_count += 1;
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                 (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+                  operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+                  operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM))
+            vector_register_count += 1;
+    }
+    if (!mask_slot || physical_index != query.operand_count) return false;
+    if (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST)
+        return memory_count == 1 && ordinary_memory_count == 1 && !query.attributes.sae &&
+               query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
+    if (query.attributes.sae || query.attributes.rounding_mode)
+        return !has_memory && vector_register_count >= 2;
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_apx_evex_memory_witness(BusterX86MetadataForm form)
 {
     return form.id == 5584 &&
@@ -347,6 +426,19 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
         {
             operands[physical_index].memory.has_displacement = true;
             operands[physical_index].memory.displacement = 1;
+        }
+        else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                 buster_x86_completion_typed_decorator_shape(form, query) &&
+                 (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) &&
+                 !operands[physical_index].memory.vsib && !operands[physical_index].memory.has_segment &&
+                 (!operands[physical_index].memory.address_size || operands[physical_index].memory.address_size == 64))
+        {
+            // Public broadcast syntax does not preserve an explicit zero
+            // displacement.  Normalize only this proven typed-decorator
+            // cohort; ordinary memory rows retain their established witness
+            // and byte classification.
+            operands[physical_index].memory.has_displacement = false;
+            operands[physical_index].memory.displacement = 0;
         }
         else if (buster_x86_completion_apx_evex_memory_witness(form) &&
                  operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
@@ -534,6 +626,97 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_mnemonic(BusterX86MetadataForm
     return buster_x86_metadata_string_span(form.iclass);
 }
 
+BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_typed_source(
+    Arena* arena, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
+    BusterX86CompletionCensusSourceReason* reason)
+{
+    String8 source = buster_x86_completion_mnemonic(form);
+    String8 spelling = {0};
+    String8 decorator = buster_x86_completion_typed_decorator(query.attributes);
+    bool wrote = false;
+    bool source_has_mask = query.attributes.has_mask_register;
+    u8 source_mask = query.attributes.mask_register;
+    u32 metadata_index = 0;
+    u32 physical_index = 0;
+    u32 visible_index = 0;
+    BusterX86MetadataPhysicalOperand operand = {0};
+    if (!source.length) return (String8){0};
+    for (; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        if (!metadata.visible) continue;
+        bool mask_decorator = buster_x86_completion_mask_decorator(form, visible_index++);
+        if (physical_index >= query.operand_count)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        operand = query.operands[physical_index++];
+        if (mask_decorator)
+        {
+            if (!buster_x86_completion_is_mask_register(operand))
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
+                return (String8){0};
+            }
+            if (!source_has_mask && operand.reg.index != 0)
+            {
+                source_has_mask = true;
+                source_mask = (u8)operand.reg.index;
+            }
+            continue;
+        }
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+            spelling = buster_x86_completion_register(arena, operand.reg);
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            spelling = buster_x86_completion_memory_intel(arena, operand, query.attributes, reason);
+        else spelling = buster_x86_completion_immediate(arena, operand);
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE ||
+            operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
+            spelling = operand.has_symbol ? buster_x86_completion_symbol(arena, operand.symbol, operand.addend)
+                                          : buster_x86_completion_immediate(arena, operand);
+        if (!spelling.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        source = wrote ? string_format(arena, S8("{S8}, {S8}"), source, spelling)
+                       : string_format(arena, S8("{S8} {S8}"), source, spelling);
+        if (!wrote && source_has_mask && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+        {
+            source = string_format(arena, S8("{S8} {{k{u8}}}"), source, source_mask);
+            if (query.attributes.zeroing) source = string_format(arena, S8("{S8} {{z}}"), source);
+        }
+        wrote = true;
+    }
+    if (physical_index != query.operand_count)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+        return (String8){0};
+    }
+    if (query.attributes.sae || query.attributes.rounding_mode)
+    {
+        if (query.operand_count && query.operands[query.operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+        {
+            String8 immediate = buster_x86_completion_immediate(arena, query.operands[query.operand_count - 1]);
+            u32 prefix_length = immediate.length <= source.length ? (u32)(source.length - immediate.length) : 0;
+            while (prefix_length && source.pointer[prefix_length - 1] == ' ') prefix_length -= 1;
+            if (prefix_length && source.pointer[prefix_length - 1] == ',') prefix_length -= 1;
+            while (prefix_length && source.pointer[prefix_length - 1] == ' ') prefix_length -= 1;
+            source = string_format(arena, S8("{S8}, {{{S8}}}, {S8}"), string_slice(source, 0, prefix_length), decorator,
+                                   immediate);
+        }
+        else source = string_format(arena, S8("{S8}, {{{S8}}}"), source, decorator);
+    }
+    return string_format(arena, S8("{S8}\n"), source);
+}
+
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, BusterX86MetadataForm form,
                                                                BusterX86MetadataPhysicalQuery query,
                                                                BusterX86CompletionCensusSourceReason* reason)
@@ -549,6 +732,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool mask_decorator = false;
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
+    if (query.attributes.decorator_flags && buster_x86_completion_typed_decorator_shape(form, query))
+        return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);
     if (!source.length)
     {
@@ -682,6 +867,113 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_register(Arena* arena, Bus
     return value.length ? string_format(arena, S8("%{S8}"), value) : (String8){0};
 }
 
+BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_typed_source(
+    Arena* arena, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
+    BusterX86CompletionCensusSourceReason* reason)
+{
+    BusterX86MetadataPhysicalOperand source_operands[16] = {0};
+    BusterX86MetadataPhysicalOperand operand = {0};
+    String8 source = buster_x86_completion_mnemonic(form);
+    String8 spelling = {0};
+    String8 decorator = buster_x86_completion_typed_decorator(query.attributes);
+    bool source_has_mask = query.attributes.has_mask_register;
+    bool has_immediate = false;
+    u8 source_mask = query.attributes.mask_register;
+    u32 source_operand_count = 0;
+    u32 metadata_index = 0;
+    u32 physical_index = 0;
+    u32 visible_index = 0;
+    if (!source.length) return (String8){0};
+    for (; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        if (!metadata.visible) continue;
+        bool mask_decorator = buster_x86_completion_mask_decorator(form, visible_index++);
+        if (physical_index >= query.operand_count)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        operand = query.operands[physical_index++];
+        if (mask_decorator)
+        {
+            if (!buster_x86_completion_is_mask_register(operand))
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
+                return (String8){0};
+            }
+            if (!source_has_mask && operand.reg.index != 0)
+            {
+                source_has_mask = true;
+                source_mask = (u8)operand.reg.index;
+            }
+            continue;
+        }
+        if (source_operand_count >= BUSTER_ARRAY_LENGTH(source_operands))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        source_operands[source_operand_count++] = operand;
+    }
+    if (physical_index != query.operand_count)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+        return (String8){0};
+    }
+    for (u32 index = 0; index < source_operand_count; index += 1)
+    {
+        has_immediate |= source_operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE;
+    }
+    if (!has_immediate && (query.attributes.sae || query.attributes.rounding_mode))
+        source = string_format(arena, S8("{S8} {{{S8}}},"), source, decorator);
+    for (u32 reverse = source_operand_count; reverse; reverse -= 1)
+    {
+        u32 index = reverse - 1;
+        operand = source_operands[index];
+        spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
+                       ? buster_x86_completion_att_register(arena, operand.reg)
+                       : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
+                             ? buster_x86_completion_memory_att(arena, operand, reason)
+                             : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE
+                                   ? string_format(arena, S8("${S8}"), buster_x86_completion_immediate(arena, operand))
+                                   : operand.has_symbol ? string_format(arena, S8("${S8}"), buster_x86_completion_symbol(arena, operand.symbol, operand.addend))
+                                                         : string_format(arena, S8("$0"));
+        if (!spelling.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST))
+        {
+            if (!query.attributes.broadcast_elements)
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
+                return (String8){0};
+            }
+            spelling = string_format(arena, S8("{S8}{{1to{u8}}}"), spelling, query.attributes.broadcast_elements);
+        }
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
+            (query.attributes.sae || query.attributes.rounding_mode))
+            spelling = string_format(arena, S8("{S8}, {{{S8}}}"), spelling, decorator);
+        if (index == 0 && source_has_mask && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+        {
+            spelling = string_format(arena, S8("{S8}{{%k{u8}}}"), spelling, source_mask);
+            if (query.attributes.zeroing) spelling = string_format(arena, S8("{S8}{{z}}"), spelling);
+        }
+        source = reverse == source_operand_count ? string_format(arena, S8("{S8} {S8}"), source, spelling)
+                                                 : string_format(arena, S8("{S8}, {S8}"), source, spelling);
+    }
+    return string_format(arena, S8("{S8}\n"), source);
+}
+
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, BusterX86MetadataForm form,
                                                              BusterX86MetadataPhysicalQuery query,
                                                              BusterX86CompletionCensusSourceReason* reason)
@@ -701,6 +993,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
     // cohort.  Decorated EVEX, APX role controls, and hidden operands remain
     // explicitly unresolved until their dialect grammar is generalized.
     bool apx_amx_witness = buster_x86_completion_apx_amx_memory_witness(form);
+    if (query.attributes.decorator_flags && buster_x86_completion_typed_decorator_shape(form, query))
+        return buster_x86_completion_att_typed_source(arena, form, query, reason);
     if (query.attributes.decorator_flags)
     {
         buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
@@ -1262,6 +1556,71 @@ bool buster_x86_completion_census_test_query(u32 form_id, BusterX86MetadataPhysi
         return false;
     buster_x86_completion_normalize_query(form, *query, operands);
     query->operands = operands;
+    return true;
+}
+
+bool buster_x86_completion_census_test_decorator_shape(u32 form_id, bool standalone_sae)
+{
+    BusterX86MetadataForm form = {0};
+    BusterX86MetadataPhysicalQuery query = {0};
+    BusterX86MetadataPhysicalOperand operands[16] = {0};
+    String8 features[1] = {0};
+    char8 mnemonic_buffer[128] = {0};
+    u32 memory_count = 0;
+    u32 vector_register_count = 0;
+    bool visible_mask_slot = false;
+    u32 visible_index = 0;
+    if (!buster_x86_metadata_form(form_id, &form) ||
+        !buster_x86_completion_census_test_query(form_id, &query, operands, features, mnemonic_buffer))
+        return false;
+    if (!standalone_sae) return buster_x86_completion_typed_decorator_shape(form, query);
+    u16 mode_bits = form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 | BUSTER_X86_METADATA_MODE_64);
+    // The standalone cohort includes fixed-round/BCRC rows whose canonical
+    // physical query intentionally carries no explicit SAE token.  Use the
+    // form's typed capability as the semantic discriminator, while retaining
+    // the strict query checks for any decorators that are actually present.
+    if (form.encoder_family != BUSTER_X86_METADATA_ENCODER_EVEX || form.apx_flags || form.amx_flags ||
+        (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) || (mode_bits && !(mode_bits & BUSTER_X86_METADATA_MODE_64)) ||
+        query.address_size != 64 || !(form.decorator_flags & (BUSTER_X86_METADATA_DECORATOR_SAE |
+                                                                BUSTER_X86_METADATA_DECORATOR_ROUNDING)) ||
+        (query.attributes.decorator_flags & (u16)~form.decorator_flags) ||
+        (query.attributes.decorator_flags & (BUSTER_X86_METADATA_DECORATOR_MASK |
+                                              BUSTER_X86_METADATA_DECORATOR_ZEROING |
+                                              BUSTER_X86_METADATA_DECORATOR_BROADCAST)))
+        return false;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        visible_mask_slot |= buster_x86_completion_mask_decorator(form, visible_index);
+        visible_index += 1;
+    }
+    // Standalone SAE is a maskless fixed-round pattern.  Require both sides
+    // of the semantic discriminator: a visible MASKmskw slot is never part of
+    // this cohort, and the parsed pattern must carry the fixed-round SAE
+    // control rather than merely advertising a broad decorator capability.
+    if (visible_mask_slot || !buster_x86_metadata_form_standalone_sae_capable(form)) return false;
+    for (u32 operand_index = 0; operand_index < query.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = query.operands[operand_index];
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            memory_count += 1;
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                 (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+                  operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+                  operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM))
+            vector_register_count += 1;
+    }
+    if (memory_count || query.operand_count != 2 || vector_register_count == 0) return false;
+    for (u32 operand_index = 0; operand_index < query.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = query.operands[operand_index];
+        if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+            (operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+             operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR))
+            return false;
+    }
     return true;
 }
 

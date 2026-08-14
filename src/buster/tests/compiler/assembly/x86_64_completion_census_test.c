@@ -5,6 +5,7 @@
 #include <buster/lib/target.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
+#include <buster/tests/compiler/link/link_test.h>
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
 {
@@ -115,38 +116,362 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         intel_reason_non_none += source.intel_source_reason_counts[class_index];
         att_reason_non_none += source.att_source_reason_counts[class_index];
     }
+
+    // The typed source-builder and standalone-SAE inventories are derived
+    // from metadata topology, then hashed over their sorted dense IDs.  This
+    // keeps the exhaustive cohort contract independent of mnemonic spelling
+    // or a hand-maintained partial witness list.
+    u8 typed_inventory_text[1410 * 12] = {0};
+    u8 standalone_inventory_text[32 * 12] = {0};
+    u8 typed_inventory_hash_text[1410 * 32] = {0};
+    u8 standalone_inventory_hash_text[32 * 32] = {0};
+    u8 avx10_family_hash_text[130 * 32] = {0};
+    u32 typed_inventory_length = 0;
+    u32 standalone_inventory_length = 0;
+    u32 typed_inventory_hash_length = 0;
+    u32 standalone_inventory_hash_length = 0;
+    u32 avx10_family_hash_length = 0;
+    u32 typed_inventory_count = 0;
+    u32 standalone_inventory_count = 0;
+    u32 avx10_family_count = 0;
+    u32 avx10_family_counts[4] = {0};
+    u32 typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT][BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT] = {0};
+    for (u32 inventory_form_id = 0; inventory_form_id < form_count; inventory_form_id += 1)
+    {
+        if (buster_x86_completion_census_test_decorator_shape(inventory_form_id, false))
+        {
+            BusterX86MetadataForm inventory_form = {0};
+            BusterX86MetadataFormKey inventory_key = {0};
+            String8 id_text = string_format(arguments->arena, S8("{u32}\n"), inventory_form_id);
+            String8 hash_text = {0};
+            BUSTER_TEST(arguments, buster_x86_metadata_form(inventory_form_id, &inventory_form) &&
+                                     buster_x86_metadata_form_key(inventory_form_id, &inventory_key));
+            hash_text = string_format(arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"), inventory_form_id,
+                                      inventory_key.stable_hash);
+            BUSTER_TEST(arguments, typed_inventory_length + id_text.length <= sizeof(typed_inventory_text));
+            BUSTER_TEST(arguments, typed_inventory_hash_length + hash_text.length <= sizeof(typed_inventory_hash_text));
+            memcpy(typed_inventory_text + typed_inventory_length, id_text.pointer, id_text.length);
+            typed_inventory_length += (u32)id_text.length;
+            memcpy(typed_inventory_hash_text + typed_inventory_hash_length, hash_text.pointer, hash_text.length);
+            typed_inventory_hash_length += (u32)hash_text.length;
+            typed_inventory_count += 1;
+            typed_pair_matrix[records[inventory_form_id].intel_class][records[inventory_form_id].att_class] += 1;
+
+            // The AVX10.2 feature-map cohort is a semantic intersection of
+            // the typed topology and the generated ISA family.  Classify
+            // DS before SAT_CVT because the former has the latter as a text
+            // prefix; no dense form identity participates in this rule.
+            String8 isa_set = buster_x86_metadata_string_span(inventory_form.isa_set);
+            u32 avx10_family = UINT32_MAX;
+            if (string_starts_with_sequence(isa_set, S8("AVX512_FP8_CONVERT_"))) avx10_family = 0;
+            else if (string_starts_with_sequence(isa_set, S8("AVX512_MINMAX_"))) avx10_family = 1;
+            else if (string_starts_with_sequence(isa_set, S8("AVX512_SAT_CVT_DS_"))) avx10_family = 3;
+            else if (string_starts_with_sequence(isa_set, S8("AVX512_SAT_CVT_"))) avx10_family = 2;
+            if (avx10_family != UINT32_MAX)
+            {
+                String8 family_hash_text = string_format(
+                    arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"), inventory_form_id,
+                    inventory_key.stable_hash);
+                BUSTER_TEST(arguments, avx10_family_hash_length + family_hash_text.length <= sizeof(avx10_family_hash_text));
+                memcpy(avx10_family_hash_text + avx10_family_hash_length, family_hash_text.pointer, family_hash_text.length);
+                avx10_family_hash_length += (u32)family_hash_text.length;
+                avx10_family_count += 1;
+                avx10_family_counts[avx10_family] += 1;
+            }
+        }
+        if (buster_x86_completion_census_test_decorator_shape(inventory_form_id, true))
+        {
+            BusterX86MetadataForm inventory_form = {0};
+            BusterX86MetadataFormKey inventory_key = {0};
+            String8 id_text = string_format(arguments->arena, S8("{u32}\n"), inventory_form_id);
+            String8 hash_text = {0};
+            BUSTER_TEST(arguments, buster_x86_metadata_form(inventory_form_id, &inventory_form) &&
+                                     buster_x86_metadata_form_key(inventory_form_id, &inventory_key));
+            hash_text = string_format(arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"), inventory_form_id,
+                                      inventory_key.stable_hash);
+            BUSTER_TEST(arguments, standalone_inventory_length + id_text.length <= sizeof(standalone_inventory_text));
+            BUSTER_TEST(arguments, standalone_inventory_hash_length + hash_text.length <= sizeof(standalone_inventory_hash_text));
+            memcpy(standalone_inventory_text + standalone_inventory_length, id_text.pointer, id_text.length);
+            standalone_inventory_length += (u32)id_text.length;
+            memcpy(standalone_inventory_hash_text + standalone_inventory_hash_length, hash_text.pointer, hash_text.length);
+            standalone_inventory_hash_length += (u32)hash_text.length;
+            standalone_inventory_count += 1;
+        }
+    }
+    u8 typed_inventory_digest[32] = {0};
+    u8 standalone_inventory_digest[32] = {0};
+    u8 typed_inventory_hash_digest[32] = {0};
+    u8 standalone_inventory_hash_digest[32] = {0};
+    u8 avx10_family_digest[32] = {0};
+    link_sha256(arguments->arena, typed_inventory_text, typed_inventory_length, typed_inventory_digest);
+    link_sha256(arguments->arena, standalone_inventory_text, standalone_inventory_length, standalone_inventory_digest);
+    link_sha256(arguments->arena, typed_inventory_hash_text, typed_inventory_hash_length, typed_inventory_hash_digest);
+    link_sha256(arguments->arena, standalone_inventory_hash_text, standalone_inventory_hash_length, standalone_inventory_hash_digest);
+    link_sha256(arguments->arena, avx10_family_hash_text, avx10_family_hash_length, avx10_family_digest);
+    static u8 const expected_typed_inventory_digest[32] = {
+        0x4c, 0x89, 0xd4, 0x39, 0x9e, 0xfa, 0x5b, 0xc6, 0x37, 0x1b, 0x97, 0x9e, 0x3c, 0x6e, 0x07, 0x58,
+        0x73, 0xf9, 0xd9, 0x4c, 0x2d, 0xe6, 0x4b, 0x37, 0xd4, 0x51, 0x4b, 0xef, 0xf1, 0xe9, 0x5c, 0x04,
+    };
+    static u8 const expected_standalone_inventory_digest[32] = {
+        0x15, 0x3b, 0xe7, 0x5e, 0x44, 0xdf, 0x30, 0x41, 0xe0, 0x4e, 0x2f, 0xe7, 0xa6, 0x86, 0xc0, 0xbf,
+        0xfd, 0x53, 0x3c, 0x94, 0x0e, 0x63, 0xbe, 0x8c, 0xbb, 0x9e, 0x8a, 0x4b, 0x26, 0x8e, 0xf8, 0xbc,
+    };
+    static u8 const expected_typed_inventory_hash_digest[32] = {
+        0xb2, 0xe5, 0x9b, 0x71, 0xed, 0xa5, 0x19, 0x8c, 0xc2, 0x1d, 0xbb, 0xdb, 0xcd, 0xed, 0xa3, 0xd5,
+        0xfb, 0x03, 0xa7, 0xa3, 0x02, 0x49, 0xc6, 0xfd, 0x25, 0xd8, 0xc4, 0x32, 0x54, 0xcf, 0x86, 0xd5,
+    };
+    static u8 const expected_standalone_inventory_hash_digest[32] = {
+        0x15, 0x1f, 0x9e, 0xda, 0x2f, 0xfa, 0xb2, 0x20, 0x0e, 0xf6, 0xd4, 0x87, 0x7d, 0xe1, 0x82, 0x9d,
+        0x86, 0x27, 0x4e, 0x47, 0x5f, 0x34, 0x4d, 0xfe, 0x06, 0x7d, 0xc5, 0xd0, 0xca, 0x7d, 0x34, 0x1e,
+    };
+    static u8 const expected_avx10_family_digest[32] = {
+        0xd3, 0x0e, 0x72, 0x2b, 0xa3, 0xfc, 0xec, 0x63, 0xa7, 0x49, 0xf9, 0x87, 0x36, 0x97, 0x9b, 0xb5,
+        0x79, 0xfd, 0x4e, 0x8c, 0x83, 0x44, 0xa9, 0xfe, 0x98, 0x21, 0x19, 0x98, 0x2f, 0x3c, 0xca, 0xf1,
+    };
+    BUSTER_TEST(arguments, typed_inventory_count == 1410);
+    BUSTER_TEST(arguments, standalone_inventory_count == 32);
+    BUSTER_TEST(arguments, memcmp(typed_inventory_digest, expected_typed_inventory_digest, sizeof(typed_inventory_digest)) == 0);
+    BUSTER_TEST(arguments, memcmp(standalone_inventory_digest, expected_standalone_inventory_digest,
+                                  sizeof(standalone_inventory_digest)) == 0);
+    BUSTER_TEST(arguments, memcmp(typed_inventory_hash_digest, expected_typed_inventory_hash_digest,
+                                  sizeof(typed_inventory_hash_digest)) == 0);
+    BUSTER_TEST(arguments, memcmp(standalone_inventory_hash_digest, expected_standalone_inventory_hash_digest,
+                                  sizeof(standalone_inventory_hash_digest)) == 0);
+    BUSTER_TEST(arguments, avx10_family_count == 130 && avx10_family_counts[0] == 36 && avx10_family_counts[1] == 18 &&
+                             avx10_family_counts[2] == 44 && avx10_family_counts[3] == 32);
+    BUSTER_TEST(arguments, memcmp(avx10_family_digest, expected_avx10_family_digest, sizeof(avx10_family_digest)) == 0);
+
+    // Exercise the canonical metadata feature gate directly for every row in
+    // the family cohort.  All four families require AVX10.2; only an ISA
+    // suffix of *_512 additionally requires AVX10-512.
+    String8 avx10_2_features[] = {S8("avx10.2")};
+    String8 avx10_2_512_features[] = {S8("avx10.2"), S8("avx10-512")};
+    String8 avx10_512_features[] = {S8("avx10-512")};
+    u32 avx10_feature_checked_count = 0;
+    for (u32 avx10_form_id = 0; avx10_form_id < form_count; avx10_form_id += 1)
+    {
+        if (!buster_x86_completion_census_test_decorator_shape(avx10_form_id, false)) continue;
+        BusterX86MetadataForm avx10_form = {0};
+        BUSTER_TEST(arguments, buster_x86_metadata_form(avx10_form_id, &avx10_form));
+        String8 isa_set = buster_x86_metadata_string_span(avx10_form.isa_set);
+        bool family_match = string_starts_with_sequence(isa_set, S8("AVX512_FP8_CONVERT_")) ||
+                            string_starts_with_sequence(isa_set, S8("AVX512_MINMAX_")) ||
+                            string_starts_with_sequence(isa_set, S8("AVX512_SAT_CVT_DS_")) ||
+                            string_starts_with_sequence(isa_set, S8("AVX512_SAT_CVT_"));
+        if (!family_match) continue;
+        bool width512 = string_ends_with_sequence(isa_set, S8("_512"));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_feature_available(
+                                 avx10_form_id, avx10_2_features, BUSTER_ARRAY_LENGTH(avx10_2_features)) == !width512);
+        BUSTER_TEST(arguments, buster_x86_metadata_test_feature_available(
+                                 avx10_form_id, avx10_2_512_features, BUSTER_ARRAY_LENGTH(avx10_2_512_features)));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_feature_available(
+                                  avx10_form_id, avx10_512_features, BUSTER_ARRAY_LENGTH(avx10_512_features)));
+        avx10_feature_checked_count += 1;
+    }
+    BUSTER_TEST(arguments, avx10_feature_checked_count == 130);
+    u32 typed_pair_total = 0;
+    for (u32 intel_class = 0; intel_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; intel_class += 1)
+        for (u32 att_class = 0; att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; att_class += 1)
+            typed_pair_total += typed_pair_matrix[intel_class][att_class];
+    BUSTER_TEST(arguments, typed_pair_total == 1410);
+    BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 1394);
+    BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED] == 0);
+    BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED] == 16);
+    for (u32 intel_class = 0; intel_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; intel_class += 1)
+        for (u32 att_class = 0; att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; att_class += 1)
+            if (!((intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                   (att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
+                    att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED)) ||
+                  (intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                   att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED)))
+                BUSTER_TEST(arguments, typed_pair_matrix[intel_class][att_class] == 0);
+
+    // The three AVX512-VBMI2 VPSHLDQ broadcast forms are the exact
+    // source-selection delta that exposed the AT&T suffix fallback seam.
+    // Keep their stable metadata keys pinned independently of the aggregate
+    // pair matrix so a future mnemonic/suffix change cannot silently move
+    // them to the XOP alias family again.
+    static u32 const vbmi2_suffix_form_ids[] = {8937, 8939, 8941};
+    static u64 const vbmi2_suffix_form_hashes[] = {
+        UINT64_C(9988580178933169345), UINT64_C(11535724125939013543), UINT64_C(5917272197917209722),
+    };
+    for (u32 vbmi2_index = 0; vbmi2_index < BUSTER_ARRAY_LENGTH(vbmi2_suffix_form_ids); vbmi2_index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[vbmi2_suffix_form_ids[vbmi2_index]];
+        BUSTER_TEST(arguments, record.form_id == vbmi2_suffix_form_ids[vbmi2_index] &&
+                                 record.stable_hash == vbmi2_suffix_form_hashes[vbmi2_index] &&
+                                 record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+    }
+
+    static u32 const standalone_vcomx_ids[] = {4276, 4279, 4282, 4285, 4288, 4291};
+    static u64 const standalone_vcomx_hashes[] = {
+        UINT64_C(6982375845674161057), UINT64_C(16979018338420635722), UINT64_C(14724532497951551532),
+        UINT64_C(4254777725290352627), UINT64_C(14277251828581801801), UINT64_C(17702768127218365195),
+    };
+    for (u32 standalone_index = 0; standalone_index < BUSTER_ARRAY_LENGTH(standalone_vcomx_ids); standalone_index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[standalone_vcomx_ids[standalone_index]];
+        BUSTER_TEST(arguments, record.form_id == standalone_vcomx_ids[standalone_index] &&
+                                 record.stable_hash == standalone_vcomx_hashes[standalone_index]);
+        BUSTER_TEST(arguments, record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE);
+        BUSTER_TEST(arguments, record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
+    }
+    u32 standalone_non_vcomx_count = 0;
+    u32 standalone_non_vcomx_intel_exact = 0;
+    u32 standalone_non_vcomx_intel_policy = 0;
+    u32 standalone_non_vcomx_att_decorator = 0;
+    for (u32 inventory_form_id = 0; inventory_form_id < form_count; inventory_form_id += 1)
+    {
+        if (!buster_x86_completion_census_test_decorator_shape(inventory_form_id, true)) continue;
+        bool is_vcomx = false;
+        for (u32 standalone_index = 0; standalone_index < BUSTER_ARRAY_LENGTH(standalone_vcomx_ids); standalone_index += 1)
+            is_vcomx |= inventory_form_id == standalone_vcomx_ids[standalone_index];
+        if (is_vcomx) continue;
+        standalone_non_vcomx_count += 1;
+        standalone_non_vcomx_intel_exact += records[inventory_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+        standalone_non_vcomx_intel_policy += records[inventory_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED;
+        standalone_non_vcomx_att_decorator +=
+            records[inventory_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE &&
+            records[inventory_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR;
+    }
+    BUSTER_TEST(arguments, standalone_non_vcomx_count == 26 && standalone_non_vcomx_intel_exact == 26 &&
+                             standalone_non_vcomx_intel_policy == 0 && standalone_non_vcomx_att_decorator == 26);
     BUSTER_TEST(arguments, source.structural_complete && source.records_complete && source.diagnostics_complete);
     BUSTER_TEST(arguments, source.metadata_blocked_count == 0 && source.metadata_emitted_count == 10607);
     BUSTER_TEST(arguments, source.source_partition_expected_count == 10607);
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 3279 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 6114 &&
-                             source.intel_byte_mismatch_count == 996 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 710 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 3612 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 40 && source.att_unresolved_count == 5831 &&
-                             source.att_byte_mismatch_count == 1098 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 715 && source.att_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.intel_exact_count == 4707 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 4678 &&
+                             source.intel_byte_mismatch_count == 1004 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_policy_rejected_count == 716 && source.intel_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.att_exact_count == 5128 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 4307 &&
+                             source.att_byte_mismatch_count == 1104 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 694 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 4510 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 5055 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 5946 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3741 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 204 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 128 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 710);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 4793 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 716);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6317 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1989 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 84 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 1470 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1519 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1426 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 715);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 694);
+
+    // Every baseline POLICY_FEATURE row must become byte-exact when the
+    // target explicitly enables the complete x86 feature vocabulary.  This
+    // is a proof of source reachability under an enabled target, not a change
+    // to the default policy ledger.  Keep the loop keyed by the observed
+    // reason so mode/privilege and parser classifications cannot be hidden by
+    // an artificially broad target.
+    Target feature_enabled_target = census_target;
+    u32 intel_feature_policy_count = 0;
+    u32 att_feature_policy_count = 0;
+    u32 intel_feature_enabled_exact_count = 0;
+    u32 att_feature_enabled_exact_count = 0;
+    u32 intel_feature_still_policy_count = 0;
+    u32 att_feature_still_policy_count = 0;
+    // Diamond Rapids already carries the complete AVX10.2/AVX10-512 and
+    // AVX512-VBMI2 vocabulary.  Add the only typed-policy family absent from
+    // that public model (AVX512ER) while keeping the target internally valid;
+    // synthesizing a bitset across the interleaved AArch64 enum values would
+    // create an invalid cross-architecture target rather than a feature proof.
+    feature_enabled_target.cpu_features =
+        target_cpu_features_add(feature_enabled_target.cpu_features, TARGET_CPU_FEATURE_X86_AVX512ER);
+    feature_enabled_target.cpu_features_explicit = true;
+    for (u32 policy_form_id = 0; policy_form_id < form_count; policy_form_id += 1)
+    {
+        if (buster_x86_completion_census_test_decorator_shape(policy_form_id, false) &&
+            records[policy_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+            records[policy_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE)
+        {
+            intel_feature_policy_count += 1;
+            BusterX86CompletionCensusClass enabled_class =
+                buster_x86_completion_census_test_source_class(arguments->arena, feature_enabled_target, policy_form_id, false);
+            if (enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT)
+                intel_feature_enabled_exact_count += 1;
+            else
+            {
+                intel_feature_still_policy_count += enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED;
+            }
+            BUSTER_TEST(arguments, enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
+                                     enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED);
+        }
+        if (buster_x86_completion_census_test_decorator_shape(policy_form_id, false) &&
+            records[policy_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+            records[policy_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE)
+        {
+            att_feature_policy_count += 1;
+            BusterX86CompletionCensusClass enabled_class =
+                buster_x86_completion_census_test_source_class(arguments->arena, feature_enabled_target, policy_form_id, true);
+            if (enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT)
+                att_feature_enabled_exact_count += 1;
+            else
+            {
+                att_feature_still_policy_count += enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED;
+            }
+            BUSTER_TEST(arguments, enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
+                                     enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED);
+        }
+    }
+    BUSTER_TEST(arguments, intel_feature_policy_count == 16 && att_feature_policy_count == 16 &&
+                             intel_feature_enabled_exact_count == 16 && att_feature_enabled_exact_count == 16 &&
+                             intel_feature_still_policy_count == 0 && att_feature_still_policy_count == 0);
+
+    // The standalone-SAE inventory is a separate 32-row semantic cohort.
+    // Keep its policy proof separate from the MASKmskw source-builder rows:
+    // every baseline Intel feature-policy row is attempted under the
+    // feature-enabled target.  The VCOMX rows remain policy-rejected because
+    // their VIA/PadLock capability has no corresponding TargetCpuFeature;
+    // that residual is recorded explicitly below rather than being omitted.
+    u32 standalone_intel_feature_policy_count = 0;
+    u32 standalone_intel_feature_exact_count = 0;
+    u32 standalone_vcomx_enabled_nonexact_count = 0;
+    u32 standalone_mover_enabled_nonexact_count = 0;
+    for (u32 standalone_policy_form_id = 0; standalone_policy_form_id < form_count; standalone_policy_form_id += 1)
+    {
+        if (!buster_x86_completion_census_test_decorator_shape(standalone_policy_form_id, true) ||
+            records[standalone_policy_form_id].intel_class != BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED ||
+            records[standalone_policy_form_id].intel_source_reason != BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE)
+            continue;
+        standalone_intel_feature_policy_count += 1;
+        BusterX86CompletionCensusClass enabled_class = buster_x86_completion_census_test_source_class(
+            arguments->arena, feature_enabled_target, standalone_policy_form_id, false);
+        if (enabled_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT)
+            standalone_intel_feature_exact_count += 1;
+        else
+        {
+            bool is_vcomx = false;
+            for (u32 standalone_index = 0; standalone_index < BUSTER_ARRAY_LENGTH(standalone_vcomx_ids); standalone_index += 1)
+                is_vcomx |= standalone_policy_form_id == standalone_vcomx_ids[standalone_index];
+            if (is_vcomx) standalone_vcomx_enabled_nonexact_count += 1;
+            else standalone_mover_enabled_nonexact_count += 1;
+        }
+    }
+    BUSTER_TEST(arguments, standalone_intel_feature_policy_count == 6);
+    BUSTER_TEST(arguments, standalone_intel_feature_exact_count + standalone_vcomx_enabled_nonexact_count +
+                             standalone_mover_enabled_nonexact_count == standalone_intel_feature_policy_count &&
+                             standalone_intel_feature_exact_count == 0 && standalone_vcomx_enabled_nonexact_count == 6 &&
+                             standalone_mover_enabled_nonexact_count == 0);
     {
         typedef struct CensusReasonWitness CensusReasonWitness;
         struct CensusReasonWitness
@@ -162,16 +487,16 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
             {326, UINT64_C(0x72aa28b9191feec9), 0, BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION},
-            {4204, UINT64_C(0x4798dc8b1bc0ac94), 0, BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
-             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION},
+            {4204, UINT64_C(0x4798dc8b1bc0ac94), 0, BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
             {7, UINT64_C(0xa1090cdb23861fbd), 0, BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE},
             {497, UINT64_C(0x6a04e34774497f64), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL},
             {5507, UINT64_C(0x5bb4c576ce0a124f), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY},
-            {3801, UINT64_C(0x142ac9c2f91af56c), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
-             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR},
+            {3801, UINT64_C(0x142ac9c2f91af56c), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
             {0, UINT64_C(0xc07fcd97af562be9), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
             {326, UINT64_C(0x72aa28b9191feec9), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
@@ -189,7 +514,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             BusterX86CompletionCensusRecord record = records[witness.form_id];
             BUSTER_TEST(arguments, record.form_id == witness.form_id && record.stable_hash == witness.stable_hash);
             if (witness.dialect == 0)
+            {
                 BUSTER_TEST(arguments, record.intel_class == witness.expected_class && record.intel_source_reason == witness.expected_reason);
+            }
             else
                 BUSTER_TEST(arguments, record.att_class == witness.expected_class && record.att_source_reason == witness.expected_reason);
         }
@@ -263,8 +590,139 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 5584, true);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    {
+        AssemblyEncodeResult vfpclass_intel = assembly_encode(
+            arguments->arena, S8("VFPCLASSBF16 k0, word ptr [rax]{1to8}, 0x0\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult vfpclass_att = assembly_encode(
+            arguments->arena, S8("VFPCLASSBF16 $0x0, 0(%rax){1to8}, %k0\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        static u8 const expected_vfpclass_bytes[] = {0x62, 0xf3, 0x7f, 0x18, 0x66, 0x00, 0x00};
+        BUSTER_TEST(arguments, vfpclass_intel.diagnostic_count == 0 && vfpclass_intel.bytes.length == sizeof(expected_vfpclass_bytes) &&
+                                 memcmp(vfpclass_intel.bytes.pointer, expected_vfpclass_bytes, sizeof(expected_vfpclass_bytes)) == 0);
+        BUSTER_TEST(arguments, vfpclass_att.diagnostic_count == 0 && vfpclass_att.bytes.length == sizeof(expected_vfpclass_bytes) &&
+                                 memcmp(vfpclass_att.bytes.pointer, expected_vfpclass_bytes, sizeof(expected_vfpclass_bytes)) == 0);
+        AssemblyEncodeResult vbmi_att = assembly_encode(
+            arguments->arena, S8("VPSHLDQ $0x0, 0(%rax){1to2}, %xmm0, %xmm0\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        static u8 const expected_vbmi_att_bytes[] = {0x62, 0xf3, 0xfd, 0x18, 0x71, 0x00, 0x00};
+        BUSTER_TEST(arguments, vbmi_att.diagnostic_count == 0 && vbmi_att.bytes.length == sizeof(expected_vbmi_att_bytes) &&
+                                 memcmp(vbmi_att.bytes.pointer, expected_vbmi_att_bytes, sizeof(expected_vbmi_att_bytes)) == 0);
+
+        // Keep the handwritten AMD-XOP mnemonic path alive while the
+        // metadata selector handles the similarly suffixed VPSHLDQ form.
+        // This ordinary unsuffixed XOP spelling must retain its historical
+        // bytes and feature-gated selection.
+        Target xop_target = census_target;
+        xop_target.cpu_features = target_cpu_features_add(xop_target.cpu_features, TARGET_CPU_FEATURE_X86_XOP);
+        xop_target.cpu_features_explicit = true;
+        AssemblyEncodeResult xop_att = assembly_encode(
+            arguments->arena, S8("vpshld %xmm2, %xmm1, %xmm0\n"),
+            (AssemblyEncodeOptions){.target = xop_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        static u8 const expected_xop_att_bytes[] = {0x8f, 0xe9, 0x68, 0x96, 0xc1};
+        BUSTER_TEST(arguments, xop_att.diagnostic_count == 0 && xop_att.bytes.length == sizeof(expected_xop_att_bytes) &&
+                                 memcmp(xop_att.bytes.pointer, expected_xop_att_bytes, sizeof(expected_xop_att_bytes)) == 0);
+    }
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    {
+        // The shared authority predicate is deliberately topology-based.  A
+        // valid ordinary-memory broadcast form is accepted, while each
+        // excluded semantic shape is rejected independently.
+        BusterX86MetadataForm authority_form = {0};
+        BusterX86MetadataPhysicalOperand authority_operands[16] = {0};
+        String8 authority_features[1] = {0};
+        char8 authority_mnemonic[128] = {0};
+        BusterX86MetadataPhysicalQuery authority_query = {0};
+        BusterX86MetadataPhysicalOperand excluded_operands[16] = {0};
+        u32 authority_memory_index = UINT32_MAX;
+        BUSTER_TEST(arguments, buster_x86_metadata_form(3983, &authority_form) &&
+                                 buster_x86_completion_census_test_query(3983, &authority_query, authority_operands,
+                                                                          authority_features, authority_mnemonic));
+        for (u32 authority_operand_index = 0; authority_operand_index < authority_query.operand_count; authority_operand_index += 1)
+            if (authority_operands[authority_operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                authority_memory_index = authority_operand_index;
+                break;
+            }
+        BUSTER_TEST(arguments, authority_memory_index != UINT32_MAX);
+        BUSTER_TEST(arguments, buster_x86_metadata_typed_decorator_authoritative(authority_form, authority_query));
+        BusterX86MetadataPhysicalQuery excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_query.address_size = 32;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_query.attributes.apx_flags = BUSTER_X86_METADATA_APX_NDD;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_query.attributes.has_dfv = true;
+        excluded_query.attributes.dfv = 0;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_query.attributes.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_operands[authority_memory_index].memory.vsib = true;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_operands[authority_memory_index].memory.has_segment = true;
+        excluded_operands[authority_memory_index].memory.segment = BUSTER_X86_METADATA_SEGMENT_FS;
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_operands[0] = excluded_operands[authority_memory_index];
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+        excluded_query = authority_query;
+        memcpy(excluded_operands, authority_operands, sizeof(excluded_operands));
+        excluded_query.operands = excluded_operands;
+        excluded_query.operand_count += 1;
+        excluded_operands[3] = excluded_operands[authority_memory_index];
+        BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(authority_form, excluded_query));
+
+        u32 standalone_authority_form_id = UINT32_MAX;
+        BusterX86MetadataForm standalone_authority_form = {0};
+        BusterX86MetadataPhysicalOperand standalone_authority_operands[16] = {0};
+        String8 standalone_authority_features[1] = {0};
+        char8 standalone_authority_mnemonic[128] = {0};
+        BusterX86MetadataPhysicalQuery standalone_authority_query = {0};
+        for (u32 candidate_id = 0; candidate_id < form_count; candidate_id += 1)
+        {
+            if (!buster_x86_completion_census_test_decorator_shape(candidate_id, true)) continue;
+            standalone_authority_form_id = candidate_id;
+            BUSTER_TEST(arguments, buster_x86_metadata_form(candidate_id, &standalone_authority_form) &&
+                                     buster_x86_completion_census_test_query(candidate_id, &standalone_authority_query,
+                                                                              standalone_authority_operands,
+                                                                              standalone_authority_features,
+                                                                              standalone_authority_mnemonic));
+            break;
+        }
+        BUSTER_TEST(arguments, standalone_authority_form_id != UINT32_MAX);
+        if (standalone_authority_form_id != UINT32_MAX)
+        {
+            BUSTER_TEST(arguments, buster_x86_metadata_typed_decorator_authoritative(standalone_authority_form,
+                                                                                        standalone_authority_query));
+            excluded_query = standalone_authority_query;
+            memcpy(excluded_operands, standalone_authority_operands, sizeof(excluded_operands));
+            excluded_query.operands = excluded_operands;
+            excluded_query.operand_count += 1;
+            excluded_operands[excluded_query.operand_count - 1] = excluded_operands[0];
+            excluded_operands[excluded_query.operand_count - 1].kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
+            BUSTER_TEST(arguments, !buster_x86_metadata_typed_decorator_authoritative(standalone_authority_form,
+                                                                                         excluded_query));
+        }
+    }
     {
         u32 const apx_amx_form_ids[] = {490, 491, 492, 493, 494};
         u8 const apx_amx_opcode_prefixes[] = {0x7f, 0x7f, 0x7d, 0x7d, 0x7e};

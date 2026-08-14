@@ -756,9 +756,18 @@ struct BusterX86MetadataSelectResult
 {
     BusterX86MetadataEncodeStatus status;
     u32 form_id;
+    // When selection fails, retain the candidate form that supplied the
+    // diagnostic.  This is intentionally separate from form_id, which stays
+    // UINT32_MAX for unsuccessful selection; source adapters can use the
+    // semantic candidate identity to preserve an authoritative feature
+    // diagnostic without guessing from the mnemonic or physical operands.
+    u32 failure_form_id;
     u64 stable_hash;
     u32 candidate_count;
     u32 selected_byte_count;
+    u16 selected_memory_width;
+    u8 selected_memory_operand;
+    u8 reserved0;
     u32 diagnostic_operand;
     s64 diagnostic_value;
     BusterX86MetadataString required_feature;
@@ -1035,6 +1044,17 @@ BUSTER_F_DECL BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX
 // shortest valid encoding, breaking equal lengths by snapshot form ID.  It
 // does not allocate and does not retain any operand or feature storage.
 BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query);
+// Shared semantic proof used by source adapters and the handwritten parser:
+// an explicitly typed EVEX decorator is authoritative only for ordinary
+// 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a
+// register-only SAE/rounding topology.
+BUSTER_F_DECL bool buster_x86_metadata_typed_decorator_authoritative(BusterX86MetadataForm form,
+                                                                      BusterX86MetadataPhysicalQuery query);
+// Returns the metadata-derived fixed-round, maskless SAE capability used by
+// the source adapters.  The predicate is intentionally semantic: it parses
+// the normalized pattern and never keys behavior to a form ID, hash, or
+// mnemonic spelling.
+BUSTER_F_DECL bool buster_x86_metadata_form_standalone_sae_capable(BusterX86MetadataForm form);
 // Emit encodes one form selected from the same physical query.  The output
 // and relocation arrays are caller-owned; symbols in relocations are borrowed
 // from the query and remain format-neutral.
@@ -1170,4 +1190,12 @@ bool buster_x86_metadata_test_execution_mode_matches(u16 mode_flags, u8 coverage
                                                                          bool include_not64, u8 execution_mode);
 bool buster_x86_metadata_test_eamode_alias_forms(u32 first_form_id, u32 second_form_id);
 bool buster_x86_metadata_test_fixed_bsrinit_no_zeroing(void);
+// Test-only view of the canonical public feature gate.  This keeps feature
+// mapping assertions independent of source spelling while reusing the same
+// generated ISA-family matcher as resolve/emit.
+bool buster_x86_metadata_test_feature_available(u32 form_id, String8 const* names, u32 count);
+// Test-only semantic discriminator for fixed-round, maskless SAE rows.  This
+// exposes parsed pattern controls without making the private pattern schema a
+// production API or keying any behavior to a form identity.
+bool buster_x86_metadata_test_standalone_sae_pattern(u32 form_id);
 #endif

@@ -474,6 +474,11 @@ struct AssemblyBuilder
     u32 diagnostic_capacity;
     u64 output_capacity;
     u64 output_count;
+    // The metadata parser reports this transient semantic fact to the outer
+    // source adapter when a feature-gated typed decorator candidate is the
+    // authoritative form.  It prevents the handwritten INVALID_OPERANDS
+    // fallback from erasing an actual feature-policy diagnostic.
+    bool metadata_failure_typed_decorator_authoritative;
 };
 
 enum
@@ -10993,9 +10998,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_has_duplicate_registers(
     return false;
 }
 
+// A typed EVEX decorator is source-level evidence that the metadata candidate
+// is the intended instruction shape.  The handwritten parser can still report
+// INVALID_OPERANDS for canonical census witnesses that deliberately reuse
+// registers, and the feature-selection path historically downgraded a
+// feature failure for the same reason.  Keep those legacy fallbacks for
+// ordinary syntax, but let this metadata-proven semantic shape remain
+// authoritative.  The predicate deliberately accepts maskless standalone SAE
+// forms as well as MASKmskw forms; the form/attribute contract, not a mnemonic
+// or census identity, determines eligibility.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_typed_decorator_authoritative(
+    BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query)
+{
+    return buster_x86_metadata_typed_decorator_authoritative(form, query);
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruction_parse(
     AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset, Target target, AssemblySyntax syntax)
 {
+    builder->metadata_failure_typed_decorator_authoritative = false;
     if (target.cpu_arch != CPU_ARCH_X86_64)
     {
         return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
@@ -11175,6 +11196,31 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        // Metadata-only EVEX mnemonics do not pass through the handwritten
+        // vector parser, but they use the same standalone SAE/rounding token
+        // placement: Intel after the visible operands (or before an
+        // immediate), and AT&T after the immediate.  Consume that token here
+        // so it becomes the typed query attribute instead of being sent to
+        // the expression parser.  Form selection remains the authority for
+        // whether the selected metadata row actually permits the control.
+        if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+        {
+            String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+            u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+                               : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+                               : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+                               : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+                                                                                : 0;
+            bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+            if (pseudo_sae)
+            {
+                if (leading_sae || (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 0))
+                    return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+                leading_rounding = pseudo_rounding;
+                leading_sae = true;
+                continue;
+            }
         }
         bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && relative && text.pointer[0] == '*';
         if (indirect)
@@ -11423,6 +11469,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     BusterX86MetadataSelectResult selection = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
         .form_id = UINT32_MAX,
+        .failure_form_id = UINT32_MAX,
     };
     bool selected = false;
     u32 trial_count = relative_literal ? 15 : 1;
@@ -11442,6 +11489,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         if (trial_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
             (!relative_literal || trial_selection.selected_byte_count == trial_byte_count))
         {
+            if (trial_selection.selected_memory_width && trial_selection.selected_memory_operand < operand_count)
+                trial_physical[trial_selection.selected_memory_operand].width = trial_selection.selected_memory_width;
             memcpy(physical, trial_physical, operand_count * sizeof(*physical));
             mnemonic = trial_mnemonic;
             selection = trial_selection;
@@ -11467,9 +11516,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
+        BusterX86MetadataForm failure_form = {0};
+        bool typed_decorator_authoritative = selection.failure_form_id != UINT32_MAX &&
+                                             buster_x86_metadata_form(selection.failure_form_id, &failure_form) &&
+                                             assembly_x86_metadata_typed_decorator_authoritative(
+                                                 failure_form,
+                                                 (BusterX86MetadataPhysicalQuery){
+                                                     .operands = physical,
+                                                     .operand_count = operand_count,
+                                                     .attributes = attributes,
+                                                     .address_size = address_size,
+                                                     .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                                                    .source_semantics = true,
+                                                });
+        builder->metadata_failure_typed_decorator_authoritative = typed_decorator_authoritative &&
+                                                                   selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                                                   selection.required_feature.length != 0;
         if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
             (!selection.required_feature.length ||
-             (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics)))
+             (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics &&
+              !typed_decorator_authoritative)))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
@@ -11753,9 +11819,27 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     {
         bool metadata_novel = builder->instruction_count > instruction_count &&
                               assembly_x86_metadata_instruction_is_novel(builder->instructions[instruction_count]);
-        if (handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE ||
+        bool typed_decorator_authoritative = false;
+        if (builder->instruction_count > instruction_count)
+        {
+            AssemblyInstruction metadata_instruction = builder->instructions[instruction_count];
+            BusterX86MetadataForm metadata_form = {0};
+            typed_decorator_authoritative = buster_x86_metadata_form(metadata_instruction.metadata_form_id, &metadata_form) &&
+                                            assembly_x86_metadata_typed_decorator_authoritative(
+                                                metadata_form,
+                                                (BusterX86MetadataPhysicalQuery){
+                                                    .operands = metadata_instruction.metadata_operands,
+                                                    .operand_count = metadata_instruction.metadata_operand_count,
+                                                    .attributes = metadata_instruction.metadata_attributes,
+                                                    .address_size = metadata_instruction.metadata_address_size,
+                                                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                                                    .source_semantics = true,
+                                                });
+        }
+        if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !typed_decorator_authoritative) ||
             (handwritten_kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
-             (!metadata_novel || assembly_x86_metadata_instruction_has_duplicate_registers(builder->instructions[instruction_count]))))
+             (!typed_decorator_authoritative &&
+              (!metadata_novel || assembly_x86_metadata_instruction_has_duplicate_registers(builder->instructions[instruction_count])))))
         {
             builder->instruction_count = instruction_count;
             builder->result.symbol_count = symbol_count;
@@ -11778,14 +11862,16 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     bool metadata_precise = handwritten_requires_metadata || (!handwritten_succeeded &&
                             (handwritten_kind != ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS ||
                              (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
-                              assembly_x86_statement_has_extended_gpr(statement) &&
-                              !assembly_x86_statement_has_no_flags_decorator(statement)) ||
+                              (builder->metadata_failure_typed_decorator_authoritative ||
+                               (assembly_x86_statement_has_extended_gpr(statement) &&
+                                !assembly_x86_statement_has_no_flags_decorator(statement)))) ||
                              (handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
                               (status == BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT ||
                                status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH))) &&
                             status != BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC &&
                             status != BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
-                            handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+                            (handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE ||
+                             builder->metadata_failure_typed_decorator_authoritative));
     if (metadata_precise)
     {
         u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
