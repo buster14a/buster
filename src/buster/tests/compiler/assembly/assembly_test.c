@@ -2877,6 +2877,55 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[2].symbol].name,
                                             S8("external2")));
 
+    // Opmask instructions use the checked metadata producer for both Intel
+    // and AT&T operand orderings; keep one register-only cohort here because
+    // the legacy assembler's size validator intentionally rejects KMOV
+    // memory forms until their source-width policy is normalized.
+    Target mask_target = x86_target;
+    mask_target.cpu_features_explicit = true;
+    mask_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+                                  TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL,
+                                  TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ},
+        6);
+    String8 mask_intel_source = S8("kmovw k1, k2\n"
+                                   "kmovd k3, k4\n"
+                                   "kmovq k5, k6\n"
+                                   "knotw k5, k6\n"
+                                   "kaddw k1, k2, k3\n"
+                                   "kandw k4, k5, k6\n"
+                                   "korw k1, k2, k3\n"
+                                   "kxorw k4, k5, k6\n"
+                                   "kortestw k1, k2\n");
+    String8 mask_att_source = S8("kmovw %k2, %k1\n"
+                                 "kmovd %k4, %k3\n"
+                                 "kmovq %k6, %k5\n"
+                                 "knotw %k6, %k5\n"
+                                 "kaddw %k3, %k2, %k1\n"
+                                 "kandw %k6, %k5, %k4\n"
+                                 "korw %k3, %k2, %k1\n"
+                                 "kxorw %k6, %k5, %k4\n"
+                                 "kortestw %k2, %k1\n");
+    u8 expected_mask_bytes[] = {
+        0xc5, 0xf8, 0x90, 0xca,
+        0xc4, 0xe1, 0xf9, 0x90, 0xdc,
+        0xc4, 0xe1, 0xf8, 0x90, 0xee,
+        0xc5, 0xf8, 0x44, 0xee,
+        0xc5, 0xec, 0x4a, 0xcb,
+        0xc5, 0xd4, 0x41, 0xe6,
+        0xc5, 0xec, 0x45, 0xcb,
+        0xc5, 0xd4, 0x47, 0xe6,
+        0xc5, 0xf8, 0x98, 0xca,
+    };
+    AssemblyEncodeResult mask_intel = assembly_encode(
+        arguments->arena, mask_intel_source, (AssemblyEncodeOptions){.target = mask_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult mask_att = assembly_encode(
+        arguments->arena, mask_att_source, (AssemblyEncodeOptions){.target = mask_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, mask_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(mask_intel.bytes, expected_mask_bytes, sizeof(expected_mask_bytes)));
+    BUSTER_TEST(arguments, mask_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(mask_att.bytes, expected_mask_bytes, sizeof(expected_mask_bytes)));
+
     // Front-door routing for the legacy prefix-control rows: RET/LEAVE use
     // the newly normalized DF64/IMMUNE66_LOOP64 forms, while LOOP-family
     // branches retain their 8-bit displacement and ignore redundant 66.

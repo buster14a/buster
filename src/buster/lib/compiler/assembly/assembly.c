@@ -11888,10 +11888,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     {
         return true;
     }
-    if (instruction.no_flags ||
-        (assembly_x86_instruction_has_extended_gpr(instruction) && (!instruction.evex || !vector_instruction)))
+    // Opmask instructions are emitted by the metadata producer.  Keep the
+    // handwritten parser's mask-feature and operand-shape validation, but do
+    // not allow its legacy VEX byte emitter to become a second authority.
+    if (assembly_x86_opcode_is_mask(instruction.opcode))
     {
-        return false;
+        return true;
     }
     switch (instruction.opcode)
     {
@@ -13015,55 +13017,6 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_evex_prefix(AssemblyBuilder* builder,
     assembly_emit_byte(builder, p2);
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_mask(AssemblyBuilder* builder, AssemblyInstruction* instruction)
-{
-    AssemblyOpcode opcode = instruction->opcode;
-    AssemblyRegister destination = instruction->operands[0].reg;
-    AssemblyOperand source = instruction->operands[1];
-    u8 prefix[3] = {0};
-    u8 prefix_count = 2;
-    u8 operation = 0;
-    u8 source_index = 0;
-    if (opcode == ASSEMBLY_OPCODE_X86_KMOVW)
-    {
-        prefix[0] = 0xc5;
-        prefix[1] = 0xf8;
-        operation = 0x90;
-    }
-    else if (opcode == ASSEMBLY_OPCODE_X86_KMOVD || opcode == ASSEMBLY_OPCODE_X86_KMOVQ)
-    {
-        prefix[0] = 0xc4;
-        prefix[1] = 0xe1;
-        prefix[2] = opcode == ASSEMBLY_OPCODE_X86_KMOVD ? 0xf9 : 0xf8;
-        prefix_count = 3;
-        operation = 0x90;
-    }
-    else
-    {
-        prefix[0] = 0xc5;
-        prefix[1] = 0xf8;
-        operation = opcode == ASSEMBLY_OPCODE_X86_KNOTW ? 0x44
-                    : opcode == ASSEMBLY_OPCODE_X86_KORTESTW ? 0x98
-                    : opcode == ASSEMBLY_OPCODE_X86_KADDW ? 0x4a
-                    : opcode == ASSEMBLY_OPCODE_X86_KANDW ? 0x41
-                    : opcode == ASSEMBLY_OPCODE_X86_KORW ? 0x45
-                                                        : 0x47;
-        if (instruction->operand_count == 3)
-        {
-            source_index = instruction->operands[1].reg.index;
-            prefix[1] = (u8)(0x80 | 0x04 | ((~source_index & 15) << 3));
-            source = instruction->operands[2];
-        }
-    }
-    for (u8 index = 0; index < prefix_count; index += 1)
-    {
-        assembly_emit_byte(builder, prefix[index]);
-    }
-    assembly_emit_byte(builder, operation);
-    assembly_x86_emit_modrm(builder, destination.index, source.reg.index);
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL u8 assembly_x86_apx_memory_rex2_byte(u16 width, AssemblyRegister reg, AssemblyMemory memory)
 {
     u8 result = (u8)((width == 64 ? 0x08 : 0) | (reg.index & 8 ? 0x04 : 0) | (reg.index & 16 ? 0x40 : 0));
@@ -14066,11 +14019,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                     S8("AMX memory displacement is out of range"));
                 return;
             }
-            continue;
-        }
-        if (assembly_x86_opcode_is_mask(instruction->opcode))
-        {
-            assembly_x86_emit_mask(builder, instruction);
             continue;
         }
         if (instruction->no_flags && assembly_x86_opcode_is_apx_nf(instruction->opcode) &&
