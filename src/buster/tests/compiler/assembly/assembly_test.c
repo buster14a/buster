@@ -260,6 +260,18 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_reductio
     {S8_INITIALIZER("uminv s0, v1.4s\n"), {0x20, 0xa8, 0xb1, 0x6e}},
 };
 
+/* Exhaustive legal vector ADDP arrangements. Bytes are independent
+ * llvm-mc 22.1.8 literals, not buster output. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_addp_cases[] = {
+    {S8_INITIALIZER("addp v0.8b, v1.8b, v31.8b\n"), {0x20, 0xbc, 0x3f, 0x0e}},
+    {S8_INITIALIZER("addp v0.16b, v1.16b, v31.16b\n"), {0x20, 0xbc, 0x3f, 0x4e}},
+    {S8_INITIALIZER("addp v0.4h, v1.4h, v31.4h\n"), {0x20, 0xbc, 0x7f, 0x0e}},
+    {S8_INITIALIZER("addp v0.8h, v1.8h, v31.8h\n"), {0x20, 0xbc, 0x7f, 0x4e}},
+    {S8_INITIALIZER("addp v0.2s, v1.2s, v31.2s\n"), {0x20, 0xbc, 0xbf, 0x0e}},
+    {S8_INITIALIZER("addp v0.4s, v1.4s, v31.4s\n"), {0x20, 0xbc, 0xbf, 0x4e}},
+    {S8_INITIALIZER("addp v0.2d, v1.2d, v31.2d\n"), {0x20, 0xbc, 0xff, 0x4e}},
+};
+
 /* Exhaustive legal vector shift-by-register forms. Bytes are independent
  * llvm-mc 22.1.8 encodings. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_shift_cases[] = {
@@ -1054,12 +1066,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 237);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 237);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 153);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 175);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 238);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 238);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 152);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 176);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 88);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 87);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4104,6 +4116,63 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, reduction_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
         BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_addp_cases) == 7);
+    for (u32 addp_index = 0; addp_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_addp_cases); addp_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase addp_case = assembly_a64_direct_simd_addp_cases[addp_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, addp_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, addp_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, addp_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult addp_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("ADDP V31.8B, V30.8B, V29.8B\n"
+           "ADDP V31.16B, V30.16B, V29.16B\n"
+           "ADDP V31.4H, V30.4H, V29.4H\n"
+           "ADDP V31.8H, V30.8H, V29.8H\n"
+           "ADDP V31.2S, V30.2S, V29.2S\n"
+           "ADDP V31.4S, V30.4S, V29.4S\n"
+           "ADDP V31.2D, V30.2D, V29.2D\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, addp_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(addp_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0xbf, 0x3d, 0x0e,
+                                                                      0xdf, 0xbf, 0x3d, 0x4e,
+                                                                      0xdf, 0xbf, 0x7d, 0x0e,
+                                                                      0xdf, 0xbf, 0x7d, 0x4e,
+                                                                      0xdf, 0xbf, 0xbd, 0x0e,
+                                                                      0xdf, 0xbf, 0xbd, 0x4e,
+                                                                      0xdf, 0xbf, 0xfd, 0x4e},
+                                                         28));
+    AssemblyEncodeResult addp_pair_regression = assembly_encode(
+        arguments->arena, S8("addp d0, v1.2d\nADDP D31, V30.2D\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, addp_pair_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(addp_pair_regression.bytes,
+                                                         (u8 const[]){0x20, 0xb8, 0xf1, 0x5e,
+                                                                      0xdf, 0xbb, 0xf1, 0x5e},
+                                                         8));
+    static String8 const invalid_addp_cases[] = {
+        S8_INITIALIZER("addp v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("addp v0.8b, v1.16b, v2.8b\n"),
+        S8_INITIALIZER("addp v0.8b, v1.8b\n"),
+        S8_INITIALIZER("addp v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("addp q0, q1, q2\n"),
+        S8_INITIALIZER("addp v32.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("addp v0.2d, v1.2d, d2\n"),
+        S8_INITIALIZER("addp d0, d1, d2\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_addp_cases); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_addp = assembly_encode(
+            arguments->arena, invalid_addp_cases[invalid_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_addp.diagnostic_count == 1 && invalid_addp.bytes.length == 0 &&
+                                   invalid_addp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     AssemblyEncodeResult reduction_upper = assembly_encode(
         arguments->arena,
