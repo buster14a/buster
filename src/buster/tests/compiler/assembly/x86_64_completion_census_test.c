@@ -413,6 +413,206 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              vsib_intel_policy_count == 16 && vsib_att_policy_count == 16);
     BUSTER_TEST(arguments, memcmp(vsib_inventory_digest, expected_vsib_inventory_digest,
                                   sizeof(vsib_inventory_digest)) == 0);
+
+    // The legacy MMX read-memory cohort is mechanically exhaustive.  Its
+    // source proof is the metadata topology: one visible slot-0 MMX64
+    // READ|WRITE register, one visible slot-0 READ memory operand, and no
+    // decorators or extension controls.  The AT&T source omits a scalar
+    // suffix because the explicit MMX register supplies the aggregate 64-bit
+    // memory width; no mnemonic or generated-form identity participates.
+    u8 mmx_inventory_hash_text[55 * 64] = {0};
+    u8 mmx_new_hash_text[37 * 64] = {0};
+    u8 mmx_preexisting_hash_text[11 * 64] = {0};
+    u8 mmx_control_hash_text[7 * 64] = {0};
+    u32 mmx_inventory_hash_length = 0;
+    u32 mmx_new_hash_length = 0;
+    u32 mmx_preexisting_hash_length = 0;
+    u32 mmx_control_hash_length = 0;
+    u32 mmx_new_count = 0;
+    u32 mmx_preexisting_count = 0;
+    u32 mmx_control_count = 0;
+    u32 mmx_inventory_count = 0;
+    u32 mmx_exact_count = 0;
+    u32 mmx_intel_invalid_count = 0;
+    u32 mmx_feature_checked_count = 0;
+    String8 mmx_empty_features[1] = {0};
+    String8 mmx_sse2_features[] = {S8("sse2")};
+    static u32 const mmx_intel_invalid_ids[] = {10195, 10197, 10199, 10221, 10223, 10225, 10331};
+    static u32 const mmx_preexisting_ids[] = {10329, 10695, 10727, 10735, 10753, 10755,
+                                               10757, 10759, 10761, 10763, 10765};
+    u8 mmx_inventory_digest[32] = {0};
+    for (u32 mmx_form_id = 0; mmx_form_id < form_count; mmx_form_id += 1)
+    {
+        BusterX86MetadataForm mmx_form = {0};
+        BusterX86MetadataFormKey mmx_key = {0};
+        BusterX86MetadataPhysicalQuery mmx_query = {0};
+        BusterX86MetadataPhysicalOperand mmx_operands[16] = {0};
+        String8 mmx_features[1] = {0};
+        char8 mmx_mnemonic[128] = {0};
+        if (!buster_x86_metadata_form(mmx_form_id, &mmx_form) ||
+            mmx_form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+            mmx_form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY ||
+            mmx_form.field_flags != (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_MEMORY |
+                                     BUSTER_X86_METADATA_FIELD_REGISTER) ||
+            mmx_form.decorator_flags || mmx_form.apx_flags || mmx_form.amx_flags ||
+            !buster_x86_completion_census_test_query(mmx_form_id, &mmx_query, mmx_operands, mmx_features, mmx_mnemonic))
+            continue;
+        String8 mmx_isa_set = buster_x86_metadata_string_span(mmx_form.isa_set);
+        if (!(string_equal(mmx_isa_set, S8("PENTIUMMMX")) || string_equal(mmx_isa_set, S8("SSE2MMX")))) continue;
+        u32 mmx_register_count = 0;
+        u32 mmx_memory_count = 0;
+        u32 mmx_visible_count = 0;
+        for (u32 metadata_index = 0; metadata_index < mmx_form.operand_count; metadata_index += 1)
+        {
+            BusterX86MetadataOperand metadata = {0};
+            BUSTER_TEST(arguments, buster_x86_metadata_operand(mmx_form_id, metadata_index, &metadata));
+            if (!metadata.visible) continue;
+            mmx_visible_count += 1;
+            if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+                metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX && metadata.slot == 0 &&
+                metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG &&
+                metadata.access == (BUSTER_X86_METADATA_ACCESS_READ | BUSTER_X86_METADATA_ACCESS_WRITE))
+            {
+                mmx_register_count += 1;
+            }
+            else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                     metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY && metadata.slot == 0 &&
+                     metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_RM &&
+                     metadata.access == BUSTER_X86_METADATA_ACCESS_READ)
+            {
+                mmx_memory_count += 1;
+            }
+        }
+        if (mmx_visible_count != 2 || mmx_register_count != 1 || mmx_memory_count != 1 || mmx_query.operand_count != 2)
+            continue;
+        u32 mmx_register_index = UINT32_MAX;
+        u32 mmx_memory_index = UINT32_MAX;
+        for (u32 operand_index = 0; operand_index < mmx_query.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = mmx_operands[operand_index];
+            if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX && operand.reg.width == 64)
+                mmx_register_index = operand_index;
+            else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !operand.memory.vsib &&
+                     !operand.memory.has_segment)
+                mmx_memory_index = operand_index;
+        }
+        bool mmx_physical_shape = mmx_register_index != UINT32_MAX && mmx_memory_index != UINT32_MAX;
+        BUSTER_TEST(arguments, mmx_physical_shape);
+        if (!mmx_physical_shape) continue;
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_feature_available(mmx_form_id, mmx_empty_features, 0));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_feature_available(mmx_form_id, mmx_sse2_features,
+                                                                          BUSTER_ARRAY_LENGTH(mmx_sse2_features)));
+        mmx_feature_checked_count += 1;
+        BUSTER_TEST(arguments, buster_x86_metadata_form_key(mmx_form_id, &mmx_key));
+        String8 mmx_hash_text = string_format(arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"),
+                                               mmx_form_id, mmx_key.stable_hash);
+        bool mmx_hash_fits = mmx_inventory_hash_length + mmx_hash_text.length <= sizeof(mmx_inventory_hash_text);
+        BUSTER_TEST(arguments, mmx_hash_fits);
+        if (!mmx_hash_fits) continue;
+        memcpy(mmx_inventory_hash_text + mmx_inventory_hash_length, mmx_hash_text.pointer, mmx_hash_text.length);
+        mmx_inventory_hash_length += (u32)mmx_hash_text.length;
+        bool mmx_control_partition = false;
+        bool mmx_preexisting_partition = false;
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(mmx_intel_invalid_ids); invalid_index += 1)
+            mmx_control_partition |= mmx_form_id == mmx_intel_invalid_ids[invalid_index];
+        for (u32 preexisting_index = 0; preexisting_index < BUSTER_ARRAY_LENGTH(mmx_preexisting_ids); preexisting_index += 1)
+            mmx_preexisting_partition |= mmx_form_id == mmx_preexisting_ids[preexisting_index];
+        if (mmx_control_partition)
+        {
+            bool hash_fits = mmx_control_hash_length + mmx_hash_text.length <= sizeof(mmx_control_hash_text);
+            BUSTER_TEST(arguments, hash_fits);
+            if (!hash_fits) continue;
+            memcpy(mmx_control_hash_text + mmx_control_hash_length, mmx_hash_text.pointer, mmx_hash_text.length);
+            mmx_control_hash_length += (u32)mmx_hash_text.length;
+            mmx_control_count += 1;
+        }
+        else if (mmx_preexisting_partition)
+        {
+            bool hash_fits = mmx_preexisting_hash_length + mmx_hash_text.length <= sizeof(mmx_preexisting_hash_text);
+            BUSTER_TEST(arguments, hash_fits);
+            if (!hash_fits) continue;
+            memcpy(mmx_preexisting_hash_text + mmx_preexisting_hash_length, mmx_hash_text.pointer, mmx_hash_text.length);
+            mmx_preexisting_hash_length += (u32)mmx_hash_text.length;
+            mmx_preexisting_count += 1;
+        }
+        else
+        {
+            bool hash_fits = mmx_new_hash_length + mmx_hash_text.length <= sizeof(mmx_new_hash_text);
+            BUSTER_TEST(arguments, hash_fits);
+            if (!hash_fits) continue;
+            memcpy(mmx_new_hash_text + mmx_new_hash_length, mmx_hash_text.pointer, mmx_hash_text.length);
+            mmx_new_hash_length += (u32)mmx_hash_text.length;
+            mmx_new_count += 1;
+        }
+        mmx_inventory_count += 1;
+        mmx_exact_count += records[mmx_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                           records[mmx_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                           records[mmx_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                           records[mmx_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE;
+        mmx_intel_invalid_count += records[mmx_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
+                                   records[mmx_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS;
+        bool mmx_intel_invalid_control = false;
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(mmx_intel_invalid_ids); invalid_index += 1)
+            mmx_intel_invalid_control |= mmx_form_id == mmx_intel_invalid_ids[invalid_index];
+        bool mmx_exact_row = records[mmx_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                             records[mmx_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                             records[mmx_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                             records[mmx_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE;
+        bool mmx_control_row = mmx_intel_invalid_control &&
+                               records[mmx_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
+                               records[mmx_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
+                               records[mmx_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                               records[mmx_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE;
+        BUSTER_TEST(arguments, mmx_exact_row || mmx_control_row);
+    }
+    link_sha256(arguments->arena, mmx_inventory_hash_text, mmx_inventory_hash_length, mmx_inventory_digest);
+    u8 mmx_new_digest[32] = {0};
+    u8 mmx_preexisting_digest[32] = {0};
+    u8 mmx_control_digest[32] = {0};
+    link_sha256(arguments->arena, mmx_new_hash_text, mmx_new_hash_length, mmx_new_digest);
+    link_sha256(arguments->arena, mmx_preexisting_hash_text, mmx_preexisting_hash_length, mmx_preexisting_digest);
+    link_sha256(arguments->arena, mmx_control_hash_text, mmx_control_hash_length, mmx_control_digest);
+    static u8 const expected_mmx_inventory_digest[32] = {
+        0xfc, 0x79, 0xb3, 0x9a, 0xc0, 0x42, 0xee, 0x80, 0xe4, 0x84, 0xc5, 0xae, 0x81, 0xcf, 0xba, 0x89,
+        0x90, 0x0a, 0xa6, 0x8a, 0x00, 0x19, 0xb2, 0x3c, 0x93, 0x02, 0x48, 0x27, 0x28, 0x9d, 0x99, 0x8b,
+    };
+    static u8 const expected_mmx_new_digest[32] = {
+        0x65, 0x9c, 0x9a, 0xa9, 0x55, 0xd2, 0x46, 0xf4, 0xa7, 0x94, 0x81, 0xdc, 0xba, 0xed, 0xee, 0x6d,
+        0x78, 0xe4, 0xed, 0x55, 0xe2, 0xb8, 0x8b, 0x2e, 0xd1, 0x9a, 0x9e, 0xea, 0x93, 0x17, 0xc0, 0xab,
+    };
+    static u8 const expected_mmx_preexisting_digest[32] = {
+        0xb7, 0xcd, 0x9f, 0x84, 0xd4, 0xee, 0x8b, 0xf0, 0x9a, 0x3e, 0x86, 0x63, 0xb8, 0x90, 0xe9, 0xee,
+        0x01, 0xa9, 0xe9, 0xfa, 0x13, 0xfd, 0x5a, 0x9d, 0x1f, 0x53, 0x7a, 0x59, 0xff, 0x25, 0xe2, 0xf0,
+    };
+    static u8 const expected_mmx_control_digest[32] = {
+        0x17, 0x1f, 0x4b, 0xdb, 0x28, 0xd0, 0x16, 0x84, 0x74, 0x61, 0xdc, 0x00, 0xb9, 0x28, 0xbb, 0xae,
+        0xfd, 0x0b, 0xff, 0xc0, 0x99, 0x60, 0xdc, 0x97, 0x88, 0xf7, 0x07, 0x8d, 0x35, 0x06, 0x1d, 0xff,
+    };
+    BUSTER_TEST(arguments, mmx_inventory_count == 55 && mmx_exact_count == 48 && mmx_intel_invalid_count == 7);
+    BUSTER_TEST(arguments, mmx_feature_checked_count == 55);
+    BUSTER_TEST(arguments, memcmp(mmx_inventory_digest, expected_mmx_inventory_digest, sizeof(mmx_inventory_digest)) == 0);
+    BUSTER_TEST(arguments, mmx_new_count == 37 && mmx_preexisting_count == 11 && mmx_control_count == 7 &&
+                             mmx_new_hash_length && mmx_preexisting_hash_length && mmx_control_hash_length);
+    BUSTER_TEST(arguments, memcmp(mmx_new_digest, expected_mmx_new_digest, sizeof(mmx_new_digest)) == 0 &&
+                             memcmp(mmx_preexisting_digest, expected_mmx_preexisting_digest, sizeof(mmx_preexisting_digest)) == 0 &&
+                             memcmp(mmx_control_digest, expected_mmx_control_digest, sizeof(mmx_control_digest)) == 0);
+    // The semantic inventory contains 55 forms. Seven Intel-invalid rows
+    // remain unchanged, eleven were already AT&T-capable through the
+    // handwritten packed path, and the metadata seam truthfully unlocks the
+    // remaining 37 without changing those rows.
+    BUSTER_TEST(arguments, source.att_exact_count - 5266 == 37 &&
+                             1426 - source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 37);
+    for (u32 preexisting_index = 0; preexisting_index < BUSTER_ARRAY_LENGTH(mmx_preexisting_ids); preexisting_index += 1)
+    {
+        u32 form_id = mmx_preexisting_ids[preexisting_index];
+        BUSTER_TEST(arguments, records[form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 records[form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 records[form_id].intel_byte_count == records[form_id].att_byte_count);
+    }
+
     // These six rows were already Intel-exact before the cohort landed. Keep
     // them explicit so the aggregate +68 Intel delta cannot hide a regression.
     static u32 const preexisting_intel_control_ids[] = {9483, 9484, 9487, 9488, 9833, 9836};
@@ -537,8 +737,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 4562 &&
                              source.intel_byte_mismatch_count == 1004 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 716 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 5266 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 4169 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5303 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 4132 &&
                              source.att_byte_mismatch_count == 1104 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 710 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
@@ -552,11 +752,11 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 716);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6455 &&
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6492 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1426 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1389 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 710);
 

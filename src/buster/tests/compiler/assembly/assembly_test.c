@@ -3454,12 +3454,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_sse2_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_sse2.diagnostic_count == 0 && x86_att_sse2.bytes.length == sizeof(expected_x86_sse2) &&
                                memcmp(x86_att_sse2.bytes.pointer, expected_x86_sse2, sizeof(expected_x86_sse2)) == 0);
-    Target x86_without_sse2 = x86_target;
-    x86_without_sse2.cpu_features_explicit = true;
-    x86_without_sse2.cpu_features = target_cpu_features_empty();
+    Target x86_without_sse2_mmx = x86_target;
+    x86_without_sse2_mmx.cpu_features_explicit = true;
+    x86_without_sse2_mmx.cpu_features = target_cpu_features_empty();
     AssemblyEncodeResult unsupported_sse2 = assembly_encode(
         arguments->arena, S8("pxor xmm0, xmm0\n"),
-        (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        (AssemblyEncodeOptions){.target = x86_without_sse2_mmx, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, unsupported_sse2.diagnostic_count == 1 &&
                                unsupported_sse2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     u8 expected_x86_mmx[] = {
@@ -3543,6 +3543,93 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_mmx_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_mmx.diagnostic_count == 0 && x86_att_mmx.bytes.length == sizeof(expected_x86_mmx) &&
                                memcmp(x86_att_mmx.bytes.pointer, expected_x86_mmx, sizeof(expected_x86_mmx)) == 0);
+    // Metadata-backed MMX read-memory forms use the explicit register to
+    // resolve the aggregate 64-bit memory width in AT&T source.  Keep these
+    // fixtures independent of the census: they cover a byte/unpack form,
+    // high-register addressing and displacement boundaries, plus a
+    // pre-existing handwritten packed row and an Intel-invalid control row.
+    u8 expected_x86_mmx_memory_forms[] = {
+        0x0f, 0x60, 0x00,
+        0x41, 0x0f, 0x63, 0x7c, 0x24, 0x08,
+        0x0f, 0xd3, 0x46, 0x7f,
+        0x0f, 0xe0, 0x7d, 0xf0,
+        0x0f, 0xfc, 0x10,
+    };
+    u8 expected_x86_mmx_memory_intel[] = {
+        0x0f, 0x60, 0x00,
+        0x41, 0x0f, 0x63, 0x7c, 0x24, 0x08,
+        0x0f, 0xd3, 0x46, 0x7f,
+        0x0f, 0xe0, 0x7d, 0xf0,
+        0x0f, 0xfc, 0x10,
+    };
+    String8 x86_intel_mmx_memory_source =
+        S8("punpcklbw mm0, [rax]\n"
+           "packsswb mm7, [r12 + 8]\n"
+           "psrlq mm0, qword ptr [rsi + 127]\n"
+           "pavgb mm7, qword ptr [rbp - 16]\n"
+           "paddb mm2, qword ptr [rax]\n");
+    AssemblyEncodeResult x86_intel_mmx_memory = assembly_encode(
+        arguments->arena, x86_intel_mmx_memory_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_mmx_memory.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_intel_mmx_memory.bytes, expected_x86_mmx_memory_intel,
+                                                         sizeof(expected_x86_mmx_memory_intel)));
+    String8 x86_att_mmx_memory_source =
+        S8("punpcklbw (%rax), %mm0\n"
+           "packsswb 8(%r12), %mm7\n"
+           "psrlq 127(%rsi), %mm0\n"
+           "pavgb -16(%rbp), %mm7\n"
+           "paddb (%rax), %mm2\n");
+    AssemblyEncodeResult x86_att_mmx_memory = assembly_encode(
+        arguments->arena, x86_att_mmx_memory_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_mmx_memory.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_att_mmx_memory.bytes, expected_x86_mmx_memory_forms,
+                                                         sizeof(expected_x86_mmx_memory_forms)));
+    AssemblyEncodeResult x86_intel_mmx_wrong_width = assembly_encode(
+        arguments->arena, S8("punpcklbw mm0, qword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_mmx_wrong_width.diagnostic_count != 0);
+    AssemblyEncodeResult x86_intel_mmx_wrong_arity = assembly_encode(
+        arguments->arena, S8("punpcklbw mm0, [rax], mm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_mmx_wrong_arity.diagnostic_count != 0);
+    AssemblyEncodeResult x86_att_mmx_wrong_register = assembly_encode(
+        arguments->arena, S8("punpcklbw (%rax), %mm8\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_mmx_wrong_register.diagnostic_count != 0);
+    AssemblyEncodeResult x86_att_mmx_wrong_order = assembly_encode(
+        arguments->arena, S8("punpcklbw %mm0, (%rax)\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_mmx_wrong_order.diagnostic_count != 0);
+    AssemblyEncodeResult x86_intel_mmx_control = assembly_encode(
+        arguments->arena, S8("pcmpgtb mm5, byte ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_intel_mmx_control.diagnostic_count != 0);
+    AssemblyEncodeResult x86_att_mmx_control = assembly_encode(
+        arguments->arena, S8("pcmpgtb (%rax), %mm5\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_x86_mmx_control[] = {0x0f, 0x64, 0x28};
+    BUSTER_TEST(arguments, x86_att_mmx_control.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_att_mmx_control.bytes, expected_x86_mmx_control,
+                                                         sizeof(expected_x86_mmx_control)));
+    Target x86_without_sse2 = x86_target;
+    x86_without_sse2.cpu_features_explicit = true;
+    x86_without_sse2.cpu_features = target_cpu_features_empty();
+    AssemblyEncodeResult x86_mmx_without_feature = assembly_encode(
+        arguments->arena, S8("paddb mm2, qword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_without_sse2_mmx, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult x86_sse2mmx_without_feature = assembly_encode(
+        arguments->arena, S8("paddq mm0, qword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_without_sse2_mmx, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult x86_sse2_without_feature = assembly_encode(
+        arguments->arena, S8("paddq xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_without_sse2, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    // Legacy MMX/SSE2MMX encodings are baseline here; the same target must
+    // still reject an XMM packed form when SSE2 is absent.
+    BUSTER_TEST(arguments, x86_mmx_without_feature.diagnostic_count == 0 && x86_sse2mmx_without_feature.diagnostic_count == 0 &&
+                               x86_sse2_without_feature.diagnostic_count == 1 &&
+                               x86_sse2_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     u8 expected_x86_x87[] = {
         0xd9, 0xc3, 0xdd, 0xd4, 0xdd, 0xdd, 0xd9, 0xce,
         0xd8, 0xc2, 0xdc, 0xcb, 0xd8, 0xe4, 0xdc, 0xe5,

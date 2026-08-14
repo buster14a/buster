@@ -4028,6 +4028,56 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_width_is_variable(Bust
     return flags != 0 && (flags & (u16)(flags - 1)) != 0;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_legacy_mmx_memory_shape(
+    BusterX86MetadataForm form, BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
+{
+    String8 isa_set = buster_x86_metadata_string_span(form.isa_set);
+    if (form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+        form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY ||
+        form.field_flags != (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_MEMORY |
+                             BUSTER_X86_METADATA_FIELD_REGISTER) ||
+        form.decorator_flags || form.apx_flags || form.amx_flags ||
+        !(buster_x86_metadata_input_string_equal(isa_set, S8("PENTIUMMMX")) ||
+          buster_x86_metadata_input_string_equal(isa_set, S8("SSE2MMX"))) ||
+        !bindings ||
+        binding_count != 2)
+        return false;
+    bool has_mmx_destination = false;
+    bool has_memory_source = false;
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        BusterX86MetadataPhysicalBinding binding = bindings[index];
+        if (!binding.has_physical || !binding.metadata.visible || binding.metadata.slot != 0)
+            return false;
+        if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            binding.metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+            binding.metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX &&
+            binding.metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG &&
+            binding.metadata.access == (BUSTER_X86_METADATA_ACCESS_READ | BUSTER_X86_METADATA_ACCESS_WRITE) &&
+            binding.physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX &&
+            binding.physical.reg.width == 64)
+        {
+            if (has_mmx_destination) return false;
+            has_mmx_destination = true;
+        }
+        else if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                 binding.metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                 binding.metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY &&
+                 binding.metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_RM &&
+                 binding.metadata.access == BUSTER_X86_METADATA_ACCESS_READ &&
+                 !binding.physical.memory.vsib && !binding.physical.memory.has_segment)
+        {
+            if (has_memory_source) return false;
+            has_memory_source = true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return has_mmx_destination && has_memory_source;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX86MetadataForm form,
                                                                             BusterX86MetadataPhysicalBinding* bindings,
                                                                             u32 binding_count)
@@ -4085,6 +4135,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
             }
         }
     }
+    bool legacy_mmx_memory_shape = buster_x86_metadata_emit_legacy_mmx_memory_shape(form, bindings, binding_count);
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalBinding binding = bindings[index];
@@ -4142,6 +4193,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
         }
         bool variable_width = buster_x86_metadata_emit_operand_width_is_variable(binding.metadata);
         u16 width = buster_x86_metadata_emit_operand_width(binding.physical);
+        if (!width && legacy_mmx_memory_shape && binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            width = 64;
         if (!width && binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
             binding.physical.memory.source_width > 64)
         {
