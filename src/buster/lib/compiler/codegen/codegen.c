@@ -155,6 +155,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrFunction* functio
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
 BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_exhausted(CodegenBuffer* buffer);
 BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type);
 
 BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
@@ -953,8 +954,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
         emitted.byte_count > output_capacity)
     {
-        buffer->error = emitted.status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY ? CODEGEN_ERROR_CAPACITY
-                                                                                       : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY || emitted.byte_count > output_capacity)
+        {
+            codegen_buffer_report_exhausted(buffer);
+        }
+        else
+        {
+            buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        }
         return false;
     }
     buffer->count += emitted.byte_count;
@@ -7160,20 +7167,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                             C_X64_LOAD(0x85, instruction->operands[0]);
-                            if (loaded_type->layout.size == 1 || loaded_type->layout.size == 2)
+                            u16 load_width = (u16)(loaded_type->layout.size * 8);
+                            BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, loaded_type->layout.size <= 2 ? 32 : load_width),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, load_width, 0),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, loaded_type->layout.size <= 2 ? S8("MOVZX") : S8("MOV"),
+                                                                       load_operands, BUSTER_ARRAY_LENGTH(load_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, loaded_type->layout.size == 1 ? 0xb6 : 0xb7);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            else
-                            {
-                                if (loaded_type->layout.size == 8)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, 0x8b);
-                            }
-                            codegen_emit_u8(&buffer, 0x00);
                         }
                         else
                         {
@@ -7797,19 +7801,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     C_X64_LOAD(0x95, instruction->operands[0]);
                                 }
-                                if (stored_type->layout.size == 2)
+                                u16 atomic_store_width = (u16)(stored_type->layout.size * 8);
+                                BusterX86MetadataPhysicalOperand atomic_store_operands[2] = {
+                                    indirect ? codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, atomic_store_width, 0)
+                                              : codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, atomic_store_width,
+                                                                                       C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, atomic_store_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XCHG"), atomic_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(atomic_store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                else if (stored_type->layout.size == 8)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, stored_type->layout.size == 1 ? 0x86 : 0x87);
-                                codegen_emit_u8(&buffer, indirect ? 0x02 : 0x85);
-                                if (!indirect)
-                                {
-                                    codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
+                                    result.error = buffer.error;
+                                    return result;
                                 }
                                 instruction_id = instruction->next;
                                 continue;
@@ -7824,23 +7827,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
-                                if (stored_type->layout.size == 2)
+                                u16 store_width = (u16)(stored_type->layout.size * 8);
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, store_width, 0),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, store_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x66);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                if (stored_type->layout.size == 8)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, stored_type->layout.size == 1 ? 0x88 : 0x89);
-                                codegen_emit_u8(&buffer, 0x02);
                                 instruction_id = instruction->next;
                                 continue;
                             }
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
+                            BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                                        C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
+                                                                       BUSTER_ARRAY_LENGTH(store_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
