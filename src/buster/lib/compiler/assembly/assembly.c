@@ -422,7 +422,8 @@ struct AssemblyInstruction
     AssemblyAmdForm const* amd_form;
     bool metadata;
     u8 metadata_operand_count;
-    u16 metadata_reserved;
+    bool metadata_include_implicit;
+    u8 metadata_reserved;
     u32 metadata_form_id;
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
@@ -10628,6 +10629,35 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
 {
     if (assembly_word_equal(mnemonic, S8("loopz"))) return S8("loope");
     if (assembly_word_equal(mnemonic, S8("loopnz"))) return S8("loopne");
+    // GNU/AT&T spellings for the accumulator sign-extension family are
+    // aliases of the Intel mnemonics represented by metadata.
+    if (assembly_word_equal(mnemonic, S8("cbtw"))) return S8("cbw");
+    if (assembly_word_equal(mnemonic, S8("cwtl"))) return S8("cwde");
+    if (assembly_word_equal(mnemonic, S8("cltq"))) return S8("cdqe");
+    if (assembly_word_equal(mnemonic, S8("cwtd"))) return S8("cwd");
+    if (assembly_word_equal(mnemonic, S8("cltd"))) return S8("cdq");
+    if (assembly_word_equal(mnemonic, S8("cqto"))) return S8("cqo");
+    // XED's condition-family spellings use Z/NZ and the negative aliases
+    // (NLE, etc.) as canonical keys.  The handwritten front end accepts the
+    // shorter Intel aliases (JE, SETNE, SETG, CMOVE); normalize those keys
+    // before metadata candidate selection.
+    if (assembly_word_equal(mnemonic, S8("je"))) return S8("jz");
+    if (assembly_word_equal(mnemonic, S8("setne"))) return S8("setnz");
+    if (assembly_word_equal(mnemonic, S8("setg"))) return S8("setnle");
+    if (assembly_word_equal(mnemonic, S8("cmove"))) return S8("cmovz");
+    // GNU/AT&T scalar extension aliases carry both source and destination
+    // widths in the mnemonic.  Metadata models the operation as MOVZX/MOVSX
+    // (or MOVSXD for the dword-to-qword form); source memory width is restored
+    // from the alias in the parser below.
+    if (assembly_word_equal(mnemonic, S8("movzbw")) || assembly_word_equal(mnemonic, S8("movzbl")) ||
+        assembly_word_equal(mnemonic, S8("movzbq")) || assembly_word_equal(mnemonic, S8("movzwl")) ||
+        assembly_word_equal(mnemonic, S8("movzwq")))
+        return S8("movzx");
+    if (assembly_word_equal(mnemonic, S8("movsbw")) || assembly_word_equal(mnemonic, S8("movsbl")) ||
+        assembly_word_equal(mnemonic, S8("movsbq")) || assembly_word_equal(mnemonic, S8("movswl")) ||
+        assembly_word_equal(mnemonic, S8("movswq")))
+        return S8("movsx");
+    if (assembly_word_equal(mnemonic, S8("movslq"))) return S8("movsxd");
     if (assembly_word_equal(mnemonic, S8("xlatb"))) return S8("xlat");
     if (buster_x86_metadata_lookup_mnemonic(mnemonic).count)
     {
@@ -10642,6 +10672,19 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
         }
     }
     return mnemonic;
+}
+
+BUSTER_GLOBAL_LOCAL u16 assembly_x86_metadata_att_scalar_extend_source_width(String8 mnemonic)
+{
+    if (assembly_word_equal(mnemonic, S8("movzbw")) || assembly_word_equal(mnemonic, S8("movzbl")) ||
+        assembly_word_equal(mnemonic, S8("movzbq")) || assembly_word_equal(mnemonic, S8("movsbw")) ||
+        assembly_word_equal(mnemonic, S8("movsbl")) || assembly_word_equal(mnemonic, S8("movsbq")))
+        return 8;
+    if (assembly_word_equal(mnemonic, S8("movzwl")) || assembly_word_equal(mnemonic, S8("movzwq")) ||
+        assembly_word_equal(mnemonic, S8("movswl")) || assembly_word_equal(mnemonic, S8("movswq")))
+        return 16;
+    if (assembly_word_equal(mnemonic, S8("movslq"))) return 32;
+    return 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_apx_disasm_alias(
@@ -10793,7 +10836,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opc
     }
     if (assembly_x86_opcode_is_shift(opcode))
     {
-        return operand_index + 1 < operand_count;
+        // An explicit literal one is normalized away before metadata
+        // selection.  In that ONE() topology the remaining data operand is
+        // still the suffix-described operand.
+        return operand_count == 1 ? operand_index == 0 : operand_index + 1 < operand_count;
     }
     return true;
 }
@@ -11019,6 +11065,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_typed_decorator_authoritative(
     return buster_x86_metadata_typed_decorator_authoritative(form, query);
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_statement_has_extended_gpr(String8 statement);
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruction_parse(
     AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset, Target target, AssemblySyntax syntax)
 {
@@ -11117,6 +11165,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u64 mnemonic_end = 0;
     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+    u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+                                            ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+                                            : 0;
     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
     String8 mnemonic_suffix_base = {0};
@@ -11132,6 +11183,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
         }
         mnemonic = mnemonic_suffix_base;
+        mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
     }
     else if (!has_suffix_alias)
     {
@@ -11307,7 +11359,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     // ONE(), with no visible immediate operand.  Hide an explicit literal `1`
     // accepted by the handwritten syntax front end so both dialects select
     // the canonical one-byte opcode.
-    if (operand_count >= 2 &&
+    if (!assembly_x86_statement_has_extended_gpr(statement) && operand_count >= 2 &&
         (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
          assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
          assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("shr")) ||
@@ -11329,6 +11381,56 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                                      physical + index))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
+    if (att_scalar_extend_source_width)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+            {
+                physical[index].width = att_scalar_extend_source_width;
+            }
+        }
+    }
+    if (mnemonic.length >= 3 && (mnemonic.pointer[0] == 's' || mnemonic.pointer[0] == 'S') &&
+        (mnemonic.pointer[1] == 'e' || mnemonic.pointer[1] == 'E') && (mnemonic.pointer[2] == 't' || mnemonic.pointer[2] == 'T'))
+    {
+        // SETcc always stores one byte.  AT&T leaves that width implicit on
+        // memory operands, so make the source element explicit for metadata.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+                physical[index].width = 8;
+        }
+    }
+    if (assembly_word_equal(mnemonic, S8("imul")) && operand_count == 2 &&
+        physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+        physical[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        // Intel/AT&T two-operand IMUL is the three-operand form with the
+        // destination implicitly repeated as its source.  The metadata schema
+        // keeps that source binding visible to the physical query.
+        physical[2] = physical[1];
+        physical[1] = physical[0];
+        operands[2] = operands[1];
+        operands[1] = operands[0];
+        operand_count = 3;
+    }
+    bool rotate_mnemonic = assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode) ||
+                           assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+                           assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr"));
+    if (rotate_mnemonic)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand* count = physical + index;
+            if (count->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && count->has_value && count->value < 0)
+            {
+                count->unsigned_value = (u64)count->value & UINT64_C(0xff);
+                count->has_unsigned_value = true;
+                count->has_value = false;
+            }
         }
     }
     // Direct symbol-relative calls/jumps/conditions have no link-time range
@@ -11411,6 +11513,17 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     for (u32 immediate_index = 0; immediate_index < operand_count; immediate_index += 1)
     {
         if (physical[immediate_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || physical[immediate_index].width)
+        {
+            continue;
+        }
+        // IMUL's immediate is a variable signed 8/32-bit field independent
+        // of the destination width; SHLD/SHRD and rotate/shift counts are
+        // fixed imm8 fields.  Leave those widths unconstrained so metadata
+        // can select the canonical short form instead of rejecting a query
+        // merely because the data operand is 16/32/64 bits wide.
+        if (assembly_word_equal(mnemonic, S8("imul")) || assembly_word_equal(mnemonic, S8("shld")) ||
+            assembly_word_equal(mnemonic, S8("shrd")) || assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode) ||
+            assembly_x86_opcode_is_shift(mnemonic_suffix_info.opcode))
         {
             continue;
         }
@@ -11501,6 +11614,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = true,
         .include_not64 = false,
+        .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                            physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+                            physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
+                            (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+                             assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
+                             assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
         .source_semantics = true,
     };
     bool relative_literal = false;
@@ -11599,6 +11718,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .size = selection.selected_byte_count,
         .metadata = true,
         .metadata_operand_count = (u8)operand_count,
+        .metadata_include_implicit = query.include_implicit,
         .metadata_form_id = selection.form_id,
         .metadata_mnemonic = mnemonic,
         .metadata_address_size = address_size,
@@ -11712,7 +11832,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
 {
     // APX extended-GPR encodings remain on the handwritten path until their
     // dedicated metadata forms are migrated.
-    if (assembly_x86_instruction_has_extended_gpr(instruction))
+    if (instruction.no_flags || assembly_x86_instruction_has_extended_gpr(instruction))
     {
         return false;
     }
@@ -12228,6 +12348,10 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_prefix(AssemblyBuilder* builder, u16 
 
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_memory_prefix(AssemblyBuilder* builder, u16 width, AssemblyRegister reg, AssemblyMemory memory)
 {
+    if (memory.address_size == 32)
+    {
+        assembly_emit_byte(builder, 0x67);
+    }
     if (width == 16)
     {
         assembly_emit_byte(builder, 0x66);
@@ -12557,13 +12681,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = true,
         .include_not64 = false,
+        .include_implicit = instruction->metadata_include_implicit,
         .source_semantics = true,
     };
     u8 bytes[64] = {0};
     BusterX86MetadataRelocation metadata_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
         .physical = physical,
-        .form_id = instruction->metadata_form_id,
         .output = bytes,
         .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
         .relocations = metadata_relocations,
