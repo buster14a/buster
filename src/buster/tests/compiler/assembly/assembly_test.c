@@ -167,6 +167,39 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cas
     {S8_INITIALIZER("ucvtf h0, h1\n"), {0x20, 0xd8, 0x79, 0x7e}},
 };
 
+/* Scalar FP/FP16 direct rows. Bytes are independent llvm-mc 22.1.8
+ * encodings; each of the twelve fixed generated rows has one legal spelling
+ * and the boundary table below exercises the high register encodings. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp_scalar_cases[] = {
+    {S8_INITIALIZER("fabs d0, d1\n"), {0x20, 0xc0, 0x60, 0x1e}},
+    {S8_INITIALIZER("fabs h0, h1\n"), {0x20, 0xc0, 0xe0, 0x1e}},
+    {S8_INITIALIZER("fabs s0, s1\n"), {0x20, 0xc0, 0x20, 0x1e}},
+    {S8_INITIALIZER("fadd d0, d1, d2\n"), {0x20, 0x28, 0x62, 0x1e}},
+    {S8_INITIALIZER("fadd h0, h1, h2\n"), {0x20, 0x28, 0xe2, 0x1e}},
+    {S8_INITIALIZER("fadd s0, s1, s2\n"), {0x20, 0x28, 0x22, 0x1e}},
+    {S8_INITIALIZER("fcmp d0, d1\n"), {0x00, 0x20, 0x61, 0x1e}},
+    {S8_INITIALIZER("fcmp h0, h1\n"), {0x00, 0x20, 0xe1, 0x1e}},
+    {S8_INITIALIZER("fcmp s0, s1\n"), {0x00, 0x20, 0x21, 0x1e}},
+    {S8_INITIALIZER("fcmpe d0, d1\n"), {0x10, 0x20, 0x61, 0x1e}},
+    {S8_INITIALIZER("fcmpe h0, h1\n"), {0x10, 0x20, 0xe1, 0x1e}},
+    {S8_INITIALIZER("fcmpe s0, s1\n"), {0x10, 0x20, 0x21, 0x1e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp_scalar_boundary_cases[] = {
+    {S8_INITIALIZER("FABS D31, D30\n"), {0xdf, 0xc3, 0x60, 0x1e}},
+    {S8_INITIALIZER("FABS H31, H30\n"), {0xdf, 0xc3, 0xe0, 0x1e}},
+    {S8_INITIALIZER("FABS S31, S30\n"), {0xdf, 0xc3, 0x20, 0x1e}},
+    {S8_INITIALIZER("FADD D31, D30, D29\n"), {0xdf, 0x2b, 0x7d, 0x1e}},
+    {S8_INITIALIZER("FADD H31, H30, H29\n"), {0xdf, 0x2b, 0xfd, 0x1e}},
+    {S8_INITIALIZER("FADD S31, S30, S29\n"), {0xdf, 0x2b, 0x3d, 0x1e}},
+    {S8_INITIALIZER("FCMP D31, D30\n"), {0xe0, 0x23, 0x7e, 0x1e}},
+    {S8_INITIALIZER("FCMP H31, H30\n"), {0xe0, 0x23, 0xfe, 0x1e}},
+    {S8_INITIALIZER("FCMP S31, S30\n"), {0xe0, 0x23, 0x3e, 0x1e}},
+    {S8_INITIALIZER("FCMPE D31, D30\n"), {0xf0, 0x23, 0x7e, 0x1e}},
+    {S8_INITIALIZER("FCMPE H31, H30\n"), {0xf0, 0x23, 0xfe, 0x1e}},
+    {S8_INITIALIZER("FCMPE S31, S30\n"), {0xf0, 0x23, 0x3e, 0x1e}},
+};
+
 /* Scalar same-shape AdvSIMD rows added after the FP16 cohort.  Every byte is
  * an independent llvm-mc 22.1.8 encoding; the table intentionally covers
  * every legal width of every row (nine FP rows at S/D and eight integer rows
@@ -1177,13 +1210,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 273);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 273);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 117);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 285);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 285);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 105);
     BUSTER_TEST(arguments, direct_simd_covered_transform_count == 211);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 74);
     BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 52);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 53);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
@@ -4138,10 +4171,25 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target aarch64_fp16_no_both = aarch64_fp16_no_full;
     aarch64_fp16_no_both.cpu_features = target_cpu_features_remove(aarch64_fp16_no_both.cpu_features,
                                                                     TARGET_CPU_FEATURE_AARCH64_NEON);
+    Target aarch64_fp_only = aarch64_fp16_both;
+    aarch64_fp_only.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8}, 1);
+    Target aarch64_fp16_scalar_only = aarch64_fp16_both;
+    aarch64_fp16_scalar_only.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_FULLFP16}, 2);
+    Target aarch64_no_fp = aarch64_fp_only;
+    aarch64_no_fp.cpu_features = (TargetCpuFeatures){0};
+    Target aarch64_invalid_fullfp16 = aarch64_fp_only;
+    aarch64_invalid_fullfp16.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FULLFP16}, 1);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_both));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_full));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_neon));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_both));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp_only));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_scalar_only));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_no_fp));
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_invalid_fullfp16));
     TargetCpuFeatures invalid_requirement_features = {0};
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON, 0));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE,
@@ -4157,6 +4205,28 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_fp16_both,
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT));
+    TargetCpuFeatures fp_requirement_features = {0};
+    TargetCpuFeatures fullfp16_requirement_features = {0};
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP,
+                                                                        &fp_requirement_features) &&
+                               fp_requirement_features.words[0] == 0 &&
+                               fp_requirement_features.words[1] == (UINT64_C(1) << 54) &&
+                               fp_requirement_features.words[2] == 0 && fp_requirement_features.words[3] == 0);
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16,
+                                                                        &fullfp16_requirement_features) &&
+                               fullfp16_requirement_features.words[0] == 0 &&
+                               fullfp16_requirement_features.words[1] == (UINT64_C(1) << 57) &&
+                               fullfp16_requirement_features.words[2] == 0 && fullfp16_requirement_features.words[3] == 0);
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_fp_only,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_no_fp,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP));
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_fp16_both,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_fp16_no_full,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_invalid_fullfp16,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16));
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases) == 133);
     for (u32 fp16_index = 0; fp16_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases); fp16_index += 1)
     {
@@ -4203,6 +4273,58 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
         BUSTER_TEST(arguments, no_both.diagnostic_count == 1 && no_both.bytes.length == 0 &&
                                    no_both.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp_scalar_cases) == 12);
+    for (u32 fp_scalar_index = 0; fp_scalar_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp_scalar_cases);
+         fp_scalar_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fp_scalar_case = assembly_a64_direct_simd_fp_scalar_cases[fp_scalar_index];
+        bool half_precision = fp_scalar_case.source.pointer[5] == 'h' || fp_scalar_case.source.pointer[5] == 'H' ||
+                              (fp_scalar_case.source.length > 6 &&
+                               (fp_scalar_case.source.pointer[6] == 'h' || fp_scalar_case.source.pointer[6] == 'H'));
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fp_scalar_case.source,
+            (AssemblyEncodeOptions){.target = half_precision ? aarch64_fp16_scalar_only : aarch64_fp_only});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fp_scalar_case.bytes, 4));
+    }
+    for (u32 fp_scalar_index = 0; fp_scalar_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp_scalar_boundary_cases);
+         fp_scalar_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fp_scalar_case = assembly_a64_direct_simd_fp_scalar_boundary_cases[fp_scalar_index];
+        bool half_precision = fp_scalar_case.source.pointer[5] == 'h' || fp_scalar_case.source.pointer[5] == 'H' ||
+                              (fp_scalar_case.source.length > 6 &&
+                               (fp_scalar_case.source.pointer[6] == 'h' || fp_scalar_case.source.pointer[6] == 'H'));
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fp_scalar_case.source,
+            (AssemblyEncodeOptions){.target = half_precision ? aarch64_fp16_scalar_only : aarch64_fp_only});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fp_scalar_case.bytes, 4));
+    }
+    for (u32 fp_scalar_index = 0; fp_scalar_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp_scalar_cases);
+         fp_scalar_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fp_scalar_case = assembly_a64_direct_simd_fp_scalar_cases[fp_scalar_index];
+        bool half_precision = fp_scalar_case.source.pointer[5] == 'h' ||
+                              (fp_scalar_case.source.length > 6 && fp_scalar_case.source.pointer[6] == 'h');
+        AssemblyEncodeResult no_feature = assembly_encode(
+            arguments->arena, fp_scalar_case.source,
+            (AssemblyEncodeOptions){.target = half_precision ? aarch64_fp16_no_full : aarch64_no_fp});
+        BUSTER_TEST(arguments, no_feature.diagnostic_count == 1 && no_feature.bytes.length == 0 &&
+                                   no_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    static String8 const malformed_fp_scalar_cases[] = {
+        S8_INITIALIZER("fabs v0.2s, d1\n"), S8_INITIALIZER("fabs d0, s1\n"),
+        S8_INITIALIZER("fabs d0\n"), S8_INITIALIZER("fabs d0, d1, d2\n"), S8_INITIALIZER("fabs d32, d1\n"),
+        S8_INITIALIZER("fadd s0, s1, d2\n"), S8_INITIALIZER("fadd s0, s1\n"),
+        S8_INITIALIZER("fadd s0, s1, s2, s3\n"), S8_INITIALIZER("fadd s32, s1, s2\n"),
+        S8_INITIALIZER("fcmp q0, q1\n"), S8_INITIALIZER("fcmp d0\n"), S8_INITIALIZER("fcmp d0, d1, d2\n"),
+        S8_INITIALIZER("fcmp d0, x1\n"), S8_INITIALIZER("fcmpe h0, s1\n"), S8_INITIALIZER("fcmpe h0, h1[0]\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_fp_scalar_cases); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_fp_scalar_cases[malformed_index], (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_same_cases) == 50);
     for (u32 scalar_same_index = 0; scalar_same_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_same_cases); scalar_same_index += 1)
