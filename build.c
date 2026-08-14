@@ -25,6 +25,12 @@
 #include <buster/lib/integer.c>
 #include <buster/lib/entry_point.c>
 #include <buster/lib/target.c>
+#if BUSTER_CPU_ARCH_X86_64
+// target.c includes the x86 utility encoder.  Keep the bootstrap build on the
+// same metadata authority as the compiler instead of leaving that public
+// helper with an unresolved metadata encoder dependency.
+#include <buster/lib/compiler/assembly/x86_64_metadata.c>
+#endif
 
 typedef enum BuildCommand
 {
