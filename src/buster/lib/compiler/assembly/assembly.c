@@ -10394,8 +10394,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_physical_operand(AssemblyBuilder*
         // vector width (xmmword/ymmword/zmmword).  Leave aggregate widths
         // unresolved so the selected vector form supplies the element width;
         // scalar and branch memory widths retain their source value.
-        result->width = memory.width > 64 ? 0 : memory.width ? memory.width : (relative ? 64 : 0);
-        result->memory.source_width = memory.width;
+        result->width = (memory.width > 64 && memory.width != 80) ? 0 : memory.width ? memory.width : (relative ? 64 : 0);
+        // Width 80 is an x87 scalar element, not an aggregate vector
+        // qualifier.  Keep it in the physical width field only; the
+        // metadata source-width side channel is reserved for vector
+        // aggregate qualifiers and would reject the mem80real rows.
+        result->memory.source_width = memory.width == 80 ? 0 : memory.width;
         result->memory.address_size = memory.address_size ? memory.address_size : 64;
         result->memory.scale = memory.scale ? memory.scale : 1;
         result->memory.segment = memory.has_segment ? memory.segment : BUSTER_X86_METADATA_SEGMENT_NONE;
@@ -10775,7 +10779,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
         return false;
     }
     char8 suffix = assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 1]);
-    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64 : 0;
+    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64
+                     : suffix == 's' ? 32
+                     : suffix == 't' ? 80
+                                      : 0;
     if (!suffix_width)
     {
         return false;
@@ -10789,6 +10796,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
             info.opcode == ASSEMBLY_OPCODE_X86_SETCC)
         {
             return false;
+        }
+        if (suffix == 'l' &&
+            (info.opcode == ASSEMBLY_OPCODE_X86_FLD || info.opcode == ASSEMBLY_OPCODE_X86_FST ||
+             info.opcode == ASSEMBLY_OPCODE_X86_FSTP ||
+             (info.opcode >= ASSEMBLY_OPCODE_X86_FADD && info.opcode <= ASSEMBLY_OPCODE_X86_FDIVR) ||
+             (info.opcode >= ASSEMBLY_OPCODE_X86_FCOM && info.opcode <= ASSEMBLY_OPCODE_X86_FCMOVCC)))
+        {
+            suffix_width = 64;
         }
     }
     else if (!buster_x86_metadata_lookup_mnemonic(candidate).count ||
@@ -11058,6 +11073,27 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     if (target.cpu_arch != CPU_ARCH_X86_64)
     {
         return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+    }
+    // FINIT/FCLEX are the architectural WAIT-prefixed aliases of the
+    // metadata-native FNINIT/FNCLEX forms.  Expand each source instruction
+    // into two checked metadata instructions so the 0x9B wait prefix remains
+    // metadata-produced rather than resurrecting a handwritten opcode path.
+    String8 trimmed_statement = assembly_trim(statement);
+    u64 first_space = 0;
+    while (first_space < trimmed_statement.length && !assembly_space(trimmed_statement.pointer[first_space])) first_space += 1;
+    String8 first_word = string_slice(trimmed_statement, 0, first_space);
+    String8 wait_alias = {0};
+    if (assembly_word_equal(first_word, S8("finit"))) wait_alias = S8("fninit");
+    else if (assembly_word_equal(first_word, S8("fclex"))) wait_alias = S8("fnclex");
+    if (wait_alias.length && first_space == trimmed_statement.length)
+    {
+        BusterX86MetadataEncodeStatus wait_status = assembly_x86_metadata_instruction_parse(
+            builder, S8("fwait"), line, column, offset, target, syntax);
+        if (wait_status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+        {
+            return wait_status;
+        }
+        return assembly_x86_metadata_instruction_parse(builder, wait_alias, line, column, offset + 1, target, syntax);
     }
     bool lock = false;
     bool rep = false;
@@ -11365,6 +11401,41 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                                      physical + index))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
+    // X87 metadata rows expose only the explicit stack operand; ST0 (and the
+    // status/pop/push pseudo-registers) are implicit schema operands.  The
+    // handwritten front end accepts the conventional two-register spelling,
+    // so project an explicit ST0 pair down to its visible non-ST0 operand
+    // before physical form selection.
+    u32 x87_register_count = 0;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        x87_register_count += physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                              physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL &&
+                              physical[index].reg.width == 80;
+    }
+    if (x87_register_count == 2 && operand_count == 2)
+    {
+        u32 drop_index = UINT32_MAX;
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL &&
+                physical[index].reg.width == 80 && physical[index].reg.index == 0)
+            {
+                drop_index = index;
+                break;
+            }
+        }
+        if (drop_index != UINT32_MAX)
+        {
+            for (u32 index = drop_index + 1; index < operand_count; index += 1)
+            {
+                physical[index - 1] = physical[index];
+                operands[index - 1] = operands[index];
+            }
+            operand_count -= 1;
         }
     }
     bool mmx_instruction = false;
@@ -11902,6 +11973,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     // are admitted below only when their physical decorator topology is
     // represented by the metadata adapter.
     bool vector_instruction = assembly_x86_vector_form(instruction.opcode) != 0;
+    bool x87_instruction = instruction.opcode >= ASSEMBLY_OPCODE_X86_FLD && instruction.opcode <= ASSEMBLY_OPCODE_X86_FWAIT;
+    if (x87_instruction)
+    {
+        // Keep malformed x87 extended-GPR forms under the checked metadata
+        // authority so they fail closed instead of reaching handwritten
+        // ModRM bytes.  Valid x87 memory forms have ordinary GPR bases.
+        return true;
+    }
     if (instruction.no_flags ||
         (assembly_x86_instruction_has_extended_gpr(instruction) && (!instruction.evex || !vector_instruction)))
     {
@@ -12444,7 +12523,15 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                     assembly_instruction_parse(builder, statement, line, column, output_offset, target, syntax);
                     if (builder->instruction_count != instruction_count)
                     {
-                        output_offset += builder->instructions[builder->instruction_count - 1].size;
+                        // A source alias may expand into multiple checked
+                        // metadata instructions (for example WAIT-prefixed
+                        // x87 FINIT/FCLEX).  Account for every appended
+                        // instruction so subsequent offsets and relocations
+                        // remain aligned with emitted bytes.
+                        for (u32 index = instruction_count; index < builder->instruction_count; index += 1)
+                        {
+                            output_offset += builder->instructions[index].size;
+                        }
                     }
                 }
             }
@@ -14454,279 +14541,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             }
             continue;
         }
-        if (instruction->opcode == ASSEMBLY_OPCODE_X86_EMMS)
-        {
-            assembly_emit_byte(builder, 0x0f);
-            assembly_emit_byte(builder, 0x77);
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_zero_operand(instruction->opcode))
-        {
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FWAIT)
-            {
-                assembly_emit_byte(builder, 0x9b);
-                continue;
-            }
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT || instruction->opcode == ASSEMBLY_OPCODE_X86_FCLEX)
-            {
-                assembly_emit_byte(builder, 0x9b);
-            }
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT || instruction->opcode == ASSEMBLY_OPCODE_X86_FNINIT ||
-                instruction->opcode == ASSEMBLY_OPCODE_X86_FCLEX || instruction->opcode == ASSEMBLY_OPCODE_X86_FNCLEX)
-            {
-                assembly_emit_byte(builder, 0xdb);
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FINIT ||
-                                                   instruction->opcode == ASSEMBLY_OPCODE_X86_FNINIT
-                                               ? 0xe3
-                                               : 0xe2);
-                continue;
-            }
-            assembly_emit_byte(builder, 0xd9);
-            u8 second_byte = instruction->opcode == ASSEMBLY_OPCODE_X86_F2XM1 ? 0xf0
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FABS ? 0xe1
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FCHS ? 0xe0
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLD1 ? 0xe8
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDZ ? 0xee
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDPI ? 0xeb
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDL2E ? 0xea
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDL2T ? 0xe9
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDLG2 ? 0xec
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDLN2 ? 0xed
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSQRT ? 0xfa
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSIN ? 0xfe
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FCOS ? 0xff
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSINCOS ? 0xfb
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPTAN ? 0xf2
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPATAN ? 0xf3
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FYL2X ? 0xf1
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FYL2XP1 ? 0xf9
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FRNDINT ? 0xfc
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FSCALE ? 0xfd
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPREM ? 0xf8
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FPREM1 ? 0xf5
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FXTRACT ? 0xf4
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FTST ? 0xe4
-                             : instruction->opcode == ASSEMBLY_OPCODE_X86_FXAM ? 0xe5
-                                                                              : 0xd0;
-            assembly_emit_byte(builder, second_byte);
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_data(instruction->opcode))
-        {
-            AssemblyOperand operand = instruction->operands[0];
-            if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
-            {
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? 0xd9 : 0xdd);
-                assembly_emit_byte(builder, (u8)((instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? 0xc0
-                                                 : instruction->opcode == ASSEMBLY_OPCODE_X86_FST ? 0xd0
-                                                                                                  : 0xd8) +
-                                                operand.reg.index));
-                continue;
-            }
-            assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, operand.memory);
-            u8 primary = instruction->opcode == ASSEMBLY_OPCODE_X86_FLD
-                             ? (instruction->width == 32 ? 0xd9 : instruction->width == 64 ? 0xdd : 0xdb)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FST
-                             ? (instruction->width == 32 ? 0xd9 : 0xdd)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSTP
-                             ? (instruction->width == 32 ? 0xd9 : instruction->width == 64 ? 0xdd : 0xdb)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FILD
-                             ? (instruction->width == 32 ? 0xdb : 0xdf)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FIST
-                             ? (instruction->width == 32 ? 0xdb : 0xdf)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FISTP
-                             ? (instruction->width == 32 ? 0xdb : 0xdf)
-                             : (instruction->width == 16 ? 0xdf : instruction->width == 32 ? 0xdb : 0xdd);
-            u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FLD ? (instruction->width == 80 ? 5 : 0)
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FST ? 2
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FSTP ? (instruction->width == 80 ? 7 : 3)
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FILD ? (instruction->width == 64 ? 5 : 0)
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FIST ? 2
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FISTP ? (instruction->width == 64 ? 7 : 3)
-                                                                         : 1;
-            assembly_emit_byte(builder, primary);
-            if (!assembly_x86_emit_memory(builder, instruction, group, operand.memory))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x87 memory displacement is out of range"));
-                return;
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_arithmetic(instruction->opcode))
-        {
-            if (instruction->operand_count == 1)
-            {
-                AssemblyMemory memory = instruction->operands[0].memory;
-                assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, memory);
-                assembly_emit_byte(builder, instruction->width == 32 ? 0xd8 : 0xdc);
-                u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FADD ? 0
-                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FMUL ? 1
-                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUB ? 4
-                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBR ? 5
-                           : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIV ? 6
-                                                                            : 7;
-                if (!assembly_x86_emit_memory(builder, instruction, group, memory))
-                {
-                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                        S8("x87 memory displacement is out of range"));
-                    return;
-                }
-                continue;
-            }
-            AssemblyRegister destination = instruction->operands[0].reg;
-            AssemblyRegister source = instruction->operands[1].reg;
-            u8 destination_is_top = destination.index == 0;
-            u8 index = destination_is_top ? source.index : destination.index;
-            assembly_emit_byte(builder, destination_is_top ? 0xd8 : 0xdc);
-            u8 operation = instruction->opcode == ASSEMBLY_OPCODE_X86_FADD ? 0xc0
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FMUL ? 0xc8
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUB ? (destination_is_top ? 0xe0 : 0xe8)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBR ? (destination_is_top ? 0xe8 : 0xe0)
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIV ? (destination_is_top ? 0xf0 : 0xf8)
-                                                                           : (destination_is_top ? 0xf8 : 0xf0);
-            assembly_emit_byte(builder, (u8)(operation + index));
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_pop_arithmetic(instruction->opcode))
-        {
-            assembly_emit_byte(builder, 0xde);
-            u8 operation = instruction->opcode == ASSEMBLY_OPCODE_X86_FADDP ? 0xc0
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FMULP ? 0xc8
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBP ? 0xe8
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FSUBRP ? 0xe0
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FDIVP ? 0xf8
-                                                                           : 0xf0;
-            assembly_emit_byte(builder, (u8)(operation + instruction->operands[0].reg.index));
-            continue;
-        }
-        if (instruction->opcode == ASSEMBLY_OPCODE_X86_FXCH)
-        {
-            assembly_emit_byte(builder, 0xd9);
-            assembly_emit_byte(builder, (u8)(0xc8 + instruction->operands[0].reg.index));
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_compare(instruction->opcode))
-        {
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FCOMPP || instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOMPP)
-            {
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FCOMPP ? 0xde : 0xda);
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FCOMPP ? 0xd9 : 0xe9);
-                continue;
-            }
-            AssemblyOperand first = instruction->operands[0];
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FCOM || instruction->opcode == ASSEMBLY_OPCODE_X86_FCOMP)
-            {
-                if (first.kind == ASSEMBLY_OPERAND_REGISTER)
-                {
-                    assembly_emit_byte(builder, 0xd8);
-                    assembly_emit_byte(builder, (u8)((instruction->opcode == ASSEMBLY_OPCODE_X86_FCOM ? 0xd0 : 0xd8) + first.reg.index));
-                    continue;
-                }
-                assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, first.memory);
-                assembly_emit_byte(builder, instruction->width == 32 ? 0xd8 : 0xdc);
-                if (!assembly_x86_emit_memory(builder, instruction, instruction->opcode == ASSEMBLY_OPCODE_X86_FCOM ? 2 : 3, first.memory))
-                {
-                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                        S8("x87 comparison memory displacement is out of range"));
-                    return;
-                }
-                continue;
-            }
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOM || instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOMP)
-            {
-                assembly_emit_byte(builder, 0xdd);
-                assembly_emit_byte(builder, (u8)((instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOM ? 0xe0 : 0xe8) + first.reg.index));
-                continue;
-            }
-            AssemblyRegister source = instruction->operands[1].reg;
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FCMOVCC)
-            {
-                u8 inverse = instruction->condition >= 4;
-                u8 condition = inverse ? (u8)(instruction->condition - 4) : instruction->condition;
-                assembly_emit_byte(builder, inverse ? 0xdb : 0xda);
-                assembly_emit_byte(builder, (u8)(0xc0 + condition * 8 + source.index));
-                continue;
-            }
-            u8 pop = instruction->opcode == ASSEMBLY_OPCODE_X86_FCOMIP || instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOMIP;
-            u8 unordered = instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOMI || instruction->opcode == ASSEMBLY_OPCODE_X86_FUCOMIP;
-            assembly_emit_byte(builder, pop ? 0xdf : 0xdb);
-            assembly_emit_byte(builder, (u8)((unordered ? 0xe8 : 0xf0) + source.index));
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_integer_arithmetic(instruction->opcode))
-        {
-            AssemblyMemory memory = instruction->operands[0].memory;
-            assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, memory);
-            assembly_emit_byte(builder, instruction->width == 16 ? 0xde : 0xda);
-            u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FIADD ? 0
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FIMUL ? 1
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FISUB ? 4
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FISUBR ? 5
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FIDIV ? 6
-                                                                         : 7;
-            if (!assembly_x86_emit_memory(builder, instruction, group, memory))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x87 integer arithmetic memory displacement is out of range"));
-                return;
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_state_memory(instruction->opcode))
-        {
-            u8 waited = instruction->opcode == ASSEMBLY_OPCODE_X86_FSTCW || instruction->opcode == ASSEMBLY_OPCODE_X86_FSTENV ||
-                          instruction->opcode == ASSEMBLY_OPCODE_X86_FSAVE || instruction->opcode == ASSEMBLY_OPCODE_X86_FSTSW;
-            if (waited)
-            {
-                assembly_emit_byte(builder, 0x9b);
-            }
-            AssemblyOperand operand = instruction->operands[0];
-            if (operand.kind == ASSEMBLY_OPERAND_REGISTER)
-            {
-                assembly_emit_byte(builder, 0xdf);
-                assembly_emit_byte(builder, 0xe0);
-                continue;
-            }
-            assembly_x86_emit_memory_prefix(builder, 0, (AssemblyRegister){0}, operand.memory);
-            u8 primary = instruction->opcode == ASSEMBLY_OPCODE_X86_FBLD || instruction->opcode == ASSEMBLY_OPCODE_X86_FBSTP ? 0xdf
-                         : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDCW || instruction->opcode == ASSEMBLY_OPCODE_X86_FNSTCW ||
-                                   instruction->opcode == ASSEMBLY_OPCODE_X86_FSTCW || instruction->opcode == ASSEMBLY_OPCODE_X86_FLDENV ||
-                                   instruction->opcode == ASSEMBLY_OPCODE_X86_FNSTENV || instruction->opcode == ASSEMBLY_OPCODE_X86_FSTENV
-                             ? 0xd9
-                             : 0xdd;
-            u8 group = instruction->opcode == ASSEMBLY_OPCODE_X86_FBLD || instruction->opcode == ASSEMBLY_OPCODE_X86_FLDENV ||
-                               instruction->opcode == ASSEMBLY_OPCODE_X86_FRSTOR
-                           ? 4
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FLDCW ? 5
-                       : instruction->opcode == ASSEMBLY_OPCODE_X86_FBSTP || instruction->opcode == ASSEMBLY_OPCODE_X86_FNSTENV ||
-                                 instruction->opcode == ASSEMBLY_OPCODE_X86_FSTENV || instruction->opcode == ASSEMBLY_OPCODE_X86_FNSAVE ||
-                                 instruction->opcode == ASSEMBLY_OPCODE_X86_FSAVE
-                           ? 6
-                           : 7;
-            assembly_emit_byte(builder, primary);
-            if (!assembly_x86_emit_memory(builder, instruction, group, operand.memory))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x87 state memory displacement is out of range"));
-                return;
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_x87_stack_control(instruction->opcode))
-        {
-            if (instruction->opcode == ASSEMBLY_OPCODE_X86_FINCSTP || instruction->opcode == ASSEMBLY_OPCODE_X86_FDECSTP)
-            {
-                assembly_emit_byte(builder, 0xd9);
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FINCSTP ? 0xf7 : 0xf6);
-            }
-            else
-            {
-                assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FFREE ? 0xdd : 0xdf);
-                assembly_emit_byte(builder, (u8)(0xc0 + instruction->operands[0].reg.index));
-            }
-            continue;
-        }
         A64Opcode opcode = instruction->opcode == ASSEMBLY_OPCODE_AARCH64_NOP   ? A64_OPCODE_NOP
                            : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_RET ? A64_OPCODE_RET
                            : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_BL  ? A64_OPCODE_BL
@@ -14792,7 +14606,8 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
             line_count += 1;
         }
     }
-    if (line_count > UINT32_MAX / BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY ||
+    if (line_count > UINT32_MAX / 2 ||
+        line_count > UINT32_MAX / BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY ||
         line_count > UINT32_MAX / ASSEMBLY_SOURCE_SYMBOLS_PER_LINE)
     {
         return empty;
@@ -14800,7 +14615,9 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
-        .instruction_capacity = line_count,
+        // A small set of source aliases (currently WAIT-prefixed x87 FINIT
+        // and FCLEX) expands into multiple metadata instructions.
+        .instruction_capacity = line_count * 2,
         .symbol_capacity = line_count * ASSEMBLY_SOURCE_SYMBOLS_PER_LINE,
         .relocation_capacity = line_count * BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
         .diagnostic_capacity = line_count * 4,
