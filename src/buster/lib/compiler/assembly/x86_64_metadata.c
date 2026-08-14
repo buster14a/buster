@@ -824,6 +824,21 @@ struct BusterX86MetadataExactPlanRecord
     bool ready;
 };
 
+enum
+{
+    BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_POLICY_VALID = 1u << 0,
+    BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX = 1u << 1,
+    BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_FLAGS_ALL = BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_POLICY_VALID |
+                                                        BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX,
+};
+
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_machine_exact_token_integrity(u16 slot_plus_one, u8 policy_flags,
+                                                                           u32 form_id, u64 stable_hash)
+{
+    return (u8)(UINT8_C(0xa5) ^ (u8)slot_plus_one ^ (u8)(slot_plus_one >> 8) ^ policy_flags ^
+                (u8)form_id ^ (u8)(form_id >> 8) ^ (u8)stable_hash ^ (u8)(stable_hash >> 32));
+}
+
 typedef struct BusterX86MetadataEncodeScratch BusterX86MetadataEncodeScratch;
 struct BusterX86MetadataEncodeScratch
 {
@@ -4449,7 +4464,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_diagnostic_u64(s64* diagnostic
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_to_scratch(
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form, BusterX86MetadataEncodeScratch* scratch,
-    u32* diagnostic_operand, s64* diagnostic_value, BusterX86MetadataExactPlanRecord const* plan)
+    u32* diagnostic_operand, s64* diagnostic_value, BusterX86MetadataExactPlanRecord const* plan,
+    BusterX86MetadataMachineExactToken const* machine_token)
 {
     BusterX86MetadataPatternSemantics pattern = {0};
     bool pattern_valid = plan ? (plan->pattern != 0) : buster_x86_metadata_emit_parse_pattern(form, &pattern);
@@ -4519,17 +4535,20 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (pattern.not16 && query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
         query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_32)
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
-    if (!buster_x86_metadata_form_coverage_allowed(generated, (BusterX86MetadataResolveQuery){
-                                                        .include_privileged = query.include_privileged,
-                                                        .include_not64 = query.include_not64,
-                                                    }) ||
-        !buster_x86_metadata_form_execution_mode_matches(generated, (BusterX86MetadataResolveQuery){
-                                                              .execution_mode = query.execution_mode,
-                                                              .include_not64 = query.include_not64,
-                                                          }))
+    if (!machine_token &&
+        (!buster_x86_metadata_form_coverage_allowed(generated, (BusterX86MetadataResolveQuery){
+                                                         .include_privileged = query.include_privileged,
+                                                         .include_not64 = query.include_not64,
+                                                     }) ||
+         !buster_x86_metadata_form_execution_mode_matches(generated, (BusterX86MetadataResolveQuery){
+                                                               .execution_mode = query.execution_mode,
+                                                               .include_not64 = query.include_not64,
+                                                           }) ||
+         !buster_x86_metadata_form_feature_available(generated, query.features)))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
-    if (!buster_x86_metadata_form_feature_available(generated, query.features)) return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
-    if (query_uses_egpr && !buster_x86_metadata_feature_input_allows_apx(query.features))
+    if (query_uses_egpr &&
+        !(machine_token ? (machine_token->policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX) != 0
+                        : buster_x86_metadata_feature_input_allows_apx(query.features)))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     if (query_uses_egpr && (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
                             form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX))
@@ -4546,7 +4565,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         form.prefix_kind = BUSTER_X86_METADATA_PREFIX_REX2;
         form.encoder_family = BUSTER_X86_METADATA_ENCODER_REX2;
     }
-    if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 && !buster_x86_metadata_feature_input_allows_apx(query.features))
+    if (!machine_token && form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
+        !buster_x86_metadata_feature_input_allows_apx(query.features))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     if (query.attributes.broadcast_elements)
     {
@@ -4713,7 +4733,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         uses_apx_egpr |= memory.has_base && memory.base.index >= 16;
         uses_apx_egpr |= memory.has_index && !memory.vsib && memory.index.index >= 16;
     }
-    if (uses_apx_egpr && !buster_x86_metadata_feature_input_allows_apx(query.features))
+    if (uses_apx_egpr &&
+        !(machine_token ? (machine_token->policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX) != 0
+                        : buster_x86_metadata_feature_input_allows_apx(query.features)))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     BusterX86MetadataAddressEncoding address = {0};
     if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, form, pattern, &address))
@@ -5576,7 +5598,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         u32 diagnostic_operand = 0;
         s64 diagnostic_value = 0;
         BusterX86MetadataEncodeStatus status = buster_x86_metadata_emit_form_to_scratch(query, form, &scratch, &diagnostic_operand,
-                                                                                          &diagnostic_value, 0);
+                                                                                          &diagnostic_value, 0, 0);
         if (status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
         {
             BusterX86MetadataString required_feature = {0};
@@ -5698,7 +5720,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_emit_required_fe
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_with_form(BusterX86MetadataEmitQuery query,
                                                                                          BusterX86MetadataForm form,
                                                                                          bool check_mnemonic,
-                                                                                         BusterX86MetadataExactPlanRecord const* plan)
+                                                                                         BusterX86MetadataExactPlanRecord const* plan,
+                                                                                         BusterX86MetadataMachineExactToken const* machine_token)
 {
     BusterX86MetadataEmitResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
@@ -5725,8 +5748,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
     scratch.byte_count = 0;
     scratch.relocation_count = 0;
     result.status = buster_x86_metadata_emit_form_to_scratch(query.physical, form, &scratch, &result.diagnostic_operand,
-                                                              &result.diagnostic_value, plan);
-    if (result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
+                                                              &result.diagnostic_value, plan, machine_token);
+    if (result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE && !machine_token)
         result.required_feature = buster_x86_metadata_emit_required_feature(query.physical, form);
     result.required_byte_count = scratch.byte_count;
     result.required_relocation_count = scratch.relocation_count;
@@ -5764,7 +5787,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQ
         result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
         return result;
     }
-    return buster_x86_metadata_emit_form_with_form(query, form, true, 0);
+    return buster_x86_metadata_emit_form_with_form(query, form, true, 0, 0);
 }
 
 BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86MetadataEmitQuery query,
@@ -5791,7 +5814,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86Metadat
     normalized.physical.mnemonic = buster_x86_metadata_string_span(form.iclass);
     normalized.physical.source_semantics = false;
     if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
-    return buster_x86_metadata_emit_form_with_form(normalized, form, false, 0);
+    return buster_x86_metadata_emit_form_with_form(normalized, form, false, 0, 0);
 }
 
 BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(BusterX86MetadataEmitQuery query,
@@ -5867,12 +5890,78 @@ buster_x86_metadata_exact_plan_record(BusterX86MetadataExactPlan plan)
     return record;
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataExactPlanRecord const*
+buster_x86_metadata_machine_exact_plan_record(BusterX86MetadataMachineExactToken token)
+{
+    if (!buster_x86_metadata_prewarmed || !token.slot_plus_one || token.slot_plus_one > buster_x86_metadata_exact_plan_count ||
+        token.slot_plus_one > BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY ||
+        (token.policy_flags & (u8)~BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_FLAGS_ALL) ||
+        !(token.policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_POLICY_VALID))
+        return 0;
+    BusterX86MetadataExactPlanRecord const* record = &buster_x86_metadata_exact_plan_records[token.slot_plus_one - 1];
+    if (!record->ready || !record->identity.stable_hash || record->identity.form_id >= BUSTER_X86_GENERATED_FORM_COUNT || !record->form ||
+        !record->pattern || record->operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY ||
+        record->operand_count != record->form->operand_count || record->form->id != record->identity.form_id ||
+        record->form->stable_hash != record->identity.stable_hash)
+        return 0;
+    u8 integrity = buster_x86_metadata_machine_exact_token_integrity(
+        token.slot_plus_one, token.policy_flags, record->identity.form_id, record->identity.stable_hash);
+    if (token.integrity != integrity ||
+        (record->form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
+         !(token.policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX)))
+        return 0;
+    return record;
+}
+
 bool buster_x86_metadata_exact_plan_for_key(BusterX86MetadataFormKey key, BusterX86MetadataExactPlan* result)
 {
     if (!result) return false;
     BusterX86MetadataExactPlan plan = {.form_id = key.form_id, .stable_hash = key.stable_hash};
     if (!buster_x86_metadata_exact_plan_record(plan)) return false;
     *result = plan;
+    return true;
+}
+
+bool buster_x86_metadata_machine_exact_token_for_plan(BusterX86MetadataExactPlan plan,
+                                                       BusterX86MetadataFeatureInput features,
+                                                       BusterX86MetadataMachineExactToken* result)
+{
+    if (!result) return false;
+    *result = (BusterX86MetadataMachineExactToken){0};
+    // This is a pure read of the immutable post-prewarm plan table.  Machine
+    // prewarm calls it serially before publishing tokens; keeping the lookup
+    // read-only also lets differential metadata tests resolve an already
+    // prepared plan after the test gang has started without introducing a
+    // worker mutation or a lazy cache.
+    BusterX86MetadataExactPlanRecord const* record = buster_x86_metadata_exact_plan_record(plan);
+    if (!record) return false;
+    BusterX86MetadataResolveQuery policy_query = {
+        .features = features,
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = false,
+        .include_not64 = false,
+        .include_implicit = false,
+    };
+    if (!buster_x86_metadata_resolution_query_valid(policy_query, 0)) return false;
+    BusterX86GeneratedForm generated = buster_x86_metadata_form_record(record->form->id);
+    bool allows_apx = buster_x86_metadata_feature_input_allows_apx(features);
+    if (!buster_x86_metadata_form_coverage_allowed(generated, policy_query) ||
+        !buster_x86_metadata_form_execution_mode_matches(generated, policy_query) ||
+        !buster_x86_metadata_form_feature_available(generated, features) ||
+        (record->form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 && !allows_apx))
+        return false;
+    u16 slot_plus_one = buster_x86_metadata_exact_plan_slots[plan.form_id];
+    if (!slot_plus_one || slot_plus_one > buster_x86_metadata_exact_plan_count ||
+        slot_plus_one > BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY ||
+        record != &buster_x86_metadata_exact_plan_records[slot_plus_one - 1])
+        return false;
+    result->slot_plus_one = slot_plus_one;
+    result->policy_flags = BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_POLICY_VALID;
+    if (allows_apx)
+        result->policy_flags |= BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX;
+    result->integrity = buster_x86_metadata_machine_exact_token_integrity(
+        slot_plus_one, result->policy_flags, record->identity.form_id, record->identity.stable_hash);
     return true;
 }
 
@@ -5920,7 +6009,46 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX8
         .relocation_capacity = query.relocation_capacity,
     };
     if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
-    return buster_x86_metadata_emit_form_with_form(normalized, *record->form, false, record);
+    return buster_x86_metadata_emit_form_with_form(normalized, *record->form, false, record, 0);
+}
+
+BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86MetadataMachineExactToken token,
+                                                                    BusterX86MetadataMachineExactQuery query)
+{
+    BusterX86MetadataEmitResult result = {
+        .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+        .form_id = UINT32_MAX,
+    };
+    BusterX86MetadataExactPlanRecord const* record = buster_x86_metadata_machine_exact_plan_record(token);
+    if (!record)
+    {
+        result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
+        return result;
+    }
+    result.form_id = record->identity.form_id;
+    result.stable_hash = record->identity.stable_hash;
+    if ((query.operand_count && !query.operands) || query.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY ||
+        (query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations))
+        return result;
+    BusterX86MetadataEmitQuery normalized = {
+        .physical = {
+            .mnemonic = buster_x86_metadata_string_span(record->form->iclass),
+            .operands = query.operands,
+            .operand_count = query.operand_count,
+            .attributes = {0},
+            .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            .include_privileged = false,
+            .include_not64 = false,
+            .include_implicit = false,
+            .source_semantics = false,
+        },
+        .output = query.output,
+        .output_capacity = query.output_capacity,
+        .relocations = query.relocations,
+        .relocation_capacity = query.relocation_capacity,
+    };
+    return buster_x86_metadata_emit_form_with_form(normalized, *record->form, false, record, &token);
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86MetadataForm form)

@@ -1059,11 +1059,18 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_case(
         !buster_x86_metadata_exact_plan_for_key(key, &looked_up) ||
         plan.form_id != looked_up.form_id || plan.stable_hash != looked_up.stable_hash)
         return false;
+    BusterX86MetadataMachineExactToken machine_token = {0};
+    if (!buster_x86_metadata_machine_exact_token_for_plan(plan,
+                                                          (BusterX86MetadataFeatureInput){.names = features, .count = feature_count},
+                                                          &machine_token))
+        return false;
 
     u8 checked_bytes[32] = {0};
     u8 fast_bytes[32] = {0};
+    u8 machine_bytes[32] = {0};
     BusterX86MetadataRelocation checked_relocations[8] = {0};
     BusterX86MetadataRelocation fast_relocations[8] = {0};
+    BusterX86MetadataRelocation machine_relocations[8] = {0};
     BusterX86MetadataExactQuery checked_query = {
         .key = key,
         .operands = operands,
@@ -1080,13 +1087,27 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_case(
     BusterX86MetadataExactQuery fast_query = checked_query;
     fast_query.output = fast_bytes;
     fast_query.relocations = fast_relocations;
+    BusterX86MetadataMachineExactQuery machine_query = {
+        .operands = operands,
+        .operand_count = operand_count,
+        .output = machine_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(machine_bytes),
+        .relocations = machine_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(machine_relocations),
+    };
     BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query(checked_query);
     BusterX86MetadataEmitResult fast = buster_x86_metadata_emit_exact_prevalidated(plan, fast_query);
-    bool result_equal = x86_64_metadata_test_emit_result_equal(checked, fast);
+    BusterX86MetadataEmitResult machine = buster_x86_metadata_emit_exact_machine(machine_token, machine_query);
+    bool result_equal = x86_64_metadata_test_emit_result_equal(checked, fast) &&
+                        x86_64_metadata_test_emit_result_equal(checked, machine);
     bool bytes_equal = x86_64_metadata_test_bytes_equal(fast_bytes, fast.byte_count, checked_bytes, checked.byte_count);
+    bytes_equal &= x86_64_metadata_test_bytes_equal(machine_bytes, machine.byte_count, checked_bytes, checked.byte_count);
     bool relocations_equal = fast.relocation_count == 0 ||
                              memcmp(fast_relocations, checked_relocations,
                                     fast.relocation_count * sizeof(*fast_relocations)) == 0;
+    relocations_equal &= machine.relocation_count == 0 ||
+                         memcmp(machine_relocations, checked_relocations,
+                                machine.relocation_count * sizeof(*machine_relocations)) == 0;
 
     // The fast ABI must preserve the checked entry point's failure ordering:
     // a stale query key is rejected before output/capacity validation, while
@@ -2793,6 +2814,19 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                        BUSTER_ARRAY_LENGTH(wildcard_features)));
             BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_missing_feature(mfence_plan_key));
 
+            BusterX86MetadataExactPlan mfence_plan = {0};
+            BusterX86MetadataMachineExactToken mfence_token = {0};
+            BUSTER_TEST(arguments, buster_x86_metadata_exact_plan_for_key(mfence_plan_key, &mfence_plan));
+            BUSTER_TEST(arguments, !buster_x86_metadata_machine_exact_token_for_plan(
+                                       mfence_plan, (BusterX86MetadataFeatureInput){0}, &mfence_token));
+            BUSTER_TEST(arguments, buster_x86_metadata_machine_exact_token_for_plan(
+                                       mfence_plan,
+                                       (BusterX86MetadataFeatureInput){
+                                           .names = wildcard_features,
+                                           .count = BUSTER_ARRAY_LENGTH(wildcard_features),
+                                       },
+                                       &mfence_token));
+
             BusterX86MetadataExactPlan reserved_plan = {0};
             if (buster_x86_metadata_exact_plan_for_key(mfence_plan_key, &reserved_plan))
             {
@@ -2805,6 +2839,33 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                     buster_x86_metadata_emit_exact_prevalidated(reserved_plan, reserved_query);
                 BUSTER_TEST(arguments, reserved_result.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
                                            reserved_result.form_id == reserved_query.key.form_id);
+
+                BusterX86MetadataMachineExactToken forged_token = {
+                    .slot_plus_one = UINT16_MAX,
+                    .policy_flags = 1,
+                };
+                u8 forged_output = 0xa5;
+                BusterX86MetadataEmitResult forged_token_result = buster_x86_metadata_emit_exact_machine(
+                    forged_token, (BusterX86MetadataMachineExactQuery){.output = &forged_output, .output_capacity = 1});
+                BUSTER_TEST(arguments, forged_token_result.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                           forged_output == 0xa5);
+
+                forged_token = (BusterX86MetadataMachineExactToken){
+                    .slot_plus_one = mfence_token.slot_plus_one,
+                    .policy_flags = 0,
+                    .integrity = mfence_token.integrity,
+                };
+                forged_token_result = buster_x86_metadata_emit_exact_machine(
+                    forged_token, (BusterX86MetadataMachineExactQuery){.output = &forged_output, .output_capacity = 1});
+                BUSTER_TEST(arguments, forged_token_result.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                           forged_output == 0xa5);
+
+                forged_token = mfence_token;
+                forged_token.policy_flags ^= 2;
+                forged_token_result = buster_x86_metadata_emit_exact_machine(
+                    forged_token, (BusterX86MetadataMachineExactQuery){.output = &forged_output, .output_capacity = 1});
+                BUSTER_TEST(arguments, forged_token_result.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                           forged_output == 0xa5);
             }
         }
 

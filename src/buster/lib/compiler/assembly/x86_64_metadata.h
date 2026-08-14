@@ -850,6 +850,33 @@ struct BusterX86MetadataExactPlan
 };
 BUSTER_CT_CHECK(sizeof(BusterX86MetadataExactPlan) == 16);
 
+// A compact opaque handle for a machine exact plan that was resolved during
+// the serial prewarm phase.  Callers must obtain this value from
+// buster_x86_metadata_machine_exact_token_for_plan(); its representation is
+// not part of the metadata ABI and must not be inspected or modified.
+typedef struct BusterX86MetadataMachineExactToken BusterX86MetadataMachineExactToken;
+struct BusterX86MetadataMachineExactToken
+{
+    u16 slot_plus_one;
+    u8 policy_flags;
+    u8 integrity;
+};
+BUSTER_CT_CHECK(sizeof(BusterX86MetadataMachineExactToken) == 4);
+
+// The machine exact bridge has no source/query policy fields: these values
+// are fixed and validated when its token is prepared.  Operands and output
+// storage remain borrowed for the duration of one emission call.
+typedef struct BusterX86MetadataMachineExactQuery BusterX86MetadataMachineExactQuery;
+struct BusterX86MetadataMachineExactQuery
+{
+    BusterX86MetadataPhysicalOperand const* operands;
+    u32 operand_count;
+    u8* output;
+    u32 output_capacity;
+    BusterX86MetadataRelocation* relocations;
+    u32 relocation_capacity;
+};
+
 typedef struct BusterX86MetadataEmitResult BusterX86MetadataEmitResult;
 struct BusterX86MetadataEmitResult
 {
@@ -1026,12 +1053,29 @@ BUSTER_F_DECL bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormK
 // stale keys, and for rows whose pattern/operand schema cannot be prepared.
 BUSTER_F_DECL bool buster_x86_metadata_exact_plan_for_key(BusterX86MetadataFormKey key,
                                                            BusterX86MetadataExactPlan* result);
+// Resolve an already validated plan to a compact immutable machine token.
+// This serial-prewarm operation validates the fixed machine policy (64-bit
+// address/execution mode, ordinary coverage, no implicit/privileged/not64
+// policy, and the supplied target feature input); the returned token is safe
+// to copy to worker lanes and remains valid for the process lifetime.
+BUSTER_F_DECL bool buster_x86_metadata_machine_exact_token_for_plan(
+    BusterX86MetadataExactPlan plan, BusterX86MetadataFeatureInput features,
+    BusterX86MetadataMachineExactToken* result);
 // Fast exact emission for a previously prepared plan.  The checked
 // `buster_x86_metadata_emit_exact_query` remains the public fallback; this
 // path skips repeated form-key and parsed-pattern lookup while retaining
 // physical-query, capacity, feature, and relocation validation.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX86MetadataExactPlan plan,
                                                                                        BusterX86MetadataExactQuery query);
+// Machine-trusted exact emission for a token created during serial prewarm.
+// The token resolves directly to immutable normalized metadata, so this path
+// skips durable-key lookup, generic physical-query validation, and the fixed
+// machine feature/mode/coverage checks.  It still performs the full dynamic
+// form transform (register, range, addressing, dynamic EGPR/APX, and
+// instruction-length checks) plus output/relocation capacity checks.  Invalid
+// or forged tokens fail closed without touching output.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(
+    BusterX86MetadataMachineExactToken token, BusterX86MetadataMachineExactQuery query);
 // Build the deterministic physical query used by coverage consumers.  The
 // returned operands, feature slot, and mnemonic buffer are caller-owned and
 // are only borrowed by the query; they must remain live until the caller has

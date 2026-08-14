@@ -5031,20 +5031,19 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_
 // that same dense namespace so workers do not re-enter the registry, decode a
 // recipe category/index, or re-check a durable form key for every row.  The
 // descriptor/status portion is a static projection of the source registry;
-// the plan fields are filled and published by the serial prewarm below.
+// the token and validity fields are filled and published by serial prewarm.
 typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
 struct MachineX64PreparedExactOpcode
 {
     MachineX64ExactRecipe const* descriptor;
-    BusterX86MetadataExactPlan plan;
-    // Reserved for the compact metadata-trusted token.  Keep this field in
-    // the per-opcode record so the token can be published with the plan
-    // without changing the row or the hot lookup shape.
-    u32 metadata_token;
+    // The token is resolved beside the descriptor's feature policy during
+    // serial prewarm and remains opaque to the machine layer.
+    BusterX86MetadataMachineExactToken metadata_token;
     u8 exact_required;
     u8 plan_valid;
     u8 reserved[2];
 };
+BUSTER_CT_CHECK(sizeof(MachineX64PreparedExactOpcode) == 16);
 
 #define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(index) (&machine_x64_exact_recipe_table[(index)])
 #define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW(index) 0
@@ -5122,8 +5121,22 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
                                 prepared[plan_id].stable_hash == descriptor->key.stable_hash;
             if (descriptor_valid)
             {
+                BusterX86MetadataMachineExactToken metadata_token = {0};
+                descriptor_valid = buster_x86_metadata_machine_exact_token_for_plan(
+                    prepared[plan_id],
+                    (BusterX86MetadataFeatureInput){
+                        .names = descriptor->features,
+                        .count = descriptor->feature_count,
+                    },
+                    &metadata_token);
+                if (descriptor_valid)
+                {
+                    entry.metadata_token = metadata_token;
+                }
+            }
+            if (descriptor_valid)
+            {
                 entry.descriptor = descriptor;
-                entry.plan = prepared[plan_id];
                 entry.plan_valid = true;
             }
             else
@@ -5132,8 +5145,7 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
                 // and rejected by the worker lane instead of using the old
                 // switch as an accidental fallback.
                 entry.descriptor = 0;
-                entry.plan = (BusterX86MetadataExactPlan){0};
-                entry.metadata_token = 0;
+                entry.metadata_token = (BusterX86MetadataMachineExactToken){0};
                 entry.plan_valid = false;
             }
         }
@@ -5228,27 +5240,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rip_memor
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder, X64ExactFormKey key,
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
+                                                     BusterX86MetadataMachineExactToken metadata_token,
                                                      BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                     String8 const* features, u32 feature_count,
-                                                     BusterX86MetadataExactPlan plan,
                                                      MachineX64ExactEmitCounters* counters)
 {
     if (counters) counters->attempts += 1;
-    if (plan.form_id != key.form_id || plan.stable_hash != key.stable_hash)
-    {
-        if (counters) counters->fallbacks += 1;
-        return false;
-    }
     u8 exact_bytes[16];
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_prevalidated(plan, (BusterX86MetadataExactQuery){
-        .key = key,
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(metadata_token, (BusterX86MetadataMachineExactQuery){
         .operands = operands,
         .operand_count = operand_count,
-        .features = {.names = features, .count = feature_count},
-        .address_size = 64,
-        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-        .include_implicit = false,
         .output = exact_bytes,
         .output_capacity = sizeof(exact_bytes),
         .relocations = 0,
@@ -5325,8 +5326,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             return false;
         }
     }
-    return machine_x64_emit_exact_form(encoder, descriptor->key, operands, descriptor->operand_count,
-                                       descriptor->features, descriptor->feature_count, entry->plan, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_token, operands, descriptor->operand_count, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
