@@ -351,6 +351,7 @@ struct AssemblyMemory
     bool rip_relative;
     bool has_segment;
     bool vsib;
+    bool width_explicit;
     // AT&T permits an absolute address without the parenthesized
     // displacement(base,index,scale) form.  Keep this source-level bit so
     // direct branch targets (which use the same bare spelling) can remain
@@ -1275,6 +1276,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_intel(AssemblyBuilder* builde
             assembly_space(text.pointer[prefix.length]))
         {
             result->width = qualifiers[qualifier_index].width;
+            result->width_explicit = true;
             text = assembly_trim(string_slice(text, prefix.length, text.length));
             break;
         }
@@ -11405,6 +11407,58 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             }
         }
     }
+    u16 vector_memory_width = 0;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            (physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+             physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+             physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM))
+        {
+            vector_memory_width = physical[index].reg.width;
+            break;
+        }
+    }
+    if (vector_memory_width)
+    {
+        u16 scalar_memory_width = 0;
+        if (mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
+            scalar_memory_width = 32;
+        else if (mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 'd')
+            scalar_memory_width = 64;
+        else if ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 'd') ||
+                 assembly_word_equal(mnemonic, S8("vmovapd")) || assembly_word_equal(mnemonic, S8("vmovupd")))
+            scalar_memory_width = 64;
+        else if ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 's') ||
+                 assembly_word_equal(mnemonic, S8("vmovaps")) || assembly_word_equal(mnemonic, S8("vmovups")))
+            scalar_memory_width = 32;
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                continue;
+            }
+            bool explicit_width = operands[index].memory.width_explicit;
+            if (explicit_width && physical[index].memory.source_width > 64)
+            {
+                if (physical[index].memory.source_width != vector_memory_width)
+                {
+                    return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                }
+                // The handwritten parser already validated the aggregate
+                // qualifier against the vector register.  VEX metadata rows
+                // carry that width in VL and expose only the scalar element
+                // atom to the encoder; retain the validation while removing
+                // the aggregate token from the physical query.
+                physical[index].memory.source_width = 0;
+                physical[index].width = scalar_memory_width;
+            }
+            else if (index == 0 && !physical[index].width && !explicit_width)
+            {
+                physical[index].width = scalar_memory_width;
+            }
+        }
+    }
     if (att_scalar_extend_source_width)
     {
         for (u32 index = 0; index < operand_count; index += 1)
@@ -11854,7 +11908,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
 {
     // APX extended-GPR encodings remain on the handwritten path until their
     // dedicated metadata forms are migrated.
-    if (instruction.no_flags || assembly_x86_instruction_has_extended_gpr(instruction))
+    // This tranche covers legacy VEX forms. EVEX/mask/SAE spellings retain
+    // the handwritten parser until their decorator topology is represented
+    // losslessly by the physical metadata adapter.
+    if (instruction.no_flags || instruction.evex || assembly_x86_instruction_has_extended_gpr(instruction))
     {
         return false;
     }
@@ -11946,6 +12003,45 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     case ASSEMBLY_OPCODE_X86_PCMPGTW_MMX:
     case ASSEMBLY_OPCODE_X86_PCMPGTD_MMX:
     case ASSEMBLY_OPCODE_X86_PMULLW_MMX:
+    case ASSEMBLY_OPCODE_X86_VMOVAPS:
+    case ASSEMBLY_OPCODE_X86_VMOVUPS:
+    case ASSEMBLY_OPCODE_X86_VMOVAPD:
+    case ASSEMBLY_OPCODE_X86_VMOVUPD:
+    case ASSEMBLY_OPCODE_X86_VXORPS:
+    case ASSEMBLY_OPCODE_X86_VXORPD:
+    case ASSEMBLY_OPCODE_X86_VADDPS:
+    case ASSEMBLY_OPCODE_X86_VADDPD:
+    case ASSEMBLY_OPCODE_X86_VADDSS:
+    case ASSEMBLY_OPCODE_X86_VADDSD:
+    case ASSEMBLY_OPCODE_X86_VSUBPS:
+    case ASSEMBLY_OPCODE_X86_VSUBPD:
+    case ASSEMBLY_OPCODE_X86_VMULPS:
+    case ASSEMBLY_OPCODE_X86_VMULPD:
+    case ASSEMBLY_OPCODE_X86_VDIVPS:
+    case ASSEMBLY_OPCODE_X86_VDIVPD:
+    case ASSEMBLY_OPCODE_X86_VMOVDQA:
+    case ASSEMBLY_OPCODE_X86_VMOVDQU:
+    case ASSEMBLY_OPCODE_X86_VPADDB:
+    case ASSEMBLY_OPCODE_X86_VPADDW:
+    case ASSEMBLY_OPCODE_X86_VPADDD:
+    case ASSEMBLY_OPCODE_X86_VPADDQ:
+    case ASSEMBLY_OPCODE_X86_VPSUBB:
+    case ASSEMBLY_OPCODE_X86_VPSUBW:
+    case ASSEMBLY_OPCODE_X86_VPSUBD:
+    case ASSEMBLY_OPCODE_X86_VPSUBQ:
+    case ASSEMBLY_OPCODE_X86_VPAND:
+    case ASSEMBLY_OPCODE_X86_VPOR:
+    case ASSEMBLY_OPCODE_X86_VPXOR:
+    case ASSEMBLY_OPCODE_X86_VPCMPEQB:
+    case ASSEMBLY_OPCODE_X86_VPCMPEQW:
+    case ASSEMBLY_OPCODE_X86_VPCMPEQD:
+    case ASSEMBLY_OPCODE_X86_VPCMPEQQ:
+    case ASSEMBLY_OPCODE_X86_VPCMPGTB:
+    case ASSEMBLY_OPCODE_X86_VPCMPGTW:
+    case ASSEMBLY_OPCODE_X86_VPCMPGTD:
+    case ASSEMBLY_OPCODE_X86_VPCMPGTQ:
+    case ASSEMBLY_OPCODE_X86_VPMULLW:
+    case ASSEMBLY_OPCODE_X86_VPMULLD:
         return true;
     default:
         return false;
@@ -14786,76 +14882,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             {
                 assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FFREE ? 0xdd : 0xdf);
                 assembly_emit_byte(builder, (u8)(0xc0 + instruction->operands[0].reg.index));
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_avx(instruction->opcode))
-        {
-            AssemblyOperand first = instruction->operands[0];
-            AssemblyOperand second = instruction->operands[1];
-            u8 move = assembly_x86_opcode_is_avx_move(instruction->opcode);
-            AssemblyOperand source = move ? second : instruction->operands[2];
-            u8 load = !move || first.kind == ASSEMBLY_OPERAND_REGISTER;
-            AssemblyRegister reg = load ? first.reg : second.reg;
-            AssemblyOperand rm = load ? source : first;
-            AssemblyRegisterClass vector_class = reg.class;
-            u8 vex_source = move ? 0 : second.reg.index;
-            u8 prefix = instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSD ? 3
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSS || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQU ? 2
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVUPD ||
-                                  instruction->opcode == ASSEMBLY_OPCODE_X86_VXORPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VADDPD ||
-                                  instruction->opcode == ASSEMBLY_OPCODE_X86_VSUBPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPD ||
-                                  instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPD || instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQA ||
-                                  assembly_x86_opcode_is_avx_integer(instruction->opcode)
-                              ? 1
-                              : 0;
-            assembly_x86_emit_vex_prefix(builder, reg, rm, vector_class, vex_source, prefix,
-                                          assembly_x86_avx_map(instruction->opcode));
-            u8 opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPS ? (load ? 0x28 : 0x29)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVUPS ? (load ? 0x10 : 0x11)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVAPD ? (load ? 0x28 : 0x29)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVUPD ? (load ? 0x10 : 0x11)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VXORPS  ? 0x57
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VXORPD  ? 0x57
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDPS  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDPD  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSS  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VADDSD  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VSUBPS  ? 0x5c
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VSUBPD  ? 0x5c
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPS  ? 0x59
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMULPD  ? 0x59
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPS    ? 0x5e
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VDIVPD    ? 0x5e
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQA   ? (load ? 0x6f : 0x7f)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VMOVDQU   ? (load ? 0x6f : 0x7f)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDB    ? 0xfc
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDW    ? 0xfd
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDD    ? 0xfe
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPADDQ    ? 0xd4
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBB    ? 0xf8
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBW    ? 0xf9
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBD    ? 0xfa
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPSUBQ    ? 0xfb
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPAND     ? 0xdb
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPOR      ? 0xeb
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPXOR     ? 0xef
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQB  ? 0x74
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQW  ? 0x75
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQD  ? 0x76
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ  ? 0x29
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTB  ? 0x64
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTW  ? 0x65
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTD  ? 0x66
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ  ? 0x37
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_VPMULLW   ? 0xd5
-                                                                               : 0x40;
-            assembly_emit_byte(builder, opcode);
-            if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x86 memory displacement is out of range"));
-                return;
             }
             continue;
         }
