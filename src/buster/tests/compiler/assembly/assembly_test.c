@@ -13,6 +13,31 @@ BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* e
                                                                      memcmp(actual.pointer, expected, expected_count) == 0));
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
+{
+    for (u64 index = 0; index < source.length; index += 1)
+    {
+        if (source.pointer[index] == 'h' || source.pointer[index] == 'H')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_x_register(String8 source)
+{
+    for (u64 index = 0; index + 1 < source.length; index += 1)
+    {
+        if ((source.pointer[index] == 'x' || source.pointer[index] == 'X') &&
+            source.pointer[index + 1] >= '0' && source.pointer[index + 1] <= '9')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 typedef struct AssemblyA64DirectSIMDNeonCase AssemblyA64DirectSIMDNeonCase;
 struct AssemblyA64DirectSIMDNeonCase
 {
@@ -474,6 +499,125 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_sca
     {S8_INITIALIZER("fcvtzs d0, d1\n"), {0x20, 0xb8, 0xe1, 0x5e}},
     {S8_INITIALIZER("fcvtzu s0, s1\n"), {0x20, 0xb8, 0xa1, 0x7e}},
     {S8_INITIALIZER("fcvtzu d0, d1\n"), {0x20, 0xb8, 0xe1, 0x7e}},
+};
+
+/* Mixed GPR/scalar-SIMD FCVT rows.  The instruction bytes come from an
+ * independent llvm-mc 22.1.8 run; the ID/digest pair pins each fixture to
+ * its canonical generated row rather than merely exercising a mnemonic. */
+typedef struct AssemblyA64DirectSIMDFcvtGprCase AssemblyA64DirectSIMDFcvtGprCase;
+struct AssemblyA64DirectSIMDFcvtGprCase
+{
+    String8 source;
+    u8 bytes[4];
+    String8 semantic_id;
+    u64 source_digest;
+};
+
+static AssemblyA64DirectSIMDFcvtGprCase const assembly_a64_direct_simd_fcvt_gpr_cases[] = {
+    {S8_INITIALIZER("fcvtas w0, d1\n"), {0x20, 0x00, 0x64, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_32D_float2int"), UINT64_C(0xbd156ab773e3db2d)},
+    {S8_INITIALIZER("fcvtas w0, h1\n"), {0x20, 0x00, 0xe4, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_32H_float2int"), UINT64_C(0x913328683e893c88)},
+    {S8_INITIALIZER("fcvtas w0, s1\n"), {0x20, 0x00, 0x24, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_32S_float2int"), UINT64_C(0xac161d00b51920b9)},
+    {S8_INITIALIZER("fcvtas x0, d1\n"), {0x20, 0x00, 0x64, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_64D_float2int"), UINT64_C(0x5eda5c8f175dd96e)},
+    {S8_INITIALIZER("fcvtas x0, h1\n"), {0x20, 0x00, 0xe4, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_64H_float2int"), UINT64_C(0xedf3d0506bbe827a)},
+    {S8_INITIALIZER("fcvtas x0, s1\n"), {0x20, 0x00, 0x24, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAS_64S_float2int"), UINT64_C(0x27af20ba2edd15e5)},
+    {S8_INITIALIZER("fcvtau w0, d1\n"), {0x20, 0x00, 0x65, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_32D_float2int"), UINT64_C(0x3e813e6b1e499209)},
+    {S8_INITIALIZER("fcvtau w0, h1\n"), {0x20, 0x00, 0xe5, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_32H_float2int"), UINT64_C(0x4de0c9e8dfb514c1)},
+    {S8_INITIALIZER("fcvtau w0, s1\n"), {0x20, 0x00, 0x25, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_32S_float2int"), UINT64_C(0x68d8a09a27183810)},
+    {S8_INITIALIZER("fcvtau x0, d1\n"), {0x20, 0x00, 0x65, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_64D_float2int"), UINT64_C(0x7dede17ec2c4de3b)},
+    {S8_INITIALIZER("fcvtau x0, h1\n"), {0x20, 0x00, 0xe5, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_64H_float2int"), UINT64_C(0xe474e9242969ced3)},
+    {S8_INITIALIZER("fcvtau x0, s1\n"), {0x20, 0x00, 0x25, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTAU_64S_float2int"), UINT64_C(0x232bd56f2551067c)},
+    {S8_INITIALIZER("fcvtms w0, d1\n"), {0x20, 0x00, 0x70, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_32D_float2int"), UINT64_C(0xdb999f823dcbeadf)},
+    {S8_INITIALIZER("fcvtms w0, h1\n"), {0x20, 0x00, 0xf0, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_32H_float2int"), UINT64_C(0x5f900df11447d8eb)},
+    {S8_INITIALIZER("fcvtms w0, s1\n"), {0x20, 0x00, 0x30, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_32S_float2int"), UINT64_C(0x826eae4d5959097f)},
+    {S8_INITIALIZER("fcvtms x0, d1\n"), {0x20, 0x00, 0x70, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_64D_float2int"), UINT64_C(0x754d122a7c6bc2a0)},
+    {S8_INITIALIZER("fcvtms x0, h1\n"), {0x20, 0x00, 0xf0, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_64H_float2int"), UINT64_C(0x0698365a178984a2)},
+    {S8_INITIALIZER("fcvtms x0, s1\n"), {0x20, 0x00, 0x30, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMS_64S_float2int"), UINT64_C(0xf7f4b327317ab2ae)},
+    {S8_INITIALIZER("fcvtmu w0, d1\n"), {0x20, 0x00, 0x71, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_32D_float2int"), UINT64_C(0xb09a743c1e19bdaa)},
+    {S8_INITIALIZER("fcvtmu w0, h1\n"), {0x20, 0x00, 0xf1, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_32H_float2int"), UINT64_C(0x9b695075d37a1cc9)},
+    {S8_INITIALIZER("fcvtmu w0, s1\n"), {0x20, 0x00, 0x31, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_32S_float2int"), UINT64_C(0xe28fc4f972b3218c)},
+    {S8_INITIALIZER("fcvtmu x0, d1\n"), {0x20, 0x00, 0x71, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_64D_float2int"), UINT64_C(0xecddac8715a29697)},
+    {S8_INITIALIZER("fcvtmu x0, h1\n"), {0x20, 0x00, 0xf1, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_64H_float2int"), UINT64_C(0xa12cdfe13344872e)},
+    {S8_INITIALIZER("fcvtmu x0, s1\n"), {0x20, 0x00, 0x31, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTMU_64S_float2int"), UINT64_C(0xe650588e5f4c16c2)},
+    {S8_INITIALIZER("fcvtns w0, d1\n"), {0x20, 0x00, 0x60, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_32D_float2int"), UINT64_C(0xc6547e16a34ec087)},
+    {S8_INITIALIZER("fcvtns w0, h1\n"), {0x20, 0x00, 0xe0, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_32H_float2int"), UINT64_C(0xebb8428412bf2a40)},
+    {S8_INITIALIZER("fcvtns w0, s1\n"), {0x20, 0x00, 0x20, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_32S_float2int"), UINT64_C(0x4a8d8be66b5be011)},
+    {S8_INITIALIZER("fcvtns x0, d1\n"), {0x20, 0x00, 0x60, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_64D_float2int"), UINT64_C(0x4b41ddf39c44a620)},
+    {S8_INITIALIZER("fcvtns x0, h1\n"), {0x20, 0x00, 0xe0, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_64H_float2int"), UINT64_C(0xad2efe69a1bda08b)},
+    {S8_INITIALIZER("fcvtns x0, s1\n"), {0x20, 0x00, 0x20, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNS_64S_float2int"), UINT64_C(0x534c61c03a514586)},
+    {S8_INITIALIZER("fcvtnu w0, d1\n"), {0x20, 0x00, 0x61, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_32D_float2int"), UINT64_C(0x920564d643ec86be)},
+    {S8_INITIALIZER("fcvtnu w0, h1\n"), {0x20, 0x00, 0xe1, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_32H_float2int"), UINT64_C(0xc1d9e16f602eaa9f)},
+    {S8_INITIALIZER("fcvtnu w0, s1\n"), {0x20, 0x00, 0x21, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_32S_float2int"), UINT64_C(0x54458195fb9c7e24)},
+    {S8_INITIALIZER("fcvtnu x0, d1\n"), {0x20, 0x00, 0x61, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_64D_float2int"), UINT64_C(0xc955d5b1ad9e93d5)},
+    {S8_INITIALIZER("fcvtnu x0, h1\n"), {0x20, 0x00, 0xe1, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_64H_float2int"), UINT64_C(0xaf4e5e6e9f530f6f)},
+    {S8_INITIALIZER("fcvtnu x0, s1\n"), {0x20, 0x00, 0x21, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTNU_64S_float2int"), UINT64_C(0xc2f38acbbc52f90d)},
+    {S8_INITIALIZER("fcvtps w0, d1\n"), {0x20, 0x00, 0x68, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_32D_float2int"), UINT64_C(0xf6ba85f257737b99)},
+    {S8_INITIALIZER("fcvtps w0, h1\n"), {0x20, 0x00, 0xe8, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_32H_float2int"), UINT64_C(0x181471a6b42d7cba)},
+    {S8_INITIALIZER("fcvtps w0, s1\n"), {0x20, 0x00, 0x28, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_32S_float2int"), UINT64_C(0xa6082cd58100786d)},
+    {S8_INITIALIZER("fcvtps x0, d1\n"), {0x20, 0x00, 0x68, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_64D_float2int"), UINT64_C(0x52c5892d0d1d2e46)},
+    {S8_INITIALIZER("fcvtps x0, h1\n"), {0x20, 0x00, 0xe8, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_64H_float2int"), UINT64_C(0x3e34fdfe3f8990a8)},
+    {S8_INITIALIZER("fcvtps x0, s1\n"), {0x20, 0x00, 0x28, 0x9e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPS_64S_float2int"), UINT64_C(0x626cef0816527810)},
+    {S8_INITIALIZER("fcvtpu w0, d1\n"), {0x20, 0x00, 0x69, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPU_32D_float2int"), UINT64_C(0x4207dbdaa7a5dde5)},
+    {S8_INITIALIZER("fcvtpu w0, h1\n"), {0x20, 0x00, 0xe9, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPU_32H_float2int"), UINT64_C(0xb3005f0eaa49f0ba)},
+    {S8_INITIALIZER("fcvtpu w0, s1\n"), {0x20, 0x00, 0x29, 0x1e}, S8_INITIALIZER("arm-a64@2026-06:FCVTPU_32S_float2int"), UINT64_C(0x1321ee9f6aa27348)},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_gpr_boundary_cases[] = {
+    {S8_INITIALIZER("FCVTAS W30, D29\n"), {0xbe, 0x03, 0x64, 0x1e}},
+    {S8_INITIALIZER("FCVTAS W30, H29\n"), {0xbe, 0x03, 0xe4, 0x1e}},
+    {S8_INITIALIZER("FCVTAS W30, S29\n"), {0xbe, 0x03, 0x24, 0x1e}},
+    {S8_INITIALIZER("FCVTAS X30, D29\n"), {0xbe, 0x03, 0x64, 0x9e}},
+    {S8_INITIALIZER("FCVTAS X30, H29\n"), {0xbe, 0x03, 0xe4, 0x9e}},
+    {S8_INITIALIZER("FCVTAS X30, S29\n"), {0xbe, 0x03, 0x24, 0x9e}},
+    {S8_INITIALIZER("FCVTAU W30, D29\n"), {0xbe, 0x03, 0x65, 0x1e}},
+    {S8_INITIALIZER("FCVTAU W30, H29\n"), {0xbe, 0x03, 0xe5, 0x1e}},
+    {S8_INITIALIZER("FCVTAU W30, S29\n"), {0xbe, 0x03, 0x25, 0x1e}},
+    {S8_INITIALIZER("FCVTAU X30, D29\n"), {0xbe, 0x03, 0x65, 0x9e}},
+    {S8_INITIALIZER("FCVTAU X30, H29\n"), {0xbe, 0x03, 0xe5, 0x9e}},
+    {S8_INITIALIZER("FCVTAU X30, S29\n"), {0xbe, 0x03, 0x25, 0x9e}},
+    {S8_INITIALIZER("FCVTMS W30, D29\n"), {0xbe, 0x03, 0x70, 0x1e}},
+    {S8_INITIALIZER("FCVTMS W30, H29\n"), {0xbe, 0x03, 0xf0, 0x1e}},
+    {S8_INITIALIZER("FCVTMS W30, S29\n"), {0xbe, 0x03, 0x30, 0x1e}},
+    {S8_INITIALIZER("FCVTMS X30, D29\n"), {0xbe, 0x03, 0x70, 0x9e}},
+    {S8_INITIALIZER("FCVTMS X30, H29\n"), {0xbe, 0x03, 0xf0, 0x9e}},
+    {S8_INITIALIZER("FCVTMS X30, S29\n"), {0xbe, 0x03, 0x30, 0x9e}},
+    {S8_INITIALIZER("FCVTMU W30, D29\n"), {0xbe, 0x03, 0x71, 0x1e}},
+    {S8_INITIALIZER("FCVTMU W30, H29\n"), {0xbe, 0x03, 0xf1, 0x1e}},
+    {S8_INITIALIZER("FCVTMU W30, S29\n"), {0xbe, 0x03, 0x31, 0x1e}},
+    {S8_INITIALIZER("FCVTMU X30, D29\n"), {0xbe, 0x03, 0x71, 0x9e}},
+    {S8_INITIALIZER("FCVTMU X30, H29\n"), {0xbe, 0x03, 0xf1, 0x9e}},
+    {S8_INITIALIZER("FCVTMU X30, S29\n"), {0xbe, 0x03, 0x31, 0x9e}},
+    {S8_INITIALIZER("FCVTNS W30, D29\n"), {0xbe, 0x03, 0x60, 0x1e}},
+    {S8_INITIALIZER("FCVTNS W30, H29\n"), {0xbe, 0x03, 0xe0, 0x1e}},
+    {S8_INITIALIZER("FCVTNS W30, S29\n"), {0xbe, 0x03, 0x20, 0x1e}},
+    {S8_INITIALIZER("FCVTNS X30, D29\n"), {0xbe, 0x03, 0x60, 0x9e}},
+    {S8_INITIALIZER("FCVTNS X30, H29\n"), {0xbe, 0x03, 0xe0, 0x9e}},
+    {S8_INITIALIZER("FCVTNS X30, S29\n"), {0xbe, 0x03, 0x20, 0x9e}},
+    {S8_INITIALIZER("FCVTNU W30, D29\n"), {0xbe, 0x03, 0x61, 0x1e}},
+    {S8_INITIALIZER("FCVTNU W30, H29\n"), {0xbe, 0x03, 0xe1, 0x1e}},
+    {S8_INITIALIZER("FCVTNU W30, S29\n"), {0xbe, 0x03, 0x21, 0x1e}},
+    {S8_INITIALIZER("FCVTNU X30, D29\n"), {0xbe, 0x03, 0x61, 0x9e}},
+    {S8_INITIALIZER("FCVTNU X30, H29\n"), {0xbe, 0x03, 0xe1, 0x9e}},
+    {S8_INITIALIZER("FCVTNU X30, S29\n"), {0xbe, 0x03, 0x21, 0x9e}},
+    {S8_INITIALIZER("FCVTPS W30, D29\n"), {0xbe, 0x03, 0x68, 0x1e}},
+    {S8_INITIALIZER("FCVTPS W30, H29\n"), {0xbe, 0x03, 0xe8, 0x1e}},
+    {S8_INITIALIZER("FCVTPS W30, S29\n"), {0xbe, 0x03, 0x28, 0x1e}},
+    {S8_INITIALIZER("FCVTPS X30, D29\n"), {0xbe, 0x03, 0x68, 0x9e}},
+    {S8_INITIALIZER("FCVTPS X30, H29\n"), {0xbe, 0x03, 0xe8, 0x9e}},
+    {S8_INITIALIZER("FCVTPS X30, S29\n"), {0xbe, 0x03, 0x28, 0x9e}},
+    {S8_INITIALIZER("FCVTPU W30, D29\n"), {0xbe, 0x03, 0x69, 0x1e}},
+    {S8_INITIALIZER("FCVTPU W30, H29\n"), {0xbe, 0x03, 0xe9, 0x1e}},
+    {S8_INITIALIZER("FCVTPU W30, S29\n"), {0xbe, 0x03, 0x29, 0x1e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_gpr_zr_cases[] = {
+    {S8_INITIALIZER("fcvtas wzr, d0\n"), {0x1f, 0x00, 0x64, 0x1e}},
+    {S8_INITIALIZER("fcvtau xzr, h0\n"), {0x1f, 0x00, 0xe5, 0x9e}},
+    {S8_INITIALIZER("fcvtms wzr, s0\n"), {0x1f, 0x00, 0x30, 0x1e}},
+    {S8_INITIALIZER("fcvtmu xzr, d0\n"), {0x1f, 0x00, 0x71, 0x9e}},
+    {S8_INITIALIZER("fcvtns wzr, h0\n"), {0x1f, 0x00, 0xe0, 0x1e}},
+    {S8_INITIALIZER("fcvtnu xzr, s0\n"), {0x1f, 0x00, 0x21, 0x9e}},
+    {S8_INITIALIZER("fcvtps wzr, d0\n"), {0x1f, 0x00, 0x68, 0x1e}},
+    {S8_INITIALIZER("fcvtpu wzr, h0\n"), {0x1f, 0x00, 0xe9, 0x1e}},
 };
 
 /* Exhaustive legal vector shift-by-register forms. Bytes are independent
@@ -1228,7 +1372,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                 BusterA64SemanticOperand operand = {0};
                 bool operand_valid = buster_a64_semantic_operand(row_form.operand_first + operand_index, &operand);
                 public_operand_count += operand_valid &&
-                                        (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                                        (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER ||
+                                         operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
                                          (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_CONDITION &&
                                           (operand.flags & BUSTER_A64_SEMANTIC_FLAG_CONDITION_FIELD) != 0));
                 has_condition_operand = has_condition_operand ||
@@ -1262,6 +1407,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                         arrangements_valid = arrangements_valid && public_index < 4 &&
                                               spelling.arrangements[public_index] > BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
                                               spelling.arrangements[public_index] < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
+                        public_index += 1;
+                    }
+                    else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+                    {
+                        arrangements_valid = arrangements_valid && public_index < 4 &&
+                                              spelling.arrangements[public_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
                         public_index += 1;
                     }
                     else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_CONDITION &&
@@ -1319,13 +1470,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 288);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 288);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 102);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 333);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 333);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 57);
     BUSTER_TEST(arguments, direct_simd_covered_transform_count == 214);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 74);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 119);
     BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 49);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 53);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 8);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
@@ -4337,6 +4488,124 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_invalid_fullfp16,
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16));
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_cases) == 45);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_boundary_cases) == 45);
+    for (u32 fcvt_gpr_index = 0; fcvt_gpr_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_cases);
+         fcvt_gpr_index += 1)
+    {
+        AssemblyA64DirectSIMDFcvtGprCase fcvt_gpr_case = assembly_a64_direct_simd_fcvt_gpr_cases[fcvt_gpr_index];
+        bool half_precision = assembly_test_source_has_half_precision(fcvt_gpr_case.source);
+        Target positive_target = half_precision ? aarch64_fp16_scalar_only : aarch64_fp_only;
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fcvt_gpr_case.source, (AssemblyEncodeOptions){.target = positive_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fcvt_gpr_case.bytes, 4));
+
+        u32 semantic_row_index = UINT32_MAX;
+        BusterA64DirectSIMDRowInfo semantic_row = {0};
+        BusterA64SemanticForm semantic_form = {0};
+        BusterA64SemanticOperand gpr_operand = {0};
+        BusterA64SemanticOperand simd_operand = {0};
+        bool semantic_shape = buster_a64_direct_simd_find_source_digest(fcvt_gpr_case.source_digest, &semantic_row_index) &&
+                              buster_a64_direct_simd_row(semantic_row_index, &semantic_row) &&
+                              buster_a64_semantic_form(semantic_row.semantic_form_id, &semantic_form) &&
+                              semantic_form.operand_count == 2 &&
+                              buster_a64_semantic_operand(semantic_form.operand_first, &gpr_operand) &&
+                              buster_a64_semantic_operand(semantic_form.operand_first + 1, &simd_operand);
+        bool x_register = assembly_test_source_has_x_register(fcvt_gpr_case.source);
+        char8 source_width = fcvt_gpr_case.source.pointer[fcvt_gpr_case.source.length - 3];
+        BUSTER_TEST(arguments, semantic_shape && gpr_operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER &&
+                                   (gpr_operand.flags & BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_W32) == (x_register ? 0 : BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_W32) &&
+                                   (gpr_operand.flags & BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_X64) == (x_register ? BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_X64 : 0) &&
+                                   (gpr_operand.flags & BUSTER_A64_SEMANTIC_FLAG_ZR_ALLOWED) != 0 &&
+                                   simd_operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
+                                   (simd_operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0 &&
+                                   (simd_operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) == 0 &&
+                                   (simd_operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_H16) ==
+                                       (source_width == 'h' ? BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_H16 : 0) &&
+                                   (simd_operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_S32) ==
+                                       (source_width == 's' ? BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_S32 : 0) &&
+                                   (simd_operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_D64) ==
+                                       (source_width == 'd' ? BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_D64 : 0));
+
+        bool found_spelling = false;
+        for (u32 spelling_index = 0; spelling_index < assembly_test_aarch64_direct_simd_spelling_count();
+             spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == fcvt_gpr_case.source_digest)
+            {
+                bool requirement_ok = spelling.requirement ==
+                                      (half_precision ? BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16
+                                                       : BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP);
+                found_spelling = string_equal(spelling.semantic_id, fcvt_gpr_case.semantic_id) &&
+                                 spelling.operand_count == 2 &&
+                                 spelling.arrangements[0] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
+                                 spelling.arrangements[1] ==
+                                     (half_precision ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H
+                                                      : fcvt_gpr_case.source.pointer[fcvt_gpr_case.source.length - 3] == 'd'
+                                                            ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D
+                                                            : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S) &&
+                                 requirement_ok;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, found_spelling);
+
+        AssemblyEncodeResult no_fp = assembly_encode(
+            arguments->arena, fcvt_gpr_case.source, (AssemblyEncodeOptions){.target = aarch64_no_fp});
+        BUSTER_TEST(arguments, no_fp.diagnostic_count == 1 && no_fp.bytes.length == 0 &&
+                                   no_fp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        if (half_precision)
+        {
+            AssemblyEncodeResult no_full = assembly_encode(
+                arguments->arena, fcvt_gpr_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_no_full});
+            BUSTER_TEST(arguments, no_full.diagnostic_count == 1 && no_full.bytes.length == 0 &&
+                                       no_full.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+            AssemblyEncodeResult invalid_features = assembly_encode(
+                arguments->arena, fcvt_gpr_case.source, (AssemblyEncodeOptions){.target = aarch64_invalid_fullfp16});
+            BUSTER_TEST(arguments, invalid_features.bytes.length == 0 && invalid_features.diagnostic_count != 0);
+        }
+        else
+        {
+            AssemblyEncodeResult no_full = assembly_encode(
+                arguments->arena, fcvt_gpr_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_no_full});
+            BUSTER_TEST(arguments, no_full.diagnostic_count == 0 && assembly_test_bytes_equal(no_full.bytes, fcvt_gpr_case.bytes, 4));
+        }
+    }
+    for (u32 boundary_index = 0; boundary_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_boundary_cases);
+         boundary_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase boundary_case = assembly_a64_direct_simd_fcvt_gpr_boundary_cases[boundary_index];
+        Target positive_target = assembly_test_source_has_half_precision(boundary_case.source) ? aarch64_fp16_scalar_only
+                                                                                               : aarch64_fp_only;
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, boundary_case.source, (AssemblyEncodeOptions){.target = positive_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, boundary_case.bytes, 4));
+    }
+    for (u32 zr_index = 0; zr_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_zr_cases); zr_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase zr_case = assembly_a64_direct_simd_fcvt_gpr_zr_cases[zr_index];
+        Target positive_target = assembly_test_source_has_half_precision(zr_case.source) ? aarch64_fp16_scalar_only
+                                                                                         : aarch64_fp_only;
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, zr_case.source, (AssemblyEncodeOptions){.target = positive_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, zr_case.bytes, 4));
+    }
+    static String8 const malformed_fcvt_gpr_cases[] = {
+        S8_INITIALIZER("fcvtas wsp, d0\n"), S8_INITIALIZER("fcvtas sp, d0\n"), S8_INITIALIZER("fcvtas w32, d0\n"),
+        S8_INITIALIZER("fcvtas w0, d32\n"), S8_INITIALIZER("fcvtas w0, v1.2s\n"), S8_INITIALIZER("fcvtas w0, s1[0]\n"),
+        S8_INITIALIZER("fcvtas w0, w1\n"), S8_INITIALIZER("fcvtas w0\n"), S8_INITIALIZER("fcvtas w0, d0, d1\n"),
+        S8_INITIALIZER("fcvtas q0, q1\n"), S8_INITIALIZER("fcvtas w0, d0.1d\n"), S8_INITIALIZER("fcvtas w0, d0, #0\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_fcvt_gpr_cases); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_fcvt_gpr_cases[malformed_index], (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases) == 133);
     for (u32 fp16_index = 0; fp16_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases); fp16_index += 1)
     {
