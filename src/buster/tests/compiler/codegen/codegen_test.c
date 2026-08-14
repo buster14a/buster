@@ -653,6 +653,59 @@ CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice code, u64 start, u64
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, bool dynamic_frame, bool* displacements_valid)
+{
+    u32 result = 0;
+    bool valid = true;
+    if (!displacements_valid)
+    {
+        return 0;
+    }
+    for (u64 byte_index = 0; byte_index + 3 <= code.length; byte_index += 1)
+    {
+        // The canonical vector path uses REX.WRX (4c) LEA into r8/r9/r10
+        // from rbp. Accept either ModRM displacement width: the metadata
+        // emitter is allowed to use disp8 when the frame slot fits it.
+        if (code.pointer[byte_index] != 0x4c || code.pointer[byte_index + 1] != 0x8d)
+        {
+            continue;
+        }
+        u8 modrm = code.pointer[byte_index + 2];
+        u8 mod = modrm >> 6;
+        u8 reg = (modrm >> 3) & 7;
+        if (mod == 3 || (modrm & 7) != 5 || reg > 2)
+        {
+            continue;
+        }
+        s32 displacement = 0;
+        if (mod == 1)
+        {
+            if (byte_index + 4 > code.length)
+            {
+                continue;
+            }
+            displacement = (s8)code.pointer[byte_index + 3];
+        }
+        else if (mod == 2)
+        {
+            if (byte_index + 7 > code.length)
+            {
+                continue;
+            }
+            memcpy(&displacement, code.pointer + byte_index + 3, sizeof(displacement));
+        }
+        else
+        {
+            // ModRM mod=0/rm=5 is RIP-relative, not a frame slot.
+            continue;
+        }
+        result += 1;
+        valid &= dynamic_frame ? displacement >= 0 : displacement < 0;
+    }
+    *displacements_valid = valid;
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1537,6 +1590,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             u32 realign_mask = 0;
             memcpy(&realign_mask, code + 3, sizeof(realign_mask));
             found_stack_realignment |= code[0] == 0x48 && code[1] == 0x81 && code[2] == 0xe4 && realign_mask == (u32)(0 - (u32)64);
+            found_stack_realignment |= code[0] == 0x48 && code[1] == 0x83 && code[2] == 0xe4 && code[3] == (u8)(0 - (u8)64);
         }
         BUSTER_TEST(arguments, found_stack_realignment);
     }
@@ -1599,28 +1653,15 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 continue;
             }
             // The vector path is the only emission that addresses a frame slot
-            // through r8/r9/r10, so `lea r8|r9|r10, [rbp+disp32]` names its
-            // operand and result slots exactly.
+            // through r8/r9/r10, so `lea r8|r9|r10, [rbp+disp]` names its
+            // operand and result slots exactly. The displacement may be a
+            // canonical disp8 or disp32 depending on the slot offset.
             u8* vector_frame_code = vector_frame_module.code.pointer + vector_frame_descriptor->code_offset;
-            u32 vector_frame_lea_count = 0;
             bool vector_frame_displacements_valid = true;
-            for (u32 byte_index = 0; byte_index + 7 <= vector_frame_descriptor->code_size; byte_index += 1)
-            {
-                u8 modrm = vector_frame_code[byte_index + 2];
-                if (vector_frame_code[byte_index] != 0x4c || vector_frame_code[byte_index + 1] != 0x8d ||
-                    (modrm != 0x85 && modrm != 0x8d && modrm != 0x95))
-                {
-                    continue;
-                }
-                s32 displacement = (s32)((u32)vector_frame_code[byte_index + 3] | ((u32)vector_frame_code[byte_index + 4] << 8) |
-                                         ((u32)vector_frame_code[byte_index + 5] << 16) | ((u32)vector_frame_code[byte_index + 6] << 24));
-                vector_frame_lea_count += 1;
-                // A Windows frame holding a stack restore is addressed upward
-                // from its bottom; every other frame is addressed downward from
-                // its top. Either way the slot has to be inside the frame.
-                bool dynamic_frame = vector_frame_windows && string_equal(vector_frame_names[name_index], S8("vector_with_loop"));
-                vector_frame_displacements_valid = vector_frame_displacements_valid && (dynamic_frame ? displacement >= 0 : displacement < 0);
-            }
+            bool dynamic_frame = vector_frame_windows && string_equal(vector_frame_names[name_index], S8("vector_with_loop"));
+            u32 vector_frame_lea_count = codegen_test_x64_vector_frame_lea_count(
+                (ByteSlice){.pointer = vector_frame_code, .length = vector_frame_descriptor->code_size}, dynamic_frame,
+                &vector_frame_displacements_valid);
             BUSTER_TEST(arguments, vector_frame_lea_count >= 3);
             BUSTER_TEST(arguments, vector_frame_displacements_valid);
         }
