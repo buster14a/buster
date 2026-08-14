@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/link/link.h>
+#include <buster/lib/compiler/wasm/wasm.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
 // object/debug data through the driver call. The reservation is virtual and
@@ -21,6 +22,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_ANALYSIS,
     COMPILER_DRIVER_ERROR_IR,
     COMPILER_DRIVER_ERROR_CODEGEN,
+    COMPILER_DRIVER_ERROR_WASM64,
     COMPILER_DRIVER_ERROR_OBJECT,
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_COUNT,
@@ -60,6 +62,7 @@ typedef enum CompilerDriverOutputKind
     // Value zero preserves the existing compile-to-native-executable API.
     COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE,
     COMPILER_DRIVER_OUTPUT_KIND_JIT,
+    COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE,
     COMPILER_DRIVER_OUTPUT_KIND_COUNT,
 } CompilerDriverOutputKind;
 
@@ -136,6 +139,7 @@ struct CompilerDriverResult
     String8 warning;
     String8 output;
     NativeExecutableLinkResult native_link;
+    Wasm64Artifact wasm64;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
     // What the C frontend consumed, per inclusion and per distinct file, and
@@ -152,7 +156,8 @@ struct CompilerDriverResult
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
     bool has_object;
-    u8 reserved[3];
+    bool has_wasm64;
+    u8 reserved[2];
 };
 
 // Fills every table the compile pipeline builds on first use -- tokenizer, C

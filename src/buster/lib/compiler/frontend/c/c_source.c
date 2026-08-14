@@ -3767,7 +3767,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             String8 argument = c_token_spelling(base, arguments[0]);
             supported = is_target_arch        ? (options->target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? string_equal(argument, S8("arm64")) || string_equal(argument, S8("aarch64"))
-                                                      : string_equal(argument, S8("x86_64")))
+                                                  : options->target.cpu_arch == CPU_ARCH_WASM64 ? string_equal(argument, S8("wasm64"))
+                                                                                               : string_equal(argument, S8("x86_64")))
                         : is_target_os          ? (options->target.os == OPERATING_SYSTEM_MACOS
                                                        ? string_equal(argument, S8("macos"))
                                                        : options->target.os == OPERATING_SYSTEM_IOS && string_equal(argument, S8("ios")))
@@ -5389,7 +5390,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__SIZEOF_INT__", string_format(arena, S8("{u32}"), layout.integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG__", string_format(arena, S8("{u32}"), layout.long_integer.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_LONG__", string_format(arena, S8("{u32}"), layout.long_long_integer.size));
-    C_DEFINE_TYPE_MACRO("__SIZEOF_INT128__", string_format(arena, S8("{u32}"), layout.integer128.size));
+    if (layout.has_128_bit_integer)
+    {
+        C_DEFINE_TYPE_MACRO("__SIZEOF_INT128__", string_format(arena, S8("{u32}"), layout.integer128.size));
+    }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
@@ -5498,8 +5502,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     {
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
-    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__") : S8("__x86_64__");
+    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+                               : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
+                                                                             : S8("__x86_64__");
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
+    if (options.target.cpu_arch == CPU_ARCH_WASM64)
+    {
+        c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
+        c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__wasm_memory64__"), standard_replacement, 1, 0, 0, false, false);
+    }
     if ((options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS) && options.target.cpu_arch == CPU_ARCH_AARCH64)
     {
         c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
@@ -5517,7 +5528,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             c_macro_define(arena, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
         }
     }
-    c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), standard_replacement, 1, 0, 0, false, false);
+    CToken hosted_replacement = standard_replacement[0];
+    if (options.target.os == OPERATING_SYSTEM_FREESTANDING)
+    {
+        hosted_replacement.offset = C_SPELLING_ZERO;
+    }
+    c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
     CPreprocessTokenRange* first_output_range = 0;
     CPreprocessTokenRange* last_output_range = 0;

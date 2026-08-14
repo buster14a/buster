@@ -836,6 +836,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    Target wasm64_target = {
+        .cpu_arch = CPU_ARCH_WASM64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_FREESTANDING,
+    };
+    String8 wasm64_output = buster_test_temporary_path(arguments->arena, S8("buster-driver-wasm64"), S8(".wasm"));
+    String8 wasm64_command_line[] = {
+        S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_output, S8("tests/basic_c_wasm64.c"),
+    };
+    CompilerDriverResult wasm64_compile = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_command_line)));
+    if (wasm64_compile.error != COMPILER_DRIVER_ERROR_NONE && wasm64_compile.diagnostic.length)
+    {
+        arguments->show(arguments, S8("Wasm64 compiler driver error: {S8}\n"), wasm64_compile.diagnostic);
+    }
+    BUSTER_TEST(arguments, wasm64_compile.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, wasm64_compile.has_wasm64 && wasm64_compile.wasm64.stats.memory64);
+    BUSTER_TEST(arguments, wasm64_compile.wasm64.bytes.length >= 8);
+    BUSTER_TEST(arguments, wasm64_compile.wasm64.bytes.length >= 8 &&
+                               memcmp(wasm64_compile.wasm64.bytes.pointer, "\0asm\1\0\0\0", 8) == 0);
+    BUSTER_TEST(arguments, file_read(arguments->arena, wasm64_output, (FileReadOptions){0}).length == wasm64_compile.wasm64.bytes.length);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
+
+    String8 wasm64_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("wasm64-unknown-freestanding"), S8("tests/basic_c_wasm64.c"),
+    };
+    CompilerDriverResult wasm64_assembly = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_assembly_command_line)));
+    BUSTER_TEST(arguments, wasm64_assembly.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, wasm64_assembly.diagnostic, S8("-S is not supported for direct Wasm64 module output"));
+
     String8 command_line[] = {
         S8("-c"),
         S8("-std=gnu23"),

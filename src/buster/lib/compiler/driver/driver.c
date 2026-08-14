@@ -1320,6 +1320,58 @@ BUSTER_GLOBAL_LOCAL CDiagnostic* compiler_driver_first_preprocess_error(CPreproc
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm64_path(Arena* arena, String8 input)
+{
+    u64 extension = input.length;
+    for (u64 index = input.length; index != 0; index -= 1)
+    {
+        char8 byte = input.pointer[index - 1];
+        if (byte == '.')
+        {
+            extension = index - 1;
+            break;
+        }
+        if (byte == '/' || byte == '\\')
+        {
+            break;
+        }
+    }
+    return string_format_z(arena, S8("{S8}.wasm"), (String8){
+                                                          .pointer = input.pointer,
+                                                          .length = extension,
+                                                      });
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm64(Arena* arena, CompilerDriverInvocation invocation, Wasm64Artifact artifact,
+                                                        CompilerDriverResult* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    result->wasm64 = artifact;
+    if (artifact.error.code != WASM64_ERROR_NONE)
+    {
+        result->error = COMPILER_DRIVER_ERROR_WASM64;
+        result->diagnostic = artifact.error.diagnostic.length ? artifact.error.diagnostic
+                             : artifact.error.message.length  ? artifact.error.message
+                                                               : S8("Wasm64 code generation failed");
+        return false;
+    }
+    result->has_wasm64 = true;
+    String8 output = invocation.output_path.length ? invocation.output_path
+                     : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
+                         ? compiler_driver_default_wasm64_path(arena, invocation.input_paths[0])
+                         : S8("a.wasm");
+    if (!file_write(output, artifact.bytes))
+    {
+        result->error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
+        return false;
+    }
+    return true;
+}
+
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
                                                              CompilerDriverWarningCollector* warnings)
 {
@@ -1457,6 +1509,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),
                           (u32)validation.error, validation.function.value, function_name, validation.block.value, validation.instruction.value, opcode);
+        goto end;
+    }
+    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
+    {
+        Wasm64Artifact artifact = wasm64_emit(arena, lowered.program, module, 1);
+        compiler_driver_write_wasm64(arena, invocation, artifact, &result);
         goto end;
     }
     CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target,
@@ -1722,6 +1780,28 @@ static CompilerDriverResult compiler_driver_execute_buster(Arena* arena, Compile
     }
 
     IrProgram ir = ir_generate_program(arena, &analysis);
+    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
+    {
+        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
+        {
+            AnalysisResult* module_analysis = analysis.module_results[module_index];
+            if (!module_analysis)
+            {
+                continue;
+            }
+            IrValidationResult validation = ir_validate_module(module_analysis, &ir.modules[module_index]);
+            if (validation.error != IR_VALIDATION_NONE)
+            {
+                result.error = COMPILER_DRIVER_ERROR_IR;
+                result.diagnostic = string_format(arena, S8("Buster IR validation failed in module {S8} with error {u32}"),
+                                                  module_analysis->module.name, (u32)validation.error);
+                goto cleanup;
+            }
+        }
+        Wasm64Artifact artifact = wasm64_emit(arena, &ir, ir.modules, ir.module_count);
+        compiler_driver_write_wasm64(arena, invocation, artifact, &result);
+        goto cleanup;
+    }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, analysis.module_count);
     u32 object_count = 0;
     for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
@@ -1867,6 +1947,35 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
         goto finish;
+    }
+    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
+    {
+        if (invocation.target.os != OPERATING_SYSTEM_FREESTANDING)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("Wasm64 currently requires the wasm64-unknown-freestanding target");
+            goto finish;
+        }
+        if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("-S is not supported for direct Wasm64 module output");
+            goto finish;
+        }
+        if (invocation.input_count > 1 || invocation.library_count || invocation.library_path_count || invocation.framework_count ||
+            invocation.framework_path_count || invocation.linker_argument_count)
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("Wasm64 accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments");
+            goto finish;
+        }
+        if (invocation.input_count &&
+            (compiler_driver_object_input(invocation.input_paths[0]) || compiler_driver_archive_input(invocation.input_paths[0])))
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("native objects and archives cannot be linked into a Wasm64 module");
+            goto finish;
+        }
     }
     bool has_buster_input = false;
     bool has_c_input = false;
@@ -2364,7 +2473,8 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
     CompilerDriverResult result = {0};
     if (!arena || !options.source_path.length || (u32)options.output_kind >= (u32)COMPILER_DRIVER_OUTPUT_KIND_COUNT ||
         (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE && !options.output_path.length) ||
-        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT && options.output_path.length))
+        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT && options.output_path.length) ||
+        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE && !options.output_path.length))
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         return result;
@@ -2372,6 +2482,13 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
     if (options.target.cpu_arch >= CPU_ARCH_COUNT || options.target.os >= OPERATING_SYSTEM_COUNT)
     {
         options.target = target_native;
+    }
+    if ((options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE) != (options.target.cpu_arch == CPU_ARCH_WASM64) ||
+        (options.target.cpu_arch == CPU_ARCH_WASM64 && options.target.os != OPERATING_SYSTEM_FREESTANDING))
+    {
+        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+        result.diagnostic = S8("Wasm64 module output requires target wasm64-unknown-freestanding");
+        return result;
     }
     TargetDataLayout data_layout = target_data_layout(options.target);
     Arena* expression_arena = arena_create((ArenaCreation){0});
@@ -2440,6 +2557,41 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
     arena_destroy(expression_arena, 1);
     expression_arena = 0;
     IrProgram ir = ir_generate_program(arena, &analysis);
+    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE)
+    {
+        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
+        {
+            AnalysisResult* module_analysis = analysis.module_results[module_index];
+            if (!module_analysis)
+            {
+                continue;
+            }
+            IrValidationResult validation = ir_validate_module(module_analysis, &ir.modules[module_index]);
+            if (validation.error != IR_VALIDATION_NONE)
+            {
+                result.error = COMPILER_DRIVER_ERROR_IR;
+                result.diagnostic =
+                    string_format(arena, S8("IR validation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)validation.error);
+                goto cleanup;
+            }
+        }
+        result.wasm64 = wasm64_emit(arena, &ir, ir.modules, ir.module_count);
+        if (result.wasm64.error.code != WASM64_ERROR_NONE)
+        {
+            result.error = COMPILER_DRIVER_ERROR_WASM64;
+            result.diagnostic = result.wasm64.error.diagnostic.length ? result.wasm64.error.diagnostic
+                                : result.wasm64.error.message.length  ? result.wasm64.error.message
+                                                                      : S8("Wasm64 code generation failed");
+            goto cleanup;
+        }
+        result.has_wasm64 = true;
+        if (!file_write(options.output_path, result.wasm64.bytes))
+        {
+            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.diagnostic = string_format(arena, S8("could not write {S8}"), options.output_path);
+        }
+        goto cleanup;
+    }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, analysis.module_count);
     u32 object_count = 0;
     for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)

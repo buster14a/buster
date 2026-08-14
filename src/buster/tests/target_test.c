@@ -56,6 +56,11 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             CPU_ARCH_AARCH64,
             OPERATING_SYSTEM_FREESTANDING,
         },
+        {
+            S8("wasm64-unknown-freestanding"),
+            CPU_ARCH_WASM64,
+            OPERATING_SYSTEM_FREESTANDING,
+        },
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -107,6 +112,21 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_X86_64));
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_AMD_ZEN_5, CPU_ARCH_AARCH64));
     BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_A64_APPLE_M4, CPU_ARCH_AARCH64));
+    BUSTER_TEST(arguments, cpu_model_supports_arch(CPU_MODEL_BASELINE, CPU_ARCH_WASM64));
+    BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_NATIVE, CPU_ARCH_WASM64));
+    Target wasm64_target = {
+        .cpu_arch = CPU_ARCH_WASM64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_FREESTANDING,
+    };
+    TargetDataLayout wasm64_layout = target_data_layout(wasm64_target);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(wasm64_layout));
+    BUSTER_TEST(arguments, wasm64_layout.pointer.size == 8 && wasm64_layout.pointer.bit_width == 64);
+    BUSTER_TEST(arguments, wasm64_layout.long_integer.size == 8 && wasm64_layout.long_double_type.size == 8);
+    BUSTER_TEST(arguments, !wasm64_layout.has_128_bit_integer);
+    BUSTER_TEST(arguments, target_vector_register_size(wasm64_target) == 0);
+    BUSTER_STRING_TEST(arguments, cpu_arch_to_string_os(CPU_ARCH_WASM64), S8("wasm64"));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
     TargetCpuFeatures rocketlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ROCKETLAKE);
     TargetCpuFeatures rocketlake_avx512 = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ}, 16);
     BUSTER_TEST(arguments, target_cpu_features_subset(rocketlake_avx512, rocketlake_features));

@@ -6,6 +6,10 @@ typedef enum CpuArch
 {
     CPU_ARCH_X86_64,
     CPU_ARCH_AARCH64,
+    // WebAssembly with the Memory64 proposal.  This is intentionally a
+    // distinct architecture rather than a feature of wasm32: pointers,
+    // linear-memory addresses, and the C data model are all 64-bit.
+    CPU_ARCH_WASM64,
     CPU_ARCH_COUNT,
 } CpuArch;
 

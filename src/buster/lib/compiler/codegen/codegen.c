@@ -1007,6 +1007,11 @@ CodegenAbi codegen_abi_for_target(Target target)
     }
     break;
         break;
+    case CPU_ARCH_WASM64:
+        // Wasm64 is emitted directly from canonical IR and does not use a
+        // native platform ABI or the native machine-code pipeline.
+        return CODEGEN_ABI_COUNT;
+        break;
     case CPU_ARCH_COUNT:
         return CODEGEN_ABI_COUNT;
     }

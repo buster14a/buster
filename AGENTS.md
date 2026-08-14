@@ -10,7 +10,8 @@ language (`.bbb` files), written entirely in C with zero third-party
 dependencies. One executable, `ide`, contains everything: UI toolkit, GPU
 renderers (Vulkan/Metal/D3D12), TrueType rasterizer, compiler frontend, IR,
 codegen backends (x86_64, aarch64), linker, and the in-process test suite.
-Targets: Linux, macOS, Windows, Android, iOS.
+Targets: Linux, macOS, Windows, Android, iOS, and direct
+`wasm64-unknown-freestanding` core modules using Memory64.
 
 ## Current compiler priority
 
@@ -1055,6 +1056,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
 | `driver/driver.{c,h}` | End-to-end source-to-object compilation with either an in-memory JIT object result or libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
 | `codegen/codegen.{c,h}`, `codegen/codegen_internal.h` | Direct typed-IR ABI translation, conservative register allocation, native x86-64/AArch64 emission, executable-memory support, and private codegen test seams. Tests live in `codegen_test.{c,h}`. |
+| `wasm/wasm.{c,h}` | Direct canonical typed-IR to core Wasm64 emitter. It uses Memory64 and i64 addresses, exports linear memory, lowers arbitrary CFGs through a dispatcher, and diagnoses unsupported ABI and instruction shapes instead of falling back to native code. |
 
 Applications and standalone tools:
 

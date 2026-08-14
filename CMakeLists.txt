@@ -866,6 +866,7 @@ buster_register_module(compiler_pdb "${BUSTER_SOURCE_DIR}/compiler/pdb/pdb${COMM
 buster_register_module(compiler_object "${BUSTER_SOURCE_DIR}/compiler/object/object${COMMON_EXTENSION}")
 buster_register_module(compiler_jit "${BUSTER_SOURCE_DIR}/compiler/jit/jit${COMMON_EXTENSION}")
 buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${COMMON_EXTENSION}")
+buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -1823,6 +1824,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_object
     compiler_jit
     compiler_link
+    compiler_wasm
     compiler_driver
     simd
     file
