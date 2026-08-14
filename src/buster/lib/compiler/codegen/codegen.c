@@ -6470,16 +6470,30 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         IrValue* local = function->values + instruction->result.value;
                         u32 local_alignment = local->alignment;
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x8d);
-                        codegen_emit_u8(&buffer, 0x85);
-                        codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(aligned_local_offsets[instruction->result.value]));
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x05);
-                        codegen_emit_u32(&buffer, local_alignment - 1);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x25);
-                        codegen_emit_u32(&buffer, 0 - local_alignment);
+                        if (!local_alignment || local_alignment > INT32_MAX)
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        BusterX86MetadataPhysicalOperand local_address_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_memory(
+                                X64_REGISTER_RBP, 64, C_X64_FRAME_DISPLACEMENT(aligned_local_offsets[instruction->result.value])),
+                        };
+                        BusterX86MetadataPhysicalOperand local_add_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate((s64)local_alignment - 1, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand local_align_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate(-(s64)local_alignment, 32),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), local_address_operands,
+                                                                  BUSTER_ARRAY_LENGTH(local_address_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), local_add_operands,
+                                                                  BUSTER_ARRAY_LENGTH(local_add_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), local_align_operands,
+                                                                  BUSTER_ARRAY_LENGTH(local_align_operands));
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_STACK_ALLOCATE)
@@ -6487,55 +6501,103 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 stack_alignment = (u32)instruction->immediates[0];
                         stack_alignment = BUSTER_MAX(stack_alignment, 16);
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x05);
-                        codegen_emit_u32(&buffer, stack_alignment - 1);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x25);
-                        codegen_emit_u32(&buffer, 0 - stack_alignment);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x3d);
-                        codegen_emit_u32(&buffer, 4096);
-                        codegen_emit_u8(&buffer, 0x72);
-                        codegen_emit_u8(&buffer, 19);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x81);
-                        codegen_emit_u8(&buffer, 0xec);
-                        codegen_emit_u32(&buffer, 4096);
-                        codegen_emit_u8(&buffer, 0xf6);
-                        codegen_emit_u8(&buffer, 0x04);
-                        codegen_emit_u8(&buffer, 0x24);
-                        codegen_emit_u8(&buffer, 0);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x2d);
-                        codegen_emit_u32(&buffer, 4096);
-                        codegen_emit_u8(&buffer, 0xeb);
-                        codegen_emit_u8(&buffer, 0xe5);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x29);
-                        codegen_emit_u8(&buffer, 0xc4);
-                        codegen_emit_u8(&buffer, 0xf6);
-                        codegen_emit_u8(&buffer, 0x04);
-                        codegen_emit_u8(&buffer, 0x24);
-                        codegen_emit_u8(&buffer, 0);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x89);
-                        codegen_emit_u8(&buffer, 0xe0);
+                        if (stack_alignment > INT32_MAX)
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        BusterX86MetadataPhysicalOperand stack_add_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate((s64)stack_alignment - 1, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_align_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate(-(s64)stack_alignment, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_compare_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_sub_rsp_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_test_operands[2] = {
+                            codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RSP, 8, 0),
+                            codegen_canonical_x64_metadata_immediate(0, 8),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_sub_rax_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_sub_rsp_rax_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                        };
+                        BusterX86MetadataPhysicalOperand stack_move_rax_rsp_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), stack_add_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_add_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), stack_compare_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_compare_operands));
+                        u64 stack_probe_final_patch = buffer.count;
+                        BusterX86MetadataPhysicalOperand stack_probe_final_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("JB"), &stack_probe_final_branch, 1);
+                        u64 stack_probe_loop_offset = buffer.count;
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_sub_rsp_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_sub_rsp_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), stack_test_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_test_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_sub_rax_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_sub_rax_operands));
+                        u64 stack_probe_loop_patch = buffer.count;
+                        BusterX86MetadataPhysicalOperand stack_probe_loop_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &stack_probe_loop_branch, 1);
+                        u64 stack_probe_final_offset = buffer.count;
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_sub_rsp_rax_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_sub_rsp_rax_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), stack_test_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_test_operands));
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_move_rax_rsp_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_move_rax_rsp_operands));
+                        s64 stack_probe_final_delta = (s64)stack_probe_final_offset - (s64)(stack_probe_final_patch + 2);
+                        s64 stack_probe_loop_delta = (s64)stack_probe_loop_offset - (s64)(stack_probe_loop_patch + 2);
+                        if (buffer.error == CODEGEN_ERROR_NONE && stack_probe_final_delta >= INT8_MIN && stack_probe_final_delta <= INT8_MAX &&
+                            stack_probe_loop_delta >= INT8_MIN && stack_probe_loop_delta <= INT8_MAX && stack_probe_final_patch + 1 < buffer.count &&
+                            stack_probe_loop_patch + 1 < buffer.count)
+                        {
+                            buffer.bytes[stack_probe_final_patch + 1] = (u8)(s8)stack_probe_final_delta;
+                            buffer.bytes[stack_probe_loop_patch + 1] = (u8)(s8)stack_probe_loop_delta;
+                        }
+                        else if (buffer.error == CODEGEN_ERROR_NONE)
+                        {
+                            buffer.error = CODEGEN_ERROR_CAPACITY;
+                        }
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_STACK_SAVE)
                     {
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x89);
-                        codegen_emit_u8(&buffer, 0xe0);
+                        BusterX86MetadataPhysicalOperand stack_save_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_save_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_save_operands));
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
                     {
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x89);
-                        codegen_emit_u8(&buffer, 0xc4);
+                        BusterX86MetadataPhysicalOperand stack_restore_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_restore_operands,
+                                                                  BUSTER_ARRAY_LENGTH(stack_restore_operands));
                     }
                     else if (instruction->opcode == IR_OPCODE_ARGUMENT)
                     {
