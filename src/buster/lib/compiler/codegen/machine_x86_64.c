@@ -6561,7 +6561,7 @@ BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature_seed(String8 mnemon
     for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
     {
         BusterX86MetadataPhysicalOperand operand = operands[operand_index];
-        u64 descriptor = operand.kind | ((u64)operand.width << 4);
+        u64 descriptor = (u64)operand.kind | ((u64)operand.width << 4);
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
         {
             descriptor |= (u64)operand.reg.physical_class << 14;
