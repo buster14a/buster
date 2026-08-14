@@ -10803,6 +10803,7 @@ typedef enum XedGeneratedCoverageClass
     XED_GENERATED_COVERAGE_RESERVED,
     XED_GENERATED_COVERAGE_UNSUPPORTED_TOKEN,
     XED_GENERATED_COVERAGE_UNCLASSIFIED,
+    XED_GENERATED_COVERAGE_DECODE_ALIAS,
     XED_GENERATED_COVERAGE_COUNT,
 } XedGeneratedCoverageClass;
 
@@ -10919,6 +10920,7 @@ enum
     XED_GENERATED_REASON_CPL0,
     XED_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN,
     XED_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN,
+    XED_GENERATED_REASON_DECODE_ALIAS,
     XED_GENERATED_REASON_COUNT,
 };
 
@@ -10952,6 +10954,7 @@ enum
     XED_GENERATED_TEST_SCHEMA,
     XED_GENERATED_TEST_PRIVILEGED_SCHEMA,
     XED_GENERATED_TEST_NOT64_SCHEMA,
+    XED_GENERATED_TEST_DECODE_ALIAS_SCHEMA,
 };
 
 #define XED_GENERATED_MAX_OPERANDS 16
@@ -11258,6 +11261,70 @@ BUSTER_GLOBAL_LOCAL bool xed_import_pattern_has_token(String8 pattern, String8 w
         start = end;
     }
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_attribute_contains(String8 attributes, String8 wanted);
+
+// These selectors are decoder controls, not source-level operands.  A zero
+// value selects the architectural NOP/legacy overlap when the corresponding
+// feature is absent; accepting it through the public mnemonic path would make
+// the same bytes change meaning as target features change.  Keep the rule
+// token-based so it remains stable across regenerated form ordering.
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_has_decode_alias_selector(String8 pattern)
+{
+    return xed_import_pattern_has_token(pattern, S8("CET=0")) ||
+           xed_import_pattern_has_token(pattern, S8("CLDEMOTE=0")) ||
+           xed_import_pattern_has_token(pattern, S8("LZCNT=0")) ||
+           xed_import_pattern_has_token(pattern, S8("TZCNT=0")) ||
+           xed_import_pattern_has_token(pattern, S8("IBHF=0")) ||
+           xed_import_pattern_has_token(pattern, S8("MPXMODE=0")) ||
+           xed_import_pattern_has_token(pattern, S8("PREFETCHRST=0")) ||
+           xed_import_pattern_has_token(pattern, S8("PREFETCHIT=0"));
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_is_ibhf_generic_nop_collision(XedImportRecord* record)
+{
+    // This is the importer-side form of the emitter's architectural IBHF
+    // collision predicate.  The explicit NOREXW row is safe; only the broad
+    // BASE NOP row whose bytes are also the IBHF selector is excluded.
+    return string_equal(record->iclass, S8("NOP")) && string_equal(record->isa_set, S8("PPRO")) &&
+           string_equal(record->extension, S8("BASE")) && string_equal(record->attributes, S8("NOP")) &&
+           xed_import_pattern_has_token(record->pattern, S8("0x0F")) &&
+           xed_import_pattern_has_token(record->pattern, S8("0x1E")) &&
+           xed_import_pattern_has_token(record->pattern, S8("MOD[0b11]")) &&
+           xed_import_pattern_has_token(record->pattern, S8("MOD=3")) &&
+           xed_import_pattern_has_token(record->pattern, S8("REG[0b111]")) &&
+           xed_import_pattern_has_token(record->pattern, S8("RM[0b000]")) &&
+           xed_import_pattern_has_token(record->pattern, S8("f3_refining_prefix")) &&
+           !xed_import_pattern_has_token(record->pattern, S8("IBHF=0")) &&
+           !xed_import_pattern_has_token(record->pattern, S8("IBHF=1")) &&
+           !xed_import_pattern_has_token(record->pattern, S8("norexw_prefix"));
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_is_undocumented_loop_alias(XedImportRecord* record)
+{
+    // P5 REP/LOOP opcode inversions are decoder aliases documented by XED as
+    // UNDOCUMENTED.  Match their typed selector and inverted opcode, rather
+    // than form ids or mnemonic-specific generated indexes.
+    bool loopne = string_equal(record->iclass, S8("LOOPNE")) &&
+                  xed_import_pattern_has_token(record->pattern, S8("0xE1")) &&
+                  xed_import_pattern_has_token(record->pattern, S8("MODEP5=1")) &&
+                  xed_import_pattern_has_token(record->pattern, S8("REP=2"));
+    bool loope = string_equal(record->iclass, S8("LOOPE")) &&
+                 xed_import_pattern_has_token(record->pattern, S8("0xE0")) &&
+                 xed_import_pattern_has_token(record->pattern, S8("MODEP5=1")) &&
+                 xed_import_pattern_has_token(record->pattern, S8("REP=3"));
+    return xed_import_attribute_contains(record->attributes, S8("UNDOCUMENTED")) && (loopne || loope);
+}
+
+BUSTER_GLOBAL_LOCAL bool xed_import_is_decode_alias(XedImportRecord* record)
+{
+    return xed_import_pattern_has_decode_alias_selector(record->pattern) ||
+           xed_import_pattern_has_token(record->pattern, S8("ENCDELETE")) ||
+           (string_equal(record->iclass, S8("NOP")) &&
+            xed_import_pattern_has_token(record->pattern, S8("P4=0")) &&
+            xed_import_pattern_has_token(record->pattern, S8("refining_f3"))) ||
+           xed_import_is_ibhf_generic_nop_collision(record) || xed_import_is_undocumented_loop_alias(record);
 }
 
 BUSTER_GLOBAL_LOCAL u8 xed_import_tuple_kind(String8 name)
@@ -12249,11 +12316,24 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, Xed
         form->test_class = XED_GENERATED_TEST_PRIVILEGED_SCHEMA;
         form->reason_id = XED_GENERATED_REASON_CPL0;
     }
+    else if ((form->mode_flags & XED_GENERATED_MODE_EA16) &&
+             !(form->mode_flags & (XED_GENERATED_MODE_EA32 | XED_GENERATED_MODE_EA64)))
+    {
+        form->coverage_class = XED_GENERATED_COVERAGE_NOT64;
+        form->test_class = XED_GENERATED_TEST_NOT64_SCHEMA;
+        form->reason_id = XED_GENERATED_REASON_MODE_NOT64;
+    }
     else if (form->mode_flags & XED_GENERATED_MODE_NOT64)
     {
         form->coverage_class = XED_GENERATED_COVERAGE_NOT64;
         form->test_class = XED_GENERATED_TEST_NOT64_SCHEMA;
         form->reason_id = XED_GENERATED_REASON_MODE_NOT64;
+    }
+    else if (xed_import_is_decode_alias(record))
+    {
+        form->coverage_class = XED_GENERATED_COVERAGE_DECODE_ALIAS;
+        form->test_class = XED_GENERATED_TEST_DECODE_ALIAS_SCHEMA;
+        form->reason_id = XED_GENERATED_REASON_DECODE_ALIAS;
     }
     else
     {
@@ -12346,7 +12426,7 @@ struct XedGeneratedTableStats
     u64 coverage_counts[XED_GENERATED_COVERAGE_COUNT];
     u64 reason_counts[XED_GENERATED_REASON_COUNT];
     u64 encoder_counts[8];
-    u64 test_counts[3];
+    u64 test_counts[4];
     u64 operand_count;
     u64 token_count;
     u64 string_pool_bytes;
@@ -12674,6 +12754,7 @@ BUSTER_GLOBAL_LOCAL void xed_generated_emit_preamble(Arena* output)
                             "    BUSTER_X86_GENERATED_COVERAGE_RESERVED,\n"
                             "    BUSTER_X86_GENERATED_COVERAGE_UNSUPPORTED_TOKEN,\n"
                             "    BUSTER_X86_GENERATED_COVERAGE_UNCLASSIFIED,\n"
+                            "    BUSTER_X86_GENERATED_COVERAGE_DECODE_ALIAS,\n"
                             "    BUSTER_X86_GENERATED_COVERAGE_COUNT,\n"
                             "} BusterX86GeneratedCoverageClass;\n\n"
                             "typedef enum BusterX86GeneratedPrefixKind {\n"
@@ -12764,6 +12845,7 @@ BUSTER_GLOBAL_LOCAL void xed_generated_emit_preamble(Arena* output)
                             "    BUSTER_X86_GENERATED_REASON_CPL0,\n"
                             "    BUSTER_X86_GENERATED_REASON_UNKNOWN_PATTERN_TOKEN,\n"
                             "    BUSTER_X86_GENERATED_REASON_UNKNOWN_OPERAND_TOKEN,\n"
+                            "    BUSTER_X86_GENERATED_REASON_DECODE_ALIAS,\n"
                             "};\n\n"
                             "enum {\n"
                             "    BUSTER_X86_GENERATED_OPERAND_NONE,\n"
@@ -12798,6 +12880,7 @@ BUSTER_GLOBAL_LOCAL void xed_generated_emit_preamble(Arena* output)
                             "    BUSTER_X86_GENERATED_TEST_SCHEMA,\n"
                             "    BUSTER_X86_GENERATED_TEST_PRIVILEGED_SCHEMA,\n"
                             "    BUSTER_X86_GENERATED_TEST_NOT64_SCHEMA,\n"
+                            "    BUSTER_X86_GENERATED_TEST_DECODE_ALIAS_SCHEMA,\n"
                             "};\n\n"
                             "typedef struct BusterX86GeneratedOperand BusterX86GeneratedOperand;\n"
                             "struct BusterX86GeneratedOperand {\n"
@@ -12873,7 +12956,7 @@ BUSTER_GLOBAL_LOCAL void xed_generated_emit_preamble(Arena* output)
                             "    u16 reason_id;\n"
                             "    u32 reason_offset;\n"
                             "};\n\n"
-                            "#define BUSTER_X86_GENERATED_SCHEMA_VERSION 2\n\n"));
+                            "#define BUSTER_X86_GENERATED_SCHEMA_VERSION 3\n\n"));
 }
 
 BUSTER_GLOBAL_LOCAL bool xed_import_emit_generated_tables_packed(Arena* output, Arena* coverage_output, Arena* arena,
@@ -13413,8 +13496,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("d2fd59db30361ad5")) &&
-                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("2064976d2bb2c565"));
+                           assembly_import_validate_artifact(arena, artifacts[1], 6052285, S8("ce5b2b62ace7ea08")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("2607706d0d627162"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
@@ -17933,7 +18016,46 @@ BUSTER_GLOBAL_LOCAL bool xed_import_emit_generated_tables_packed(Arena* output, 
     stats->string_pool_bytes = pool.byte_count;
     stats->header_bytes = arena_buffer_size(output);
     stats->coverage_bytes = arena_buffer_size(coverage_output);
-    return stats->coverage_counts[XED_GENERATED_COVERAGE_UNCLASSIFIED] == 0;
+    if (stats->coverage_counts[XED_GENERATED_COVERAGE_UNCLASSIFIED] != 0)
+    {
+        return false;
+    }
+    // The checked-in XED snapshot is an inventory contract, not a hint.  On
+    // the complete 11,013-row input, require the semantic rules above to
+    // classify exactly the approved 27 decoder aliases and the two additional
+    // EA16-only rows (270 NOT64 total).  Small synthetic importer self-tests
+    // intentionally bypass this full-snapshot assertion.
+    if (forms.length == 11013)
+    {
+        u32 decode_alias_rule_count = 0;
+        u32 ea16_only_count = 0;
+        u32 ea16_privileged_count = 0;
+        for (u32 form_index = 0; form_index < forms.length; form_index += 1)
+        {
+            XedGeneratedForm* form = forms.pointer + form_index;
+            bool decode_alias = xed_import_is_decode_alias(form->record);
+            bool ea16_only = (form->mode_flags & XED_GENERATED_MODE_EA16) &&
+                             !(form->mode_flags & (XED_GENERATED_MODE_EA32 | XED_GENERATED_MODE_EA64));
+            decode_alias_rule_count += decode_alias;
+            ea16_only_count += ea16_only;
+            bool privileged = form->coverage_class == XED_GENERATED_COVERAGE_PRIVILEGED;
+            ea16_privileged_count += ea16_only && privileged;
+            if ((decode_alias && form->coverage_class != XED_GENERATED_COVERAGE_DECODE_ALIAS) ||
+                (ea16_only && !privileged && form->coverage_class != XED_GENERATED_COVERAGE_NOT64))
+            {
+                return false;
+            }
+        }
+        if (decode_alias_rule_count != 27 || ea16_only_count != 4 || ea16_privileged_count != 1 ||
+            stats->coverage_counts[XED_GENERATED_COVERAGE_DECODE_ALIAS] != 27 ||
+            stats->coverage_counts[XED_GENERATED_COVERAGE_NORMALIZED] != 10607 ||
+            stats->coverage_counts[XED_GENERATED_COVERAGE_NOT64] != 270 ||
+            stats->coverage_counts[XED_GENERATED_COVERAGE_PRIVILEGED] != 109)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_missing_inventory(Arena* output, Aarch64ImportRecordList records, u64* row_count)
@@ -18939,8 +19061,8 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
            "    \"operand_count\": {u64},\n"
            "    \"token_count\": {u64},\n"
            "    \"string_pool_bytes\": {u64},\n"
-           "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"NOT64\": {u64}, \"PRIVILEGED\": {u64}, \"RESERVED\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
-           "    \"reason_counts\": {{\"NONE\": {u64}, \"MODE_NOT64\": {u64}, \"CPL0\": {u64}, \"UNKNOWN_PATTERN_TOKEN\": {u64}, \"UNKNOWN_OPERAND_TOKEN\": {u64}}}\n"
+           "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"NOT64\": {u64}, \"PRIVILEGED\": {u64}, \"RESERVED\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}, \"DECODE_ALIAS\": {u64}}},\n"
+           "    \"reason_counts\": {{\"NONE\": {u64}, \"MODE_NOT64\": {u64}, \"CPL0\": {u64}, \"UNKNOWN_PATTERN_TOKEN\": {u64}, \"UNKNOWN_OPERAND_TOKEN\": {u64}, \"DECODE_ALIAS\": {u64}}}\n"
            "  }},\n"
            "  \"aarch64_generated\": {{\n"
            "    \"header\": \"aarch64-assembly.generated.h\",\n"
@@ -19019,8 +19141,9 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
         data.xed_stats.token_count, data.xed_stats.string_pool_bytes, data.xed_stats.coverage_counts[0], data.xed_stats.coverage_counts[1],
         data.xed_stats.coverage_counts[2],
         data.xed_stats.coverage_counts[3], data.xed_stats.coverage_counts[4], data.xed_stats.coverage_counts[5], data.xed_stats.coverage_counts[6],
+        data.xed_stats.coverage_counts[7],
         data.xed_stats.reason_counts[0], data.xed_stats.reason_counts[1], data.xed_stats.reason_counts[2], data.xed_stats.reason_counts[3],
-        data.xed_stats.reason_counts[4], data.aarch64_generated_output_checksum, data.aarch64_stats.header_bytes,
+        data.xed_stats.reason_counts[4], data.xed_stats.reason_counts[5], data.aarch64_generated_output_checksum, data.aarch64_stats.header_bytes,
         data.aarch64_generated_coverage_checksum, data.aarch64_stats.coverage_bytes, data.aarch64_form_ids_checksum, data.aarch64_form_ids_bytes,
         data.aarch64_production_plan_checksum, data.aarch64_production_plan_bytes, data.aarch64_production_plan_json_checksum,
         data.aarch64_production_plan_json_bytes, data.aarch64_production_plan_form_count, data.aarch64_production_plan_field_count,
@@ -19275,14 +19398,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
     result = result && assembly_import_manifest_expect_fields(generated, generated_expected, BUSTER_ARRAY_LENGTH(generated_expected));
 
     String8 generated_classification_keys[] = {S8("DIRECT"), S8("NORMALIZED"), S8("NOT64"), S8("PRIVILEGED"), S8("RESERVED"),
-                                               S8("UNSUPPORTED_TOKEN"), S8("UNCLASSIFIED")};
+                                               S8("UNSUPPORTED_TOKEN"), S8("UNCLASSIFIED"), S8("DECODE_ALIAS")};
     AssemblyImportManifestFieldExpectation generated_classification_expected[BUSTER_ARRAY_LENGTH(generated_classification_keys)] = {0};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_classification_expected); index += 1)
     {
         generated_classification_expected[index] = (AssemblyImportManifestFieldExpectation){
             .key = generated_classification_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.xed_stats.coverage_counts[index])};
     }
-    String8 generated_reason_keys[] = {S8("NONE"), S8("MODE_NOT64"), S8("CPL0"), S8("UNKNOWN_PATTERN_TOKEN"), S8("UNKNOWN_OPERAND_TOKEN")};
+    String8 generated_reason_keys[] = {S8("NONE"), S8("MODE_NOT64"), S8("CPL0"), S8("UNKNOWN_PATTERN_TOKEN"), S8("UNKNOWN_OPERAND_TOKEN"),
+                                       S8("DECODE_ALIAS")};
     AssemblyImportManifestFieldExpectation generated_reason_expected[BUSTER_ARRAY_LENGTH(generated_reason_keys)] = {0};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_reason_expected); index += 1)
     {
@@ -21050,10 +21174,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                          aarch64_generated_stats.canonical_form_count, aarch64_generated_stats.field_count, aarch64_generated_stats.segment_count,
                          aarch64_generated_stats.operand_count, aarch64_generated_stats.predicate_count, aarch64_generated_stats.header_bytes,
                          aarch64_generated_stats.coverage_bytes, aarch64_generated_stats.string_pool_bytes);
-            string_print(S8("XED coverage: DIRECT={u64} NORMALIZED={u64} NOT64={u64} PRIVILEGED={u64} RESERVED={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
+            string_print(S8("XED coverage: DIRECT={u64} NORMALIZED={u64} NOT64={u64} PRIVILEGED={u64} RESERVED={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64} DECODE_ALIAS={u64}.\n"),
                          generated_stats.coverage_counts[0], generated_stats.coverage_counts[1], generated_stats.coverage_counts[2],
                          generated_stats.coverage_counts[3], generated_stats.coverage_counts[4], generated_stats.coverage_counts[5],
-                         generated_stats.coverage_counts[6]);
+                         generated_stats.coverage_counts[6], generated_stats.coverage_counts[7]);
             string_print(S8("AArch64 coverage: DIRECT={u64} NORMALIZED={u64} ALIAS={u64} PRIVILEGED/SYSTEM={u64} RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}.\n"),
                          aarch64_generated_stats.coverage_counts[0], aarch64_generated_stats.coverage_counts[1], aarch64_generated_stats.coverage_counts[2],
                          aarch64_generated_stats.coverage_counts[3], aarch64_generated_stats.coverage_counts[4], aarch64_generated_stats.coverage_counts[5],

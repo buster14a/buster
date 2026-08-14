@@ -12,7 +12,7 @@ over the pinned AArch64 records.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
-- `x86_64-assembly.generated.h` is a 6,052,140-byte compact ABI artifact:
+- `x86_64-assembly.generated.h` is a 6,052,285-byte compact ABI artifact:
   11,013 forms, 32,813 operands, a 1,726,254-byte logical string pool, and
   immutable little-endian packed blobs accessed through bounded generated
   accessors. Flat C string chunks are at most 4,092 payload bytes, avoiding a
@@ -28,10 +28,11 @@ over the pinned AArch64 records.
   exact diagnostic indexes. Numeric form IDs are snapshot row IDs; `stable_hash`
   is the durable form identity.
 - `x86_64-coverage.generated.inc` is a 389,599-byte packed coverage include.
-  It has one checked row per form and reports DIRECT=0, NORMALIZED=10,636,
-  NOT64=268, PRIVILEGED=109, RESERVED=0, UNSUPPORTED_TOKEN=0, and
-  UNCLASSIFIED=0. NORMALIZED rows are metadata coverage, not a claim that the
-  runtime assembler can encode them.
+  It has one checked row per form and reports DIRECT=0, NORMALIZED=10,607,
+  NOT64=270, PRIVILEGED=109, DECODE_ALIAS=27, RESERVED=0,
+  UNSUPPORTED_TOKEN=0, and UNCLASSIFIED=0. NORMALIZED rows are metadata
+  coverage, not a claim that the runtime assembler can encode them; decode
+  aliases are retained for provenance but are never source-selectable.
 - `aarch64-llvm.jsonl` contains one reduced non-pseudo `AArch64Inst` record per
   line.
 - `aarch64-assembly.generated.h` contains compact fixed masks/values,

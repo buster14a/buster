@@ -2485,8 +2485,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, ledger_capacity);
     BusterX86CompletionLedger completion = x86_64_metadata_test_completion_ledger(ledger, audit.entry_count);
     BusterX86CompletionLedger empty_completion = x86_64_metadata_test_completion_ledger(0, 0);
-    bool completion_totals_match = completion.digest == UINT64_C(0xc17fa2a15eca311e) &&
-                                   completion.form_count == 11013 && completion.normalized_count == 10636 &&
+    bool completion_totals_match = completion.digest == UINT64_C(0xef8690567887ffc6) &&
+                                   completion.form_count == 11013 && completion.normalized_count == 10607 &&
                                    completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&
                                    completion.zero_stable_hash_count == 0 && completion.emitted_nonzero_blocker_count == 0;
@@ -2495,7 +2495,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     static u32 const expected_visible_distribution[] = {412, 858, 3420, 3375, 2603, 345};
     static u32 const expected_field_cohorts[][9] = {
         {10609, 10, 80, 5377, 10416, 3276, 2216, 87, 87},
-        {10301, 10, 80, 5228, 10067, 3244, 2159, 49, 49},
+        {10275, 10, 80, 5213, 10042, 3244, 2159, 46, 46},
         {10275, 10, 80, 5213, 10042, 3244, 2159, 46, 46},
         {334, 0, 0, 164, 374, 32, 57, 41, 41},
     };
@@ -2530,9 +2530,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     static u32 const expected_family_all[] = {1929, 202, 5, 1698, 196, 6812, 49, 122};
     static u32 const expected_family_all_emitted[] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
     static u32 const expected_family_all_blocked[] = {145, 5, 0, 54, 20, 84, 0, 98};
-    static u32 const expected_family_normalized[] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_normalized[] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
     static u32 const expected_family_normalized_emitted[] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
-    static u32 const expected_family_normalized_blocked[] = {28, 1, 0, 0, 0, 0, 0, 0};
+    static u32 const expected_family_normalized_blocked[] = {0, 0, 0, 0, 0, 0, 0, 0};
     for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         completion_vectors_match &= completion.family_all_counts[family] == expected_family_all[family] &&
                                     completion.family_all_emitted_counts[family] == expected_family_all_emitted[family] &&
@@ -2540,7 +2540,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
                                     completion.family_counts[family] == expected_family_normalized[family] &&
                                     completion.family_emitted_counts[family] == expected_family_normalized_emitted[family] &&
                                     completion.family_blocked_counts[family] == expected_family_normalized_blocked[family];
-    static u32 const expected_blockers[] = {10607, 268, 108, 29, 0, 1, 0, 0, 0, 0, 0, 0};
+    static u32 const expected_blockers[] = {10607, 270, 108, 1, 0, 0, 0, 0, 0, 0, 0, 0, 27};
     for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
         completion_vectors_match &= completion.blocker_counts[blocker] == expected_blockers[blocker];
     bool completion_structural_ok = completion_totals_match && completion_vectors_match &&
@@ -2899,7 +2899,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         montmul_aliases &= montmul_lower_has_9011 && montmul_lower_has_9012 && montmul_upper_has_9011 && montmul_upper_has_9012;
         BUSTER_TEST(arguments, montmul_records && montmul_eamode16.stable_hash == UINT64_C(0x43ea6607300874ad) &&
-                                   montmul_eamode16.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   montmul_eamode16.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 &&
                                    montmul_eamode16.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
                                    montmul_eamode16.mode_flags == BUSTER_X86_METADATA_MODE_EA16 &&
                                    montmul_eamode32.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
@@ -3025,25 +3025,147 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     BusterX86MetadataCounts counts = buster_x86_metadata_counts();
+    {
+        typedef struct X86_64MetadataAliasInventoryCase X86_64MetadataAliasInventoryCase;
+        struct X86_64MetadataAliasInventoryCase
+        {
+            u32 form_id;
+            u64 stable_hash;
+            u8 coverage_class;
+            u16 reason_id;
+            u8 test_class;
+        };
+        static X86_64MetadataAliasInventoryCase const inventory[] = {
+            {7963, UINT64_C(9760411889977040051), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7965, UINT64_C(9415441538438589370), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7966, UINT64_C(17207840402057639609), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7967, UINT64_C(16100944905773296210), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7968, UINT64_C(9984935062474368315), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7970, UINT64_C(15604930873871107343), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7971, UINT64_C(10850275643501731349), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7972, UINT64_C(7816956366636167268), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7973, UINT64_C(2414193575843013120), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7974, UINT64_C(12477954903810431918), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7975, UINT64_C(16234885271030626349), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {7978, UINT64_C(12568587553290984177), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8106, UINT64_C(7673034833317256367), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8107, UINT64_C(3274967469198123399), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8689, UINT64_C(14813386923769267956), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8690, UINT64_C(3837008830770907182), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8692, UINT64_C(14272704612556719270), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8814, UINT64_C(11284571631391134300), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8815, UINT64_C(9911688756507210979), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8816, UINT64_C(3985021897032612900), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {8817, UINT64_C(4076819320050101737), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {9011, UINT64_C(4893836126148129965), BUSTER_X86_METADATA_COVERAGE_NOT64,
+             BUSTER_X86_METADATA_REASON_MODE_NOT64, BUSTER_X86_METADATA_TEST_NOT64_SCHEMA},
+            {9572, UINT64_C(9209903826378290749), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {9573, UINT64_C(6800483434327952346), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {9574, UINT64_C(13951958529522862627), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {9854, UINT64_C(9098192276389485439), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {10045, UINT64_C(7714867975667879422), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {10049, UINT64_C(18015428549483481338), BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS,
+             BUSTER_X86_METADATA_REASON_DECODE_ALIAS, BUSTER_X86_METADATA_TEST_DECODE_ALIAS_SCHEMA},
+            {10051, UINT64_C(7650631457957071542), BUSTER_X86_METADATA_COVERAGE_NOT64,
+             BUSTER_X86_METADATA_REASON_MODE_NOT64, BUSTER_X86_METADATA_TEST_NOT64_SCHEMA},
+        };
+        bool inventory_exact = BUSTER_ARRAY_LENGTH(inventory) == 29;
+        bool alias_apis_closed = true;
+        u32 alias_count = 0;
+        u32 not64_count = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(inventory); index += 1)
+        {
+            X86_64MetadataAliasInventoryCase expected = inventory[index];
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(expected.form_id, &form);
+            inventory_exact &= retrieved && form.id == expected.form_id && form.stable_hash == expected.stable_hash &&
+                               form.coverage_class == expected.coverage_class && form.reason_id == expected.reason_id &&
+                               form.test_class == expected.test_class;
+            alias_count += expected.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS;
+            not64_count += expected.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64;
+            if (expected.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS)
+            {
+                BusterX86MetadataPhysicalOperand operands[16] = {0};
+                char8 mnemonic_buffer[128] = {0};
+                BusterX86MetadataPhysicalQuery query = {0};
+                bool built = x86_64_metadata_test_build_gate_query(expected.form_id, &query, operands, mnemonic_buffer);
+                u8 output[32] = {0};
+                BusterX86MetadataRelocation relocations[2] = {0};
+                BusterX86MetadataEmitQuery emit_query = {
+                    .physical = query,
+                    .form_id = expected.form_id,
+                    .output = output,
+                    .output_capacity = BUSTER_ARRAY_LENGTH(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                };
+                BusterX86MetadataEmitResult direct = built ? buster_x86_metadata_emit_form(emit_query)
+                                                            : (BusterX86MetadataEmitResult){0};
+                BusterX86MetadataEmitResult exact = built ? buster_x86_metadata_emit_form_exact(
+                    emit_query, (BusterX86MetadataFormKey){.form_id = expected.form_id, .stable_hash = expected.stable_hash})
+                                                           : (BusterX86MetadataEmitResult){0};
+                BusterX86MetadataSelectResult selected = built ? buster_x86_metadata_select_form(query)
+                                                                : (BusterX86MetadataSelectResult){0};
+                alias_apis_closed &= built && direct.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                     exact.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                     selected.form_id != expected.form_id;
+            }
+            else
+            {
+                inventory_exact &= (form.mode_flags & BUSTER_X86_METADATA_MODE_EA16) != 0 &&
+                                   (form.mode_flags & (BUSTER_X86_METADATA_MODE_EA32 | BUSTER_X86_METADATA_MODE_EA64)) == 0;
+            }
+        }
+        BUSTER_TEST(arguments, inventory_exact && alias_count == 27 && not64_count == 2);
+        BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS] == 27 &&
+                                   counts.reason_counts[BUSTER_X86_METADATA_REASON_DECODE_ALIAS] == 27);
+        BUSTER_TEST(arguments, alias_apis_closed);
+    }
     BusterX86MetadataValidationResult validation = {0};
-    BUSTER_TEST(arguments, buster_x86_metadata_schema_version() == 2);
+    BUSTER_TEST(arguments, buster_x86_metadata_schema_version() == 3);
     BUSTER_TEST(arguments, buster_x86_metadata_form_count() == 11013);
-    BUSTER_TEST(arguments, buster_x86_metadata_normalized_form_count() == 10636);
+    BUSTER_TEST(arguments, buster_x86_metadata_normalized_form_count() == 10607);
     BUSTER_TEST(arguments, buster_x86_metadata_coverage_count() == 11013);
     BUSTER_TEST(arguments, buster_x86_metadata_operand_count() == 32813);
     BUSTER_TEST(arguments, buster_x86_metadata_string_pool_size() == 1726254);
     BUSTER_TEST(arguments, buster_x86_metadata_validate(&validation) && validation.valid &&
                                validation.error == BUSTER_X86_METADATA_VALIDATION_NONE);
-    BUSTER_TEST(arguments, counts.total_form_count == 11013 && counts.normalized_form_count == 10636 && counts.coverage_count == 11013);
+    BUSTER_TEST(arguments, counts.total_form_count == 11013 && counts.normalized_form_count == 10607 && counts.coverage_count == 11013);
     BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_DIRECT] == 0);
-    BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_NORMALIZED] == 10636);
-    BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_NOT64] == 268);
+    BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_NORMALIZED] == 10607);
+    BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_NOT64] == 270);
     BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_PRIVILEGED] == 109);
     BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_RESERVED] == 0);
     BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_UNSUPPORTED_TOKEN] == 0);
     BUSTER_TEST(arguments, counts.coverage_class_counts[BUSTER_X86_METADATA_COVERAGE_UNCLASSIFIED] == 0);
-    BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_NONE] == 10636);
-    BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_MODE_NOT64] == 268);
+    BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_NONE] == 10607);
+    BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_MODE_NOT64] == 270);
     BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_CPL0] == 109);
     BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_UNKNOWN_PATTERN_TOKEN] == 0);
     BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_UNKNOWN_OPERAND_TOKEN] == 0);
@@ -4760,13 +4882,14 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 for (u32 expected_index = 0; expected_index < cohort.expected_count; expected_index += 1)
                     expected_id |= form_id == cohort.expected_ids[expected_index];
                 boolean_cohort_ok &= expected_id;
-                boolean_cohort_ok &= form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
                 bool decode_alias = cohort_index == 0 || cohort_index == 2 || cohort_index == 4 ||
                                     cohort_index == 6 || cohort_index == 8 || cohort_index == 10;
+                boolean_cohort_ok &= decode_alias ? form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS
+                                                   : form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
                 if (decode_alias)
                     boolean_cohort_ok &= !ledger[form_id].encoder_capable &&
                                          ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                         ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+                                         ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS;
                 else
                     boolean_cohort_ok &= ledger[form_id].encoder_capable &&
                                          ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
@@ -4804,7 +4927,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !no_storage.complete && no_storage.required_entry_count == 11013 && no_storage.entry_count == 0);
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
-                                   audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
+                                   audit.entry_count == 11013 && audit.normalized_entry_count == 10607);
         static u32 const ace_r4_form_ids[] = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
         bool ace_r4_ledger_unlocked = true;
         for (u32 ace_index = 0; ace_index < BUSTER_ARRAY_LENGTH(ace_r4_form_ids); ace_index += 1)
@@ -4828,12 +4951,12 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, audit.emitted_count == 10607 && audit.blocked_count == 406 &&
                                    audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10607 &&
                                    audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 406);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10715 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 29);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10715 && audit.policy_excluded_count == 406 &&
+                                   audit.explicitly_unsupported_count == 297 && audit.schema_inexpressible_count == 0);
 
-        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
         u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {28, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -4843,7 +4966,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10607, 268, 108, 29, 0, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10607, 270, 108, 1, 0, 0, 0, 0, 0, 0, 0, 0, 27};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -4853,18 +4976,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataCoverageLedgerEntry jcxz_ledger = ledger[10051];
         BusterX86MetadataCoverageLedgerEntry monitor_ledger = ledger[9598];
         BUSTER_TEST(arguments, montmul_ledger.form_id == 9011 && montmul_ledger.stable_hash == UINT64_C(0x43ea6607300874ad) &&
-                                   montmul_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   montmul_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 &&
                                    montmul_ledger.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
                                    montmul_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                   montmul_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
-                                   !montmul_ledger.encoder_capable && !montmul_ledger.policy_excluded &&
+                                   montmul_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_NOT64 &&
+                                   !montmul_ledger.encoder_capable && montmul_ledger.policy_excluded &&
                                    montmul_eamode32_ledger.form_id == 9012 &&
                                    montmul_eamode32_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
                                    montmul_eamode32_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_NONE &&
                                    montmul_eamode32_ledger.encoder_capable && jcxz_ledger.form_id == 10051 &&
-                                   jcxz_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   jcxz_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 &&
                                    jcxz_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                   jcxz_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS && !jcxz_ledger.encoder_capable &&
+                                   jcxz_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_NOT64 && jcxz_ledger.policy_excluded && !jcxz_ledger.encoder_capable &&
                                    monitor_ledger.form_id == 9598 && monitor_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED &&
                                    monitor_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
                                    monitor_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
@@ -5165,9 +5288,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                             x86_64_metadata_test_string_equal(form.iclass, S8("NOP"));
             bool mode_zero = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("MPXMODE=0"));
             mpxmode_aliases_blocked &= retrieved && base_nop && mode_zero &&
-                                      form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                      form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS &&
                                       ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
+                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS &&
                                       !ledger[form_id].encoder_capable;
         }
         bool mpxmode_adjacent_excluded = true;
@@ -5239,7 +5362,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             u32 form_id = cet0_form_ids[index];
             cet0_ledger_exact &= form_id < audit.entry_count && ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
                                  !ledger[form_id].encoder_capable &&
-                                 ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+                                 ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS;
         }
         static u32 const encdelete_form_ids[] = {7970, 7971, 7972, 7973, 7974, 7975};
         bool encdelete_ledger_exact = true;
@@ -5248,10 +5371,10 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             u32 form_id = encdelete_form_ids[index];
             encdelete_ledger_exact &= form_id < audit.entry_count && ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
                                       !ledger[form_id].encoder_capable &&
-                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS;
         }
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
-                                   audit.entry_count == 11013 && audit.normalized_entry_count == 10636 && cet0_ledger_exact &&
+                                   audit.entry_count == 11013 && audit.normalized_entry_count == 10607 && cet0_ledger_exact &&
                                    encdelete_ledger_exact);
         // These are the five additional normalized LEGACY rows whose plain
         // not_refining controls are architecturally selectable here.  The
@@ -5373,7 +5496,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                            : BUSTER_X86_METADATA_COVERAGE_BLOCKED) &&
                                    ledger[fixed_nop_ids[index]].blocker ==
                                        (expected_coverage ? BUSTER_X86_METADATA_BLOCKER_NONE
-                                                           : BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+                                                           : BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS);
         }
         BUSTER_TEST(arguments, fixed_nop_inventory);
 
@@ -5472,24 +5595,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, wrong_built && wrong_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS && wrong_result.byte_count == 0);
 
         // Prefix-control coverage is intentionally tracked separately from
-        // the broad audit totals.  These raw populations and exact blocked
-        // rows make it impossible for a newly recognized token to unlock an
-        // unrelated CET or MODEP5/REP-selector form by accident.
+        // the broad audit totals.  Decoder aliases are policy-excluded from
+        // the normalized cohort; every remaining normalized row must still
+        // emit, so a newly recognized token cannot widen the encoder cohort
+        // by accident.
         String8 const residual_tokens[] = {
             S8_INITIALIZER("DF64()"), S8_INITIALIZER("IMMUNE66()"),
             S8_INITIALIZER("IMMUNE66_LOOP64()"), S8_INITIALIZER("IMMUNE_REXW()"),
         };
         static u32 const residual_total_expected[] = {42, 34, 15, 4};
-        static u32 const residual_normalized_expected[] = {40, 26, 15, 4};
-        static u32 const residual_blocked_expected[] = {2, 0, 2, 0};
+        static u32 const residual_normalized_expected[] = {38, 26, 13, 4};
+        static u32 const residual_blocked_expected[] = {0, 0, 0, 0};
         static u32 const residual_emitted_expected[] = {38, 26, 13, 4};
-        static u32 const residual_blocked_ids[][10] = {
-            {10045, 10049},
-            {0},
-            {10045, 10049},
-            {0},
-        };
-        static u32 const residual_blocked_id_count[] = {2, 0, 2, 0};
         u32 residual_total[4] = {0};
         u32 residual_normalized[4] = {0};
         u32 residual_blocked[4] = {0};
@@ -5505,22 +5622,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 residual_total[token_index] += 1;
                 if (form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED) continue;
                 residual_normalized[token_index] += 1;
-                bool expected_blocked = false;
-                for (u32 blocked_index = 0; blocked_index < residual_blocked_id_count[token_index]; blocked_index += 1)
-                    expected_blocked |= form_id == residual_blocked_ids[token_index][blocked_index];
                 bool is_blocked = ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
                 residual_blocked[token_index] += is_blocked;
                 residual_emitted[token_index] += !is_blocked;
-                if (expected_blocked)
-                {
-                    residual_rows_consistent &= is_blocked && !ledger[form_id].encoder_capable &&
-                                               ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
-                }
-                else
-                {
-                    residual_rows_consistent &= !is_blocked && ledger[form_id].encoder_capable &&
-                                               ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE;
-                }
+                residual_rows_consistent &= !is_blocked && ledger[form_id].encoder_capable &&
+                                           ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE;
             }
         }
         bool residual_counts_match = residual_rows_consistent;
@@ -8242,7 +8348,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             cet0_contract &= retrieved && x86_64_metadata_test_string_equal(form.iclass, S8("NOP")) &&
                              x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
                              x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
-                             form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                             form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS &&
                              x86_64_metadata_test_pattern_has_token(form.pattern, S8("CET=0")) && raw_signature &&
                              operands[0].visible && operands[1].visible && operands[0].physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
                              operands[1].physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&

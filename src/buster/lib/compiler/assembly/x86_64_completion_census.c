@@ -875,7 +875,8 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
         result.scanned_form_count += 1;
         normalized = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
         policy = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED ||
-                 form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64;
+                 form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
+                 form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS;
         if (normalized) result.normalized_form_count += 1;
         else result.non_normalized_form_count += 1;
         if (policy) result.policy_excluded_count += 1;

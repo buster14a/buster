@@ -23,16 +23,16 @@
   },
   "generated": {
     "header": "x86_64-assembly.generated.h",
-    "header_checksum": "d2fd59db30361ad5",
-    "header_bytes": 6052140,
+    "header_checksum": "ce5b2b62ace7ea08",
+    "header_bytes": 6052285,
     "coverage": "x86_64-coverage.generated.inc",
-    "coverage_checksum": "2064976d2bb2c565",
+    "coverage_checksum": "2607706d0d627162",
     "coverage_bytes": 389599,
     "operand_count": 32813,
     "token_count": 136913,
     "string_pool_bytes": 1726254,
-    "classification_counts": {"DIRECT": 0, "NORMALIZED": 10636, "NOT64": 268, "PRIVILEGED": 109, "RESERVED": 0, "UNSUPPORTED_TOKEN": 0, "UNCLASSIFIED": 0},
-    "reason_counts": {"NONE": 10636, "MODE_NOT64": 268, "CPL0": 109, "UNKNOWN_PATTERN_TOKEN": 0, "UNKNOWN_OPERAND_TOKEN": 0}
+    "classification_counts": {"DIRECT": 0, "NORMALIZED": 10607, "NOT64": 270, "PRIVILEGED": 109, "RESERVED": 0, "UNSUPPORTED_TOKEN": 0, "UNCLASSIFIED": 0, "DECODE_ALIAS": 27},
+    "reason_counts": {"NONE": 10607, "MODE_NOT64": 270, "CPL0": 109, "UNKNOWN_PATTERN_TOKEN": 0, "UNKNOWN_OPERAND_TOKEN": 0, "DECODE_ALIAS": 27}
   },
   "aarch64_generated": {
     "header": "aarch64-assembly.generated.h",
