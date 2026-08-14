@@ -1536,19 +1536,19 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
     u8 opcode = 0;
     if (is_float)
     {
-        bool f64 = type->bit_width == 64;
+        bool is_f64 = type->bit_width == 64;
         switch (operation)
         {
-        case IR_BINARY_FLOAT_ADD: opcode = f64 ? 0xa0 : 0x92; break;
-        case IR_BINARY_FLOAT_SUBTRACT: opcode = f64 ? 0xa1 : 0x93; break;
-        case IR_BINARY_FLOAT_MULTIPLY: opcode = f64 ? 0xa2 : 0x94; break;
-        case IR_BINARY_FLOAT_DIVIDE: opcode = f64 ? 0xa3 : 0x95; break;
-        case IR_BINARY_FLOAT_EQUAL: opcode = f64 ? 0x61 : 0x5b; break;
-        case IR_BINARY_FLOAT_NOT_EQUAL: opcode = f64 ? 0x62 : 0x5c; break;
-        case IR_BINARY_FLOAT_LESS: opcode = f64 ? 0x63 : 0x5d; break;
-        case IR_BINARY_FLOAT_GREATER: opcode = f64 ? 0x64 : 0x5e; break;
-        case IR_BINARY_FLOAT_LESS_EQUAL: opcode = f64 ? 0x65 : 0x5f; break;
-        case IR_BINARY_FLOAT_GREATER_EQUAL: opcode = f64 ? 0x66 : 0x60; break;
+        case IR_BINARY_FLOAT_ADD: opcode = is_f64 ? 0xa0 : 0x92; break;
+        case IR_BINARY_FLOAT_SUBTRACT: opcode = is_f64 ? 0xa1 : 0x93; break;
+        case IR_BINARY_FLOAT_MULTIPLY: opcode = is_f64 ? 0xa2 : 0x94; break;
+        case IR_BINARY_FLOAT_DIVIDE: opcode = is_f64 ? 0xa3 : 0x95; break;
+        case IR_BINARY_FLOAT_EQUAL: opcode = is_f64 ? 0x61 : 0x5b; break;
+        case IR_BINARY_FLOAT_NOT_EQUAL: opcode = is_f64 ? 0x62 : 0x5c; break;
+        case IR_BINARY_FLOAT_LESS: opcode = is_f64 ? 0x63 : 0x5d; break;
+        case IR_BINARY_FLOAT_GREATER: opcode = is_f64 ? 0x64 : 0x5e; break;
+        case IR_BINARY_FLOAT_LESS_EQUAL: opcode = is_f64 ? 0x65 : 0x5f; break;
+        case IR_BINARY_FLOAT_GREATER_EQUAL: opcode = is_f64 ? 0x66 : 0x60; break;
         default: break;
         }
     }
