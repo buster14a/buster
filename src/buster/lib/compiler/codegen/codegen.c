@@ -15076,7 +15076,19 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParal
         u64 alignment = state->target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
         while (buffer.count % alignment && !buffer.error)
         {
-            codegen_emit_u8(&buffer, state->target.cpu_arch == CPU_ARCH_X86_64 ? 0x90 : 0);
+            if (state->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("NOP"), 0, 0))
+                {
+                    result.error = buffer.error;
+                    state->result = result;
+                    return;
+                }
+            }
+            else
+            {
+                codegen_emit_u8(&buffer, 0);
+            }
         }
         if (buffer.error || buffer.count > UINT32_MAX || fragment->code.length > buffer.capacity - buffer.count)
         {
