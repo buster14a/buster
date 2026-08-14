@@ -878,6 +878,19 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
     if (native_program.error == JIT_ERROR_NONE)
     {
+#if BUSTER_CPU_ARCH_X86_64
+        // The imported call is relocated through the six-byte metadata-built
+        // FF /4 RIP thunk.  Derive the thunk address from the relocated call
+        // rather than assuming a section layout, then compare its stable
+        // instruction prefix exactly; the trailing target payload is runtime
+        // data and is intentionally not part of this byte differential.
+        u8* native_text_address = (u8*)native_program.section_addresses[0];
+        s32 thunk_displacement = 0;
+        memcpy(&thunk_displacement, native_text_address + import_relocation_offset, sizeof(thunk_displacement));
+        u8* import_thunk = native_text_address + import_relocation_offset + sizeof(thunk_displacement) + thunk_displacement;
+        u8 const expected_import_thunk[] = {0xff, 0x25, 0, 0, 0, 0};
+        BUSTER_TEST(arguments, memcmp(import_thunk, expected_import_thunk, sizeof(expected_import_thunk)) == 0);
+#endif
         void* constant_address = jit_program_symbol(&native_program, native_symbols[0].name);
         JitTestFunction* constant = 0;
         BUSTER_CT_CHECK(sizeof(constant) == sizeof(constant_address));

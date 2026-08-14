@@ -1,6 +1,7 @@
 #include <buster/lib/compiler/link/link.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 
 #include <buster/lib/file.h>
@@ -92,6 +93,198 @@ BUSTER_GLOBAL_LOCAL String8 link_string_copy(Arena* arena, String8 source)
 BUSTER_GLOBAL_LOCAL bool link_target_matches(Target left, Target right)
 {
     return left.cpu_arch == right.cpu_arch && left.os == right.os;
+}
+
+typedef struct LinkX86InstructionBuilder LinkX86InstructionBuilder;
+struct LinkX86InstructionBuilder
+{
+    u8* bytes;
+    u32 capacity;
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_register(u16 index, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = width,
+        .reg = {.index = index, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_memory_rip(u16 width, s64 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = width,
+        .memory = {
+            .displacement = displacement,
+            .address_size = 64,
+            .has_displacement = true,
+            .rip_relative = true,
+            .source_width = width,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_memory_base(u16 base, u16 width, s64 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = width,
+        .memory = {
+            .base = {.index = base, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            .displacement = displacement,
+            .address_size = 64,
+            .scale = 1,
+            .has_base = true,
+            .has_displacement = displacement != 0,
+            .source_width = width,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_memory_base_index(u16 base, u16 index, u8 scale, u16 width,
+                                                                                  s64 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = width,
+        .memory = {
+            .base = {.index = base, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            .index = {.index = index, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            .displacement = displacement,
+            .address_size = 64,
+            .scale = scale,
+            .has_base = true,
+            .has_index = true,
+            .has_displacement = displacement != 0,
+            .source_width = width,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_immediate(s64 value, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+        .width = width,
+        .value = value,
+        .has_value = true,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_relative(s64 value, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+        .width = width,
+        .value = value,
+        .has_value = true,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool link_x86_emit(LinkX86InstructionBuilder* builder, String8 mnemonic,
+                                       BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
+{
+    if (!builder || builder->count > builder->capacity || (operand_count && !operands) || operand_count > 16) return false;
+    String8 features[1] = {S8("*")};
+    BusterX86MetadataEmitResult result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = {
+            .mnemonic = mnemonic,
+            .operands = operands,
+            .operand_count = operand_count,
+            .features = {.names = features, .count = 1},
+            .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            .include_privileged = true,
+            .include_not64 = false,
+            .include_implicit = false,
+            .source_semantics = false,
+        },
+        .output = builder->bytes + builder->count,
+        .output_capacity = builder->capacity - builder->count,
+    });
+    if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || result.byte_count > builder->capacity - builder->count)
+        return false;
+    builder->count += result.byte_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_x86_emit_zero(LinkX86InstructionBuilder* builder, String8 mnemonic)
+{
+    return link_x86_emit(builder, mnemonic, 0, 0);
+}
+
+BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_count, u32* call_displacement_offset)
+{
+    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    operands[0] = link_x86_register(5, 32);
+    operands[1] = link_x86_register(5, 32);
+    if (!link_x86_emit(&builder, S8("XOR"), operands, 2)) return false;
+    operands[0] = link_x86_register(7, 64);
+    operands[1] = link_x86_memory_base(4, 64, 0);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    operands[0] = link_x86_register(6, 64);
+    operands[1] = link_x86_memory_base(4, 64, 8);
+    if (!link_x86_emit(&builder, S8("LEA"), operands, 2)) return false;
+    operands[0] = link_x86_register(2, 64);
+    operands[1] = link_x86_memory_base_index(6, 7, 8, 64, 8);
+    if (!link_x86_emit(&builder, S8("LEA"), operands, 2)) return false;
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(-16, 8);
+    if (!link_x86_emit(&builder, S8("AND"), operands, 2)) return false;
+    if (call_displacement_offset) *call_displacement_offset = builder.count + 1;
+    operands[0] = link_x86_relative(0, 32);
+    if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    operands[0] = link_x86_register(7, 32);
+    operands[1] = link_x86_register(0, 32);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    operands[0] = link_x86_register(0, 32);
+    operands[1] = link_x86_immediate(60, 32);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_zero(&builder, S8("SYSCALL")) || !link_x86_emit_zero(&builder, S8("HLT"))) return false;
+    if (byte_count) *byte_count = builder.count;
+    return builder.count == 35;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8 bytes[64], u32* byte_count)
+{
+    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(0x38, 8);
+    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    operands[0] = link_x86_register(1, 32);
+    operands[1] = link_x86_register(1, 32);
+    if (!link_x86_emit(&builder, S8("XOR"), operands, 2)) return false;
+    operands[0] = link_x86_register(1, 32);
+    if (!link_x86_emit(&builder, S8("INC"), operands, 1)) return false;
+    BusterX86MetadataPhysicalOperand indirect = link_x86_memory_rip(64, 0);
+    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1) || !link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    operands[0] = link_x86_register(0, 32);
+    operands[1] = link_x86_memory_base(0, 32, 0);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    operands[0] = link_x86_memory_base(4, 32, 0x20);
+    operands[1] = link_x86_register(0, 32);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    operands[0] = link_x86_register(2, 64);
+    operands[1] = link_x86_memory_base(0, 64, 0);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    operands[0] = link_x86_register(1, 32);
+    operands[1] = link_x86_memory_base(4, 32, 0x20);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    operands[0] = link_x86_relative(0, 32);
+    if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    operands[0] = link_x86_register(1, 32);
+    operands[1] = link_x86_register(0, 32);
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2) || !link_x86_emit(&builder, S8("CALL"), &indirect, 1) ||
+        !link_x86_emit_zero(&builder, S8("INT3")))
+        return false;
+    if (byte_count) *byte_count = builder.count;
+    return builder.count == 53;
 }
 
 typedef struct LinkGlobalSymbolTable LinkGlobalSymbolTable;
@@ -1459,15 +1652,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         ELF_PAGE_SIZE = 4096,
         ELF_MACHINE_X86_64 = 62,
     };
-    static u8 const entry_stub[] = {
-        0x31, 0xed, 0x48, 0x8b, 0x3c, 0x24, 0x48, 0x8d, 0x74, 0x24, 0x08, 0x48, 0x8d, 0x54, 0xfe, 0x08, 0x48, 0x83,
-        0xe4, 0xf0, 0xe8, 0,    0,    0,    0,    0x89, 0xc7, 0xb8, 0x3c, 0,    0,    0,    0x0f, 0x05, 0xf4,
-    };
+    u8 entry_stub[64] = {0};
+    u32 entry_stub_size = 0;
+    u32 entry_call_displacement_offset = 0;
     if ((options.dynamic_library_count && !options.dynamic_libraries) || (options.runtime_exported_symbol_count && !options.runtime_exported_symbols) ||
         object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
         (object->relocation_count && !object->relocations))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    buster_x86_metadata_prewarm();
+    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
         return result;
     }
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
@@ -1501,7 +1699,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
-    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
+    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
     u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
@@ -1523,7 +1721,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     };
     u8* bytes = result.executable.pointer;
     memset(bytes, 0, file_size);
-    memcpy(bytes + entry_stub_offset, entry_stub, sizeof(entry_stub));
+    memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {
         if (object_section_kind_is_debug((ObjectSectionKind)section))
@@ -1539,7 +1737,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 image_base = 0x400000;
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
-    u64 call_displacement_offset = entry_stub_offset + 21;
+    u64 call_displacement_offset = entry_stub_offset + entry_call_displacement_offset;
     s64 call_displacement = (s64)entry_address - (s64)(image_base + call_displacement_offset + 4);
     if (call_displacement < INT32_MIN || call_displacement > INT32_MAX)
     {
@@ -1693,16 +1891,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         ELF_PLT_ENTRY_SIZE = 16,
         ELF_GOT_RESERVED_COUNT = 3,
     };
-    static u8 const entry_stub[] = {
-        0x31, 0xed, 0x48, 0x8b, 0x3c, 0x24, 0x48, 0x8d, 0x74, 0x24, 0x08, 0x48, 0x8d, 0x54, 0xfe, 0x08, 0x48, 0x83,
-        0xe4, 0xf0, 0xe8, 0,    0,    0,    0,    0x89, 0xc7, 0xb8, 0x3c, 0,    0,    0,    0x0f, 0x05, 0xf4,
-    };
+    u8 entry_stub[64] = {0};
+    u32 entry_stub_size = 0;
+    u32 entry_call_displacement_offset = 0;
     static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
     static char8 const library_name[] = "libc.so.6";
     if ((options.dynamic_library_count && !options.dynamic_libraries) || object->section_count < OBJECT_SECTION_COUNT || !object->sections ||
         (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    buster_x86_metadata_prewarm();
+    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset))
+    {
+        result.error = LINK_ERROR_RELOCATION;
         return result;
     }
     u32 import_count = 0;
@@ -1754,7 +1957,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
-    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
+    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(plt_offset + plt_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
@@ -1815,7 +2018,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     };
     u8* bytes = result.executable.pointer;
     memset(bytes, 0, file_size);
-    memcpy(bytes + entry_stub_offset, entry_stub, sizeof(entry_stub));
+    memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {
         if (object_section_kind_is_debug((ObjectSectionKind)section))
@@ -1864,15 +2067,30 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 got_address = image_base + got_offset;
     u64 plt_address = image_base + plt_offset;
     u64 dynamic_address = image_base + dynamic_offset;
-    bytes[plt_offset] = 0xff;
-    bytes[plt_offset + 1] = 0x35;
+    LinkX86InstructionBuilder plt0 = {.bytes = bytes + plt_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+    BusterX86MetadataPhysicalOperand plt_memory = link_x86_memory_rip(64, 0);
+    if (!link_x86_emit(&plt0, S8("PUSH"), &plt_memory, 1) ||
+        !link_x86_emit(&plt0, S8("JMP"), &plt_memory, 1) ||
+        !link_x86_emit(&plt0, S8("NOP"), &(BusterX86MetadataPhysicalOperand){
+                                               .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                                               .width = 8,
+                                               .memory = {
+                                                   .base = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                                                   .address_size = 64,
+                                                   .scale = 1,
+                                                   .has_base = true,
+                                                   .has_displacement = true,
+                                                   .source_width = 8,
+                                               },
+                                           },
+                       1) ||
+        plt0.count != ELF_PLT_ENTRY_SIZE)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     link_write_u32(bytes, plt_offset + 2, (u32)(s32)((s64)(got_address + 8) - (s64)(plt_address + 6)));
-    bytes[plt_offset + 6] = 0xff;
-    bytes[plt_offset + 7] = 0x25;
     link_write_u32(bytes, plt_offset + 8, (u32)(s32)((s64)(got_address + 16) - (s64)(plt_address + 12)));
-    bytes[plt_offset + 12] = 0x0f;
-    bytes[plt_offset + 13] = 0x1f;
-    bytes[plt_offset + 14] = 0x40;
     link_write_u64(bytes, got_offset, dynamic_address);
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
@@ -1880,12 +2098,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         u64 entry_address = image_base + entry_offset;
         u64 slot_offset = got_offset + (u64)(ELF_GOT_RESERVED_COUNT + import_index) * sizeof(u64);
         u64 slot_address = image_base + slot_offset;
-        bytes[entry_offset] = 0xff;
-        bytes[entry_offset + 1] = 0x25;
+        LinkX86InstructionBuilder plt_entry = {.bytes = bytes + entry_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+        BusterX86MetadataPhysicalOperand slot_memory = link_x86_memory_rip(64, 0);
+        BusterX86MetadataPhysicalOperand import_immediate = link_x86_immediate(import_index, 32);
+        BusterX86MetadataPhysicalOperand plt_relative = link_x86_relative(0, 32);
+        if (!link_x86_emit(&plt_entry, S8("JMP"), &slot_memory, 1) ||
+            !link_x86_emit(&plt_entry, S8("PUSH"), &import_immediate, 1) ||
+            !link_x86_emit(&plt_entry, S8("JMP"), &plt_relative, 1) ||
+            plt_entry.count != ELF_PLT_ENTRY_SIZE)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
         link_write_u32(bytes, entry_offset + 2, (u32)(s32)((s64)slot_address - (s64)(entry_address + 6)));
-        bytes[entry_offset + 6] = 0x68;
-        link_write_u32(bytes, entry_offset + 7, import_index);
-        bytes[entry_offset + 11] = 0xe9;
         link_write_u32(bytes, entry_offset + 12, (u32)(s32)((s64)plt_address - (s64)(entry_address + 16)));
         link_write_u64(bytes, slot_offset, entry_address + 6);
         u64 relocation_entry = relocation_offset + (u64)import_index * ELF_RELOCATION_SIZE;
@@ -1894,7 +2119,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
-    u64 call_displacement_offset = entry_stub_offset + 21;
+    u64 call_displacement_offset = entry_stub_offset + entry_call_displacement_offset;
     s64 call_displacement = (s64)entry_address - (s64)(image_base + call_displacement_offset + 4);
     if (call_displacement < INT32_MIN || call_displacement > INT32_MAX)
     {
@@ -2724,11 +2949,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         PE_IMAGE_BASE_LOW = 0x40000000,
         PE_IMAGE_BASE_HIGH = 1,
     };
-    static u8 const entry_stub_x86_64[] = {
-        0x48, 0x83, 0xec, 0x38, 0x31, 0xc9, 0xff, 0xc1, 0xff, 0x15, 0,    0,    0, 0, 0xff, 0x15, 0,    0,
-        0,    0,    0x8b, 0x00, 0x89, 0x44, 0x24, 0x20, 0xff, 0x15, 0,    0,    0, 0, 0x48, 0x8b, 0x10, 0x8b,
-        0x4c, 0x24, 0x20, 0xe8, 0,    0,    0,    0,    0x89, 0xc1, 0xff, 0x15, 0, 0, 0,    0,    0xcc,
-    };
+    u8 entry_stub_x86_64[64] = {0};
+    u32 entry_stub_x86_64_size = 0;
     static u32 const entry_stub_aarch64[] = {
         0xa9bf7bfd, 0x910003fd, 0x94000000, 0x94000000, 0xd4200000,
     };
@@ -2748,6 +2970,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
+    }
+    if (!aarch64)
+    {
+        buster_x86_metadata_prewarm();
+        if (!link_x86_build_pe_entry_stub(entry_stub_x86_64, &entry_stub_x86_64_size))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
     }
     u32 import_count = 0;
     u64 imported_name_size = 0;
@@ -2896,7 +3127,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     object_output_sections[OBJECT_SECTION_WINDOWS_PDATA] = PE_SECTION_PDATA;
     object_output_sections[OBJECT_SECTION_WINDOWS_XDATA] = PE_SECTION_XDATA;
     u64 entry_stub_offset = 0;
-    u64 entry_stub_size = aarch64 ? sizeof(entry_stub_aarch64) : sizeof(entry_stub_x86_64);
+    u64 entry_stub_size = aarch64 ? sizeof(entry_stub_aarch64) : entry_stub_x86_64_size;
     object_section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 thunk_offset = align_forward(object_section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 thunk_entry_size = aarch64 ? 16 : 6;
@@ -3095,8 +3326,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         u64 iat_rva = import_section_rva + runtime_address_offset + (u64)import_slot * sizeof(u64);
         if (!aarch64)
         {
-            bytes[thunk_raw] = 0xff;
-            bytes[thunk_raw + 1] = 0x25;
+            LinkX86InstructionBuilder thunk_builder = {.bytes = bytes + thunk_raw, .capacity = 6};
+            BusterX86MetadataPhysicalOperand thunk_memory = link_x86_memory_rip(64, 0);
+            if (!link_x86_emit(&thunk_builder, S8("JMP"), &thunk_memory, 1) || thunk_builder.count != 6)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
             link_write_u32(bytes, thunk_raw + 2, (u32)(s32)((s64)iat_rva - (s64)(thunk_rva + 6)));
         }
         else
@@ -3410,7 +3646,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     result.symbol = symbol->name;
                     return result;
                 }
-                bytes[output_offset - 2] = 0x8b;
+                if (output_offset < 3 || output_offset > result.executable.length || result.executable.length - output_offset < 4)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+                LinkX86InstructionBuilder load_builder = {.bytes = bytes + output_offset - 3, .capacity = 7};
+                BusterX86MetadataPhysicalOperand load_operands[2] = {
+                    link_x86_register(0, 64),
+                    link_x86_memory_rip(64, 0),
+                };
+                if (!link_x86_emit(&load_builder, S8("MOV"), load_operands, 2) || load_builder.count != 7)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
             }
             s64 value = 0;
             if (!link_address_difference(symbol_rva, place_rva, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
@@ -4605,6 +4857,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
     }
+    if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        buster_x86_metadata_prewarm();
+    }
     u32 import_count = 0;
     u64 import_name_size = 0;
     u32 thread_local_count = 0;
@@ -4911,8 +5167,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 valid = false;
                 break;
             }
-            bytes[current_stub_offset] = 0xff;
-            bytes[current_stub_offset + 1] = 0x25;
+            LinkX86InstructionBuilder stub_builder = {.bytes = bytes + current_stub_offset, .capacity = 6};
+            BusterX86MetadataPhysicalOperand stub_memory = link_x86_memory_rip(64, 0);
+            if (!link_x86_emit(&stub_builder, S8("JMP"), &stub_memory, 1) || stub_builder.count != 6)
+            {
+                valid = false;
+                break;
+            }
             link_write_u32(bytes, current_stub_offset + 2, (u32)(s32)displacement);
         }
         else

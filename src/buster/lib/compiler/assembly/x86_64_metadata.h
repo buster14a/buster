@@ -819,6 +819,24 @@ struct BusterX86MetadataEmitQuery
     u32 relocation_capacity;
 };
 
+// Checked source-independent encoding combines physical-form selection and
+// emission in one borrowed-storage query.  Unlike the exact-form compiler ABI
+// below, callers do not need to carry a durable form key: metadata chooses the
+// shortest valid canonical form for the supplied physical operands and
+// attributes, then writes bytes and format-neutral relocations to the caller's
+// buffers.  The query is intentionally separate from EmitQuery so a selected
+// form cannot accidentally be reused with a physically different operand
+// shape.
+typedef struct BusterX86MetadataEncodeQuery BusterX86MetadataEncodeQuery;
+struct BusterX86MetadataEncodeQuery
+{
+    BusterX86MetadataPhysicalQuery physical;
+    u8* output;
+    u32 output_capacity;
+    BusterX86MetadataRelocation* relocations;
+    u32 relocation_capacity;
+};
+
 // Compiler-facing exact emission keeps the durable form identity and the
 // physical values in one query object.  Unlike BusterX86MetadataEmitQuery it
 // has no source mnemonic or duplicate dense form ID: the exact emitter fills
@@ -1047,6 +1065,10 @@ BUSTER_F_DECL BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX
 // shortest valid encoding, breaking equal lengths by snapshot form ID.  It
 // does not allocate and does not retain any operand or feature storage.
 BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query);
+// Select and emit one canonical form from a physical query.  This checked
+// entry point is the public bridge for producers that do not retain a durable
+// form key; output and relocation storage are borrowed for the call.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQuery query);
 // Shared semantic proof used by source adapters and the handwritten parser:
 // an explicitly typed EVEX decorator is authoritative only for ordinary
 // 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a

@@ -1,4 +1,5 @@
 #include <buster/lib/x86_64.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL CpuId cpuid(u32 leaf, u32 subleaf)
@@ -57,21 +58,45 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
     {
         return result;
     }
-    u8 opcodes[] = {
-        0x89, 0x01, 0x29, 0x21, 0x09, 0x31,
+    String8 const mnemonics[] = {
+        S8("MOV"),
+        S8("ADD"),
+        S8("SUB"),
+        S8("AND"),
+        S8("OR"),
+        S8("XOR"),
     };
-    if (target_register >= 16 || source_register >= 16)
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = 64,
+            .reg = {.index = (u16)target_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        },
+        {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = 64,
+            .reg = {.index = (u16)source_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        },
+    };
+    String8 apx_features[1] = {S8("*")};
+    BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = {
+            .mnemonic = mnemonics[operation],
+            .operands = operands,
+            .operand_count = BUSTER_ARRAY_LENGTH(operands),
+            .features = {.names = (target_register >= 16 || source_register >= 16) ? apx_features : 0,
+                         .count = (target_register >= 16 || source_register >= 16) ? 1u : 0u},
+            .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            .source_semantics = false,
+        },
+        .output = result.bytes,
+        .output_capacity = sizeof(result.bytes),
+    });
+    if (encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count <= sizeof(result.bytes))
     {
-        result.bytes[result.length++] = 0xd5;
-        result.bytes[result.length++] = (u8)(0x08 | (source_register >= 16 ? 0x40 : 0) | (target_register >= 16 ? 0x10 : 0) |
-                                             ((source_register >> 3) & 1) << 2 | ((target_register >> 3) & 1));
+        result.length = (u8)encoded.byte_count;
     }
-    else
-    {
-        result.bytes[result.length++] = (u8)(0x48 | ((source_register >> 3) & 1) << 2 | ((target_register >> 3) & 1));
-    }
-    result.bytes[result.length++] = opcodes[operation];
-    result.bytes[result.length++] = (u8)(0xc0 | ((source_register & 7) << 3) | (target_register & 7));
     return result;
 }
 

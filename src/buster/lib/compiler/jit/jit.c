@@ -2,6 +2,7 @@
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -351,9 +352,37 @@ BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options
         u64 target = (u64)(uintptr_t)binding->address;
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
-            static u8 const instruction[] = {0xff, 0x25, 0, 0, 0, 0};
-            memcpy(thunk, instruction, sizeof(instruction));
-            memcpy(thunk + sizeof(instruction), &target, sizeof(target));
+            String8 features[1] = {S8("*")};
+            BusterX86MetadataPhysicalOperand memory = {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = 64,
+                .memory = {
+                    .address_size = 64,
+                    .has_displacement = true,
+                    .rip_relative = true,
+                    .source_width = 64,
+                },
+            };
+            BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = {
+                    .mnemonic = S8("JMP"),
+                    .operands = &memory,
+                    .operand_count = 1,
+                    .features = {.names = features, .count = 1},
+                    .address_size = 64,
+                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                    .source_semantics = false,
+                },
+                .output = thunk,
+                .output_capacity = 6,
+            });
+            if (encoded.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || encoded.byte_count != 6)
+            {
+                program->error = JIT_ERROR_INVALID_INPUT;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            memcpy(thunk + encoded.byte_count, &target, sizeof(target));
         }
         else
         {
@@ -598,6 +627,15 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
     {
         result.error = JIT_ERROR_FOREIGN_TARGET;
         return result;
+    }
+    if (object->target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        // Metadata's demand-filled decode and exact-form caches are immutable
+        // only after this serial prewarm.  jit_link_object may be called from
+        // a worker, so keep the first fill here explicit and fail loudly via
+        // the metadata serial-initialization guard if its caller violated the
+        // target prewarm contract.
+        buster_x86_metadata_prewarm();
     }
     for (u32 index = 0; index < options.binding_count; index += 1)
     {
