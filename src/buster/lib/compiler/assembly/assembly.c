@@ -11383,6 +11383,28 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
     }
+    bool mmx_instruction = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX)
+        {
+            mmx_instruction = true;
+        }
+    }
+    if (mmx_instruction)
+    {
+        // MMX memory operands are always qword packed elements.  Intel and
+        // AT&T spellings commonly omit a ptr qualifier; preserve that source
+        // semantics for metadata rows such as MOVQ/PADDQ before selection.
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+            {
+                physical[index].width = 64;
+            }
+        }
+    }
     if (att_scalar_extend_source_width)
     {
         for (u32 index = 0; index < operand_count; index += 1)
@@ -11885,6 +11907,45 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     case ASSEMBLY_OPCODE_X86_JCC:
     case ASSEMBLY_OPCODE_X86_SETCC:
     case ASSEMBLY_OPCODE_X86_CMOVCC:
+    case ASSEMBLY_OPCODE_X86_MOVAPS:
+    case ASSEMBLY_OPCODE_X86_MOVUPS:
+    case ASSEMBLY_OPCODE_X86_MOVAPD:
+    case ASSEMBLY_OPCODE_X86_MOVUPD:
+    case ASSEMBLY_OPCODE_X86_MOVDQA:
+    case ASSEMBLY_OPCODE_X86_MOVDQU:
+    case ASSEMBLY_OPCODE_X86_XORPS:
+    case ASSEMBLY_OPCODE_X86_XORPD:
+    case ASSEMBLY_OPCODE_X86_PXOR:
+    case ASSEMBLY_OPCODE_X86_ADDPS:
+    case ASSEMBLY_OPCODE_X86_ADDPD:
+    case ASSEMBLY_OPCODE_X86_ADDSS:
+    case ASSEMBLY_OPCODE_X86_ADDSD:
+    case ASSEMBLY_OPCODE_X86_SUBPS:
+    case ASSEMBLY_OPCODE_X86_SUBPD:
+    case ASSEMBLY_OPCODE_X86_MULPS:
+    case ASSEMBLY_OPCODE_X86_MULPD:
+    case ASSEMBLY_OPCODE_X86_DIVPS:
+    case ASSEMBLY_OPCODE_X86_DIVPD:
+    case ASSEMBLY_OPCODE_X86_EMMS:
+    case ASSEMBLY_OPCODE_X86_MOVQ_MMX:
+    case ASSEMBLY_OPCODE_X86_PADDB_MMX:
+    case ASSEMBLY_OPCODE_X86_PADDW_MMX:
+    case ASSEMBLY_OPCODE_X86_PADDD_MMX:
+    case ASSEMBLY_OPCODE_X86_PADDQ_MMX:
+    case ASSEMBLY_OPCODE_X86_PSUBB_MMX:
+    case ASSEMBLY_OPCODE_X86_PSUBW_MMX:
+    case ASSEMBLY_OPCODE_X86_PSUBD_MMX:
+    case ASSEMBLY_OPCODE_X86_PSUBQ_MMX:
+    case ASSEMBLY_OPCODE_X86_PAND_MMX:
+    case ASSEMBLY_OPCODE_X86_POR_MMX:
+    case ASSEMBLY_OPCODE_X86_PXOR_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPEQB_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPEQW_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPEQD_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPGTB_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPGTW_MMX:
+    case ASSEMBLY_OPCODE_X86_PCMPGTD_MMX:
+    case ASSEMBLY_OPCODE_X86_PMULLW_MMX:
         return true;
     default:
         return false;
@@ -14725,101 +14786,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             {
                 assembly_emit_byte(builder, instruction->opcode == ASSEMBLY_OPCODE_X86_FFREE ? 0xdd : 0xdf);
                 assembly_emit_byte(builder, (u8)(0xc0 + instruction->operands[0].reg.index));
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_legacy_packed(instruction->opcode))
-        {
-            AssemblyOperand first = instruction->operands[0];
-            AssemblyOperand second = instruction->operands[1];
-            u8 move = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX;
-            u8 load = !move || first.kind == ASSEMBLY_OPERAND_REGISTER;
-            AssemblyRegister reg = load ? first.reg : second.reg;
-            AssemblyOperand rm = load ? second : first;
-            if (reg.class == ASSEMBLY_REGISTER_XMM)
-            {
-                assembly_emit_byte(builder, 0x66);
-            }
-            if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
-            {
-                assembly_x86_emit_memory_prefix(builder, 0, reg, rm.memory);
-            }
-            else
-            {
-                assembly_x86_emit_prefix(builder, 0, reg, rm.reg);
-            }
-            assembly_emit_byte(builder, 0x0f);
-            u8 packed_opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVQ_MMX ? (load ? 0x6f : 0x7f)
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDB_MMX ? 0xfc
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDW_MMX ? 0xfd
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDD_MMX ? 0xfe
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PADDQ_MMX ? 0xd4
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBB_MMX ? 0xf8
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBW_MMX ? 0xf9
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBD_MMX ? 0xfa
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PSUBQ_MMX ? 0xfb
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PAND_MMX ? 0xdb
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_POR_MMX ? 0xeb
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PXOR_MMX ? 0xef
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQB_MMX ? 0x74
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQW_MMX ? 0x75
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPEQD_MMX ? 0x76
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTB_MMX ? 0x64
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTW_MMX ? 0x65
-                               : instruction->opcode == ASSEMBLY_OPCODE_X86_PCMPGTD_MMX ? 0x66
-                                                                                        : 0xd5;
-            assembly_emit_byte(builder, packed_opcode);
-            if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x86 memory displacement is out of range"));
-                return;
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_sse2(instruction->opcode))
-        {
-            AssemblyOperand first = instruction->operands[0];
-            AssemblyOperand second = instruction->operands[1];
-            u8 move = instruction->opcode >= ASSEMBLY_OPCODE_X86_MOVAPS && instruction->opcode <= ASSEMBLY_OPCODE_X86_MOVDQU;
-            u8 load = !move || first.kind == ASSEMBLY_OPERAND_REGISTER;
-            AssemblyRegister reg = load ? first.reg : second.reg;
-            AssemblyOperand rm = load ? second : first;
-            assembly_x86_emit_sse_prefix(builder, instruction->opcode);
-            if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
-            {
-                assembly_x86_emit_memory_prefix(builder, 0, reg, rm.memory);
-            }
-            else
-            {
-                assembly_x86_emit_prefix(builder, 0, reg, rm.reg);
-            }
-            assembly_emit_byte(builder, 0x0f);
-            u8 opcode = instruction->opcode == ASSEMBLY_OPCODE_X86_MOVAPS ? (load ? 0x28 : 0x29)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVUPS ? (load ? 0x10 : 0x11)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVAPD ? (load ? 0x28 : 0x29)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVUPD ? (load ? 0x10 : 0x11)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVDQA ? (load ? 0x6f : 0x7f)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MOVDQU ? (load ? 0x6f : 0x7f)
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_XORPS  ? 0x57
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_XORPD  ? 0x57
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_PXOR   ? 0xef
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDPS  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDPD  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSS  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_ADDSD  ? 0x58
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_SUBPS  ? 0x5c
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_SUBPD  ? 0x5c
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MULPS  ? 0x59
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_MULPD  ? 0x59
-                        : instruction->opcode == ASSEMBLY_OPCODE_X86_DIVPS  ? 0x5e
-                                                                           : 0x5e;
-            assembly_emit_byte(builder, opcode);
-            if (!assembly_x86_emit_rm(builder, instruction, reg.index, rm))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x86 memory displacement is out of range"));
-                return;
             }
             continue;
         }
