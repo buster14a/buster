@@ -1,6 +1,28 @@
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/string.h>
 
+String8 buster_x86_completion_census_source_reason_name(BusterX86CompletionCensusSourceReason reason)
+{
+    switch (reason)
+    {
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE: return S8("none");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND: return S8("construction_operand");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL: return S8("construction_control");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY: return S8("construction_memory");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR: return S8("construction_decorator");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_IMPLICIT: return S8("construction_implicit");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_FEATURE: return S8("construction_feature");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MODE: return S8("construction_mode");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OTHER: return S8("construction_other");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS: return S8("syntax_invalid_operands");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION: return S8("syntax_unknown_instruction");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION: return S8("syntax_invalid_expression");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_DIAGNOSTIC_OTHER: return S8("syntax_diagnostic_other");
+    case BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE: return S8("policy_feature");
+    default: return S8("unknown");
+    }
+}
+
 // The census deliberately keeps source synthesis small and conservative.  A
 // generated row is only marked source-capable after the public assembler has
 // accepted a spelling and produced bytes/relocations equivalent to the direct
@@ -10,6 +32,7 @@ typedef struct BusterX86CompletionCensusSourceResult BusterX86CompletionCensusSo
 struct BusterX86CompletionCensusSourceResult
 {
     u8 classification;
+    BusterX86CompletionCensusSourceReason reason;
     u32 byte_count;
     u32 relocation_count;
     u16 diagnostic_kind;
@@ -19,6 +42,12 @@ struct BusterX86CompletionCensusSourceResult
     u8 bytes_match;
     u8 relocations_match;
 };
+
+BUSTER_GLOBAL_LOCAL void buster_x86_completion_source_reason_set(BusterX86CompletionCensusSourceReason* reason,
+                                                                 BusterX86CompletionCensusSourceReason value)
+{
+    if (reason && *reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE) *reason = value;
+}
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_string_equal(String8 first, String8 second)
 {
@@ -348,7 +377,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
                                                                 BusterX86MetadataPhysicalOperand operand,
-                                                                BusterX86MetadataPhysicalAttributes attributes)
+                                                                BusterX86MetadataPhysicalAttributes attributes,
+                                                                BusterX86CompletionCensusSourceReason* reason)
 {
     BusterX86MetadataPhysicalMemory memory = operand.memory;
     u16 width = memory.source_width ? memory.source_width : operand.width;
@@ -361,37 +391,65 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
     String8 base = {0};
     String8 index = {0};
     String8 symbol = {0};
-    if (!qualifier.length) return (String8){0};
+    if (!qualifier.length)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+        return (String8){0};
+    }
     segment = memory.has_segment ? buster_x86_completion_segment(memory.segment) : (String8){0};
-    if (memory.has_segment && !segment.length) return (String8){0};
+    if (memory.has_segment && !segment.length)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+        return (String8){0};
+    }
     result = memory.has_segment ? string_format(arena, S8("{S8}{S8}["), qualifier, segment)
                                 : string_format(arena, S8("{S8}["), qualifier);
     if (memory.has_base)
     {
         base = buster_x86_completion_register(arena, memory.base);
-        if (!base.length) return (String8){0};
+        if (!base.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         result = string_format(arena, S8("{S8}{S8}"), result, base);
         term = true;
     }
     if (memory.rip_relative)
     {
-        if (term || memory.has_index) return (String8){0};
+        if (term || memory.has_index)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+            return (String8){0};
+        }
         result = string_format(arena, S8("{S8}rip"), result);
         term = true;
     }
     if (memory.has_index)
     {
         index = buster_x86_completion_register(arena, memory.index);
-        if (!index.length || !memory.scale) return (String8){0};
+        if (!index.length || !memory.scale)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+            return (String8){0};
+        }
         result = term ? string_format(arena, S8("{S8} + {S8}*{u8}"), result, index, memory.scale)
                       : string_format(arena, S8("{S8}{S8}*{u8}"), result, index, memory.scale);
         term = true;
     }
     if (memory.has_symbol)
     {
-        if (!memory.symbol.length || term) return (String8){0};
+        if (!memory.symbol.length || term)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+            return (String8){0};
+        }
         symbol = buster_x86_completion_symbol(arena, memory.symbol, memory.addend);
-        if (!symbol.length) return (String8){0};
+        if (!symbol.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+            return (String8){0};
+        }
         result = string_format(arena, S8("{S8}{S8}"), result, symbol);
         term = true;
     }
@@ -399,7 +457,11 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
     {
         if (memory.displacement < 0)
         {
-            if (memory.displacement == INT64_MIN) return (String8){0};
+            if (memory.displacement == INT64_MIN)
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+                return (String8){0};
+            }
             result = term ? string_format(arena, S8("{S8} - {s64}"), result, -memory.displacement)
                           : string_format(arena, S8("{S8}-{s64}"), result, -memory.displacement);
         }
@@ -407,30 +469,59 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
                            : string_format(arena, S8("{S8}{s64}"), result, memory.displacement);
         term = true;
     }
-    if (!term) return (String8){0};
+    if (!term)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+        return (String8){0};
+    }
     result = string_format(arena, S8("{S8}]"), result);
     if (attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST)
     {
-        if (!attributes.broadcast_elements) return (String8){0};
+        if (!attributes.broadcast_elements)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
+            return (String8){0};
+        }
         result = string_format(arena, S8("{S8}{{1to{u8}}}"), result, attributes.broadcast_elements);
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_att(Arena* arena, BusterX86MetadataPhysicalOperand operand)
+BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_att(Arena* arena, BusterX86MetadataPhysicalOperand operand,
+                                                              BusterX86CompletionCensusSourceReason* reason)
 {
     BusterX86MetadataPhysicalMemory memory = operand.memory;
     String8 result = {0};
     String8 base = {0};
     String8 index = {0};
-    if (memory.has_symbol && (memory.has_base || memory.has_index || memory.rip_relative)) return (String8){0};
-    if (memory.has_symbol) result = buster_x86_completion_symbol(arena, memory.symbol, memory.addend);
+    if (memory.has_symbol && (memory.has_base || memory.has_index || memory.rip_relative))
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+        return (String8){0};
+    }
+    if (memory.has_symbol)
+    {
+        result = buster_x86_completion_symbol(arena, memory.symbol, memory.addend);
+        if (!result.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+            return (String8){0};
+        }
+    }
     else if (memory.has_displacement) result = string_format(arena, S8("{s64}"), memory.displacement);
     else result = S8("0");
     base = memory.has_base ? buster_x86_completion_register(arena, memory.base) : (String8){0};
     index = memory.has_index ? buster_x86_completion_register(arena, memory.index) : (String8){0};
-    if (memory.has_base && !base.length) return (String8){0};
-    if (memory.has_index && (!index.length || !memory.scale)) return (String8){0};
+    if (memory.has_base && !base.length)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+        return (String8){0};
+    }
+    if (memory.has_index && (!index.length || !memory.scale))
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
+        return (String8){0};
+    }
     if (memory.rip_relative) return string_format(arena, S8("{S8}(%rip)"), result);
     if (memory.has_base && memory.has_index) return string_format(arena, S8("{S8}(%{S8},%{S8},{u8})"), result, base, index, memory.scale);
     if (memory.has_base) return string_format(arena, S8("{S8}(%{S8})"), result, base);
@@ -444,7 +535,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_mnemonic(BusterX86MetadataForm
 }
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, BusterX86MetadataForm form,
-                                                               BusterX86MetadataPhysicalQuery query)
+                                                               BusterX86MetadataPhysicalQuery query,
+                                                               BusterX86CompletionCensusSourceReason* reason)
 {
     String8 source = {0};
     bool wrote = false;
@@ -458,7 +550,11 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
     source = buster_x86_completion_mnemonic(form);
-    if (!source.length) return (String8){0};
+    if (!source.length)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_FEATURE);
+        return (String8){0};
+    }
     if (buster_x86_metadata_form_is_moffs(form.id))
     {
         String8 accumulator = {0};
@@ -466,7 +562,10 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
         BusterX86MetadataPhysicalOperand source_memory = {0};
         if (query.operand_count != 1 || !query.operands ||
             query.operands[0].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !form.fixed_byte_count)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
             return (String8){0};
+        }
         source_memory = query.operands[0];
         accumulator = form.fixed_bytes[0] == 0xa0 || form.fixed_bytes[0] == 0xa2 ? S8("al") : S8("eax");
         if (form.fixed_bytes[0] == 0xa1 || form.fixed_bytes[0] == 0xa3)
@@ -474,7 +573,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             source_memory.width = 32;
             source_memory.memory.source_width = 32;
         }
-        spelling = buster_x86_completion_memory_intel(arena, source_memory, query.attributes);
+        spelling = buster_x86_completion_memory_intel(arena, source_memory, query.attributes, reason);
         if (!spelling.length) return (String8){0};
         store = form.fixed_bytes[0] == 0xa2 || form.fixed_bytes[0] == 0xa3;
         return store ? string_format(arena, S8("{S8} {S8}, {S8}\n"), source, spelling, accumulator)
@@ -484,8 +583,16 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     // grammar has no bounded spelling for the canonical hidden segment or
     // legacy branch-hint forms, so keep them explicitly source-unrepresentable
     // rather than silently dropping architectural bytes.
-    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE || query.attributes.branch_hint)
+    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_IMPLICIT);
         return (String8){0};
+    }
+    if (query.attributes.branch_hint)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
+        return (String8){0};
+    }
     if (query.attributes.lock) source = string_format(arena, S8("lock {S8}"), source);
     else if (query.attributes.rep) source = string_format(arena, S8("rep {S8}"), source);
     else if (query.attributes.repne) source = string_format(arena, S8("repne {S8}"), source);
@@ -505,7 +612,11 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     for (metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
     {
         metadata = (BusterX86MetadataOperand){0};
-        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return (String8){0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         if (!metadata.visible) continue;
         mask_decorator = buster_x86_completion_mask_decorator(form, visible_index);
         visible_index += 1;
@@ -525,7 +636,11 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
                 physical_index += 1;
             continue;
         }
-        if (physical_index >= query.operand_count) return (String8){0};
+        if (physical_index >= query.operand_count)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         operand = query.operands[physical_index++];
         if (query.attributes.has_mask_register && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
@@ -534,13 +649,17 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
-                             ? buster_x86_completion_memory_intel(arena, operand, query.attributes)
+                             ? buster_x86_completion_memory_intel(arena, operand, query.attributes, reason)
                              : buster_x86_completion_immediate(arena, operand);
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE ||
             operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
             spelling = operand.has_symbol ? buster_x86_completion_symbol(arena, operand.symbol, operand.addend)
                                           : buster_x86_completion_immediate(arena, operand);
-        if (!spelling.length) return (String8){0};
+        if (!spelling.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         if (!wrote) source = string_format(arena, S8("{S8} {S8}"), source, spelling);
         else source = string_format(arena, S8("{S8}, {S8}"), source, spelling);
         if (!wrote && query.attributes.has_mask_register)
@@ -564,7 +683,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_register(Arena* arena, Bus
 }
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, BusterX86MetadataForm form,
-                                                             BusterX86MetadataPhysicalQuery query)
+                                                             BusterX86MetadataPhysicalQuery query,
+                                                             BusterX86CompletionCensusSourceReason* reason)
 {
     u32 index = 0;
     u32 reverse = 0;
@@ -581,18 +701,33 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
     // cohort.  Decorated EVEX, APX role controls, and hidden operands remain
     // explicitly unresolved until their dialect grammar is generalized.
     bool apx_amx_witness = buster_x86_completion_apx_amx_memory_witness(form);
-    if (query.attributes.decorator_flags || (query.attributes.apx_flags && !apx_amx_witness) ||
-        (query.attributes.amx_flags && !apx_amx_witness) || query.attributes.has_dfv ||
-        query.attributes.no_flags || query.attributes.branch_hint || query.attributes.notrack || query.attributes.rep ||
-        query.attributes.repne || query.attributes.lock)
+    if (query.attributes.decorator_flags)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR);
         return (String8){0};
-    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE) return (String8){0};
+    }
+    if ((query.attributes.apx_flags && !apx_amx_witness) || (query.attributes.amx_flags && !apx_amx_witness) ||
+        query.attributes.has_dfv || query.attributes.no_flags || query.attributes.branch_hint || query.attributes.notrack ||
+        query.attributes.rep || query.attributes.repne || query.attributes.lock)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
+        return (String8){0};
+    }
+    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_IMPLICIT);
+        return (String8){0};
+    }
     if (buster_x86_completion_apx_evex_memory_witness(form))
     {
         for (metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
         {
             metadata = (BusterX86MetadataOperand){0};
-            if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return (String8){0};
+            if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata))
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+                return (String8){0};
+            }
             if (!metadata.visible) continue;
             if (buster_x86_completion_mask_decorator(form, visible_index))
             {
@@ -606,22 +741,41 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
             }
             visible_index += 1;
             if (physical_index >= query.operand_count || source_operand_count >= BUSTER_ARRAY_LENGTH(source_operands))
+            {
+                buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
                 return (String8){0};
+            }
             source_operands[source_operand_count++] = query.operands[physical_index++];
         }
-        if (physical_index != query.operand_count) return (String8){0};
+        if (physical_index != query.operand_count)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
     }
     else
     {
-        if (query.operand_count > BUSTER_ARRAY_LENGTH(source_operands)) return (String8){0};
+        if (query.operand_count > BUSTER_ARRAY_LENGTH(source_operands))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         source_operand_count = query.operand_count;
         for (index = 0; index < query.operand_count; index += 1) source_operands[index] = query.operands[index];
     }
     for (index = 0; index < source_operand_count; index += 1)
         if (source_operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
             (source_operands[index].memory.vsib || source_operands[index].memory.has_segment))
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
             return (String8){0};
+        }
     source = buster_x86_completion_mnemonic(form);
+    if (!source.length)
+    {
+        buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_FEATURE);
+        return (String8){0};
+    }
     for (reverse = source_operand_count; reverse; reverse -= 1)
     {
         index = reverse - 1;
@@ -629,12 +783,16 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_att_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
-                             ? buster_x86_completion_memory_att(arena, operand)
+                             ? buster_x86_completion_memory_att(arena, operand, reason)
                              : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE
                                    ? string_format(arena, S8("${S8}"), buster_x86_completion_immediate(arena, operand))
                                    : operand.has_symbol ? string_format(arena, S8("${S8}"), buster_x86_completion_symbol(arena, operand.symbol, operand.addend))
                                                          : string_format(arena, S8("$0"));
-        if (!spelling.length) return (String8){0};
+        if (!spelling.length)
+        {
+            buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND);
+            return (String8){0};
+        }
         source = index + 1 == source_operand_count ? string_format(arena, S8("{S8} {S8}"), source, spelling)
                                                    : string_format(arena, S8("{S8}, {S8}"), source, spelling);
     }
@@ -747,6 +905,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_alias_equivalent(u32 form_id, Bus
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceReason buster_x86_completion_syntax_reason(u16 diagnostic_kind)
+{
+    switch (diagnostic_kind)
+    {
+    case ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS: return BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS;
+    case ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION: return BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION;
+    case ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION: return BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION;
+    case ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX:
+    case ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT: return BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_DIAGNOSTIC_OTHER;
+    default: return BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_DIAGNOSTIC_OTHER;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_source_check(
     Arena* arena, Target target, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
     u8 const* direct_bytes, u32 direct_byte_count, BusterX86MetadataRelocation const* direct_relocations,
@@ -754,16 +925,26 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_
 {
     BusterX86CompletionCensusSourceResult result = {
         .classification = BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
+        .reason = BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
         .diagnostic_kind = ASSEMBLY_DIAGNOSTIC_COUNT,
         .mismatch_index = UINT32_MAX};
     String8 source = {0};
     AssemblyEncodeResult encoded = {0};
     u32 shared = 0;
     u32 index = 0;
-    if (!arena) return result;
-    source = att ? buster_x86_completion_att_source(arena, form, query)
-                 : buster_x86_completion_intel_source(arena, form, query);
-    if (!source.length) return result;
+    if (!arena)
+    {
+        result.reason = BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OTHER;
+        return result;
+    }
+    source = att ? buster_x86_completion_att_source(arena, form, query, &result.reason)
+                 : buster_x86_completion_intel_source(arena, form, query, &result.reason);
+    if (!source.length)
+    {
+        if (result.reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE)
+            result.reason = BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OTHER;
+        return result;
+    }
     encoded = assembly_encode(arena, source,
                               (AssemblyEncodeOptions){.target = target,
                                                        .syntax = att ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
@@ -775,8 +956,12 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_
         result.classification = encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE
                                     ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED
                                     : BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED;
+        result.reason = encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE
+                             ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE
+                             : buster_x86_completion_syntax_reason((u16)encoded.diagnostics[0].kind);
         return result;
     }
+    result.reason = BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE;
     result.bytes_match = encoded.bytes.length == direct_byte_count &&
                          (!direct_byte_count || memcmp(encoded.bytes.pointer, direct_bytes, direct_byte_count) == 0);
     result.relocations_match = buster_x86_completion_relocations_match(direct_relocations, direct_relocation_count, encoded);
@@ -823,7 +1008,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_record_diagnostic(BusterX86Comple
     {
         query.diagnostics[result->diagnostic_count] = (BusterX86CompletionCensusDiagnostic){
             .form_id = form_id, .stable_hash = stable_hash, .dialect = dialect,
-            .classification = source.classification, .assembly_diagnostic_kind = source.diagnostic_kind,
+            .classification = source.classification, .reason = (u8)source.reason,
+            .assembly_diagnostic_kind = source.diagnostic_kind,
             .mismatch_index = source.mismatch_index, .direct_byte = source.mismatch_direct_byte,
             .source_byte = source.mismatch_source_byte};
         result->diagnostic_count += 1;
@@ -970,8 +1156,11 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                         record.intel_relocation_count = source.relocation_count;
                         record.intel_diagnostic_kind = source.diagnostic_kind;
                         record.intel_mismatch_index = source.mismatch_index;
+                        record.intel_source_reason = (u8)source.reason;
                         result.intel_attempted_count += 1;
                         result.intel_class_counts[source.classification] += 1;
+                        if (source.reason < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT)
+                            result.intel_source_reason_counts[source.reason] += 1;
                         result.intel_exact_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
                         result.intel_normalized_relocation_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_NORMALIZED_RELOCATION;
                         result.intel_alias_equivalent_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_ALIAS_EQUIVALENT;
@@ -999,8 +1188,11 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                         record.att_relocation_count = source.relocation_count;
                         record.att_diagnostic_kind = source.diagnostic_kind;
                         record.att_mismatch_index = source.mismatch_index;
+                        record.att_source_reason = (u8)source.reason;
                         result.att_attempted_count += 1;
                         result.att_class_counts[source.classification] += 1;
+                        if (source.reason < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT)
+                            result.att_source_reason_counts[source.reason] += 1;
                         result.att_exact_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
                         result.att_normalized_relocation_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_NORMALIZED_RELOCATION;
                         result.att_alias_equivalent_count += source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_ALIAS_EQUIVALENT;

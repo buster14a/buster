@@ -40,6 +40,35 @@ typedef enum BusterX86CompletionCensusClass
     BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT,
 } BusterX86CompletionCensusClass;
 
+// Source construction and parser failures are tracked separately from the
+// public reachability class.  The phase is part of the value so a reason is
+// mutually exclusive and can be counted without a second parallel array.
+// NONE is used for exact, relocation, alias, mismatch, and other rows whose
+// source failure taxonomy does not apply.
+typedef enum BusterX86CompletionCensusSourceReason
+{
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OPERAND,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_IMPLICIT,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_FEATURE,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MODE,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_OTHER,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_DIAGNOSTIC_OTHER,
+    // Kept separate from parser syntax failures so the existing
+    // SOURCE_POLICY_REJECTED class remains unchanged while feature-gated
+    // rows are still visible in the reason ledger.
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE,
+    BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT,
+} BusterX86CompletionCensusSourceReason;
+
+BUSTER_F_DECL String8 buster_x86_completion_census_source_reason_name(BusterX86CompletionCensusSourceReason reason);
+
 typedef struct BusterX86CompletionCensusDiagnostic BusterX86CompletionCensusDiagnostic;
 struct BusterX86CompletionCensusDiagnostic
 {
@@ -47,11 +76,13 @@ struct BusterX86CompletionCensusDiagnostic
     u64 stable_hash;
     u8 dialect;
     u8 classification;
+    u8 reason;
+    u8 reserved0;
     u16 assembly_diagnostic_kind;
     u32 mismatch_index;
     u8 direct_byte;
     u8 source_byte;
-    u16 reserved;
+    u16 reserved1;
 };
 
 typedef struct BusterX86CompletionCensusRecord BusterX86CompletionCensusRecord;
@@ -88,6 +119,9 @@ struct BusterX86CompletionCensusRecord
     u16 att_diagnostic_kind;
     u32 intel_mismatch_index;
     u32 att_mismatch_index;
+    u8 intel_source_reason;
+    u8 att_source_reason;
+    u16 reserved1;
 };
 
 typedef struct BusterX86CompletionCensusQuery BusterX86CompletionCensusQuery;
@@ -168,6 +202,8 @@ struct BusterX86CompletionCensusResult
     u32 class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT];
     u32 intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT];
     u32 att_class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT];
+    u32 intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT];
+    u32 att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT];
     u32 diagnostic_count;
     u32 diagnostic_dropped_count;
     bool diagnostics_complete;

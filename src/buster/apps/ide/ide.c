@@ -2778,11 +2778,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
                  census.scanned_form_count, census.normalized_form_count, census.metadata_emitted_count, census.metadata_blocked_count,
                  census.intel_exact_count, census.intel_unresolved_count, census.att_exact_count, census.att_unresolved_count,
                  census.structural_complete, ledger_digest);
+    for (u32 reason_index = 0; reason_index < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT; reason_index += 1)
+    {
+        BusterX86CompletionCensusSourceReason reason = (BusterX86CompletionCensusSourceReason)reason_index;
+        String8 reason_name = buster_x86_completion_census_source_reason_name(reason);
+        if (census.intel_source_reason_counts[reason_index])
+            string_print(S8("X86_COMPLETION_CENSUS_REASON dialect=intel reason={S8} count={u32}\n"), reason_name,
+                         census.intel_source_reason_counts[reason_index]);
+        if (census.att_source_reason_counts[reason_index])
+            string_print(S8("X86_COMPLETION_CENSUS_REASON dialect=att reason={S8} count={u32}\n"), reason_name,
+                         census.att_source_reason_counts[reason_index]);
+    }
     ProcessResult result = census.structural_complete && audit.complete ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     if (ide_state.completion_census_output_path.length)
     {
         String8 manifest = S8("");
-        ide_completion_census_manifest_line(arena, &manifest, S8("schema"), 1);
+        ide_completion_census_manifest_line(arena, &manifest, S8("schema"), 2);
         ide_completion_census_manifest_line(arena, &manifest, S8("structural_complete"), census.structural_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("records_complete"), census.records_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("form_partition_complete"), census.form_partition_complete);
@@ -2831,12 +2842,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
             key = string_format(arena, S8("att_class_{u32}_count"), class_index);
             ide_completion_census_manifest_line(arena, &manifest, key, census.att_class_counts[class_index]);
         }
+        for (u32 reason_index = 0; reason_index < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT; reason_index += 1)
+        {
+            BusterX86CompletionCensusSourceReason reason = (BusterX86CompletionCensusSourceReason)reason_index;
+            String8 reason_name = buster_x86_completion_census_source_reason_name(reason);
+            String8 key = string_format(arena, S8("intel_source_reason_{S8}_count"), reason_name);
+            ide_completion_census_manifest_line(arena, &manifest, key, census.intel_source_reason_counts[reason_index]);
+            key = string_format(arena, S8("att_source_reason_{S8}_count"), reason_name);
+            ide_completion_census_manifest_line(arena, &manifest, key, census.att_source_reason_counts[reason_index]);
+        }
         for (u32 index = 0; index < census.diagnostic_count; index += 1)
         {
             BusterX86CompletionCensusDiagnostic diagnostic = diagnostics[index];
-            String8 line = string_format(arena, S8("diagnostic_0x{u64:x,no_prefix}_dialect_{u8}=stable_hash:0x{u64:x,no_prefix},form_id:{u32},dialect:{u8},class:{u8},kind:{u16},mismatch:{u32},direct:0x{u8:x,no_prefix},source:0x{u8:x,no_prefix}\n"),
+            String8 line = string_format(arena, S8("diagnostic_0x{u64:x,no_prefix}_dialect_{u8}=stable_hash:0x{u64:x,no_prefix},form_id:{u32},dialect:{u8},class:{u8},reason:{u8},kind:{u16},mismatch:{u32},direct:0x{u8:x,no_prefix},source:0x{u8:x,no_prefix}\n"),
                                          diagnostic.stable_hash, diagnostic.dialect, diagnostic.stable_hash, diagnostic.form_id, diagnostic.dialect, diagnostic.classification,
-                                         diagnostic.assembly_diagnostic_kind, diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
+                                         diagnostic.reason, diagnostic.assembly_diagnostic_kind, diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
             manifest = string_format(arena, S8("{S8}{S8}"), manifest, line);
         }
         bool manifest_written = manifest.length < BUSTER_MB(2) && file_write(ide_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
