@@ -8864,21 +8864,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (indirect_call)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
-                            codegen_emit_u8(&buffer, 0xff);
-                            codegen_emit_u8(&buffer, 0xd0);
+                            C_X64_LOAD(0x85, instruction->operands[0]);
+                            BusterX86MetadataPhysicalOperand call_register = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                            if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("CALL"), &call_register, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         else
                         {
-                            codegen_emit_u8(&buffer, 0xe8);
-                            u32 offset = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, 0);
+                            BusterX86MetadataPhysicalOperand call_target = codegen_canonical_x64_metadata_relative(0, 32);
+                            u32 call_offset = (u32)buffer.count;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("CALL"), &call_target, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
-                                .offset = offset,
+                                .offset = call_offset + 1,
                                 .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
                             };
                         }
@@ -10546,12 +10551,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
                     {
-                        codegen_emit_u8(&buffer, 0xcc);
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("INT3"), 0, 0))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_UNREACHABLE)
                     {
-                        codegen_emit_u8(&buffer, 0x0f);
-                        codegen_emit_u8(&buffer, 0x0b);
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("UD2"), 0, 0))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_RETURN)
                     {
