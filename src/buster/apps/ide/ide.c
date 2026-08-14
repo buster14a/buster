@@ -59,6 +59,11 @@
 #include <buster/lib/target.c>
 #include <buster/lib/simd.c>
 #include <buster/lib/file.c>
+#if BUSTER_ANDROID || BUSTER_IOS
+// Mobile platforms own the process lifecycle through the window module even
+// though the compiler program itself is headless.
+#include <buster/lib/window.c>
+#endif
 #include <buster/lib/time.c>
 #include <buster/lib/float.c>
 #include <buster/lib/compiler/frontend/c/c.c>

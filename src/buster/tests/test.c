@@ -774,9 +774,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
 
     compiler_prewarm();
     buster_x86_metadata_prewarm();
-#if BUSTER_CPU_ARCH_X86_64
+    // The metadata and machine suites exercise x86 emission on every host,
+    // including AArch64 CI. Prepare the exact-plan tables before their lanes.
     machine_x86_64_exact_prewarm();
-#endif
     u64 requested_lanes = buster_test_worker_count(eligible_count);
     lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
 
