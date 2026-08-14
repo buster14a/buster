@@ -4637,7 +4637,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         0x41, 0x0f, 0xbb, 0x54, 0x24, 0x08,
         0x4d, 0x0f, 0xb3, 0xc8,
         0x48, 0x0f, 0xba, 0x2d, 0x00, 0x00, 0x00, 0x00, 0x3f,
-        0x86, 0xc3,
+        0x86, 0xd8,
         0x66, 0x41, 0x90,
         0x93,
         0x4d, 0x87, 0xc1,
@@ -4692,7 +4692,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(x86_address32_cmpxchg16b.bytes.pointer, expected_x86_address32_cmpxchg16b,
                                       sizeof(expected_x86_address32_cmpxchg16b)) == 0);
     BUSTER_TEST(arguments, x86_intel_bit_atomic.relocation_count == 2 && x86_intel_bit_atomic.relocations[0].offset == 36 &&
-                               x86_intel_bit_atomic.relocations[1].offset == 72 && x86_intel_bit_atomic.relocations[0].addend == -4 &&
+                               x86_intel_bit_atomic.relocations[1].offset == 72 && x86_intel_bit_atomic.relocations[0].addend == -5 &&
                                x86_intel_bit_atomic.relocations[1].addend == -4 &&
                                x86_intel_bit_atomic.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
                                x86_intel_bit_atomic.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
@@ -4761,7 +4761,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                       sizeof(expected_x86_locked_bit_atomic)) == 0);
     BUSTER_TEST(arguments, x86_intel_locked_bit_atomic.relocation_count == 1 &&
                                x86_intel_locked_bit_atomic.relocations[0].offset == 17 &&
-                               x86_intel_locked_bit_atomic.relocations[0].addend == -4);
+                               x86_intel_locked_bit_atomic.relocations[0].addend == -5);
     AssemblyEncodeResult x86_att_locked_bit_atomic = assembly_encode(
         arguments->arena,
         S8("lock addl %ecx, (%rax)\n"
@@ -4779,7 +4779,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                       sizeof(expected_x86_locked_bit_atomic)) == 0);
 
     u8 expected_x86_high_byte_atomic[] = {
-        0x86, 0xe0,
+        // XCHG is commutative; the metadata canonical form places AL in the
+        // ModRM.reg field and AH in r/m (86 c4), rather than the handwritten
+        // operand-order spelling (86 e0).
+        0x86, 0xc4,
         0x0f, 0xc0, 0xc4,
         0x0f, 0xb0, 0xc4,
     };
