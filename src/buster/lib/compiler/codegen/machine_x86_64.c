@@ -4647,8 +4647,8 @@ enum
 // x86-64 requires SSE2, so the MFENCE exact row always receives the target's
 // architectural baseline gate.  INT3 is BASE and deliberately carries no
 // optional feature names.
-BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse2_features[] = {S8("sse2")};
-BUSTER_GLOBAL_LOCAL String8 const machine_x64_popcnt_features[] = {S8("popcnt")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse2_features[] = {S8_INITIALIZER("sse2")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_popcnt_features[] = {S8_INITIALIZER("popcnt")};
 
 BUSTER_GLOBAL_LOCAL void machine_x64_emit8(MachineX64Encoder* encoder, u8 byte);
 
