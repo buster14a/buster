@@ -8597,19 +8597,44 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x10);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x83);
-                            codegen_emit_u8(&buffer, 0x00);
-                            codegen_emit_u8(&buffer, 8);
+                            BusterX86MetadataPhysicalOperand windows_va_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 0),
+                            };
+                            BusterX86MetadataPhysicalOperand windows_va_advance_operands[2] = {
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 0),
+                                codegen_canonical_x64_metadata_immediate(8, 8),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_va_load_operands,
+                                                                      BUSTER_ARRAY_LENGTH(windows_va_load_operands));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), windows_va_advance_operands,
+                                                                      BUSTER_ARRAY_LENGTH(windows_va_advance_operands));
                             if (aggregate_abi.indirect)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x12);
+                                BusterX86MetadataPhysicalOperand windows_va_indirect_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, 64, 0),
+                                };
+                                (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_va_indirect_operands,
+                                                                          BUSTER_ARRAY_LENGTH(windows_va_indirect_operands));
                             }
+                            for (u32 part = 0; part < (aggregate ? integer_parts : 1); part += 1)
+                            {
+                                BusterX86MetadataPhysicalOperand windows_va_part_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, 64, (s64)part * 8),
+                                };
+                                BusterX86MetadataPhysicalOperand windows_va_part_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, (s64)result_displacement + (s64)part * 8),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                };
+                                (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_va_part_load_operands,
+                                                                          BUSTER_ARRAY_LENGTH(windows_va_part_load_operands));
+                                (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_va_part_store_operands,
+                                                                          BUSTER_ARRAY_LENGTH(windows_va_part_store_operands));
+                            }
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         else
                         {
