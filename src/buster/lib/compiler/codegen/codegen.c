@@ -9825,174 +9825,312 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 bool remainder_result = operation == IR_BINARY_UNSIGNED_REMAINDER || operation == IR_BINARY_SIGNED_REMAINDER;
                                 if (signed_division)
                                 {
-                                    codegen_emit_u8(&buffer, 0x49);
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0xd0);
-                                    codegen_emit_u8(&buffer, 0x49);
-                                    codegen_emit_u8(&buffer, 0xc1);
-                                    codegen_emit_u8(&buffer, 0xf8);
-                                    codegen_emit_u8(&buffer, 63);
-                                    codegen_emit_u8(&buffer, 0x49);
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0xf1);
-                                    codegen_emit_u8(&buffer, 0x49);
-                                    codegen_emit_u8(&buffer, 0xc1);
-                                    codegen_emit_u8(&buffer, 0xf9);
-                                    codegen_emit_u8(&buffer, 63);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0x85);
-                                    codegen_emit_u32(&buffer, (u32)(result_displacement + 8));
-                                    codegen_emit_u8(&buffer, 0x4d);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc1);
-                                    codegen_emit_u8(&buffer, 0x44);
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0x8d);
-                                    codegen_emit_u32(&buffer, (u32)(result_displacement + 4));
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc0);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc2);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x29);
-                                    codegen_emit_u8(&buffer, 0xc0);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x19);
-                                    codegen_emit_u8(&buffer, 0xc2);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc9);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xce);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x29);
-                                    codegen_emit_u8(&buffer, 0xc9);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x19);
-                                    codegen_emit_u8(&buffer, 0xce);
+                                    BusterX86MetadataPhysicalOperand dividend_sign_move[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand dividend_sign_shift[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                        codegen_canonical_x64_metadata_immediate(63, 8),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_sign_move[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_sign_shift[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                        codegen_canonical_x64_metadata_immediate(63, 8),
+                                    };
+                                    BusterX86MetadataPhysicalOperand save_dividend_sign[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement + 8),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand sign_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand save_sign[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement + 4),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 32),
+                                    };
+                                    BusterX86MetadataPhysicalOperand dividend_low_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand dividend_high_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand dividend_low_sub[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand dividend_high_sbb[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_low_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_high_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_low_sub[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand divisor_high_sbb[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), dividend_sign_move, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SAR"), dividend_sign_shift, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), divisor_sign_move, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SAR"), divisor_sign_shift, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_dividend_sign, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), sign_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_sign, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_low_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_high_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), dividend_low_sub, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), dividend_high_sbb, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_low_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_high_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), divisor_low_sub, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), divisor_high_sbb, 2))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
-                                codegen_emit_u8(&buffer, 0xc7);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)result_displacement);
-                                codegen_emit_u32(&buffer, 128);
-                                codegen_emit_u8(&buffer, 0x45);
-                                codegen_emit_u8(&buffer, 0x31);
-                                codegen_emit_u8(&buffer, 0xc0);
-                                codegen_emit_u8(&buffer, 0x45);
-                                codegen_emit_u8(&buffer, 0x31);
-                                codegen_emit_u8(&buffer, 0xc9);
-                                codegen_emit_u8(&buffer, 0x45);
-                                codegen_emit_u8(&buffer, 0x31);
-                                codegen_emit_u8(&buffer, 0xd2);
-                                codegen_emit_u8(&buffer, 0x45);
-                                codegen_emit_u8(&buffer, 0x31);
-                                codegen_emit_u8(&buffer, 0xdb);
+                                BusterX86MetadataPhysicalOperand loop_count_store[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement),
+                                    codegen_canonical_x64_metadata_immediate(128, 32),
+                                };
+                                BusterX86MetadataPhysicalOperand quotient_low_zero[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                };
+                                BusterX86MetadataPhysicalOperand quotient_high_zero[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 32),
+                                };
+                                BusterX86MetadataPhysicalOperand remainder_low_zero[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 32),
+                                };
+                                BusterX86MetadataPhysicalOperand remainder_high_zero[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 32),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), loop_count_store, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), quotient_low_zero, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), quotient_high_zero, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), remainder_low_zero, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), remainder_high_zero, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 divide_loop = (u32)buffer.count;
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xe0);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xd2);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xd2);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xd3);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xe0);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0x39);
-                                codegen_emit_u8(&buffer, 0xf3);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x82);
+                                BusterX86MetadataPhysicalOperand shift_low[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand shift_high[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand shift_remainder_low[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand shift_remainder_high[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand shift_quotient_low[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand shift_quotient_high[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_low, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("RCL"), shift_high, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("RCL"), shift_remainder_low, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("RCL"), shift_remainder_high, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_quotient_low, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("RCL"), shift_quotient_high, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand high_compare[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand high_less_branch = codegen_canonical_x64_metadata_relative(0, 32);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), high_compare, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 high_less_patch = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x87);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JB"), &high_less_branch, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 high_greater_patch = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0x39);
-                                codegen_emit_u8(&buffer, 0xca);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x82);
+                                BusterX86MetadataPhysicalOperand high_greater_branch = codegen_canonical_x64_metadata_relative(0, 32);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNBE"), &high_greater_branch, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand low_compare[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand low_less_branch = codegen_canonical_x64_metadata_relative(0, 32);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), low_compare, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 low_less_patch = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JB"), &low_less_branch, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 subtract_offset = (u32)buffer.count;
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0x29);
-                                codegen_emit_u8(&buffer, 0xca);
-                                codegen_emit_u8(&buffer, 0x49);
-                                codegen_emit_u8(&buffer, 0x19);
-                                codegen_emit_u8(&buffer, 0xf3);
-                                codegen_emit_u8(&buffer, 0x41);
-                                codegen_emit_u8(&buffer, 0x80);
-                                codegen_emit_u8(&buffer, 0xc8);
-                                codegen_emit_u8(&buffer, 1);
+                                BusterX86MetadataPhysicalOperand subtract_low[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand subtract_high[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand quotient_bit[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 8),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), subtract_low, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), subtract_high, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), quotient_bit, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 divide_skip = (u32)buffer.count;
-                                codegen_emit_u8(&buffer, 0x83);
-                                codegen_emit_u8(&buffer, 0xad);
-                                codegen_emit_u32(&buffer, (u32)result_displacement);
-                                codegen_emit_u8(&buffer, 1);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x85);
+                                BusterX86MetadataPhysicalOperand loop_count_decrement = codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement);
+                                BusterX86MetadataPhysicalOperand loop_branch = codegen_canonical_x64_metadata_relative(0, 32);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("DEC"), &loop_count_decrement, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 u32 divide_loop_patch = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
-                                s32 high_less_delta = (s32)((s64)divide_skip - ((s64)high_less_patch + 4));
-                                s32 high_greater_delta = (s32)((s64)subtract_offset - ((s64)high_greater_patch + 4));
-                                s32 low_less_delta = (s32)((s64)divide_skip - ((s64)low_less_patch + 4));
-                                s32 divide_loop_delta = (s32)((s64)divide_loop - ((s64)divide_loop_patch + 4));
-                                memcpy(buffer.bytes + high_less_patch, &high_less_delta, 4);
-                                memcpy(buffer.bytes + high_greater_patch, &high_greater_delta, 4);
-                                memcpy(buffer.bytes + low_less_patch, &low_less_delta, 4);
-                                memcpy(buffer.bytes + divide_loop_patch, &divide_loop_delta, 4);
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, remainder_result ? 0xd0 : 0xc0);
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, remainder_result ? 0xda : 0xca);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNZ"), &loop_branch, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                s32 high_less_delta = (s32)((s64)divide_skip - ((s64)high_less_patch + 6));
+                                s32 high_greater_delta = (s32)((s64)subtract_offset - ((s64)high_greater_patch + 6));
+                                s32 low_less_delta = (s32)((s64)divide_skip - ((s64)low_less_patch + 6));
+                                s32 divide_loop_delta = (s32)((s64)divide_loop - ((s64)divide_loop_patch + 6));
+                                if (buffer.error == CODEGEN_ERROR_NONE && high_less_patch + 6 <= buffer.count && high_greater_patch + 6 <= buffer.count &&
+                                    low_less_patch + 6 <= buffer.count && divide_loop_patch + 6 <= buffer.count)
+                                {
+                                    memcpy(buffer.bytes + high_less_patch + 2, &high_less_delta, sizeof(high_less_delta));
+                                    memcpy(buffer.bytes + high_greater_patch + 2, &high_greater_delta, sizeof(high_greater_delta));
+                                    memcpy(buffer.bytes + low_less_patch + 2, &low_less_delta, sizeof(low_less_delta));
+                                    memcpy(buffer.bytes + divide_loop_patch + 2, &divide_loop_delta, sizeof(divide_loop_delta));
+                                }
+                                else if (buffer.error == CODEGEN_ERROR_NONE)
+                                {
+                                    buffer.error = CODEGEN_ERROR_CAPACITY;
+                                }
+                                if (buffer.error != CODEGEN_ERROR_NONE)
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand result_low_move[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_gpr(remainder_result ? X64_REGISTER_R10 : X64_REGISTER_R8, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand result_high_move[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    codegen_canonical_x64_metadata_gpr(remainder_result ? X64_REGISTER_R11 : X64_REGISTER_R9, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), result_low_move, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), result_high_move, 2))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 if (signed_division)
                                 {
                                     if (remainder_result)
                                     {
-                                        codegen_emit_u8(&buffer, 0x4c);
-                                        codegen_emit_u8(&buffer, 0x8b);
-                                        codegen_emit_u8(&buffer, 0x85);
-                                        codegen_emit_u32(&buffer, (u32)(result_displacement + 8));
+                                        BusterX86MetadataPhysicalOperand load_dividend_sign[2] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement + 8),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), load_dividend_sign, 2))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
                                     }
                                     else
                                     {
-                                        codegen_emit_u8(&buffer, 0x44);
-                                        codegen_emit_u8(&buffer, 0x8b);
-                                        codegen_emit_u8(&buffer, 0x85);
-                                        codegen_emit_u32(&buffer, (u32)(result_displacement + 4));
-                                        codegen_emit_u8(&buffer, 0x49);
-                                        codegen_emit_u8(&buffer, 0xf7);
-                                        codegen_emit_u8(&buffer, 0xd8);
+                                        BusterX86MetadataPhysicalOperand load_sign[2] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement + 4),
+                                        };
+                                        BusterX86MetadataPhysicalOperand negate_sign[] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), load_sign, 2) ||
+                                            !codegen_canonical_x64_metadata_emit(&buffer, S8("NEG"), negate_sign, 1))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
                                     }
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc0);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xc2);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x29);
-                                    codegen_emit_u8(&buffer, 0xc0);
-                                    codegen_emit_u8(&buffer, 0x4c);
-                                    codegen_emit_u8(&buffer, 0x19);
-                                    codegen_emit_u8(&buffer, 0xc2);
+                                    BusterX86MetadataPhysicalOperand result_low_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand result_high_xor[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand result_low_sub[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    BusterX86MetadataPhysicalOperand result_high_sbb[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), result_low_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), result_high_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), result_low_sub, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), result_high_sbb, 2))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                             }
                             else if (operation == IR_BINARY_SHIFT_LEFT || operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
