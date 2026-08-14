@@ -1452,58 +1452,135 @@ BUSTER_GLOBAL_LOCAL void x64_emit_population_count(CodegenBuffer* buffer, u32 wi
 
 void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base)
 {
+    if (size != 32 && size != 64)
+    {
+        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    u16 vector_width = (u16)(size * 8);
+    // The legacy native load/store opcode is VMOVUPS for both YMM and ZMM
+    // widths.  Keep the aggregate memory atom at the 256-bit lane shape used
+    // by the metadata schema; EVEX selects the 512-bit register width from
+    // the ZMM physical class while AVX512F gates the wide form.
+    String8 mnemonic = S8("VMOVUPS");
+    u16 memory_width = 32;
+    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
+    BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(0, vector_width);
+    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
+    String8 feature_names[2] = {0};
+    u32 feature_count = 0;
     if (size == 64)
     {
-        codegen_emit_u8(&builder->buffer, 0x62);
-        codegen_emit_u8(&builder->buffer, base >= X64_REGISTER_R8 ? 0xd1 : 0xf1);
-        codegen_emit_u8(&builder->buffer, 0x7c);
-        codegen_emit_u8(&builder->buffer, 0x48);
-    }
-    else if (base >= X64_REGISTER_R8)
-    {
-        codegen_emit_u8(&builder->buffer, 0xc4);
-        codegen_emit_u8(&builder->buffer, 0xc1);
-        codegen_emit_u8(&builder->buffer, 0x7c);
+        feature_names[feature_count++] = S8("avx512f");
     }
     else
     {
-        codegen_emit_u8(&builder->buffer, 0xc5);
-        codegen_emit_u8(&builder->buffer, 0xfc);
+        feature_names[feature_count++] = S8("avx");
     }
-    codegen_emit_u8(&builder->buffer, store ? 0x11 : 0x10);
-    codegen_emit_u8(&builder->buffer, (u8)(base & 7));
+    (void)codegen_canonical_x64_metadata_emit_features(
+        &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+        (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
 }
 
-void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
+// Emit a native packed operation from an explicit IR element kind/width.
+// The legacy opcode prefix is not sufficient to classify this operation:
+// 0x66 is used by both packed integer and packed-double forms.  Keep the
+// classification at the call site and use the physical metadata encoder for
+// every form.
+BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation_kind(X64Builder* builder, bool integer_operation, u16 element_width,
+                                                                       u8 prefix, u8 opcode, u32 size, X64Register base)
 {
-    u8 packed_prefix = prefix == 0x66 ? 1 : 0;
-    if (size == 64)
+    (void)prefix;
+    if (size != 32 && size != 64)
     {
-        // The EVEX forms of vpaddq/vpsubq and the packed-double arithmetic
-        // are W1 in the SDM, and Zen 4 raises #UD on their W0 encodings
-        // (measured; llvm-mc calls them invalid too), so W is set exactly
-        // where a form demands it. The legacy-SSE and VEX paths below have
-        // no W to get wrong: their D4/FB forms decode unconditionally.
-        bool wide_form = opcode == 0xd4 || opcode == 0xfb ||
-                         (packed_prefix && (opcode == 0x58 || opcode == 0x5c || opcode == 0x59 || opcode == 0x5e));
-        codegen_emit_u8(&builder->buffer, 0x62);
-        codegen_emit_u8(&builder->buffer, base >= X64_REGISTER_R8 ? 0xd1 : 0xf1);
-        codegen_emit_u8(&builder->buffer, (u8)((wide_form ? 0x80 : 0) | 0x7c | packed_prefix));
-        codegen_emit_u8(&builder->buffer, 0x48);
+        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
     }
-    else if (base >= X64_REGISTER_R8)
+    String8 mnemonic = {0};
+    u16 memory_width = 0;
+    if (integer_operation)
     {
-        codegen_emit_u8(&builder->buffer, 0xc4);
-        codegen_emit_u8(&builder->buffer, 0xc1);
-        codegen_emit_u8(&builder->buffer, (u8)(0x7c | packed_prefix));
+        switch (opcode)
+        {
+        case 0xfc: mnemonic = S8("VPADDB"); memory_width = 8; break;
+        case 0xfd: mnemonic = S8("VPADDW"); memory_width = 16; break;
+        case 0xfe: mnemonic = S8("VPADDD"); memory_width = 32; break;
+        case 0xd4: mnemonic = S8("VPADDQ"); memory_width = 64; break;
+        case 0xf8: mnemonic = S8("VPSUBB"); memory_width = 8; break;
+        case 0xf9: mnemonic = S8("VPSUBW"); memory_width = 16; break;
+        case 0xfa: mnemonic = S8("VPSUBD"); memory_width = 32; break;
+        case 0xfb: mnemonic = S8("VPSUBQ"); memory_width = 64; break;
+        case 0xdb:
+            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPANDD") : S8("VPANDQ")) : S8("VPAND");
+            memory_width = size == 64 ? element_width : 256;
+            break;
+        case 0xeb:
+            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPORD") : S8("VPORQ")) : S8("VPOR");
+            memory_width = size == 64 ? element_width : 256;
+            break;
+        case 0xef:
+            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPXORD") : S8("VPXORQ")) : S8("VPXOR");
+            memory_width = size == 64 ? element_width : 256;
+            break;
+        default: break;
+        }
     }
     else
     {
-        codegen_emit_u8(&builder->buffer, 0xc5);
-        codegen_emit_u8(&builder->buffer, (u8)(0xfc | packed_prefix));
+        bool double_precision = element_width == 64;
+        switch (opcode)
+        {
+        case 0x58: mnemonic = double_precision ? S8("VADDPD") : S8("VADDPS"); memory_width = double_precision ? 64 : 32; break;
+        case 0x5c: mnemonic = double_precision ? S8("VSUBPD") : S8("VSUBPS"); memory_width = double_precision ? 64 : 32; break;
+        case 0x59: mnemonic = double_precision ? S8("VMULPD") : S8("VMULPS"); memory_width = double_precision ? 64 : 32; break;
+        case 0x5e: mnemonic = double_precision ? S8("VDIVPD") : S8("VDIVPS"); memory_width = double_precision ? 64 : 32; break;
+        default: break;
+        }
     }
-    codegen_emit_u8(&builder->buffer, opcode);
-    codegen_emit_u8(&builder->buffer, (u8)(base & 7));
+    if (!mnemonic.length)
+    {
+        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    u16 vector_width = (u16)(size * 8);
+    BusterX86MetadataPhysicalOperand operands[3] = {
+        codegen_canonical_x64_metadata_vector(0, vector_width),
+        codegen_canonical_x64_metadata_vector(0, vector_width),
+        codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0),
+    };
+    String8 feature_names[2] = {0};
+    u32 feature_count = 0;
+    if (size == 64)
+    {
+        feature_names[feature_count++] = S8("avx512f");
+        if (integer_operation && (memory_width == 8 || memory_width == 16)) feature_names[feature_count++] = S8("avx512bw");
+    }
+    else
+    {
+        feature_names[feature_count++] = integer_operation ? S8("avx2") : S8("avx");
+    }
+    (void)codegen_canonical_x64_metadata_emit_features(
+        &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+        (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
+}
+
+// Keep the internal declaration's historical signature for out-of-line
+// callers, while routing the canonical vector path through the explicit
+// element-kind helper above.  This wrapper only serves legacy tests/tools;
+// production call sites pass element kind and width directly below.
+void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
+{
+    bool integer_operation = opcode != 0x58 && opcode != 0x5c && opcode != 0x59 && opcode != 0x5e;
+    u16 element_width = 32;
+    if (integer_operation)
+    {
+        element_width = opcode == 0xfc || opcode == 0xf8 ? 8 : opcode == 0xfd || opcode == 0xf9 ? 16 : opcode == 0xfe || opcode == 0xfa ? 32 : 64;
+    }
+    else if (prefix == 0x66)
+    {
+        element_width = 64;
+    }
+    x64_emit_vector_native_binary_operation_kind(builder, integer_operation, element_width, prefix, opcode, size, base);
 }
 
 bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
@@ -1539,9 +1616,10 @@ void x64_emit_vzeroupper(X64Builder* builder)
     {
         return;
     }
-    codegen_emit_u8(&builder->buffer, 0xc5);
-    codegen_emit_u8(&builder->buffer, 0xf8);
-    codegen_emit_u8(&builder->buffer, 0x77);
+    String8 feature_names[] = {S8("avx")};
+    (void)codegen_canonical_x64_metadata_emit_features(
+        &builder->buffer, S8("VZEROUPPER"), 0, 0,
+        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
     builder->upper_vector_dirty = false;
     builder->last_wide_vector_result = IR_VALUE_ID_INVALID;
     builder->last_wide_vector_size = 0;
@@ -4081,7 +4159,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             {
                 x64_emit_vector_native_memory(&builder, false, (u32)vector->layout.size, X64_REGISTER_R8);
             }
-            x64_emit_vector_native_binary_operation(&builder, prefix, operation, (u32)vector->layout.size, forwarded_right ? X64_REGISTER_R8 : X64_REGISTER_R9);
+            x64_emit_vector_native_binary_operation_kind(&builder, element->kind == IR_TYPE_INTEGER, (u16)element->bit_width, prefix, operation,
+                                                         (u32)vector->layout.size, forwarded_right ? X64_REGISTER_R8 : X64_REGISTER_R9);
             x64_emit_vector_native_memory(&builder, true, (u32)vector->layout.size, X64_REGISTER_R10);
             *output = builder.buffer;
             *native_operation_count += 1;
