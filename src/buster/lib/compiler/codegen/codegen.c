@@ -7436,47 +7436,92 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 else if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND)
                                 {
+                                    String8 extend_mnemonic = {0};
+                                    BusterX86MetadataPhysicalOperand extend_operands[2];
+                                    u32 extend_operand_count = 0;
                                     if (source_type->bit_width == 8 || source_type->bit_width == 16)
                                     {
-                                        codegen_emit_u8(&buffer, 0x48);
-                                        codegen_emit_u8(&buffer, 0x0f);
-                                        codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xbe : 0xbf);
-                                        codegen_emit_u8(&buffer, 0xc0);
+                                        extend_mnemonic = S8("MOVSX");
+                                        extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                        extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_type->bit_width);
+                                        extend_operand_count = 2;
                                     }
                                     else if (source_type->bit_width == 32)
                                     {
-                                        codegen_emit_u8(&buffer, 0x48);
-                                        codegen_emit_u8(&buffer, 0x63);
-                                        codegen_emit_u8(&buffer, 0xc0);
+                                        extend_mnemonic = S8("MOVSXD");
+                                        extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                        extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                        extend_operand_count = 2;
                                     }
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x99);
+                                    if ((extend_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, extend_mnemonic, extend_operands, extend_operand_count)) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("CQO"), 0, 0))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 else
                                 {
+                                    BusterX86MetadataPhysicalOperand zero_extend_operands[2];
+                                    u32 zero_extend_operand_count = 0;
                                     if (source_type->bit_width <= 32)
                                     {
-                                        codegen_emit_u8(&buffer, 0x89);
-                                        codegen_emit_u8(&buffer, 0xc0);
+                                        if (source_type->bit_width < 32)
+                                        {
+                                            zero_extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                            zero_extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_type->bit_width);
+                                            zero_extend_operand_count = 2;
+                                        }
+                                        else
+                                        {
+                                            zero_extend_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                            zero_extend_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                            zero_extend_operand_count = 2;
+                                        }
                                     }
-                                    codegen_emit_u8(&buffer, 0x31);
-                                    codegen_emit_u8(&buffer, 0xd2);
+                                    BusterX86MetadataPhysicalOperand clear_high_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    };
+                                    String8 zero_extend_mnemonic = source_type->bit_width < 32 ? S8("MOVZX") : S8("MOV");
+                                    if ((zero_extend_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, zero_extend_mnemonic, zero_extend_operands,
+                                                                                                             zero_extend_operand_count)) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), clear_high_operands, 2))
+                                    {
+                                        result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                        return result;
+                                    }
                                 }
                                 C_X64_STORE_RESULT();
                                 C_X64_STORE_HIGH_RDX();
                             }
                             else
                             {
+                                if (target_type->bit_width != 8 && target_type->bit_width != 16 && target_type->bit_width != 32 &&
+                                    target_type->bit_width != 64)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand truncate_operands[2];
+                                u32 truncate_operand_count = 0;
                                 if (target_type->bit_width == 8 || target_type->bit_width == 16)
                                 {
-                                    codegen_emit_u8(&buffer, 0x0f);
-                                    codegen_emit_u8(&buffer, target_type->bit_width == 8 ? 0xb6 : 0xb7);
-                                    codegen_emit_u8(&buffer, 0xc0);
+                                    truncate_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    truncate_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)target_type->bit_width);
+                                    truncate_operand_count = 2;
                                 }
                                 else if (target_type->bit_width == 32)
                                 {
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0xc0);
+                                    truncate_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    truncate_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    truncate_operand_count = 2;
+                                }
+                                if (truncate_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), truncate_operands,
+                                                                                                     truncate_operand_count))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
                                 }
                                 C_X64_STORE_RESULT();
                             }
@@ -7484,214 +7529,475 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             continue;
                         }
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND && source_type->kind == IR_TYPE_INTEGER)
+                        if (buffer.error)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            if (source_type->bit_width == 8 || source_type->bit_width == 16)
-                            {
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xbe : 0xbf);
-                                codegen_emit_u8(&buffer, 0xc0);
-                            }
-                            else if (source_type->bit_width == 32)
-                            {
-                                codegen_emit_u8(&buffer, 0x63);
-                                codegen_emit_u8(&buffer, 0xc0);
-                            }
+                            result.error = buffer.error;
+                            return result;
                         }
-                        else if (conversion == IR_CONVERSION_INTEGER_ZERO_EXTEND && source_type->kind == IR_TYPE_INTEGER &&
-                                 target_type->kind == IR_TYPE_INTEGER)
+                        bool source_integer = source_type->kind == IR_TYPE_INTEGER || source_type->kind == IR_TYPE_BOOLEAN ||
+                                              source_type->kind == IR_TYPE_POINTER;
+                        bool target_integer = target_type->kind == IR_TYPE_INTEGER || target_type->kind == IR_TYPE_BOOLEAN ||
+                                              target_type->kind == IR_TYPE_POINTER;
+                        if (source_integer && target_integer &&
+                            (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND || conversion == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                             conversion == IR_CONVERSION_INTEGER_TRUNCATE || conversion == IR_CONVERSION_INTEGER_REINTERPRET ||
+                             conversion == IR_CONVERSION_POINTER_TO_INTEGER || conversion == IR_CONVERSION_INTEGER_TO_POINTER ||
+                             conversion == IR_CONVERSION_POINTER_REINTERPRET || conversion == IR_CONVERSION_IDENTITY))
                         {
-                            if (source_type->bit_width == 8 || source_type->bit_width == 16)
+                            u32 source_bit_width = source_type->kind == IR_TYPE_BOOLEAN ? 8
+                                                 : source_type->kind == IR_TYPE_POINTER ? 64
+                                                                                         : source_type->bit_width;
+                            u32 target_bit_width = target_type->kind == IR_TYPE_BOOLEAN ? 8
+                                                 : target_type->kind == IR_TYPE_POINTER ? 64
+                                                                                         : target_type->bit_width;
+                            if ((source_bit_width != 8 && source_bit_width != 16 && source_bit_width != 32 && source_bit_width != 64) ||
+                                (target_bit_width != 8 && target_bit_width != 16 && target_bit_width != 32 && target_bit_width != 64))
                             {
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xb6 : 0xb7);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
-                            else if (source_type->bit_width == 32)
+                            String8 mnemonic = {0};
+                            BusterX86MetadataPhysicalOperand cast_operands[2];
+                            u32 cast_operand_count = 2;
+                            if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND)
                             {
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                if (source_bit_width == 64)
+                                {
+                                    // A 64-bit source is already in the canonical
+                                    // register width; no instruction is required.
+                                    cast_operand_count = 0;
+                                }
+                                else
+                                {
+                                    mnemonic = source_bit_width == 32 ? S8("MOVSXD") : S8("MOVSX");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width);
+                                }
                             }
-                        }
-                        else if ((conversion == IR_CONVERSION_INTEGER_TRUNCATE || conversion == IR_CONVERSION_INTEGER_REINTERPRET) &&
-                                 source_type->kind == IR_TYPE_INTEGER && target_type->kind == IR_TYPE_INTEGER)
-                        {
-                            u32 effective_bit_width = conversion == IR_CONVERSION_INTEGER_REINTERPRET && source_type->bit_width < target_type->bit_width
-                                                          ? source_type->bit_width
-                                                          : target_type->bit_width;
-                            if (effective_bit_width == 8 || effective_bit_width == 16)
+                            else if (conversion == IR_CONVERSION_INTEGER_ZERO_EXTEND)
                             {
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, effective_bit_width == 8 ? 0xb6 : 0xb7);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                if (source_bit_width == 64)
+                                {
+                                    cast_operand_count = 0;
+                                }
+                                else if (source_bit_width == 32)
+                                {
+                                    mnemonic = S8("MOV");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                }
+                                else
+                                {
+                                    mnemonic = S8("MOVZX");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width);
+                                }
                             }
-                            else if (effective_bit_width == 32)
+                            else if (conversion == IR_CONVERSION_INTEGER_TRUNCATE)
                             {
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                if (target_bit_width == 64)
+                                {
+                                    cast_operand_count = 0;
+                                }
+                                else if (target_bit_width == 32)
+                                {
+                                    mnemonic = S8("MOV");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                }
+                                else
+                                {
+                                    mnemonic = S8("MOVZX");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)target_bit_width);
+                                }
+                            }
+                            else if (conversion == IR_CONVERSION_INTEGER_REINTERPRET || conversion == IR_CONVERSION_POINTER_REINTERPRET ||
+                                     conversion == IR_CONVERSION_POINTER_TO_INTEGER || conversion == IR_CONVERSION_INTEGER_TO_POINTER ||
+                                     conversion == IR_CONVERSION_IDENTITY)
+                            {
+                                u32 effective_bit_width = conversion == IR_CONVERSION_INTEGER_REINTERPRET
+                                                               ? BUSTER_MIN(source_bit_width, target_bit_width)
+                                                               : target_bit_width;
+                                if (effective_bit_width >= 64)
+                                {
+                                    cast_operand_count = 0;
+                                }
+                                else if (effective_bit_width == 32)
+                                {
+                                    mnemonic = S8("MOV");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                }
+                                else
+                                {
+                                    mnemonic = S8("MOVZX");
+                                    cast_operands[0] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
+                                    cast_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)effective_bit_width);
+                                }
+                            }
+                            else
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (cast_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, mnemonic, cast_operands, cast_operand_count))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
                         }
                         else if ((conversion == IR_CONVERSION_FLOAT_EXTEND || conversion == IR_CONVERSION_FLOAT_TRUNCATE) &&
                                  source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_FLOAT)
                         {
-                            codegen_emit_u8(&buffer, source_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x10);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
-                            codegen_emit_u8(&buffer, conversion == IR_CONVERSION_FLOAT_EXTEND ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x5a);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, target_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x11);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)result_displacement);
+                            if ((source_type->bit_width != 32 && source_type->bit_width != 64) ||
+                                (target_type->bit_width != 32 && target_type->bit_width != 64) ||
+                                (conversion == IR_CONVERSION_FLOAT_EXTEND && (source_type->bit_width != 32 || target_type->bit_width != 64)) ||
+                                (conversion == IR_CONVERSION_FLOAT_TRUNCATE && (source_type->bit_width != 64 || target_type->bit_width != 32)))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            String8 float_features[] = {S8("sse"), S8("sse2")};
+                            BusterX86MetadataFeatureInput float_feature_input = {
+                                .names = float_features,
+                                .count = BUSTER_ARRAY_LENGTH(float_features),
+                            };
+                            BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, (u16)source_type->bit_width),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)source_type->bit_width,
+                                                                       C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                            };
+                            String8 load_mnemonic = source_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                            String8 convert_mnemonic = conversion == IR_CONVERSION_FLOAT_EXTEND ? S8("CVTSS2SD") : S8("CVTSD2SS");
+                            BusterX86MetadataPhysicalOperand convert_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, (u16)target_type->bit_width),
+                                codegen_canonical_x64_metadata_vector(0, (u16)source_type->bit_width),
+                            };
+                            BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)target_type->bit_width, result_displacement),
+                                codegen_canonical_x64_metadata_vector(0, (u16)target_type->bit_width),
+                            };
+                            String8 store_mnemonic = target_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                            if (!codegen_canonical_x64_metadata_emit_features(&buffer, load_mnemonic, load_operands,
+                                                                              BUSTER_ARRAY_LENGTH(load_operands), float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands,
+                                                                              BUSTER_ARRAY_LENGTH(convert_operands), float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, store_mnemonic, store_operands,
+                                                                              BUSTER_ARRAY_LENGTH(store_operands), float_feature_input))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             instruction_id = instruction->next;
                             continue;
                         }
                         else if (target_type->kind == IR_TYPE_FLOAT && source_type->kind == IR_TYPE_INTEGER &&
                                  (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT || conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT))
                         {
-                            if (target_type->bit_width != 32 && target_type->bit_width != 64)
+                            u32 source_bit_width = source_type->bit_width;
+                            u32 target_bit_width = target_type->bit_width;
+                            if ((source_bit_width != 8 && source_bit_width != 16 && source_bit_width != 32 && source_bit_width != 64) ||
+                                (target_bit_width != 32 && target_bit_width != 64))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            if (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT)
+                            String8 float_features[] = {S8("sse"), S8("sse2")};
+                            BusterX86MetadataFeatureInput float_feature_input = {
+                                .names = float_features,
+                                .count = BUSTER_ARRAY_LENGTH(float_features),
+                            };
+                            if (conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT && source_bit_width == 64)
                             {
-                                if (source_type->bit_width == 8 || source_type->bit_width == 16)
+                                BusterX86MetadataPhysicalOperand test_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand nonnegative_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                                u32 nonnegative_branch_offset = 0;
+                                BusterX86MetadataPhysicalOperand correction_move[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand correction_shift[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand correction_mask[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                    codegen_canonical_x64_metadata_immediate(1, 8),
+                                };
+                                BusterX86MetadataPhysicalOperand correction_or[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                };
+                                BusterX86MetadataPhysicalOperand convert_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                String8 convert_mnemonic = target_bit_width == 32 ? S8("CVTSI2SS") : S8("CVTSI2SD");
+                                BusterX86MetadataPhysicalOperand add_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                                    codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                                };
+                                String8 add_mnemonic = target_bit_width == 32 ? S8("ADDSS") : S8("ADDSD");
+                                BusterX86MetadataPhysicalOperand skip_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), test_operands, 2))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x0f);
-                                    codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xbe : 0xbf);
-                                    codegen_emit_u8(&buffer, 0xc0);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else if (source_type->bit_width == 32)
+                                nonnegative_branch_offset = (u32)buffer.count;
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNS"), &nonnegative_branch, 1) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), correction_move, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("SHR"), correction_shift, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), correction_mask, 2) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), correction_or, 2) ||
+                                    !codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands, 2, float_feature_input) ||
+                                    !codegen_canonical_x64_metadata_emit_features(&buffer, add_mnemonic, add_operands, 2, float_feature_input))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x63);
-                                    codegen_emit_u8(&buffer, 0xc0);
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                u32 skip_branch_offset = (u32)buffer.count;
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &skip_branch, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                u32 direct_conversion_offset = (u32)buffer.count;
+                                if (!codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands, 2, float_feature_input))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                u32 store_offset = (u32)buffer.count;
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)target_bit_width, result_displacement),
+                                    codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                                };
+                                String8 store_mnemonic = target_bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                                if (!codegen_canonical_x64_metadata_emit_features(&buffer, store_mnemonic, store_operands, 2, float_feature_input))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                if (buffer.error == CODEGEN_ERROR_NONE && nonnegative_branch_offset + 2 <= buffer.count && skip_branch_offset + 2 <= buffer.count)
+                                {
+                                    s8 nonnegative_delta = (s8)((s32)direct_conversion_offset - (s32)(nonnegative_branch_offset + 2));
+                                    s8 skip_delta = (s8)((s32)store_offset - (s32)(skip_branch_offset + 2));
+                                    memcpy(buffer.bytes + nonnegative_branch_offset + 1, &nonnegative_delta, sizeof(nonnegative_delta));
+                                    memcpy(buffer.bytes + skip_branch_offset + 1, &skip_delta, sizeof(skip_delta));
+                                }
+                                else if (buffer.error == CODEGEN_ERROR_NONE)
+                                {
+                                    buffer.error = CODEGEN_ERROR_CAPACITY;
+                                }
+                                if (buffer.error != CODEGEN_ERROR_NONE)
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            if (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT && source_bit_width != 64)
+                            {
+                                String8 extend_mnemonic = source_bit_width == 32 ? S8("MOVSXD") : S8("MOVSX");
+                                BusterX86MetadataPhysicalOperand extend_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, extend_mnemonic, extend_operands,
+                                                                           BUSTER_ARRAY_LENGTH(extend_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
                                 }
                             }
-                            else if (source_type->bit_width == 8 || source_type->bit_width == 16)
+                            else if (conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT && source_bit_width < 32)
                             {
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xb6 : 0xb7);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                BusterX86MetadataPhysicalOperand zero_extend_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)source_bit_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), zero_extend_operands,
+                                                                           BUSTER_ARRAY_LENGTH(zero_extend_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
-                            else if (source_type->bit_width == 32)
+                            BusterX86MetadataPhysicalOperand convert_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            String8 convert_mnemonic = target_bit_width == 32 ? S8("CVTSI2SS") : S8("CVTSI2SD");
+                            BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)target_bit_width, result_displacement),
+                                codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
+                            };
+                            String8 store_mnemonic = target_bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                            if (!codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands,
+                                                                              BUSTER_ARRAY_LENGTH(convert_operands), float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, store_mnemonic, store_operands,
+                                                                              BUSTER_ARRAY_LENGTH(store_operands), float_feature_input))
                             {
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            if (conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT && source_type->bit_width == 64)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u8(&buffer, 0xc0);
-                                codegen_emit_u8(&buffer, 0x79);
-                                codegen_emit_u8(&buffer, 23);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xc1);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xd1);
-                                codegen_emit_u8(&buffer, 0xe8);
-                                codegen_emit_u8(&buffer, 0x83);
-                                codegen_emit_u8(&buffer, 0xe1);
-                                codegen_emit_u8(&buffer, 1);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x09);
-                                codegen_emit_u8(&buffer, 0xc8);
-                                codegen_emit_u8(&buffer, target_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x2a);
-                                codegen_emit_u8(&buffer, 0xc0);
-                                codegen_emit_u8(&buffer, target_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x58);
-                                codegen_emit_u8(&buffer, 0xc0);
-                                codegen_emit_u8(&buffer, 0xeb);
-                                codegen_emit_u8(&buffer, 5);
-                            }
-                            codegen_emit_u8(&buffer, target_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x2a);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, target_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x11);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)result_displacement);
                             instruction_id = instruction->next;
                             continue;
                         }
                         else if (source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_INTEGER &&
-                                 (conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER || conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER))
+                                 (conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                                  (conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER && target_type->bit_width != 64)))
                         {
-                            codegen_emit_u8(&buffer, source_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x10);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
-                            if (conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER && target_type->bit_width == 64)
+                            u32 source_bit_width = source_type->bit_width;
+                            u32 target_bit_width = target_type->bit_width;
+                            // Keep the conversion in the 64-bit signed range
+                            // even for narrower C destinations.  This is
+                            // required for unsigned 32-bit values above
+                            // INT32_MAX (for example 4000000000.0), after
+                            // which the canonical frame store narrows as
+                            // usual.
+                            u32 conversion_bit_width = 64;
+                            if ((source_bit_width != 32 && source_bit_width != 64) ||
+                                (target_bit_width != 8 && target_bit_width != 16 && target_bit_width != 32 && target_bit_width != 64) ||
+                                (conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER && target_bit_width == 64))
                             {
-                                if (source_type->bit_width == 32)
-                                {
-                                    codegen_emit_u8(&buffer, 0xb8);
-                                    codegen_emit_u32(&buffer, 0x5f000000);
-                                }
-                                else
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0xb8);
-                                    codegen_emit_u64(&buffer, UINT64_C(0x43e0000000000000));
-                                }
-                                codegen_emit_u8(&buffer, 0x66);
-                                if (source_type->bit_width == 64)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x6e);
-                                codegen_emit_u8(&buffer, 0xc8);
-                                if (source_type->bit_width == 64)
-                                {
-                                    codegen_emit_u8(&buffer, 0x66);
-                                }
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x2e);
-                                codegen_emit_u8(&buffer, 0xc1);
-                                codegen_emit_u8(&buffer, 0x72);
-                                codegen_emit_u8(&buffer, 24);
-                                codegen_emit_u8(&buffer, source_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x5c);
-                                codegen_emit_u8(&buffer, 0xc1);
-                                codegen_emit_u8(&buffer, source_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x2c);
-                                codegen_emit_u8(&buffer, 0xc0);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0xb9);
-                                codegen_emit_u64(&buffer, UINT64_C(0x8000000000000000));
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x09);
-                                codegen_emit_u8(&buffer, 0xc8);
-                                codegen_emit_u8(&buffer, 0xeb);
-                                codegen_emit_u8(&buffer, 5);
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, source_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x2c);
-                            codegen_emit_u8(&buffer, 0xc0);
+                            String8 float_features[] = {S8("sse"), S8("sse2")};
+                            BusterX86MetadataFeatureInput float_feature_input = {
+                                .names = float_features,
+                                .count = BUSTER_ARRAY_LENGTH(float_features),
+                            };
+                            BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, (u16)source_bit_width),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)source_bit_width,
+                                                                       C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                            };
+                            String8 load_mnemonic = source_bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                            BusterX86MetadataPhysicalOperand convert_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)conversion_bit_width),
+                                codegen_canonical_x64_metadata_vector(0, (u16)source_bit_width),
+                            };
+                            String8 convert_mnemonic = source_bit_width == 32 ? S8("CVTTSS2SI") : S8("CVTTSD2SI");
+                            if (!codegen_canonical_x64_metadata_emit_features(&buffer, load_mnemonic, load_operands,
+                                                                              BUSTER_ARRAY_LENGTH(load_operands), float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands,
+                                                                              BUSTER_ARRAY_LENGTH(convert_operands), float_feature_input))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            C_X64_STORE_RESULT();
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        else if (source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_INTEGER &&
+                                 conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER && target_type->bit_width == 64)
+                        {
+                            if (source_type->bit_width != 32 && source_type->bit_width != 64)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            String8 float_features[] = {S8("sse"), S8("sse2")};
+                            BusterX86MetadataFeatureInput float_feature_input = {
+                                .names = float_features,
+                                .count = BUSTER_ARRAY_LENGTH(float_features),
+                            };
+                            u16 float_width = (u16)source_type->bit_width;
+                            String8 load_mnemonic = source_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD");
+                            String8 compare_mnemonic = source_type->bit_width == 32 ? S8("UCOMISS") : S8("UCOMISD");
+                            String8 subtract_mnemonic = source_type->bit_width == 32 ? S8("SUBSS") : S8("SUBSD");
+                            String8 convert_mnemonic = source_type->bit_width == 32 ? S8("CVTTSS2SI") : S8("CVTTSD2SI");
+                            BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, float_width),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, float_width,
+                                                                       C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                            };
+                            BusterX86MetadataPhysicalOperand threshold_load[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, source_type->bit_width == 32 ? 32 : 64),
+                                codegen_canonical_x64_metadata_unsigned_immediate(
+                                    source_type->bit_width == 32 ? UINT64_C(0x5f000000) : UINT64_C(0x43e0000000000000),
+                                    source_type->bit_width == 32 ? 32 : 64),
+                            };
+                            BusterX86MetadataPhysicalOperand threshold_vector[2] = {
+                                codegen_canonical_x64_metadata_vector(1, float_width),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, source_type->bit_width == 32 ? 32 : 64),
+                            };
+                            BusterX86MetadataPhysicalOperand compare_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, float_width),
+                                codegen_canonical_x64_metadata_vector(1, float_width),
+                            };
+                            BusterX86MetadataPhysicalOperand subtract_operands[2] = {
+                                codegen_canonical_x64_metadata_vector(0, float_width),
+                                codegen_canonical_x64_metadata_vector(1, float_width),
+                            };
+                            BusterX86MetadataPhysicalOperand convert_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_vector(0, float_width),
+                            };
+                            BusterX86MetadataPhysicalOperand high_bit_load[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_unsigned_immediate(UINT64_C(0x8000000000000000), 64),
+                            };
+                            BusterX86MetadataPhysicalOperand high_bit_or[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit_features(&buffer, load_mnemonic, load_operands, 2, float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), threshold_load, 2) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, source_type->bit_width == 32 ? S8("MOVD") : S8("MOVQ"),
+                                                                                threshold_vector, 2, float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, compare_mnemonic, compare_operands, 2, float_feature_input))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            u32 below_threshold_branch_offset = (u32)buffer.count;
+                            BusterX86MetadataPhysicalOperand below_threshold_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JB"), &below_threshold_branch, 1) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, subtract_mnemonic, subtract_operands, 2, float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands, 2, float_feature_input) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), high_bit_load, 2) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), high_bit_or, 2))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            u32 skip_direct_branch_offset = (u32)buffer.count;
+                            BusterX86MetadataPhysicalOperand skip_direct_branch = codegen_canonical_x64_metadata_relative(0, 8);
+                            u32 direct_conversion_offset = skip_direct_branch_offset + 2;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &skip_direct_branch, 1) ||
+                                !codegen_canonical_x64_metadata_emit_features(&buffer, convert_mnemonic, convert_operands, 2, float_feature_input))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            s64 below_threshold_delta = (s64)direct_conversion_offset - ((s64)below_threshold_branch_offset + 2);
+                            s64 skip_direct_delta = (s64)buffer.count - ((s64)skip_direct_branch_offset + 2);
+                            if (below_threshold_delta < INT8_MIN || below_threshold_delta > INT8_MAX || skip_direct_delta < INT8_MIN ||
+                                skip_direct_delta > INT8_MAX || below_threshold_branch_offset + 1 >= buffer.count || skip_direct_branch_offset + 1 >= buffer.count)
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            buffer.bytes[below_threshold_branch_offset + 1] = (u8)(s8)below_threshold_delta;
+                            buffer.bytes[skip_direct_branch_offset + 1] = (u8)(s8)skip_direct_delta;
+                            C_X64_STORE_RESULT();
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        else
+                        {
+                            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
                         }
                         C_X64_STORE_RESULT();
                     }
