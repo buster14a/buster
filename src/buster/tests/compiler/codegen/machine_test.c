@@ -3,7 +3,9 @@
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/string.h>
 #include <buster/lib/x86_64.h>
@@ -86,6 +88,545 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
     }
     return target.cpu_arch == CPU_ARCH_AARCH64 ? machine_encode_aarch64(arena, &selected.function, &placement)
                                                : machine_encode_x86_64(arena, &selected.function, &placement);
+}
+
+typedef struct MachineX64SourceSpan MachineX64SourceSpan;
+struct MachineX64SourceSpan
+{
+    u8 const* bytes;
+    u64 length;
+    u64 start;
+    u64 end;
+};
+
+typedef enum MachineX64SourceArch
+{
+    MACHINE_X64_SOURCE_ARCH_UNKNOWN,
+    MACHINE_X64_SOURCE_ARCH_X86,
+    MACHINE_X64_SOURCE_ARCH_AARCH64,
+} MachineX64SourceArch;
+
+typedef struct MachineX64SourceAudit MachineX64SourceAudit;
+struct MachineX64SourceAudit
+{
+    bool files_readable;
+    bool owners_found;
+    u32 owner_count;
+    u32 forbidden_count;
+    u32 forbidden_constructor_count;
+    u32 neutral_patch_count;
+    u32 aarch64_write_count;
+    u32 data_directive_count;
+};
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_identifier_start(u8 byte)
+{
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || byte == '_';
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_identifier_continue(u8 byte)
+{
+    return machine_test_source_identifier_start(byte) || (byte >= '0' && byte <= '9');
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_token_at(MachineX64SourceSpan source, u64 offset, String8 token)
+{
+    if (!source.bytes || source.start > source.end || source.end > source.length || offset < source.start || offset > source.end || !token.length ||
+        token.length > source.end - offset)
+        return false;
+    if (memcmp(source.bytes + offset, token.pointer, token.length) != 0) return false;
+    bool left_boundary = offset == source.start || !machine_test_source_identifier_continue(source.bytes[offset - 1]);
+    u64 end = offset + token.length;
+    bool right_boundary = end == source.end || !machine_test_source_identifier_continue(source.bytes[end]);
+    return left_boundary && right_boundary;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_span_contains_sequence(MachineX64SourceSpan source, String8 sequence)
+{
+    if (!source.bytes || source.start > source.end || source.end > source.length || !sequence.length || sequence.length > source.end - source.start)
+        return false;
+    u8 const* bytes = source.bytes + source.start;
+    u64 length = source.end - source.start;
+    for (u64 offset = 0; offset + sequence.length <= length; offset += 1)
+        if (memcmp(bytes + offset, sequence.pointer, sequence.length) == 0) return true;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL u8* machine_test_source_sanitize(Arena* arena, ByteSlice input)
+{
+    u8* result = arena_allocate(arena, u8, input.length + 1);
+    u64 index = 0;
+    while (index < input.length)
+    {
+        u8 byte = input.pointer[index];
+        if (byte == '/' && index + 1 < input.length && input.pointer[index + 1] == '/')
+        {
+            while (index < input.length && input.pointer[index] != '\n')
+            {
+                result[index] = ' ';
+                index += 1;
+            }
+            continue;
+        }
+        if (byte == '/' && index + 1 < input.length && input.pointer[index + 1] == '*')
+        {
+            result[index++] = ' ';
+            result[index++] = ' ';
+            while (index < input.length)
+            {
+                if (input.pointer[index] == '*' && index + 1 < input.length && input.pointer[index + 1] == '/')
+                {
+                    result[index++] = ' ';
+                    result[index++] = ' ';
+                    break;
+                }
+                result[index] = input.pointer[index] == '\n' ? '\n' : ' ';
+                index += 1;
+            }
+            continue;
+        }
+        if (byte == '"' || byte == '\'')
+        {
+            u8 quote = byte;
+            result[index++] = ' ';
+            while (index < input.length)
+            {
+                byte = input.pointer[index];
+                if (byte == '\\' && index + 1 < input.length)
+                {
+                    result[index++] = ' ';
+                    u8 escaped = input.pointer[index];
+                    result[index++] = escaped == '\n' ? '\n' : ' ';
+                    continue;
+                }
+                result[index] = byte == '\n' ? '\n' : ' ';
+                index += 1;
+                if (byte == quote) break;
+            }
+            continue;
+        }
+        result[index] = byte;
+        index += 1;
+    }
+    result[input.length] = 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_function_body_at(MachineX64SourceSpan source, String8 owner, u64 offset,
+                                                               MachineX64SourceSpan* body)
+{
+    if (!owner.length || !source.bytes || source.start > source.end || source.end > source.length || offset < source.start ||
+        offset + owner.length > source.end || !machine_test_source_token_at(source, offset, owner))
+        return false;
+    u64 cursor = offset + owner.length;
+    while (cursor < source.end && (source.bytes[cursor] == ' ' || source.bytes[cursor] == '\t' || source.bytes[cursor] == '\r' ||
+                                   source.bytes[cursor] == '\n'))
+        cursor += 1;
+    if (cursor >= source.end || source.bytes[cursor] != '(') return false;
+    u64 parentheses = 0;
+    for (; cursor < source.end; cursor += 1)
+    {
+        if (source.bytes[cursor] == '(') parentheses += 1;
+        else if (source.bytes[cursor] == ')' && parentheses && --parentheses == 0)
+        {
+            cursor += 1;
+            break;
+        }
+    }
+    if (parentheses || cursor >= source.end) return false;
+    // Definitions in this codebase put the opening brace immediately after
+    // the parameter list (modulo whitespace).  Requiring that shape rejects
+    // calls such as x64_emit_foo(...) followed by a block and keeps prefix
+    // discovery independent of line numbers or call-site lists.
+    while (cursor < source.end && (source.bytes[cursor] == ' ' || source.bytes[cursor] == '\t' || source.bytes[cursor] == '\r' ||
+                                   source.bytes[cursor] == '\n'))
+        cursor += 1;
+    if (cursor >= source.end || source.bytes[cursor] != '{') return false;
+    u64 depth = 0;
+    for (u64 index = cursor; index < source.end; index += 1)
+    {
+        if (source.bytes[index] == '{') depth += 1;
+        else if (source.bytes[index] == '}')
+        {
+            if (!depth) break;
+            depth -= 1;
+            if (!depth)
+            {
+                if (body)
+                {
+                    *body = (MachineX64SourceSpan){
+                        .bytes = source.bytes,
+                        .length = source.length,
+                        .start = cursor,
+                        .end = index + 1,
+                    };
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_function_body_from(MachineX64SourceSpan source, String8 owner, u64 search_start,
+                                                                 MachineX64SourceSpan* body)
+{
+    if (!owner.length || !source.bytes || source.start > source.end || source.end > source.length) return false;
+    u64 first_offset = BUSTER_MAX(search_start, source.start);
+    for (u64 offset = first_offset; offset + owner.length <= source.end; offset += 1)
+    {
+        if (machine_test_source_function_body_at(source, owner, offset, body)) return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_test_source_function_body(MachineX64SourceSpan source, String8 owner, MachineX64SourceSpan* body)
+{
+    return machine_test_source_function_body_from(source, owner, source.start, body);
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_inverse(MachineX64SourceArch arch)
+{
+    return arch == MACHINE_X64_SOURCE_ARCH_X86   ? MACHINE_X64_SOURCE_ARCH_AARCH64
+           : arch == MACHINE_X64_SOURCE_ARCH_AARCH64 ? MACHINE_X64_SOURCE_ARCH_X86
+                                                     : MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_markers(MachineX64SourceSpan source, u64 start, u64 end)
+{
+    if (!source.bytes || start > end || end > source.end) return MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+    String8 x86_name = S8("CPU_ARCH_X86_64");
+    String8 aarch64_name = S8("CPU_ARCH_AARCH64");
+    bool x86_found = false;
+    bool aarch64_found = false;
+    for (u64 offset = start; offset + x86_name.length <= end; offset += 1)
+    {
+        x86_found |= machine_test_source_token_at(source, offset, x86_name);
+    }
+    for (u64 offset = start; offset + aarch64_name.length <= end; offset += 1)
+    {
+        aarch64_found |= machine_test_source_token_at(source, offset, aarch64_name);
+    }
+    if (x86_found && !aarch64_found) return MACHINE_X64_SOURCE_ARCH_X86;
+    if (aarch64_found && !x86_found) return MACHINE_X64_SOURCE_ARCH_AARCH64;
+    return MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_brace(MachineX64SourceSpan source, MachineX64SourceSpan body, u64 brace,
+                                                                              MachineX64SourceArch parent, MachineX64SourceArch else_parent)
+{
+    u64 segment_start = brace;
+    while (segment_start > body.start)
+    {
+        u8 byte = source.bytes[segment_start - 1];
+        if (byte == ';' || byte == '{' || byte == '}') break;
+        segment_start -= 1;
+    }
+    MachineX64SourceArch marker_arch = machine_test_source_arch_markers(source, segment_start, brace);
+    if (marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN) return marker_arch;
+    String8 else_name = S8("else");
+    for (u64 offset = segment_start; offset + else_name.length <= brace; offset += 1)
+    {
+        if (machine_test_source_token_at(source, offset, else_name))
+            return parent == MACHINE_X64_SOURCE_ARCH_UNKNOWN && else_parent != MACHINE_X64_SOURCE_ARCH_UNKNOWN
+                       ? machine_test_source_arch_inverse(else_parent)
+                       : parent;
+    }
+    return parent;
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_writer(MachineX64SourceSpan source, MachineX64SourceSpan body,
+                                                                                u64 writer_offset, MachineX64SourceArch default_arch)
+{
+    MachineX64SourceArch stack[256] = {0};
+    u32 depth = 0;
+    MachineX64SourceArch current = default_arch;
+    MachineX64SourceArch last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+    for (u64 offset = body.start; offset < writer_offset && offset < body.end; offset += 1)
+    {
+        if (source.bytes[offset] == '{')
+        {
+            if (depth < BUSTER_ARRAY_LENGTH(stack))
+            {
+                stack[depth++] = current;
+                current = machine_test_source_arch_for_brace(source, body, offset, current, last_closed);
+                last_closed = MACHINE_X64_SOURCE_ARCH_UNKNOWN;
+            }
+        }
+        else if (source.bytes[offset] == '}' && depth)
+        {
+            last_closed = current;
+            current = stack[--depth];
+        }
+    }
+    if (current != MACHINE_X64_SOURCE_ARCH_UNKNOWN) return current;
+
+    // A ternary architecture guard (the code-buffer alignment path is the
+    // important example) has no enclosing brace.  Restrict the look-back to
+    // the current statement so a previous branch cannot classify a .byte/data
+    // write as an instruction.
+    u64 statement_start = writer_offset;
+    while (statement_start > body.start)
+    {
+        u8 byte = source.bytes[statement_start - 1];
+        if (byte == ';' || byte == '{' || byte == '}') break;
+        statement_start -= 1;
+    }
+    u64 question = UINT64_MAX;
+    u64 colon = UINT64_MAX;
+    for (u64 offset = statement_start; offset < writer_offset; offset += 1)
+    {
+        if (source.bytes[offset] == '?') question = offset;
+    }
+    if (question != UINT64_MAX)
+    {
+        for (u64 offset = question + 1; offset < body.end; offset += 1)
+        {
+            if (source.bytes[offset] == ':')
+            {
+                colon = offset;
+                break;
+            }
+        }
+        MachineX64SourceArch condition_arch = machine_test_source_arch_markers(source, statement_start, question);
+        if (condition_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN)
+        {
+            if (writer_offset < colon) return condition_arch;
+            if (colon != UINT64_MAX && writer_offset > colon) return machine_test_source_arch_inverse(condition_arch);
+        }
+    }
+    MachineX64SourceArch marker_arch = machine_test_source_arch_markers(source, statement_start, writer_offset);
+    if (marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN) return marker_arch;
+    return default_arch;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_test_source_scan_writers(MachineX64SourceSpan source, MachineX64SourceSpan body,
+                                                            MachineX64SourceArch default_arch, String8 const* writers, u32 writer_count,
+                                                            bool* has_x86, bool* has_aarch64, bool* has_unknown)
+{
+    for (u32 writer_index = 0; writer_index < writer_count; writer_index += 1)
+    {
+        String8 writer = writers[writer_index];
+        for (u64 offset = body.start; offset + writer.length <= body.end; offset += 1)
+        {
+            if (!machine_test_source_token_at(source, offset, writer)) continue;
+            MachineX64SourceArch arch = machine_test_source_arch_for_writer(source, body, offset, default_arch);
+            if (arch == MACHINE_X64_SOURCE_ARCH_X86)
+            {
+                if (has_x86) *has_x86 = true;
+            }
+            else if (arch == MACHINE_X64_SOURCE_ARCH_AARCH64)
+            {
+                if (has_aarch64) *has_aarch64 = true;
+            }
+            else if (has_unknown)
+            {
+                *has_unknown = true;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audit(Arena* arena)
+{
+    MachineX64SourceAudit audit = {.files_readable = true, .owners_found = true};
+    typedef struct MachineX64SourceFile MachineX64SourceFile;
+    struct MachineX64SourceFile
+    {
+        String8 path;
+        MachineX64SourceArch default_arch;
+    };
+    typedef struct MachineX64ConsumerSite MachineX64ConsumerSite;
+    struct MachineX64ConsumerSite
+    {
+        String8 source_file;
+        String8 owner_symbol;
+    };
+    typedef struct MachineX64NeutralSite MachineX64NeutralSite;
+    struct MachineX64NeutralSite
+    {
+        String8 source_file;
+        String8 owner_symbol;
+    };
+#define MACHINE_TEST_CONSUMER_SITE_ROW(source_file_value, owner_symbol_value) \
+    {S8_INITIALIZER(source_file_value), S8_INITIALIZER(owner_symbol_value)},
+    static MachineX64ConsumerSite const consumers[] = {
+        MACHINE_X86_64_METADATA_CONSUMER_SITES(MACHINE_TEST_CONSUMER_SITE_ROW)
+    };
+#undef MACHINE_TEST_CONSUMER_SITE_ROW
+#define MACHINE_TEST_NEUTRAL_SITE_ROW(class_value, source_file_value, owner_symbol_value) \
+    {S8_INITIALIZER(source_file_value), S8_INITIALIZER(owner_symbol_value)},
+    static MachineX64NeutralSite const neutral_sites[] = {
+        MACHINE_X86_64_NEUTRAL_PATCH_SITES(MACHINE_TEST_NEUTRAL_SITE_ROW)
+    };
+#undef MACHINE_TEST_NEUTRAL_SITE_ROW
+    static MachineX64SourceFile const files[] = {
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
+        {S8_INITIALIZER("src/buster/lib/x86_64.c"), MACHINE_X64_SOURCE_ARCH_X86},
+        {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
+    };
+    static String8 const codegen_writers[] = {
+        S8_INITIALIZER("codegen_emit_u8"),
+        S8_INITIALIZER("codegen_emit_u32"),
+        S8_INITIALIZER("codegen_emit_u64"),
+    };
+    static String8 const assembly_writers[] = {
+        S8_INITIALIZER("assembly_emit_byte"),
+        S8_INITIALIZER("assembly_emit_immediate"),
+    };
+    u8 neutral_site_seen[BUSTER_ARRAY_LENGTH(neutral_sites)] = {0};
+    for (u32 file_index = 0; file_index < BUSTER_ARRAY_LENGTH(files); file_index += 1)
+    {
+        MachineX64SourceFile file = files[file_index];
+        ByteSlice input = file_read(arena, file.path, (FileReadOptions){0});
+        if (!input.pointer || !input.length)
+        {
+            audit.files_readable = false;
+            continue;
+        }
+        u8* sanitized = machine_test_source_sanitize(arena, input);
+        MachineX64SourceSpan source = {.bytes = sanitized, .length = input.length, .start = 0, .end = input.length};
+
+        // Neutral patch owners are audited independently of metadata
+        // consumers.  A patch helper may legitimately write bytes, but the
+        // owner must be named in the registry so a new writer cannot be
+        // smuggled in as an unreviewed exception.
+        for (u32 neutral_index = 0; neutral_index < BUSTER_ARRAY_LENGTH(neutral_sites); neutral_index += 1)
+        {
+            MachineX64NeutralSite site = neutral_sites[neutral_index];
+            if (neutral_site_seen[neutral_index] || !string_equal(site.source_file, file.path)) continue;
+            MachineX64SourceSpan body = {0};
+            if (!machine_test_source_function_body(source, site.owner_symbol, &body))
+            {
+                audit.owners_found = false;
+                continue;
+            }
+            neutral_site_seen[neutral_index] = 1;
+            audit.neutral_patch_count += 1;
+        }
+
+        // First audit the explicitly named metadata consumers.  They are
+        // stable migration anchors; byte writes in a consumer are judged by
+        // the active architecture guard, not by a source line allowlist.
+        for (u32 site_index = 0; site_index < BUSTER_ARRAY_LENGTH(consumers); site_index += 1)
+        {
+            MachineX64ConsumerSite site = consumers[site_index];
+            if (!string_equal(site.source_file, file.path)) continue;
+            MachineX64SourceSpan body = {0};
+            if (!machine_test_source_function_body(source, site.owner_symbol, &body))
+            {
+                audit.owners_found = false;
+                continue;
+            }
+            audit.owner_count += 1;
+            bool has_x86 = false;
+            bool has_aarch64 = false;
+            bool has_unknown = false;
+            bool assembly_file = string_equal(file.path, S8("src/buster/lib/compiler/assembly/assembly.c"));
+            String8 const* writers = assembly_file ? assembly_writers : codegen_writers;
+            u32 writer_count = assembly_file ? BUSTER_ARRAY_LENGTH(assembly_writers) : BUSTER_ARRAY_LENGTH(codegen_writers);
+            machine_test_source_scan_writers(source, body, file.default_arch, writers, writer_count, &has_x86, &has_aarch64, &has_unknown);
+            if (assembly_file)
+            {
+                // The AArch64 fixed-word/semantic branches use assembly_emit_u32
+                // and never call an assembly_x86_emit_* helper.  A call to an
+                // x86 helper is therefore the architecture-independent marker
+                // for a handwritten x86 constructor in the mixed emitter.
+                bool has_handwritten_x86 = string_equal(site.owner_symbol, S8("assembly_instructions_emit")) &&
+                                           machine_test_source_span_contains_sequence(body, S8("assembly_x86_emit_"));
+                if (has_handwritten_x86 || has_unknown)
+                {
+                    audit.forbidden_count += 1;
+                    audit.forbidden_constructor_count += 1;
+                }
+            }
+            else if (string_equal(file.path, S8("src/buster/lib/compiler/codegen/codegen.c")))
+            {
+                bool has_data_directive = has_unknown && machine_test_source_span_contains_sequence(body, S8(".byte"));
+                if (has_x86)
+                {
+                    // `.byte` is data, while a target-guarded 0x90 alignment
+                    // byte is an x86 instruction and remains forbidden until
+                    // it is routed through metadata.
+                    audit.forbidden_count += 1;
+                    audit.forbidden_constructor_count += 1;
+                }
+                else if (has_unknown && !has_data_directive)
+                {
+                    // An unguarded byte writer in a mixed codegen owner is
+                    // not safely attributable to AArch64.  Treat unknown as
+                    // a handwritten x86 producer until an architecture guard
+                    // (or a recognized .byte data parser) makes its intent
+                    // explicit.
+                    audit.forbidden_count += 1;
+                    audit.forbidden_constructor_count += 1;
+                }
+                if (has_aarch64) audit.aarch64_write_count += 1;
+                if (has_data_directive) audit.data_directive_count += 1;
+            }
+        }
+
+        // Discover x86-named helper definitions instead of keeping a brittle
+        // line-number or hand-maintained helper allowlist.  x64 helpers are
+        // x86 by default; a nested AArch64 guard is handled by the brace
+        // tracker above.  The assembly metadata adapter is a consumer and has
+        // no assembly_emit_byte call, so it naturally remains clean.
+        String8 prefixes[2] = {0};
+        MachineX64SourceArch prefix_arch[2] = {0};
+        u32 prefix_count = 0;
+        if (string_equal(file.path, S8("src/buster/lib/compiler/codegen/codegen.c")))
+        {
+            prefixes[prefix_count] = S8("codegen_canonical_x64_");
+            prefix_arch[prefix_count++] = MACHINE_X64_SOURCE_ARCH_X86;
+            prefixes[prefix_count] = S8("x64_emit_");
+            prefix_arch[prefix_count++] = MACHINE_X64_SOURCE_ARCH_X86;
+        }
+        else if (string_equal(file.path, S8("src/buster/lib/compiler/assembly/assembly.c")))
+        {
+            prefixes[prefix_count] = S8("assembly_x86_");
+            prefix_arch[prefix_count++] = MACHINE_X64_SOURCE_ARCH_X86;
+        }
+        for (u32 prefix_index = 0; prefix_index < prefix_count; prefix_index += 1)
+        {
+            String8 prefix = prefixes[prefix_index];
+            for (u64 offset = source.start; offset + prefix.length <= source.end; offset += 1)
+            {
+                if (memcmp(source.bytes + offset, prefix.pointer, prefix.length) != 0 ||
+                    (offset && machine_test_source_identifier_continue(source.bytes[offset - 1])))
+                    continue;
+                u64 end = offset + prefix.length;
+                while (end < source.end && machine_test_source_identifier_continue(source.bytes[end])) end += 1;
+                String8 owner = {.pointer = (char8*)(source.bytes + offset), .length = end - offset};
+                MachineX64SourceSpan body = {0};
+                if (!machine_test_source_function_body_from(source, owner, offset, &body)) continue;
+                audit.owner_count += 1;
+                bool has_x86 = false;
+                bool has_aarch64 = false;
+                bool has_unknown = false;
+                if (prefix_arch[prefix_index] == MACHINE_X64_SOURCE_ARCH_X86)
+                {
+                    machine_test_source_scan_writers(source, body, prefix_arch[prefix_index],
+                                                      string_equal(file.path, S8("src/buster/lib/compiler/assembly/assembly.c"))
+                                                          ? assembly_writers
+                                                          : codegen_writers,
+                                                      string_equal(file.path, S8("src/buster/lib/compiler/assembly/assembly.c"))
+                                                          ? BUSTER_ARRAY_LENGTH(assembly_writers)
+                                                          : BUSTER_ARRAY_LENGTH(codegen_writers),
+                                                      &has_x86, &has_aarch64, &has_unknown);
+                }
+                if (has_x86 || has_unknown)
+                {
+                    audit.forbidden_count += 1;
+                    audit.forbidden_constructor_count += 1;
+                }
+                if (has_aarch64) audit.aarch64_write_count += 1;
+                offset = end - 1;
+            }
+        }
+    }
+    return audit;
 }
 
 // Every caller sits inside the executing-differential sections below, so
@@ -717,43 +1258,69 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 166);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
-    // The MIR census is only one raw-producer owner.  Pin the source-audited
-    // subsystem anchors separately so a new producer site has to be named,
-    // classified, and counted here instead of hiding behind a byte-literal
-    // search.
-    u32 producer_site_count = machine_x86_64_raw_producer_site_count();
-    BUSTER_TEST(arguments, producer_site_count == MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT);
-    u32 producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_COUNT] = {0};
-    bool producer_sites_are_well_formed = true;
-    bool producer_sites_are_unique = true;
-    for (u32 site_index = 0; site_index < producer_site_count; site_index += 1)
+    // Canonical metadata authorities and neutral patch helpers are separate
+    // records.  The source audit below validates their shape and ownership;
+    // the strict zero-manual-producer assertion is enabled once the remaining
+    // codegen/assembly migration lands.
+    u32 authority_count = machine_x86_64_canonical_authority_site_count();
+    u32 patch_count = machine_x86_64_neutral_patch_site_count();
+    BUSTER_TEST(arguments, authority_count == MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT);
+    BUSTER_TEST(arguments, patch_count == MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT);
+    u32 authority_kind_counts[MACHINE_X64_CANONICAL_AUTHORITY_KIND_COUNT] = {0};
+    u32 patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_CLASS_COUNT] = {0};
+    bool authority_records_are_well_formed = true;
+    bool authority_records_are_unique = true;
+    bool patch_records_are_well_formed = true;
+    bool patch_records_are_unique = true;
+    for (u32 site_index = 0; site_index < authority_count; site_index += 1)
     {
-        MachineX64RawProducerSite const* site = machine_x86_64_raw_producer_site(site_index);
-        bool site_is_well_formed = site && site->producer_class < MACHINE_X64_RAW_PRODUCER_CLASS_COUNT && site->source_file.length != 0 &&
+        MachineX64CanonicalAuthoritySite const* site = machine_x86_64_canonical_authority_site(site_index);
+        bool site_is_well_formed = site && site->authority_kind < MACHINE_X64_CANONICAL_AUTHORITY_KIND_COUNT && site->source_file.length != 0 &&
                                    site->owner_symbol.length != 0 && string_ends_with_sequence(site->source_file, S8(".c"));
-        producer_sites_are_well_formed &= site_is_well_formed;
+        authority_records_are_well_formed &= site_is_well_formed;
         if (site_is_well_formed)
         {
-            producer_class_counts[site->producer_class] += 1;
+            authority_kind_counts[site->authority_kind] += 1;
             for (u32 previous_index = 0; previous_index < site_index; previous_index += 1)
             {
-                MachineX64RawProducerSite const* previous = machine_x86_64_raw_producer_site(previous_index);
-                producer_sites_are_unique &= !previous || !string_equal(site->source_file, previous->source_file) ||
-                                             !string_equal(site->owner_symbol, previous->owner_symbol);
+                MachineX64CanonicalAuthoritySite const* previous = machine_x86_64_canonical_authority_site(previous_index);
+                authority_records_are_unique &= !previous || !string_equal(site->source_file, previous->source_file) ||
+                                               !string_equal(site->owner_symbol, previous->owner_symbol);
             }
         }
     }
-    BUSTER_TEST(arguments, producer_sites_are_well_formed);
-    BUSTER_TEST(arguments, producer_sites_are_unique);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_CANONICAL_DIRECT] == 1);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_LEGACY_DIRECT] == 2);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_MIR] == 1);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_HANDWRITTEN_ASSEMBLER] == 2);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_METADATA_EXACT] == 2);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_TEST_HELPER] == 1);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_GLOBAL_ASM_MINI] == 1);
-    BUSTER_TEST(arguments, producer_class_counts[MACHINE_X64_RAW_PRODUCER_CLASS_FIXED_TEMPLATE] == 2);
-    BUSTER_TEST(arguments, machine_x86_64_raw_producer_site(producer_site_count) == 0);
+    for (u32 site_index = 0; site_index < patch_count; site_index += 1)
+    {
+        MachineX64NeutralPatchSite const* site = machine_x86_64_neutral_patch_site(site_index);
+        bool site_is_well_formed = site && site->patch_class < MACHINE_X64_NEUTRAL_PATCH_CLASS_COUNT && site->source_file.length != 0 &&
+                                   site->owner_symbol.length != 0 && string_ends_with_sequence(site->source_file, S8(".c"));
+        patch_records_are_well_formed &= site_is_well_formed;
+        if (site_is_well_formed)
+        {
+            patch_class_counts[site->patch_class] += 1;
+            for (u32 previous_index = 0; previous_index < site_index; previous_index += 1)
+            {
+                MachineX64NeutralPatchSite const* previous = machine_x86_64_neutral_patch_site(previous_index);
+                patch_records_are_unique &= !previous || !string_equal(site->source_file, previous->source_file) ||
+                                            !string_equal(site->owner_symbol, previous->owner_symbol);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, authority_records_are_well_formed && authority_records_are_unique);
+    BUSTER_TEST(arguments, patch_records_are_well_formed && patch_records_are_unique);
+    BUSTER_TEST(arguments, authority_kind_counts[MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED] != 0);
+    BUSTER_TEST(arguments, authority_kind_counts[MACHINE_X64_CANONICAL_AUTHORITY_METADATA_EXACT] != 0);
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_RELOCATION] != 0);
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT] != 0);
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DATA] != 0);
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD] != 0);
+    MachineX64SourceAudit source_audit = machine_test_x86_source_authority_audit(arguments->arena);
+    BUSTER_TEST(arguments, source_audit.files_readable && source_audit.owners_found);
+    BUSTER_TEST(arguments, source_audit.neutral_patch_count == patch_count);
+    // The source audit is the final authority gate: every handwritten x86
+    // constructor must route through metadata, while AArch64 words, .byte
+    // data, and registered neutral patches remain explicitly classified.
+    BUSTER_TEST(arguments, source_audit.forbidden_count == 0);
 
     u32 a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
     for (u16 opcode = MACHINE_A64_MOV_RI; opcode <= MACHINE_A64_LEA_SYMBOL; opcode += 1)
@@ -2112,13 +2679,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 {
                     s64 none_value = none_call(left, right);
                     s64 machine_value = machine_call(left, right);
-                    if ((string_equal(supported_names[name_index], S8("ucvt")) || string_equal(supported_names[name_index], S8("fmath")) ||
-                         string_equal(supported_names[name_index], S8("f32math")) || string_equal(supported_names[name_index], S8("fcompare")) ||
-                         string_equal(supported_names[name_index], S8("fuconv"))) && (s32)none_value != (s32)machine_value)
-                    {
-                        string_print(S8("FLOATDIFF {S8} left={s64} right={s64} none={s64} machine={s64}\\n"), supported_names[name_index], left, right,
-                                     none_value, machine_value);
-                    }
                     all_equal &= (s32)none_value == (s32)machine_value;
                 }
             }

@@ -773,17 +773,30 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 #undef MACHINE_X64_REGISTRY_ROW
 };
 
-BUSTER_CT_CHECK(MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT == 12u);
+BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 5u);
+BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
-BUSTER_GLOBAL_LOCAL MachineX64RawProducerSite const machine_x86_64_raw_producer_sites[MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT] = {
-#define MACHINE_X64_RAW_PRODUCER_SITE_ROW(class_value, source_file_value, owner_symbol_value) \
+BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
+    machine_x86_64_canonical_authority_sites[MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT] = {
+#define MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW(kind_value, source_file_value, owner_symbol_value) \
     { \
-        .producer_class = MACHINE_X64_RAW_PRODUCER_CLASS_##class_value, \
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_##kind_value, \
         .source_file = S8_INITIALIZER(source_file_value), \
         .owner_symbol = S8_INITIALIZER(owner_symbol_value), \
     },
-    MACHINE_X86_64_RAW_PRODUCER_SITES(MACHINE_X64_RAW_PRODUCER_SITE_ROW)
-#undef MACHINE_X64_RAW_PRODUCER_SITE_ROW
+    MACHINE_X86_64_CANONICAL_AUTHORITY_SITES(MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW)
+#undef MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64NeutralPatchSite const machine_x86_64_neutral_patch_sites[MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT] = {
+#define MACHINE_X64_NEUTRAL_PATCH_SITE_ROW(class_value, source_file_value, owner_symbol_value) \
+    { \
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_##class_value, \
+        .source_file = S8_INITIALIZER(source_file_value), \
+        .owner_symbol = S8_INITIALIZER(owner_symbol_value), \
+    },
+    MACHINE_X86_64_NEUTRAL_PATCH_SITES(MACHINE_X64_NEUTRAL_PATCH_SITE_ROW)
+#undef MACHINE_X64_NEUTRAL_PATCH_SITE_ROW
 };
 
 BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHINE_OPCODE_COUNT] = {
@@ -909,14 +922,24 @@ BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_fi
     return entry->opcode == opcode ? entry : 0;
 }
 
-BUSTER_F_DECL u32 machine_x86_64_raw_producer_site_count(void)
+BUSTER_F_DECL u32 machine_x86_64_canonical_authority_site_count(void)
 {
-    return MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT;
+    return MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT;
 }
 
-BUSTER_F_DECL MachineX64RawProducerSite const* machine_x86_64_raw_producer_site(u32 ordinal)
+BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_authority_site(u32 ordinal)
 {
-    return ordinal < MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT ? machine_x86_64_raw_producer_sites + ordinal : 0;
+    return ordinal < MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT ? machine_x86_64_canonical_authority_sites + ordinal : 0;
+}
+
+BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void)
+{
+    return MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT;
+}
+
+BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal)
+{
+    return ordinal < MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT ? machine_x86_64_neutral_patch_sites + ordinal : 0;
 }
 
 BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info)

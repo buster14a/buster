@@ -540,9 +540,10 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
-// Phase-0 x86-64 producer census.  The registry is a contiguous projection
-// of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; keep these counts stable while
-// migration work moves encoders behind the recipe namespace.
+// x86-64 encoder authority registry.  The opcode rows are a contiguous
+// projection of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; the authority and
+// neutral-patch records below keep every remaining producer explicit while
+// migration work moves instruction construction behind metadata.
 #define MACHINE_X86_64_EMIT_REGISTRY_COUNT 122u
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
 #define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 49u
@@ -552,7 +553,8 @@ typedef enum MachineOpcode
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 26u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
-#define MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT 12u
+#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 5u
+#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
 
 typedef enum MachineX64EmitProducerStatus
 {
@@ -563,23 +565,35 @@ typedef enum MachineX64EmitProducerStatus
     MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT,
 } MachineX64EmitProducerStatus;
 
-typedef enum MachineX64RawProducerClass
+typedef enum MachineX64CanonicalAuthorityKind
 {
-    MACHINE_X64_RAW_PRODUCER_CLASS_CANONICAL_DIRECT,
-    MACHINE_X64_RAW_PRODUCER_CLASS_LEGACY_DIRECT,
-    MACHINE_X64_RAW_PRODUCER_CLASS_MIR,
-    MACHINE_X64_RAW_PRODUCER_CLASS_HANDWRITTEN_ASSEMBLER,
-    MACHINE_X64_RAW_PRODUCER_CLASS_METADATA_EXACT,
-    MACHINE_X64_RAW_PRODUCER_CLASS_TEST_HELPER,
-    MACHINE_X64_RAW_PRODUCER_CLASS_GLOBAL_ASM_MINI,
-    MACHINE_X64_RAW_PRODUCER_CLASS_FIXED_TEMPLATE,
-    MACHINE_X64_RAW_PRODUCER_CLASS_COUNT,
-} MachineX64RawProducerClass;
+    MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+    MACHINE_X64_CANONICAL_AUTHORITY_METADATA_EXACT,
+    MACHINE_X64_CANONICAL_AUTHORITY_METADATA_SEQUENCE,
+    MACHINE_X64_CANONICAL_AUTHORITY_KIND_COUNT,
+} MachineX64CanonicalAuthorityKind;
 
-typedef struct MachineX64RawProducerSite MachineX64RawProducerSite;
-struct MachineX64RawProducerSite
+typedef struct MachineX64CanonicalAuthoritySite MachineX64CanonicalAuthoritySite;
+struct MachineX64CanonicalAuthoritySite
 {
-    MachineX64RawProducerClass producer_class;
+    MachineX64CanonicalAuthorityKind authority_kind;
+    String8 source_file;
+    String8 owner_symbol;
+};
+
+typedef enum MachineX64NeutralPatchClass
+{
+    MACHINE_X64_NEUTRAL_PATCH_RELOCATION,
+    MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+    MACHINE_X64_NEUTRAL_PATCH_DATA,
+    MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD,
+    MACHINE_X64_NEUTRAL_PATCH_CLASS_COUNT,
+} MachineX64NeutralPatchClass;
+
+typedef struct MachineX64NeutralPatchSite MachineX64NeutralPatchSite;
+struct MachineX64NeutralPatchSite
+{
+    MachineX64NeutralPatchClass patch_class;
     String8 source_file;
     String8 owner_symbol;
 };
@@ -1277,8 +1291,10 @@ BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode);
 BUSTER_F_DECL u32 machine_x86_64_emit_registry_count(void);
 BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordinal);
 BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode);
-BUSTER_F_DECL u32 machine_x86_64_raw_producer_site_count(void);
-BUSTER_F_DECL MachineX64RawProducerSite const* machine_x86_64_raw_producer_site(u32 ordinal);
+BUSTER_F_DECL u32 machine_x86_64_canonical_authority_site_count(void);
+BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_authority_site(u32 ordinal);
+BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
+BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info);
