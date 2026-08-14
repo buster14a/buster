@@ -56,6 +56,58 @@ struct AssemblyA64DirectSIMDEncodingCase
     u8 bytes[4];
 };
 
+typedef struct AssemblyA64DirectSIMDSpellingExpectation AssemblyA64DirectSIMDSpellingExpectation;
+struct AssemblyA64DirectSIMDSpellingExpectation
+{
+    String8 semantic_id;
+    u64 source_digest;
+    u8 operand_count;
+    u8 arrangements[4];
+};
+
+/* SHA-1 AdvSIMD spellings are selected by the generated rows' HasSHA2
+ * predicate in LLVM's AArch64 decoder.  These bytes come independently from
+ * llvm-mc 22.1.8; the direct table deliberately reuses the existing SHA2
+ * requirement mask rather than introducing a SHA1-only target feature. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_sha1_cases[] = {
+    {S8_INITIALIZER("sha1c q0, s1, v2.4s\n"), {0x20, 0x00, 0x02, 0x5e}},
+    {S8_INITIALIZER("sha1h s0, s1\n"), {0x20, 0x08, 0x28, 0x5e}},
+    {S8_INITIALIZER("sha1m q0, s1, v2.4s\n"), {0x20, 0x20, 0x02, 0x5e}},
+    {S8_INITIALIZER("sha1p q0, s1, v2.4s\n"), {0x20, 0x10, 0x02, 0x5e}},
+    {S8_INITIALIZER("sha1su0 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x30, 0x02, 0x5e}},
+    {S8_INITIALIZER("sha1su1 v0.4s, v1.4s\n"), {0x20, 0x18, 0x28, 0x5e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_sha1_boundary_cases[] = {
+    {S8_INITIALIZER("SHA1C Q31, S30, V29.4S\n"), {0xdf, 0x03, 0x1d, 0x5e}},
+    {S8_INITIALIZER("SHA1H S31, S30\n"), {0xdf, 0x0b, 0x28, 0x5e}},
+    {S8_INITIALIZER("SHA1M Q31, S30, V29.4S\n"), {0xdf, 0x23, 0x1d, 0x5e}},
+    {S8_INITIALIZER("SHA1P Q31, S30, V29.4S\n"), {0xdf, 0x13, 0x1d, 0x5e}},
+    {S8_INITIALIZER("SHA1SU0 V31.4S, V30.4S, V29.4S\n"), {0xdf, 0x33, 0x1d, 0x5e}},
+    {S8_INITIALIZER("SHA1SU1 V31.4S, V30.4S\n"), {0xdf, 0x1b, 0x28, 0x5e}},
+};
+
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_sha1_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1C_QSV_cryptosha3"), UINT64_C(0xc8bf61c1fbc4c68b), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1H_SS_cryptosha2"), UINT64_C(0x527117bcf01c589e), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1M_QSV_cryptosha3"), UINT64_C(0xfe21fb23ee0af9be), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1P_QSV_cryptosha3"), UINT64_C(0x6df8cac602cb80f6), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1SU0_VVV_cryptosha3"), UINT64_C(0xe03e17b03ab0e566), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SHA1SU1_VV_cryptosha2"), UINT64_C(0x91788958671acea8), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cases[] = {
     {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
     {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
@@ -1470,13 +1522,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 333);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 333);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 57);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 339);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 339);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 51);
     BUSTER_TEST(arguments, direct_simd_covered_transform_count == 214);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 119);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
     BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 49);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 8);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
@@ -1487,6 +1539,41 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                     direct_simd_spelling_count, direct_simd_covered_count, direct_simd_uncovered_count,
                     direct_simd_covered_transform_count, direct_simd_covered_no_transform_count,
                     direct_simd_uncovered_transform_count, direct_simd_uncovered_no_transform_count);
+
+    /* Keep the six SHA-1 fixed rows tied to their canonical IDs and source
+     * digests.  Their table entries are intentionally contiguous so a future
+     * edit cannot silently drop or reorder one of this cohesive cohort. */
+    u32 sha1_first_spelling_index = UINT32_MAX;
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_sha1_spellings[expected_index];
+        u32 found_count = 0;
+        u32 found_index = UINT32_MAX;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                found_index = spelling_index;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_SHA2 &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+        if (expected_index == 0)
+        {
+            sha1_first_spelling_index = found_index;
+        }
+        else
+        {
+            BUSTER_TEST(arguments, found_index == sha1_first_spelling_index + expected_index);
+        }
+    }
 
     Target x86_target = {
         .cpu_arch = CPU_ARCH_X86_64,
@@ -4356,6 +4443,69 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = aarch64_sha2_target});
         BUSTER_TEST(arguments, invalid_sha256h_case.diagnostic_count == 1 && invalid_sha256h_case.bytes.length == 0 &&
                                    invalid_sha256h_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    /* SHA-1 AdvSIMD rows use the same HasSHA2 requirement as LLVM's canonical
+     * decoder.  Exercise the exact minimal target independently of the M1
+     * aggregate target used by the neighboring SHA2/SHA3 regressions. */
+    Target aarch64_sha1_target = aarch64_sha2_target;
+    aarch64_sha1_target.cpu_model = CPU_MODEL_BASELINE;
+    aarch64_sha1_target.cpu_features_explicit = true;
+    aarch64_sha1_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_NEON,
+                                   TARGET_CPU_FEATURE_AARCH64_SHA2},
+        3);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_sha1_target) &&
+                               target_cpu_feature_has(aarch64_sha1_target, TARGET_CPU_FEATURE_AARCH64_SHA2));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_cases) == 6 &&
+                               BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_boundary_cases) == 6);
+    for (u32 sha1_index = 0; sha1_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_cases); sha1_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase sha1_case = assembly_a64_direct_simd_sha1_cases[sha1_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, sha1_case.source, (AssemblyEncodeOptions){.target = aarch64_sha1_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, sha1_case.bytes, 4));
+    }
+    for (u32 sha1_index = 0; sha1_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_boundary_cases); sha1_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase sha1_case = assembly_a64_direct_simd_sha1_boundary_cases[sha1_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, sha1_case.source, (AssemblyEncodeOptions){.target = aarch64_sha1_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, sha1_case.bytes, 4));
+    }
+    Target aarch64_sha1_without_sha2 = aarch64_sha1_target;
+    aarch64_sha1_without_sha2.cpu_features =
+        target_cpu_features_remove(aarch64_sha1_without_sha2.cpu_features, TARGET_CPU_FEATURE_AARCH64_SHA2);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_sha1_without_sha2));
+    for (u32 sha1_index = 0; sha1_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_sha1_cases); sha1_index += 1)
+    {
+        AssemblyEncodeResult without_feature = assembly_encode(
+            arguments->arena, assembly_a64_direct_simd_sha1_cases[sha1_index].source,
+            (AssemblyEncodeOptions){.target = aarch64_sha1_without_sha2});
+        BUSTER_TEST(arguments, without_feature.diagnostic_count == 1 && without_feature.bytes.length == 0 &&
+                                   without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    static String8 const invalid_aarch64_sha1[] = {
+        S8_INITIALIZER("sha1c v0.4s, s1, v2.4s\n"),
+        S8_INITIALIZER("sha1h d0, s1\n"),
+        S8_INITIALIZER("sha1su0 q0, q1, q2\n"),
+        S8_INITIALIZER("sha1c q0, d1, v2.4s\n"),
+        S8_INITIALIZER("sha1c q0, s1, v2.2d\n"),
+        S8_INITIALIZER("sha1su1 v0.2d, v1.2d\n"),
+        S8_INITIALIZER("sha1c q0, s1\n"),
+        S8_INITIALIZER("sha1h s0\n"),
+        S8_INITIALIZER("sha1su0 v0.4s, v1.4s\n"),
+        S8_INITIALIZER("sha1su1 v0.4s, v1.4s, v2.4s\n"),
+        S8_INITIALIZER("sha1c q32, s1, v2.4s\n"),
+        S8_INITIALIZER("sha1h s0, s32\n"),
+        S8_INITIALIZER("sha1su0 v0.4s, v1.4s, v32.4s\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_sha1); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_sha1_case = assembly_encode(
+            arguments->arena, invalid_aarch64_sha1[invalid_index], (AssemblyEncodeOptions){.target = aarch64_sha1_target});
+        BUSTER_TEST(arguments, invalid_sha1_case.diagnostic_count == 1 && invalid_sha1_case.bytes.length == 0 &&
+                                   invalid_sha1_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     Target aarch64_advsimd_target = aarch64_m1_explicit_target;
