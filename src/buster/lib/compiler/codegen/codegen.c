@@ -3682,21 +3682,49 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
         {
             if (string_equal(instruction, S8("ret")) || string_equal(instruction, S8("retq")))
             {
-                codegen_emit_u8(buffer, 0xc3);
+                if (!codegen_canonical_x64_metadata_emit(buffer, S8("RET"), 0, 0))
+                {
+                    return false;
+                }
             }
             else if (string_equal(instruction, S8("nop")))
             {
-                codegen_emit_u8(buffer, 0x90);
+                if (!codegen_canonical_x64_metadata_emit(buffer, S8("NOP"), 0, 0))
+                {
+                    return false;
+                }
             }
             else if (string_equal(instruction, S8("ud2")))
             {
-                codegen_emit_u8(buffer, 0x0f);
-                codegen_emit_u8(buffer, 0x0b);
+                if (!codegen_canonical_x64_metadata_emit(buffer, S8("UD2"), 0, 0))
+                {
+                    return false;
+                }
             }
             else if (string_equal(instruction, S8("pause")))
             {
-                codegen_emit_u8(buffer, 0xf3);
-                codegen_emit_u8(buffer, 0x90);
+                AssemblyEncodeResult encoded = assembly_encode(arena, instruction,
+                                                                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+                if (encoded.diagnostic_count || encoded.relocation_count)
+                {
+                    return false;
+                }
+                for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
+                {
+                    if (!encoded.symbols[symbol_index].defined)
+                    {
+                        return false;
+                    }
+                }
+                u8* encoded_bytes = 0;
+                if (!codegen_buffer_reserve(buffer, encoded.bytes.length, &encoded_bytes))
+                {
+                    return false;
+                }
+                if (encoded.bytes.length)
+                {
+                    memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
+                }
             }
             else
             {
@@ -3725,8 +3753,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
                     {
                         return false;
                     }
-                    codegen_emit_u8(buffer, 0xb8);
-                    codegen_emit_u32(buffer, (u32)immediate);
+                    BusterX86MetadataPhysicalOperand operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                        codegen_canonical_x64_metadata_unsigned_immediate(immediate, 32),
+                    };
+                    if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands)))
+                    {
+                        return false;
+                    }
                     emitted = true;
                     break;
                 }
@@ -10485,27 +10519,45 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                               (u32)input_type->layout.size);
                             }
                         }
-                        if (cpuid || xgetbv || undefined)
+                        if (cpuid || undefined || nop || interrupt)
                         {
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, cpuid ? 0xa2 : xgetbv ? 0x01 : 0x0b);
-                            if (xgetbv)
+                            String8 mnemonic = cpuid ? S8("CPUID") : undefined ? S8("UD2") : nop ? S8("NOP") : S8("INT3");
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, mnemonic, 0, 0))
                             {
-                                codegen_emit_u8(&buffer, 0xd0);
+                                result.error = buffer.error;
+                                return result;
                             }
                         }
-                        else if (nop)
+                        else if (xgetbv || pause)
                         {
-                            codegen_emit_u8(&buffer, 0x90);
-                        }
-                        else if (pause)
-                        {
-                            codegen_emit_u8(&buffer, 0xf3);
-                            codegen_emit_u8(&buffer, 0x90);
-                        }
-                        else if (interrupt)
-                        {
-                            codegen_emit_u8(&buffer, 0xcc);
+                            AssemblyEncodeResult encoded = assembly_encode(arena, asm_extra.literal,
+                                                                            (AssemblyEncodeOptions){
+                                                                                .target = target,
+                                                                                .syntax = codegen_inline_assembly_syntax(options),
+                                                                            });
+                            if (encoded.diagnostic_count || encoded.relocation_count)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
+                            {
+                                if (!encoded.symbols[symbol_index].defined)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                            }
+                            u8* encoded_bytes = 0;
+                            if (!codegen_buffer_reserve(&buffer, encoded.bytes.length, &encoded_bytes))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            if (encoded.bytes.length)
+                            {
+                                memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
+                            }
                         }
                         else if (ordinary)
                         {
@@ -10596,21 +10648,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         C_X64_RESTORE_RBX();
                         if (jump_label)
                         {
-                            codegen_emit_u8(&buffer, 0xe9);
+                            BusterX86MetadataPhysicalOperand jump_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            u32 jump_offset = (u32)buffer.count;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &jump_operand, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[jump_target_index],
-                                .offset = (u32)buffer.count,
+                                .offset = jump_offset + 1,
                             });
-                            codegen_emit_u32(&buffer, 0);
                         }
                         else if (instruction->target_count)
                         {
-                            codegen_emit_u8(&buffer, 0xe9);
+                            BusterX86MetadataPhysicalOperand jump_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            u32 jump_offset = (u32)buffer.count;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &jump_operand, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[0],
-                                .offset = (u32)buffer.count,
+                                .offset = jump_offset + 1,
                             });
-                            codegen_emit_u32(&buffer, 0);
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
