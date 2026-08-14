@@ -223,6 +223,15 @@ static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_r
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
 };
 
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_rdm_scalar_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:SQRDMLAH_asisdsame2_only"), UINT64_C(0x26cc7e6837d3c6f), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SQRDMLSH_asisdsame2_only"), UINT64_C(0x8f3f8e995448cec5), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_cases[] = {
     {S8_INITIALIZER("sqrdmlah v0.4h, v1.4h, v2.4h\n"), {0x20, 0x84, 0x42, 0x2e}},
     {S8_INITIALIZER("sqrdmlah v0.8h, v1.8h, v2.8h\n"), {0x20, 0x84, 0x42, 0x6e}},
@@ -243,6 +252,20 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_boun
     {S8_INITIALIZER("SQRDMLSH V31.8H, V30.8H, V29.8H\n"), {0xdf, 0x8f, 0x5d, 0x6e}},
     {S8_INITIALIZER("SQRDMLSH V31.2S, V30.2S, V29.2S\n"), {0xdf, 0x8f, 0x9d, 0x2e}},
     {S8_INITIALIZER("SQRDMLSH V31.4S, V30.4S, V29.4S\n"), {0xdf, 0x8f, 0x9d, 0x6e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_scalar_cases[] = {
+    {S8_INITIALIZER("sqrdmlah h0, h1, h2\n"), {0x20, 0x84, 0x42, 0x7e}},
+    {S8_INITIALIZER("sqrdmlah s0, s1, s2\n"), {0x20, 0x84, 0x82, 0x7e}},
+    {S8_INITIALIZER("sqrdmlsh h0, h1, h2\n"), {0x20, 0x8c, 0x42, 0x7e}},
+    {S8_INITIALIZER("sqrdmlsh s0, s1, s2\n"), {0x20, 0x8c, 0x82, 0x7e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_rdm_scalar_boundary_cases[] = {
+    {S8_INITIALIZER("SQRDMLAH H31, H30, H29\n"), {0xdf, 0x87, 0x5d, 0x7e}},
+    {S8_INITIALIZER("SQRDMLAH S31, S30, S29\n"), {0xdf, 0x87, 0x9d, 0x7e}},
+    {S8_INITIALIZER("SQRDMLSH H31, H30, H29\n"), {0xdf, 0x8f, 0x5d, 0x7e}},
+    {S8_INITIALIZER("SQRDMLSH S31, S30, S29\n"), {0xdf, 0x8f, 0x9d, 0x7e}},
 };
 
 /* Scalar S/D AdvSIMD rows use the shared arrangement+width-selector grammar.
@@ -1822,12 +1845,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 362);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 362);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 28);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 237);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 364);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 364);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 26);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 239);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 26);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 24);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -1835,7 +1858,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_simd_frintts_requirement_count == 4 && direct_simd_frintts_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_dotprod_requirement_count == 2 && direct_simd_dotprod_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_dotprod_fixed_field_exact);
-    BUSTER_TEST(arguments, direct_simd_rdm_requirement_count == 2 && direct_simd_rdm_requirement_exact);
+    BUSTER_TEST(arguments, direct_simd_rdm_requirement_count == 4 && direct_simd_rdm_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
     arguments->show(arguments,
@@ -1982,8 +2005,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         }
     }
 
-    /* Keep the two RDM transform rows tied to their canonical IDs/digests and
-     * contiguous in the public spelling table. */
+    /* Keep the two vector RDM transform rows tied to their canonical
+     * IDs/digests.  Each vector row is immediately followed by its scalar
+     * same-mnemonic sibling in the public spelling table. */
     u32 rdm_first_spelling_index = UINT32_MAX;
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_spellings);
          expected_index += 1)
@@ -2012,7 +2036,38 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         }
         else
         {
-            BUSTER_TEST(arguments, found_index == rdm_first_spelling_index + expected_index);
+            BUSTER_TEST(arguments, found_index == rdm_first_spelling_index + 2);
+        }
+    }
+
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_rdm_scalar_spellings[expected_index];
+        u32 found_count = 0;
+        u32 found_index = UINT32_MAX;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                found_index = spelling_index;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_RDM &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+        if (expected_index == 0)
+        {
+            BUSTER_TEST(arguments, found_index == rdm_first_spelling_index + 1);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, found_index == rdm_first_spelling_index + 3);
         }
     }
 
@@ -5448,6 +5503,22 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, rdm_case.source, (AssemblyEncodeOptions){.target = aarch64_rdm_target});
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, rdm_case.bytes, 4));
     }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_cases) == 4);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_boundary_cases) == 4);
+    for (u32 rdm_index = 0; rdm_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_cases); rdm_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase rdm_case = assembly_a64_direct_simd_rdm_scalar_cases[rdm_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, rdm_case.source, (AssemblyEncodeOptions){.target = aarch64_rdm_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, rdm_case.bytes, 4));
+    }
+    for (u32 rdm_index = 0; rdm_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_boundary_cases); rdm_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase rdm_case = assembly_a64_direct_simd_rdm_scalar_boundary_cases[rdm_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, rdm_case.source, (AssemblyEncodeOptions){.target = aarch64_rdm_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, rdm_case.bytes, 4));
+    }
     Target const rdm_negative_targets[] = {
         aarch64_rdm_no_rdm,
         aarch64_rdm_no_neon,
@@ -5464,6 +5535,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, without_feature.diagnostic_count == 1 && without_feature.bytes.length == 0 &&
                                        without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
         }
+        for (u32 rdm_index = 0; rdm_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_rdm_scalar_cases); rdm_index += 1)
+        {
+            AssemblyEncodeResult without_feature = assembly_encode(
+                arguments->arena, assembly_a64_direct_simd_rdm_scalar_cases[rdm_index].source,
+                (AssemblyEncodeOptions){.target = rdm_negative_targets[target_index]});
+            BUSTER_TEST(arguments, without_feature.diagnostic_count == 1 && without_feature.bytes.length == 0 &&
+                                       without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        }
     }
     static String8 const malformed_aarch64_rdm[] = {
         S8_INITIALIZER("sqrdmlah v0.2h, v1.2h, v2.2h\n"),
@@ -5472,8 +5551,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("sqrdmlsh v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("sqrdmlah v0.4h, v1.8h, v2.8h\n"),
         S8_INITIALIZER("sqrdmlsh v0.4s, v1.2s, v2.2s\n"),
-        S8_INITIALIZER("sqrdmlah h0, h1, h2\n"),
+        S8_INITIALIZER("sqrdmlah h0, s1, s2\n"),
+        S8_INITIALIZER("sqrdmlsh s0, h1, h2\n"),
+        S8_INITIALIZER("sqrdmlah b0, b1, b2\n"),
         S8_INITIALIZER("sqrdmlsh d0, d1, d2\n"),
+        S8_INITIALIZER("sqrdmlah {h0, h1}, h2, h3\n"),
+        S8_INITIALIZER("sqrdmlsh h0, h1\n"),
+        S8_INITIALIZER("sqrdmlah s0, s1, s2, s3\n"),
+        S8_INITIALIZER("sqrdmlsh h32, h1, h2\n"),
         S8_INITIALIZER("sqrdmlah q0, q1, q2\n"),
         S8_INITIALIZER("sqrdmlsh v0.4s, v1.4s, v2.s[0]\n"),
         S8_INITIALIZER("sqrdmlah {v0.4s, v1.4s}, v2.4s, v3.4s\n"),
