@@ -9151,6 +9151,46 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                            x87_cases[case_index].bytes, BUSTER_ARRAY_LENGTH(x87_cases[case_index].bytes)));
             }
 
+            // Real-memory x87 widths are encoded by distinct legacy opcodes,
+            // not by REX.W.  The selector must therefore distinguish the
+            // m32real/m64real/mem80real rows, and a RIP-relative symbol must
+            // retain the ordinary PC32 relocation at the displacement field.
+            struct
+            {
+                u16 width;
+                u32 form_id;
+                u8 opcode;
+                u8 modrm;
+            } const x87_memory_cases[] = {
+                {32, 9097, 0xd9, 0x05},
+                {64, 9196, 0xdd, 0x05},
+                {80, 9171, 0xdb, 0x2d},
+            };
+            bool x87_memory_valid = true;
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(x87_memory_cases); case_index += 1)
+            {
+                BusterX86MetadataPhysicalOperand x87_memory_operand = x86_64_metadata_test_physical_mem_rip(
+                    S8("external_x87"), 0, x87_memory_cases[case_index].width);
+                BusterX86MetadataPhysicalQuery query = x86_64_metadata_test_physical_query(
+                    S8("FLD"), &x87_memory_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                    BUSTER_ARRAY_LENGTH(wildcard));
+                u8 output[16] = {0};
+                BusterX86MetadataRelocation relocations[2] = {0};
+                BusterX86MetadataEmitResult selected = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                    .physical = query,
+                    .output = output,
+                    .output_capacity = BUSTER_ARRAY_LENGTH(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                x87_memory_valid &= selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                    selected.form_id == x87_memory_cases[case_index].form_id && selected.byte_count == 6 &&
+                                    output[0] == x87_memory_cases[case_index].opcode && output[1] == x87_memory_cases[case_index].modrm &&
+                                    selected.relocation_count == 1 && relocations[0].offset == 2 && relocations[0].width == 4 &&
+                                    relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC32 && relocations[0].addend == -4;
+            }
+            BUSTER_TEST(arguments, x87_memory_valid);
+
             // FCMOV/FCOMI carry generated ISA-set spellings that are not
             // target feature names.  They are baseline x87 forms, so the
             // ordinary sse2 feature input must authorize both selection and

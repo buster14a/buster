@@ -5201,6 +5201,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // destination register is the semantic width authority for this one
     // legacy row; retain the no-W spelling for a 32-bit destination.
     bool movsxd_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOVSXD"));
+    // x87 real-memory forms use distinct opcodes for 32/64/80-bit elements;
+    // unlike integer scalar forms, their 64-bit element never means REX.W.
+    // Keep the physical width available for form selection while excluding
+    // the generic scalar-width prefix heuristic from every X87 row.
+    bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
@@ -5222,7 +5227,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
         if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w &&
-            !has_mmx_operand && scalar_memory_width_rex_w)
+            !has_mmx_operand && !x87_form && scalar_memory_width_rex_w)
         {
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
@@ -9988,8 +9993,17 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
         buster_x86_metadata_pool_string_equal_literal(offset, S8("i64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("f64")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("zi64")))
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("zi64")) ||
+        // XED uses x87-specific real-memory width tokens rather than the
+        // generic q/d/b spellings.  Keep those tokens width-aware so FLD
+        // source selection cannot accept the first ModRM alias (m32real)
+        // for a qword (m64real) or extended-real (mem80real) query.
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("m64real")))
         return BUSTER_X86_METADATA_PHYSICAL_WIDTH_64;
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("mem32real")))
+        return BUSTER_X86_METADATA_PHYSICAL_WIDTH_32;
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("mem80real")))
+        return BUSTER_X86_METADATA_PHYSICAL_WIDTH_80;
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("dq")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("i128")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u128")))
