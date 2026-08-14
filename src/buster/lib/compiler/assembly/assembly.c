@@ -10944,10 +10944,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     {
         return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
     }
-    // FINIT/FCLEX are the architectural WAIT-prefixed aliases of the
-    // metadata-native FNINIT/FNCLEX forms.  Expand each source instruction
-    // into two checked metadata instructions so the 0x9B wait prefix remains
-    // metadata-produced rather than resurrecting a handwritten opcode path.
+    // FINIT/FCLEX and the FST* control-store aliases are the architectural
+    // WAIT-prefixed aliases of metadata-native FN* forms.  Expand each source
+    // instruction into two checked metadata instructions so the 0x9B wait
+    // prefix remains metadata-produced rather than resurrecting a handwritten
+    // opcode path.  The latter aliases retain their operands while replacing
+    // only the mnemonic (for example `fstcw (%rax)` -> `fnstcw (%rax)`).
     String8 trimmed_statement = assembly_trim(statement);
     u64 first_space = 0;
     while (first_space < trimmed_statement.length && !assembly_space(trimmed_statement.pointer[first_space])) first_space += 1;
@@ -10955,7 +10957,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     String8 wait_alias = {0};
     if (assembly_word_equal(first_word, S8("finit"))) wait_alias = S8("fninit");
     else if (assembly_word_equal(first_word, S8("fclex"))) wait_alias = S8("fnclex");
-    if (wait_alias.length && first_space == trimmed_statement.length)
+    else if (assembly_word_equal(first_word, S8("fstcw"))) wait_alias = S8("fnstcw");
+    else if (assembly_word_equal(first_word, S8("fstenv"))) wait_alias = S8("fnstenv");
+    else if (assembly_word_equal(first_word, S8("fsave"))) wait_alias = S8("fnsave");
+    else if (assembly_word_equal(first_word, S8("fstsw"))) wait_alias = S8("fnstsw");
+    if (wait_alias.length)
     {
         BusterX86MetadataEncodeStatus wait_status = assembly_x86_metadata_instruction_parse(
             builder, S8("fwait"), line, column, offset, target, syntax);
@@ -10963,7 +10969,98 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             return wait_status;
         }
-        return assembly_x86_metadata_instruction_parse(builder, wait_alias, line, column, offset + 1, target, syntax);
+        if (first_space == trimmed_statement.length)
+        {
+            return assembly_x86_metadata_instruction_parse(builder, wait_alias, line, column, offset + 1, target, syntax);
+        }
+        String8 alias_operands = assembly_trim((String8){.pointer = trimmed_statement.pointer + first_space,
+                                                          .length = trimmed_statement.length - first_space});
+        String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), wait_alias, alias_operands);
+        return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset + 1, target, syntax);
+    }
+    // The handwritten x87 front end accepts the traditional omitted-operand
+    // spellings (for example `fadd` and `fadd st(2)`).  Metadata rows expose
+    // the visible stack operand, so materialize the same canonical operands
+    // before entering the checked selector.  This keeps the source dialect's
+    // non-commutative AT&T direction rules identical to the handwritten
+    // normalizer while ensuring the resulting bytes still come from metadata.
+    String8 x87_alias_mnemonic = first_word;
+    String8 x87_alias_operands = {0};
+    bool x87_alias_rewrite = false;
+    bool x87_alias_att = syntax == ASSEMBLY_SYNTAX_ATT;
+    bool x87_arithmetic = assembly_word_equal(first_word, S8("fadd")) || assembly_word_equal(first_word, S8("fmul")) ||
+                          assembly_word_equal(first_word, S8("fsub")) || assembly_word_equal(first_word, S8("fsubr")) ||
+                          assembly_word_equal(first_word, S8("fdiv")) || assembly_word_equal(first_word, S8("fdivr"));
+    bool x87_pop_arithmetic = assembly_word_equal(first_word, S8("faddp")) || assembly_word_equal(first_word, S8("fmulp")) ||
+                              assembly_word_equal(first_word, S8("fsubp")) || assembly_word_equal(first_word, S8("fsubrp")) ||
+                              assembly_word_equal(first_word, S8("fdivp")) || assembly_word_equal(first_word, S8("fdivrp"));
+    bool x87_omitted_register = assembly_word_equal(first_word, S8("fxch")) || assembly_word_equal(first_word, S8("fcom")) ||
+                                assembly_word_equal(first_word, S8("fcomp")) || assembly_word_equal(first_word, S8("fucom")) ||
+                                assembly_word_equal(first_word, S8("fucomp"));
+    String8 x87_one_operand = assembly_trim((String8){.pointer = trimmed_statement.pointer + first_space,
+                                                       .length = trimmed_statement.length - first_space});
+    AssemblyRegister x87_one_register = {0};
+    bool x87_one_register_source = x87_one_operand.length && assembly_register_parse(x87_one_operand, syntax, &x87_one_register) &&
+                                   x87_one_register.class == ASSEMBLY_REGISTER_X87;
+    if (!x87_one_operand.length)
+    {
+        if (x87_arithmetic)
+        {
+            x87_alias_mnemonic = assembly_word_equal(first_word, S8("fadd"))   ? S8("faddp")
+                                 : assembly_word_equal(first_word, S8("fmul")) ? S8("fmulp")
+                                 : assembly_word_equal(first_word, S8("fsub"))
+                                     ? (x87_alias_att ? S8("fsubrp") : S8("fsubp"))
+                                 : assembly_word_equal(first_word, S8("fsubr"))
+                                     ? (x87_alias_att ? S8("fsubp") : S8("fsubrp"))
+                                 : assembly_word_equal(first_word, S8("fdiv"))
+                                     ? (x87_alias_att ? S8("fdivrp") : S8("fdivp"))
+                                     : (x87_alias_att ? S8("fdivp") : S8("fdivrp"));
+            x87_alias_rewrite = true;
+        }
+        else if (x87_pop_arithmetic)
+        {
+            if (x87_alias_att)
+            {
+                x87_alias_mnemonic = assembly_word_equal(first_word, S8("fsubp"))  ? S8("fsubrp")
+                                     : assembly_word_equal(first_word, S8("fsubrp")) ? S8("fsubp")
+                                     : assembly_word_equal(first_word, S8("fdivp"))  ? S8("fdivrp")
+                                     : assembly_word_equal(first_word, S8("fdivrp")) ? S8("fdivp")
+                                                                                       : first_word;
+            }
+            x87_alias_rewrite = true;
+        }
+        else if (x87_omitted_register)
+        {
+            x87_alias_rewrite = true;
+        }
+        if (x87_alias_rewrite)
+        {
+            x87_alias_operands = x87_alias_att ? S8("%st(1), %st") : S8("st(1), st(0)");
+        }
+    }
+    else if (x87_one_register_source && (x87_arithmetic || x87_pop_arithmetic))
+    {
+        if (x87_pop_arithmetic && x87_alias_att)
+        {
+            x87_alias_mnemonic = assembly_word_equal(first_word, S8("fsubp"))  ? S8("fsubrp")
+                                 : assembly_word_equal(first_word, S8("fsubrp")) ? S8("fsubp")
+                                 : assembly_word_equal(first_word, S8("fdivp"))  ? S8("fdivrp")
+                                 : assembly_word_equal(first_word, S8("fdivrp")) ? S8("fdivp")
+                                                                                   : first_word;
+        }
+        x87_alias_rewrite = true;
+        x87_alias_operands = x87_alias_att ? string_format(builder->arena, S8("{S8}, %st"), x87_one_operand)
+                                           : string_format(builder->arena, S8("st(0), {S8}"), x87_one_operand);
+        if (x87_pop_arithmetic)
+        {
+            x87_alias_operands = x87_alias_att ? string_format(builder->arena, S8("{S8}, %st"), x87_one_operand)
+                                               : string_format(builder->arena, S8("{S8}, st(0)"), x87_one_operand);
+        }
+    }
+    if (x87_alias_rewrite)
+    {
+        String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), x87_alias_mnemonic, x87_alias_operands);
+        return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
     }
     bool lock = false;
     bool rep = false;
