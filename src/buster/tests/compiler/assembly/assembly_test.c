@@ -167,6 +167,63 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cas
     {S8_INITIALIZER("ucvtf h0, h1\n"), {0x20, 0xd8, 0x79, 0x7e}},
 };
 
+/* Scalar same-shape AdvSIMD rows added after the FP16 cohort.  Every byte is
+ * an independent llvm-mc 22.1.8 encoding; the table intentionally covers
+ * every legal width of every row (nine FP rows at S/D and eight integer rows
+ * at B/H/S/D). */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_same_cases[] = {
+    {S8_INITIALIZER("fabd s0, s1, s2\n"), {0x20, 0xd4, 0xa2, 0x7e}},
+    {S8_INITIALIZER("fabd d0, d1, d2\n"), {0x20, 0xd4, 0xe2, 0x7e}},
+    {S8_INITIALIZER("facge s0, s1, s2\n"), {0x20, 0xec, 0x22, 0x7e}},
+    {S8_INITIALIZER("facge d0, d1, d2\n"), {0x20, 0xec, 0x62, 0x7e}},
+    {S8_INITIALIZER("facgt s0, s1, s2\n"), {0x20, 0xec, 0xa2, 0x7e}},
+    {S8_INITIALIZER("facgt d0, d1, d2\n"), {0x20, 0xec, 0xe2, 0x7e}},
+    {S8_INITIALIZER("fcmeq s0, s1, s2\n"), {0x20, 0xe4, 0x22, 0x5e}},
+    {S8_INITIALIZER("fcmeq d0, d1, d2\n"), {0x20, 0xe4, 0x62, 0x5e}},
+    {S8_INITIALIZER("fcmge s0, s1, s2\n"), {0x20, 0xe4, 0x22, 0x7e}},
+    {S8_INITIALIZER("fcmge d0, d1, d2\n"), {0x20, 0xe4, 0x62, 0x7e}},
+    {S8_INITIALIZER("fcmgt s0, s1, s2\n"), {0x20, 0xe4, 0xa2, 0x7e}},
+    {S8_INITIALIZER("fcmgt d0, d1, d2\n"), {0x20, 0xe4, 0xe2, 0x7e}},
+    {S8_INITIALIZER("fmulx s0, s1, s2\n"), {0x20, 0xdc, 0x22, 0x5e}},
+    {S8_INITIALIZER("fmulx d0, d1, d2\n"), {0x20, 0xdc, 0x62, 0x5e}},
+    {S8_INITIALIZER("frecps s0, s1, s2\n"), {0x20, 0xfc, 0x22, 0x5e}},
+    {S8_INITIALIZER("frecps d0, d1, d2\n"), {0x20, 0xfc, 0x62, 0x5e}},
+    {S8_INITIALIZER("frsqrts s0, s1, s2\n"), {0x20, 0xfc, 0xa2, 0x5e}},
+    {S8_INITIALIZER("frsqrts d0, d1, d2\n"), {0x20, 0xfc, 0xe2, 0x5e}},
+    {S8_INITIALIZER("sqadd b0, b1, b2\n"), {0x20, 0x0c, 0x22, 0x5e}},
+    {S8_INITIALIZER("sqadd h0, h1, h2\n"), {0x20, 0x0c, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqadd s0, s1, s2\n"), {0x20, 0x0c, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqadd d0, d1, d2\n"), {0x20, 0x0c, 0xe2, 0x5e}},
+    {S8_INITIALIZER("sqrshl b0, b1, b2\n"), {0x20, 0x5c, 0x22, 0x5e}},
+    {S8_INITIALIZER("sqrshl h0, h1, h2\n"), {0x20, 0x5c, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqrshl s0, s1, s2\n"), {0x20, 0x5c, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqrshl d0, d1, d2\n"), {0x20, 0x5c, 0xe2, 0x5e}},
+    {S8_INITIALIZER("sqshl b0, b1, b2\n"), {0x20, 0x4c, 0x22, 0x5e}},
+    {S8_INITIALIZER("sqshl h0, h1, h2\n"), {0x20, 0x4c, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqshl s0, s1, s2\n"), {0x20, 0x4c, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqshl d0, d1, d2\n"), {0x20, 0x4c, 0xe2, 0x5e}},
+    {S8_INITIALIZER("sqsub b0, b1, b2\n"), {0x20, 0x2c, 0x22, 0x5e}},
+    {S8_INITIALIZER("sqsub h0, h1, h2\n"), {0x20, 0x2c, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqsub s0, s1, s2\n"), {0x20, 0x2c, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqsub d0, d1, d2\n"), {0x20, 0x2c, 0xe2, 0x5e}},
+    {S8_INITIALIZER("uqadd b0, b1, b2\n"), {0x20, 0x0c, 0x22, 0x7e}},
+    {S8_INITIALIZER("uqadd h0, h1, h2\n"), {0x20, 0x0c, 0x62, 0x7e}},
+    {S8_INITIALIZER("uqadd s0, s1, s2\n"), {0x20, 0x0c, 0xa2, 0x7e}},
+    {S8_INITIALIZER("uqadd d0, d1, d2\n"), {0x20, 0x0c, 0xe2, 0x7e}},
+    {S8_INITIALIZER("uqrshl b0, b1, b2\n"), {0x20, 0x5c, 0x22, 0x7e}},
+    {S8_INITIALIZER("uqrshl h0, h1, h2\n"), {0x20, 0x5c, 0x62, 0x7e}},
+    {S8_INITIALIZER("uqrshl s0, s1, s2\n"), {0x20, 0x5c, 0xa2, 0x7e}},
+    {S8_INITIALIZER("uqrshl d0, d1, d2\n"), {0x20, 0x5c, 0xe2, 0x7e}},
+    {S8_INITIALIZER("uqshl b0, b1, b2\n"), {0x20, 0x4c, 0x22, 0x7e}},
+    {S8_INITIALIZER("uqshl h0, h1, h2\n"), {0x20, 0x4c, 0x62, 0x7e}},
+    {S8_INITIALIZER("uqshl s0, s1, s2\n"), {0x20, 0x4c, 0xa2, 0x7e}},
+    {S8_INITIALIZER("uqshl d0, d1, d2\n"), {0x20, 0x4c, 0xe2, 0x7e}},
+    {S8_INITIALIZER("uqsub b0, b1, b2\n"), {0x20, 0x2c, 0x22, 0x7e}},
+    {S8_INITIALIZER("uqsub h0, h1, h2\n"), {0x20, 0x2c, 0x62, 0x7e}},
+    {S8_INITIALIZER("uqsub s0, s1, s2\n"), {0x20, 0x2c, 0xa2, 0x7e}},
+    {S8_INITIALIZER("uqsub d0, d1, d2\n"), {0x20, 0x2c, 0xe2, 0x7e}},
+};
+
 /* Exhaustive legal arrangements for the widening absolute-difference and
  * pair-long AdvSIMD rows.  Bytes are independent llvm-mc 22.1.8 literals. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_widening_cases[] = {
@@ -1105,12 +1162,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 251);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 251);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 139);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 189);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 268);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 268);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 122);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 206);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 74);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 57);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4132,6 +4189,50 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, no_both.diagnostic_count == 1 && no_both.bytes.length == 0 &&
                                    no_both.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_same_cases) == 50);
+    for (u32 scalar_same_index = 0; scalar_same_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_same_cases); scalar_same_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase scalar_same_case = assembly_a64_direct_simd_scalar_same_cases[scalar_same_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, scalar_same_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, scalar_same_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, scalar_same_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult scalar_same_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("FABD S31, S30, S29\nFABD D31, D30, D29\nFACGE S31, S30, S29\nFACGE D31, D30, D29\n"
+           "FACGT S31, S30, S29\nFACGT D31, D30, D29\nFCMEQ S31, S30, S29\nFCMEQ D31, D30, D29\n"
+           "FCMGE S31, S30, S29\nFCMGE D31, D30, D29\nFCMGT S31, S30, S29\nFCMGT D31, D30, D29\n"
+           "FMULX S31, S30, S29\nFMULX D31, D30, D29\nFRECPS S31, S30, S29\nFRECPS D31, D30, D29\n"
+           "FRSQRTS S31, S30, S29\nFRSQRTS D31, D30, D29\nSQADD B31, B30, B29\nSQADD H31, H30, H29\n"
+           "SQADD S31, S30, S29\nSQADD D31, D30, D29\nSQRSHL B31, B30, B29\nSQRSHL H31, H30, H29\n"
+           "SQRSHL S31, S30, S29\nSQRSHL D31, D30, D29\nSQSHL B31, B30, B29\nSQSHL H31, H30, H29\n"
+           "SQSHL S31, S30, S29\nSQSHL D31, D30, D29\nSQSUB B31, B30, B29\nSQSUB H31, H30, H29\n"
+           "SQSUB S31, S30, S29\nSQSUB D31, D30, D29\nUQADD B31, B30, B29\nUQADD H31, H30, H29\n"
+           "UQADD S31, S30, S29\nUQADD D31, D30, D29\nUQRSHL B31, B30, B29\nUQRSHL H31, H30, H29\n"
+           "UQRSHL S31, S30, S29\nUQRSHL D31, D30, D29\nUQSHL B31, B30, B29\nUQSHL H31, H30, H29\n"
+           "UQSHL S31, S30, S29\nUQSHL D31, D30, D29\nUQSUB B31, B30, B29\nUQSUB H31, H30, H29\n"
+           "UQSUB S31, S30, S29\nUQSUB D31, D30, D29\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, scalar_same_upper_boundary.diagnostic_count == 0 && scalar_same_upper_boundary.bytes.length == 200);
+    static String8 const malformed_scalar_same_cases[] = {
+        S8_INITIALIZER("fabd b0, b1, b2\n"), S8_INITIALIZER("fabd s0, d1, s2\n"),
+        S8_INITIALIZER("fabd s0, s1\n"), S8_INITIALIZER("fabd s0, s1, s2, s3\n"),
+        S8_INITIALIZER("sqadd v0.1d, v1.1d, v2.1d\n"), S8_INITIALIZER("sqadd b0, h1, b2\n"),
+        S8_INITIALIZER("sqadd b0, b1\n"), S8_INITIALIZER("sqadd b32, b1, b2\n"),
+        S8_INITIALIZER("uqsub q0, q1, q2\n"), S8_INITIALIZER("frecps s0, s1, v2.s[0]\n"),
+        S8_INITIALIZER("frsqrts d0, d1, d2, d3\n"), S8_INITIALIZER("fcmgt s0, w1, s2\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_scalar_same_cases); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_scalar_same_cases[malformed_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_scalar_cases) == 20);
     for (u32 fcvt_index = 0; fcvt_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_scalar_cases); fcvt_index += 1)
     {
@@ -5139,7 +5240,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("frecps v0.8b, v1.8b, v2.8b\n"),
         S8_INITIALIZER("frsqrts v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fsub v0.2d, v1.2d\n"),
-        S8_INITIALIZER("fabd d0, d1, d2\n"),
+        S8_INITIALIZER("fabd b0, b1, b2\n"),
         S8_INITIALIZER("srhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("urhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("uhadd v0.2d, v1.2d, v2.2d\n"),
