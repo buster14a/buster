@@ -12032,6 +12032,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     case ASSEMBLY_OPCODE_X86_CWD:
     case ASSEMBLY_OPCODE_X86_CDQ:
     case ASSEMBLY_OPCODE_X86_CQO:
+    case ASSEMBLY_OPCODE_X86_BSF:
+    case ASSEMBLY_OPCODE_X86_BSR:
+    case ASSEMBLY_OPCODE_X86_POPCNT:
+    case ASSEMBLY_OPCODE_X86_LZCNT:
+    case ASSEMBLY_OPCODE_X86_TZCNT:
+    case ASSEMBLY_OPCODE_X86_BSWAP:
+    case ASSEMBLY_OPCODE_X86_BT:
+    case ASSEMBLY_OPCODE_X86_BTC:
+    case ASSEMBLY_OPCODE_X86_BTR:
+    case ASSEMBLY_OPCODE_X86_BTS:
+    case ASSEMBLY_OPCODE_X86_XCHG:
+    case ASSEMBLY_OPCODE_X86_XADD:
+    case ASSEMBLY_OPCODE_X86_CMPXCHG:
+    case ASSEMBLY_OPCODE_X86_CMPXCHG8B:
+    case ASSEMBLY_OPCODE_X86_CMPXCHG16B:
     case ASSEMBLY_OPCODE_X86_JCC:
     case ASSEMBLY_OPCODE_X86_SETCC:
     case ASSEMBLY_OPCODE_X86_CMOVCC:
@@ -12568,16 +12583,6 @@ BUSTER_GLOBAL_LOCAL void assembly_emit_immediate(AssemblyBuilder* builder, u64 v
     }
 }
 
-BUSTER_GLOBAL_LOCAL void assembly_x86_emit_rex(AssemblyBuilder* builder, u16 width, AssemblyRegister reg, AssemblyRegister rm)
-{
-    if (assembly_x86_rex_needed(width, reg, rm))
-    {
-        u8 rex = UINT8_C(0x40) | (width == 64 ? UINT8_C(0x08) : 0) | (reg.index >= 8 ? UINT8_C(0x04) : 0) |
-                 (rm.index >= 8 ? UINT8_C(0x01) : 0);
-        assembly_emit_byte(builder, rex);
-    }
-}
-
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_memory_rex(AssemblyBuilder* builder, u16 width, AssemblyRegister reg, AssemblyMemory memory)
 {
     if (assembly_x86_memory_rex_needed(width, reg, memory))
@@ -12587,15 +12592,6 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_memory_rex(AssemblyBuilder* builder, 
                  (memory.has_base && memory.base.index >= 8 ? UINT8_C(0x01) : 0);
         assembly_emit_byte(builder, rex);
     }
-}
-
-BUSTER_GLOBAL_LOCAL void assembly_x86_emit_prefix(AssemblyBuilder* builder, u16 width, AssemblyRegister reg, AssemblyRegister rm)
-{
-    if (width == 16)
-    {
-        assembly_emit_byte(builder, 0x66);
-    }
-    assembly_x86_emit_rex(builder, width, reg, rm);
 }
 
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_memory_prefix(AssemblyBuilder* builder, u16 width, AssemblyRegister reg, AssemblyMemory memory)
@@ -14066,132 +14062,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_amx(AssemblyBuilder* builder, Assembl
     return assembly_x86_emit_amx_memory(builder, instruction, reg.index, rm.memory, forced_sib);
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_bit_atomic(AssemblyBuilder* builder, AssemblyInstruction* instruction)
-{
-    AssemblyOpcode opcode = instruction->opcode;
-    AssemblyOperand first = instruction->operands[0];
-    AssemblyOperand second = instruction->operands[1];
-    if (opcode == ASSEMBLY_OPCODE_X86_BSF || opcode == ASSEMBLY_OPCODE_X86_BSR || opcode == ASSEMBLY_OPCODE_X86_POPCNT ||
-        opcode == ASSEMBLY_OPCODE_X86_LZCNT || opcode == ASSEMBLY_OPCODE_X86_TZCNT)
-    {
-        u8 mandatory = opcode == ASSEMBLY_OPCODE_X86_POPCNT || opcode == ASSEMBLY_OPCODE_X86_LZCNT || opcode == ASSEMBLY_OPCODE_X86_TZCNT;
-        u8 operation = opcode == ASSEMBLY_OPCODE_X86_BSF || opcode == ASSEMBLY_OPCODE_X86_TZCNT ? 0xbc
-                       : opcode == ASSEMBLY_OPCODE_X86_BSR || opcode == ASSEMBLY_OPCODE_X86_LZCNT ? 0xbd
-                                                                                                  : 0xb8;
-        if (instruction->width == 16)
-        {
-            assembly_emit_byte(builder, 0x66);
-        }
-        if (mandatory)
-        {
-            assembly_emit_byte(builder, 0xf3);
-        }
-        if (second.kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            assembly_x86_emit_memory_rex(builder, instruction->width, first.reg, second.memory);
-        }
-        else
-        {
-            assembly_x86_emit_rex(builder, instruction->width, first.reg, second.reg);
-        }
-        assembly_emit_byte(builder, 0x0f);
-        assembly_emit_byte(builder, operation);
-        if (!assembly_x86_emit_rm(builder, instruction, first.reg.index, second))
-        {
-            return false;
-        }
-        return true;
-    }
-    if (opcode == ASSEMBLY_OPCODE_X86_BSWAP)
-    {
-        assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, first.reg);
-        assembly_emit_byte(builder, 0x0f);
-        assembly_emit_byte(builder, (u8)(0xc8 + (first.reg.index & 7)));
-        return true;
-    }
-    if (opcode == ASSEMBLY_OPCODE_X86_BT || opcode == ASSEMBLY_OPCODE_X86_BTC || opcode == ASSEMBLY_OPCODE_X86_BTR ||
-        opcode == ASSEMBLY_OPCODE_X86_BTS)
-    {
-        u8 immediate = second.kind == ASSEMBLY_OPERAND_EXPRESSION;
-        u8 extension = opcode == ASSEMBLY_OPCODE_X86_BT   ? 4
-                       : opcode == ASSEMBLY_OPCODE_X86_BTS ? 5
-                       : opcode == ASSEMBLY_OPCODE_X86_BTR ? 6
-                                                           : 7;
-        u8 reg = immediate ? extension : second.reg.index;
-        if (first.kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            assembly_x86_emit_memory_prefix(builder, instruction->width, (AssemblyRegister){.index = reg}, first.memory);
-        }
-        else
-        {
-            assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){.index = reg}, first.reg);
-        }
-        assembly_emit_byte(builder, 0x0f);
-        assembly_emit_byte(builder, immediate ? 0xba
-                                              : opcode == ASSEMBLY_OPCODE_X86_BT   ? 0xa3
-                                                : opcode == ASSEMBLY_OPCODE_X86_BTC ? 0xbb
-                                                : opcode == ASSEMBLY_OPCODE_X86_BTR ? 0xb3
-                                                                                    : 0xab);
-        if (!assembly_x86_emit_rm(builder, instruction, reg, first))
-        {
-            return false;
-        }
-        if (immediate)
-        {
-            assembly_emit_byte(builder, (u8)second.expression.addend);
-        }
-        return true;
-    }
-    if (opcode == ASSEMBLY_OPCODE_X86_XCHG)
-    {
-        u8 memory = first.kind == ASSEMBLY_OPERAND_MEMORY || second.kind == ASSEMBLY_OPERAND_MEMORY;
-        if (!memory && instruction->width != 8 && (first.reg.index == 0 || second.reg.index == 0))
-        {
-            AssemblyRegister other = first.reg.index == 0 ? second.reg : first.reg;
-            assembly_x86_emit_prefix(builder, instruction->width, (AssemblyRegister){0}, other);
-            assembly_emit_byte(builder, (u8)(0x90 + (other.index & 7)));
-            return true;
-        }
-        AssemblyRegister reg = first.kind == ASSEMBLY_OPERAND_MEMORY ? second.reg : first.reg;
-        AssemblyOperand rm = first.kind == ASSEMBLY_OPERAND_MEMORY ? first : second;
-        if (rm.kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            assembly_x86_emit_memory_prefix(builder, instruction->width, reg, rm.memory);
-        }
-        else
-        {
-            assembly_x86_emit_prefix(builder, instruction->width, reg, rm.reg);
-        }
-        assembly_emit_byte(builder, instruction->width == 8 ? 0x86 : 0x87);
-        return assembly_x86_emit_rm(builder, instruction, reg.index, rm);
-    }
-    if (opcode == ASSEMBLY_OPCODE_X86_XADD || opcode == ASSEMBLY_OPCODE_X86_CMPXCHG)
-    {
-        AssemblyRegister reg = second.reg;
-        if (first.kind == ASSEMBLY_OPERAND_MEMORY)
-        {
-            assembly_x86_emit_memory_prefix(builder, instruction->width, reg, first.memory);
-        }
-        else
-        {
-            assembly_x86_emit_prefix(builder, instruction->width, reg, first.reg);
-        }
-        assembly_emit_byte(builder, 0x0f);
-        assembly_emit_byte(builder, opcode == ASSEMBLY_OPCODE_X86_XADD ? (instruction->width == 8 ? 0xc0 : 0xc1)
-                                                                        : (instruction->width == 8 ? 0xb0 : 0xb1));
-        return assembly_x86_emit_rm(builder, instruction, reg.index, first);
-    }
-    if (opcode == ASSEMBLY_OPCODE_X86_CMPXCHG8B || opcode == ASSEMBLY_OPCODE_X86_CMPXCHG16B)
-    {
-        assembly_x86_emit_memory_prefix(builder, opcode == ASSEMBLY_OPCODE_X86_CMPXCHG16B ? 64 : 0,
-                                         (AssemblyRegister){.index = 1}, first.memory);
-        assembly_emit_byte(builder, 0x0f);
-        assembly_emit_byte(builder, 0xc7);
-        return assembly_x86_emit_rm(builder, instruction, 1, first);
-    }
-    return false;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_target_difference(s64 target, u64 place, s64* difference)
 {
     if (!difference)
@@ -14527,16 +14397,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
                                     S8("APX memory displacement is out of range"));
-                return;
-            }
-            continue;
-        }
-        if (assembly_x86_opcode_is_bit_atomic(instruction->opcode))
-        {
-            if (!assembly_x86_emit_bit_atomic(builder, instruction))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("x86 memory displacement is out of range"));
                 return;
             }
             continue;
