@@ -6770,18 +6770,38 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (float_register_index < 8)
                             {
-                                codegen_emit_u8(&buffer, argument_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x11);
-                                codegen_emit_u8(&buffer, (u8)(0x85 | (float_register_index << 3)));
-                                codegen_emit_u32(&buffer, (u32)result_displacement);
+                                BusterX86MetadataPhysicalOperand float_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                                                          result_displacement),
+                                    codegen_canonical_x64_metadata_vector(float_register_index, (u16)argument_type->bit_width),
+                                };
+                                String8 float_features[] = {S8("sse"), S8("sse2")};
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
+                                        BUSTER_ARRAY_LENGTH(float_store_operands),
+                                        (BusterX86MetadataFeatureInput){.names = float_features,
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             else
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(16 + codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 8)));
+                                BusterX86MetadataPhysicalOperand stack_argument_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        codegen_canonical_x64_rebase_frame_displacement(
+                                            &buffer, (s64)16 + (s64)codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 8),
+                                            canonical_x64_frame_base_offset)),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_argument_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(stack_argument_load_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 C_X64_STORE_RESULT();
                             }
                             instruction_id = instruction->next;
@@ -6795,11 +6815,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
-                            codegen_emit_u8(&buffer, argument_type->bit_width == 32 ? 0xf3 : 0xf2);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x11);
-                            codegen_emit_u8(&buffer, (u8)(0x85 | (register_index << 3)));
-                            codegen_emit_u32(&buffer, (u32)result_displacement);
+                            BusterX86MetadataPhysicalOperand float_store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                                                      result_displacement),
+                                codegen_canonical_x64_metadata_vector(register_index, (u16)argument_type->bit_width),
+                            };
+                            String8 float_features[] = {S8("sse"), S8("sse2")};
+                            if (!codegen_canonical_x64_metadata_emit_features(
+                                    &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
+                                    BUSTER_ARRAY_LENGTH(float_store_operands),
+                                    (BusterX86MetadataFeatureInput){.names = float_features,
+                                                                     .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             instruction_id = instruction->next;
                             continue;
                         }
@@ -6851,50 +6881,66 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(argument_stack_type) : 8);
                             if (windows_indirect)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(
-                                                                 &buffer, first_stack_offset + (s64)argument_stack_offset, canonical_x64_frame_base_offset));
+                                BusterX86MetadataPhysicalOperand indirect_stack_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        codegen_canonical_x64_rebase_frame_displacement(
+                                            &buffer, first_stack_offset + (s64)argument_stack_offset, canonical_x64_frame_base_offset)),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), indirect_stack_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(indirect_stack_load_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 for (u32 part_index = 0; part_index < part_count; part_index += 1)
                                 {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                u32 part_offset = part_index * 8;
-                                if (!part_offset)
-                                {
-                                    codegen_emit_u8(&buffer, 0x10);
-                                }
-                                else if (part_offset <= INT8_MAX)
-                                {
-                                    codegen_emit_u8(&buffer, 0x50);
-                                    codegen_emit_u8(&buffer, (u8)part_offset);
-                                }
-                                else
-                                {
-                                    codegen_emit_u8(&buffer, 0x90);
-                                    codegen_emit_u32(&buffer, part_offset);
-                                }
-                                    codegen_emit_u8(&buffer, 0x48);
-                                    codegen_emit_u8(&buffer, 0x89);
-                                    codegen_emit_u8(&buffer, 0x95);
-                                    codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)(part_index * 8)));
+                                    u32 part_offset = part_index * 8;
+                                    BusterX86MetadataPhysicalOperand indirect_part_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, part_offset),
+                                    };
+                                    BusterX86MetadataPhysicalOperand indirect_part_store_operands[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                                              result_displacement + (s32)(part_index * 8)),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), indirect_part_load_operands,
+                                                                               BUSTER_ARRAY_LENGTH(indirect_part_load_operands)) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), indirect_part_store_operands,
+                                                                               BUSTER_ARRAY_LENGTH(indirect_part_store_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 instruction_id = instruction->next;
                                 continue;
                             }
                             for (u32 part_index = 0; part_index < stack_part_count; part_index += 1)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(
-                                                                 &buffer, first_stack_offset + (s64)argument_stack_offset + (s64)part_index * 8,
-                                                                 canonical_x64_frame_base_offset));
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)(part_index * 8)));
+                                BusterX86MetadataPhysicalOperand stack_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        codegen_canonical_x64_rebase_frame_displacement(
+                                            &buffer, first_stack_offset + (s64)argument_stack_offset + (s64)part_index * 8,
+                                            canonical_x64_frame_base_offset)),
+                                };
+                                BusterX86MetadataPhysicalOperand stack_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                                          result_displacement + (s32)(part_index * 8)),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(stack_load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(stack_store_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             instruction_id = instruction->next;
                             continue;
@@ -6905,26 +6951,23 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
                                 u32 part_offset = part_index * 8;
-                                codegen_emit_u8(&buffer, source_reg >= 8 ? 0x49 : 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                if (!part_offset)
+                                BusterX86MetadataPhysicalOperand indirect_register_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory_relaxed((X64Register)source_reg, 64, part_offset),
+                                };
+                                BusterX86MetadataPhysicalOperand indirect_register_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                                          result_displacement + (s32)(part_index * 8)),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), indirect_register_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(indirect_register_load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), indirect_register_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(indirect_register_store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, (u8)(source_reg & 7));
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else if (part_offset <= INT8_MAX)
-                                {
-                                    codegen_emit_u8(&buffer, (u8)(0x40 | (source_reg & 7)));
-                                    codegen_emit_u8(&buffer, (u8)part_offset);
-                                }
-                                else
-                                {
-                                    codegen_emit_u8(&buffer, (u8)(0x80 | (source_reg & 7)));
-                                    codegen_emit_u32(&buffer, part_offset);
-                                }
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)(part_index * 8)));
                             }
                             instruction_id = instruction->next;
                             continue;
@@ -6944,19 +6987,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 continue;
                             }
                             u8 reg = registers[register_index++];
-                            if (reg >= 8)
+                            BusterX86MetadataPhysicalOperand register_store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(
+                                    X64_REGISTER_RBP, 64,
+                                    result_displacement + (s32)(system_v_register_aggregate ? argument_aggregate_abi.parts[part_index].value_offset
+                                                                                             : part_index * 8)),
+                                codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), register_store_operands,
+                                                                       BUSTER_ARRAY_LENGTH(register_store_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x4c);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            else
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, (u8)(0x85 | ((reg & 7) << 3)));
-                            codegen_emit_u32(
-                                &buffer, (u32)(result_displacement +
-                                               (s32)(system_v_register_aggregate ? argument_aggregate_abi.parts[part_index].value_offset : part_index * 8)));
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_GLOBAL || instruction->opcode == IR_OPCODE_FUNCTION)
@@ -9136,22 +9179,41 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool stack_padding = call_layout.stack_padding && !system_v_aligned_area;
                         if (stack_padding)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x83);
-                            codegen_emit_u8(&buffer, 0xec);
-                            codegen_emit_u8(&buffer, 8);
+                            BusterX86MetadataPhysicalOperand stack_padding_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                                codegen_canonical_x64_metadata_immediate(8, 8),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_padding_operands,
+                                                                       BUSTER_ARRAY_LENGTH(stack_padding_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         if (system_v_aligned_area)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, 0xa5);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset));
+                            BusterX86MetadataPhysicalOperand stack_save_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset)),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_save_operands,
+                                                                       BUSTER_ARRAY_LENGTH(stack_save_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             codegen_canonical_x64_adjust_stack(&buffer, call_layout.stack_part_count * 8, true);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x81);
-                            codegen_emit_u8(&buffer, 0xe4);
-                            codegen_emit_u32(&buffer, 0 - call_layout.stack_alignment);
+                            BusterX86MetadataPhysicalOperand stack_align_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                                codegen_canonical_x64_metadata_immediate(-(s64)call_layout.stack_alignment, 32),
+                            };
+                            if (buffer.error != CODEGEN_ERROR_NONE ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands,
+                                                                       BUSTER_ARRAY_LENGTH(stack_align_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
                             {
                                 CodegenCanonicalCallArgument* call_argument = arguments + argument_index;
@@ -9215,13 +9277,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 padding = arguments[array_index].stack_offset + arguments[array_index].stack_part_count * 8; padding < stack_cursor;
                                  padding += 8)
                             {
-                                codegen_emit_u8(&buffer, 0x50);
+                                BusterX86MetadataPhysicalOperand push_padding_operand =
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("PUSH"), &push_padding_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             for (u32 part_index = arguments[array_index].stack_part_count; part_index > 0; part_index -= 1)
                             {
-                                codegen_emit_u8(&buffer, 0xff);
-                                codegen_emit_u8(&buffer, 0xb5);
-                                codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)((part_index - 1) * 8)));
+                                BusterX86MetadataPhysicalOperand push_argument_operand = codegen_canonical_x64_metadata_memory(
+                                    X64_REGISTER_RBP, 64,
+                                    C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)((part_index - 1) * 8));
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("PUSH"), &push_argument_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             stack_cursor = arguments[array_index].stack_offset;
                         }
@@ -9248,20 +9321,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     C_X64_LOAD(0x85, argument);
                                 }
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x84);
-                                codegen_emit_u8(&buffer, 0x24);
-                                codegen_emit_u32(&buffer, 32 + stack_index * 8);
+                                BusterX86MetadataPhysicalOperand windows_stack_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RSP, 64, 32 + (s64)stack_index * 8),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_stack_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(windows_stack_store_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 stack_index += arguments[argument_index].part_count;
                             }
                         }
                         if (call_x64_indirect_return)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8d);
-                            codegen_emit_u8(&buffer, call_windows_indirect_return ? 0x8d : 0xbd);
-                            codegen_emit_u32(&buffer, (u32)result_displacement);
+                            X64Register indirect_return_register = call_windows_indirect_return ? X64_REGISTER_RCX : X64_REGISTER_RDI;
+                            BusterX86MetadataPhysicalOperand indirect_return_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(indirect_return_register, 64),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), indirect_return_operands,
+                                                                       BUSTER_ARRAY_LENGTH(indirect_return_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         IrType* call_callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
                         if (call_callee_type && call_callee_type->kind == IR_TYPE_POINTER)
@@ -9296,11 +9381,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                codegen_emit_u8(&buffer, argument_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x10);
-                                codegen_emit_u8(&buffer, (u8)(0x85 | (float_register << 3)));
-                                codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]));
+                                BusterX86MetadataPhysicalOperand float_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(float_register, (u16)argument_type->bit_width),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                        C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value])),
+                                };
+                                String8 float_features[] = {S8("sse"), S8("sse2")};
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
+                                        BUSTER_ARRAY_LENGTH(float_load_operands),
+                                        (BusterX86MetadataFeatureInput){.names = float_features,
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 continue;
                             }
                             if (call_argument->system_v_aggregate)
@@ -9327,10 +9423,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                             return result;
                                         }
                                         u8 reg = registers[register_index++];
-                                        codegen_emit_u8(&buffer, reg >= 8 ? 0x4c : 0x48);
-                                        codegen_emit_u8(&buffer, 0x8b);
-                                        codegen_emit_u8(&buffer, (u8)(0x85 | ((reg & 7) << 3)));
-                                        codegen_emit_u32(&buffer, (u32)displacement);
+                                        BusterX86MetadataPhysicalOperand integer_load_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
+                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), integer_load_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(integer_load_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
                                     }
                                 }
                                 continue;
@@ -9342,18 +9444,36 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                codegen_emit_u8(&buffer, argument_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x10);
-                                codegen_emit_u8(&buffer, (u8)(0x85 | (register_index << 3)));
-                                codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]));
+                                BusterX86MetadataPhysicalOperand float_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(register_index, (u16)argument_type->bit_width),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                        C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value])),
+                                };
+                                String8 float_features[] = {S8("sse"), S8("sse2")};
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
+                                        BUSTER_ARRAY_LENGTH(float_load_operands),
+                                        (BusterX86MetadataFeatureInput){.names = float_features,
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 if (windows_variadic_call)
                                 {
                                     u8 reg = registers[register_index];
-                                    codegen_emit_u8(&buffer, reg >= 8 ? 0x4c : 0x48);
-                                    codegen_emit_u8(&buffer, 0x8b);
-                                    codegen_emit_u8(&buffer, (u8)(0x85 | ((reg & 7) << 3)));
-                                    codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]));
+                                    BusterX86MetadataPhysicalOperand integer_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                                               C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value])),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), integer_load_operands,
+                                                                               BUSTER_ARRAY_LENGTH(integer_load_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 register_index += 1;
                                 continue;
@@ -9371,17 +9491,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 part_index = 0; part_index < call_argument->part_count; part_index += 1)
                             {
                                 u8 reg = registers[register_index++];
-                                if (reg >= 8)
+                                BusterX86MetadataPhysicalOperand integer_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)(part_index * 8)),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), integer_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(integer_load_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x4c);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                else
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, (u8)(0x85 | ((reg & 7) << 3)));
-                                codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)(part_index * 8)));
                             }
                         }
                         IrType* callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
@@ -9392,8 +9513,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic)
                         {
-                            codegen_emit_u8(&buffer, 0xb8);
-                            codegen_emit_u32(&buffer, simulated_float_registers);
+                            BusterX86MetadataPhysicalOperand variadic_register_count_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_unsigned_immediate(simulated_float_registers, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), variadic_register_count_operands,
+                                                                       BUSTER_ARRAY_LENGTH(variadic_register_count_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         if (indirect_call)
                         {
@@ -9431,10 +9560,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (system_v_aligned_area)
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0xa5);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset));
+                            BusterX86MetadataPhysicalOperand stack_restore_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset)),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_restore_operands,
+                                                                       BUSTER_ARRAY_LENGTH(stack_restore_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         else if (result.abi != CODEGEN_ABI_X86_64_WINDOWS && (call_layout.stack_part_count || stack_padding))
                         {
@@ -9471,8 +9606,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                codegen_emit_u8(&buffer, 0xdd);
-                                codegen_emit_u8(&buffer, 0xd8); // fstp st(0)
+                                BusterX86MetadataPhysicalOperand x87_st0_operand = {
+                                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                                    .width = 80,
+                                    .reg = {
+                                        .index = 0,
+                                        .width = 80,
+                                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL,
+                                    },
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("FSTP"), &x87_st0_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             instruction_id = instruction->next;
                             continue;
@@ -9487,11 +9634,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                codegen_emit_u8(&buffer, return_type->bit_width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x11);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)result_displacement);
+                                BusterX86MetadataPhysicalOperand return_float_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)return_type->bit_width,
+                                                                          result_displacement),
+                                    codegen_canonical_x64_metadata_vector(0, (u16)return_type->bit_width),
+                                };
+                                String8 return_float_features[] = {S8("sse"), S8("sse2")};
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, return_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), return_float_store_operands,
+                                        BUSTER_ARRAY_LENGTH(return_float_store_operands),
+                                        (BusterX86MetadataFeatureInput){.names = return_float_features,
+                                                                         .count = BUSTER_ARRAY_LENGTH(return_float_features)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 instruction_id = instruction->next;
                                 continue;
                             }
@@ -9530,10 +9687,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
                                         }
-                                        codegen_emit_u8(&buffer, 0x48);
-                                        codegen_emit_u8(&buffer, 0x89);
-                                        codegen_emit_u8(&buffer, integer_index ? 0x95 : 0x85);
-                                        codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)part->value_offset));
+                                        BusterX86MetadataPhysicalOperand integer_return_store_operands[2] = {
+                                            codegen_canonical_x64_metadata_memory(
+                                                X64_REGISTER_RBP, 64, result_displacement + (s32)part->value_offset),
+                                            codegen_canonical_x64_metadata_gpr(integer_index ? X64_REGISTER_RDX : X64_REGISTER_RAX, 64),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), integer_return_store_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(integer_return_store_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
                                         integer_index += 1;
                                     }
                                 }
@@ -9562,10 +9726,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             C_X64_STORE_RESULT();
                             if (aggregate_return && return_parts == 2)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x95);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + 8));
+                                BusterX86MetadataPhysicalOperand aggregate_return_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement + 8),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), aggregate_return_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(aggregate_return_store_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                         }
                     }
