@@ -3734,11 +3734,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_address(CodegenBuffer* buffer, X64Register target, s32 displacement)
 {
-    u8 rex = target >= X64_REGISTER_R8 ? 0x4c : 0x48;
-    codegen_emit_u8(buffer, rex);
-    codegen_emit_u8(buffer, 0x8d);
-    codegen_emit_u8(buffer, (u8)(0x85 | ((target & 7) << 3)));
-    codegen_emit_u32(buffer, (u32)displacement);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_gpr(target, 64),
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement),
+    };
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("LEA"), operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_sign_extend(CodegenBuffer* buffer, X64Register value, u32 width)
@@ -3747,16 +3747,17 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_sign_extend(CodegenBuffer* buffer
     {
         return;
     }
-    u8 register_bits = (u8)(value & 7);
-    u8 rex = (u8)(0x48 | (value >= X64_REGISTER_R8 ? 1 : 0));
-    codegen_emit_u8(buffer, rex);
-    codegen_emit_u8(buffer, 0xc1);
-    codegen_emit_u8(buffer, (u8)(0xe0 | register_bits));
-    codegen_emit_u8(buffer, (u8)(64 - width));
-    codegen_emit_u8(buffer, rex);
-    codegen_emit_u8(buffer, 0xc1);
-    codegen_emit_u8(buffer, (u8)(0xf8 | register_bits));
-    codegen_emit_u8(buffer, (u8)(64 - width));
+    if (!width)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_gpr(value, 64),
+        codegen_canonical_x64_metadata_immediate(64 - width, 8),
+    };
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHL"), operands, BUSTER_ARRAY_LENGTH(operands));
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHR"), operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 enum
@@ -4532,21 +4533,30 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_rsp_address(CodegenBuffer* buffer
     {
         return false;
     }
-    codegen_emit_u8(buffer, register_number >= 8 ? 0x4c : 0x48);
-    codegen_emit_u8(buffer, 0x8d);
-    codegen_emit_u8(buffer, (u8)(0x84 | ((register_number & 7) << 3)));
-    codegen_emit_u8(buffer, 0x24);
-    codegen_emit_u32(buffer, offset);
+    X64Register register_index = (X64Register)register_number;
+    BusterX86MetadataPhysicalOperand address_operands[2] = {
+        codegen_canonical_x64_metadata_gpr(register_index, 64),
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RSP, 64, offset),
+    };
+    if (!codegen_canonical_x64_metadata_emit(buffer, S8("LEA"), address_operands, BUSTER_ARRAY_LENGTH(address_operands)))
+    {
+        return false;
+    }
     if (alignment > CODEGEN_X64_STACK_ALIGNMENT)
     {
-        codegen_emit_u8(buffer, register_number >= 8 ? 0x49 : 0x48);
-        codegen_emit_u8(buffer, 0x81);
-        codegen_emit_u8(buffer, (u8)(0xc0 | (register_number & 7)));
-        codegen_emit_u32(buffer, alignment - 1);
-        codegen_emit_u8(buffer, register_number >= 8 ? 0x49 : 0x48);
-        codegen_emit_u8(buffer, 0x81);
-        codegen_emit_u8(buffer, (u8)(0xe0 | (register_number & 7)));
-        codegen_emit_u32(buffer, 0 - alignment);
+        BusterX86MetadataPhysicalOperand add_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(register_index, 64),
+            codegen_canonical_x64_metadata_immediate(alignment - 1, 32),
+        };
+        BusterX86MetadataPhysicalOperand and_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(register_index, 64),
+            codegen_canonical_x64_metadata_immediate(-(s64)alignment, 32),
+        };
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("ADD"), add_operands, BUSTER_ARRAY_LENGTH(add_operands)) ||
+            !codegen_canonical_x64_metadata_emit(buffer, S8("AND"), and_operands, BUSTER_ARRAY_LENGTH(and_operands)))
+        {
+            return false;
+        }
     }
     return buffer->error == CODEGEN_ERROR_NONE;
 }
