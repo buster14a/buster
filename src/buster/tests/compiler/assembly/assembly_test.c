@@ -272,6 +272,21 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_addp_cas
     {S8_INITIALIZER("addp v0.2d, v1.2d, v31.2d\n"), {0x20, 0xbc, 0xff, 0x4e}},
 };
 
+/* Exhaustive legal vector unary forms. Bytes are independent llvm-mc 22.1.8
+ * literals, not buster output. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_unary_cases[] = {
+    {S8_INITIALIZER("rev64 v0.8b, v1.8b\n"), {0x20, 0x08, 0x20, 0x0e}},
+    {S8_INITIALIZER("rev64 v0.16b, v1.16b\n"), {0x20, 0x08, 0x20, 0x4e}},
+    {S8_INITIALIZER("rev64 v0.4h, v1.4h\n"), {0x20, 0x08, 0x60, 0x0e}},
+    {S8_INITIALIZER("rev64 v0.8h, v1.8h\n"), {0x20, 0x08, 0x60, 0x4e}},
+    {S8_INITIALIZER("rev64 v0.2s, v1.2s\n"), {0x20, 0x08, 0xa0, 0x0e}},
+    {S8_INITIALIZER("rev64 v0.4s, v1.4s\n"), {0x20, 0x08, 0xa0, 0x4e}},
+    {S8_INITIALIZER("urecpe v0.2s, v1.2s\n"), {0x20, 0xc8, 0xa1, 0x0e}},
+    {S8_INITIALIZER("urecpe v0.4s, v1.4s\n"), {0x20, 0xc8, 0xa1, 0x4e}},
+    {S8_INITIALIZER("ursqrte v0.2s, v1.2s\n"), {0x20, 0xc8, 0xa1, 0x2e}},
+    {S8_INITIALIZER("ursqrte v0.4s, v1.4s\n"), {0x20, 0xc8, 0xa1, 0x6e}},
+};
+
 /* Exhaustive legal vector shift-by-register forms. Bytes are independent
  * llvm-mc 22.1.8 encodings. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_shift_cases[] = {
@@ -1066,12 +1081,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 238);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 238);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 152);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 176);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 241);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 241);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 149);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 179);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 87);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 84);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4173,6 +4188,47 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, invalid_addp_cases[invalid_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, invalid_addp.diagnostic_count == 1 && invalid_addp.bytes.length == 0 &&
                                    invalid_addp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_unary_cases) == 10);
+    for (u32 unary_index = 0; unary_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_unary_cases); unary_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase unary_case = assembly_a64_direct_simd_unary_cases[unary_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, unary_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, unary_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, unary_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult unary_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("REV64 V31.4S, V30.4S\nURECPE V31.4S, V30.4S\nURSQRTE V31.4S, V30.4S\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, unary_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(unary_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0x0b, 0xa0, 0x4e,
+                                                                      0xdf, 0xcb, 0xa1, 0x4e,
+                                                                      0xdf, 0xcb, 0xa1, 0x6e},
+                                                         12));
+    static String8 const invalid_unary_cases[] = {
+        S8_INITIALIZER("rev64 v0.2d, v1.2d\n"),
+        S8_INITIALIZER("rev64 v0.8b, v1.16b\n"),
+        S8_INITIALIZER("rev64 v0.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("urecpe v0.2d, v1.2d\n"),
+        S8_INITIALIZER("urecpe v0.8b, v1.8b\n"),
+        S8_INITIALIZER("urecpe q0, q1\n"),
+        S8_INITIALIZER("ursqrte v0.2d, v1.2d\n"),
+        S8_INITIALIZER("ursqrte v32.4s, v1.4s\n"),
+        S8_INITIALIZER("ursqrte v0.4s, v1.s[0]\n"),
+        S8_INITIALIZER("ursqrte v0.4s\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_unary_cases); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_unary = assembly_encode(
+            arguments->arena, invalid_unary_cases[invalid_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_unary.diagnostic_count == 1 && invalid_unary.bytes.length == 0 &&
+                                   invalid_unary.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     AssemblyEncodeResult reduction_upper = assembly_encode(
         arguments->arena,
