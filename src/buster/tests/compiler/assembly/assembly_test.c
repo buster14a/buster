@@ -2839,6 +2839,44 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86.relocation_count == 1 && x86.relocations[0].offset == 2 && x86.relocations[0].symbol == 1 &&
                                x86.relocations[0].addend == -4 && x86.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
 
+    // Metadata-authority smoke test: scalar MOV/ADD/LEA and direct CALL/JMP
+    // must preserve canonical bytes while leaving unresolved symbol fields as
+    // relocation-only fixups.
+    AssemblyEncodeResult metadata_authority_probe = assembly_encode(
+        arguments->arena,
+        S8("mov rax, rbx\n"
+           "add rax, 7\n"
+           "lea rcx, [rip + external]\n"
+           "call external\n"
+           "jmp external2\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_metadata_authority_probe[] = {
+        0x48, 0x89, 0xd8,
+        0x48, 0x83, 0xc0, 0x07,
+        0x48, 0x8d, 0x0d, 0x00, 0x00, 0x00, 0x00,
+        0xe8, 0x00, 0x00, 0x00, 0x00,
+        0xe9, 0x00, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, metadata_authority_probe.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(metadata_authority_probe.bytes, expected_metadata_authority_probe,
+                                                         BUSTER_ARRAY_LENGTH(expected_metadata_authority_probe)));
+    BUSTER_TEST(arguments, metadata_authority_probe.relocation_count == 3 &&
+                               metadata_authority_probe.relocations[0].offset == 10 &&
+                               metadata_authority_probe.relocations[1].offset == 15 &&
+                               metadata_authority_probe.relocations[2].offset == 20 &&
+                               metadata_authority_probe.relocations[0].addend == -4 &&
+                               metadata_authority_probe.relocations[1].addend == -4 &&
+                               metadata_authority_probe.relocations[2].addend == -4 &&
+                               metadata_authority_probe.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               metadata_authority_probe.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               metadata_authority_probe.relocations[2].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                               string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[0].symbol].name,
+                                            S8("external")) &&
+                               string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[1].symbol].name,
+                                            S8("external")) &&
+                               string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[2].symbol].name,
+                                            S8("external2")));
+
     // Front-door routing for the legacy prefix-control rows: RET/LEAVE use
     // the newly normalized DF64/IMMUNE66_LOOP64 forms, while LOOP-family
     // branches retain their 8-bit displacement and ignore redundant 66.
