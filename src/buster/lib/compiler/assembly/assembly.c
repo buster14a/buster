@@ -3543,6 +3543,38 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
      BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE, 2},
+    {S8_INITIALIZER("tbl"), UINT64_C(0x7217285bada5df77), S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L1_1"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbl"), UINT64_C(0xb78a5bd0b06eeb02), S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L2_2"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbl"), UINT64_C(0x1d93f8d9ed2b6dd8), S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L3_3"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbl"), UINT64_C(0x0f24e509b0a9d450), S8_INITIALIZER("arm-a64@2026-06:TBL_asimdtbl_L4_4"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbx"), UINT64_C(0x804d68c24266e3c4), S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L1_1"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbx"), UINT64_C(0xe298fbaad2ea6fd7), S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L2_2"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbx"), UINT64_C(0x9f7c68cc37209c0f), S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L3_3"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("tbx"), UINT64_C(0x2050b49463e72e5a), S8_INITIALIZER("arm-a64@2026-06:TBX_asimdtbl_L4_4"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
 };
 
 #if BUSTER_INCLUDE_TESTS
@@ -3606,6 +3638,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
         {
             return false;
         }
+        bool list_public_seen = false;
         for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
         {
             BusterA64SemanticOperand operand = {0};
@@ -3613,7 +3646,23 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
             {
                 return false;
             }
-            if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+            if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0)
+            {
+                if (!list_public_seen)
+                {
+                    public_operand_count += 1;
+                    list_public_seen = true;
+                }
+            }
+            else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                     (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+                     (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+                     (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0)
+            {
+                public_operand_count += 1;
+            }
+            else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
             {
                 public_operand_count += 1;
             }
@@ -7701,6 +7750,54 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse_any(String8
     return true;
 }
 
+/* TBL/TBX expose one brace-delimited table list as a single public operand.
+ * The generated semantic rows expand that operand into one list-member value
+ * per table register, with register_add_mod relations for the following
+ * members.  Keep this parser deliberately local to that shape: no generic
+ * brace/list grammar is admitted through direct SIMD. */
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_list_parse(String8 text, u32 expected_count, u32* first)
+{
+    text = assembly_trim(text);
+    if (!first || expected_count == 0 || expected_count > 4 || text.length < 2 || text.pointer[0] != '{' ||
+        text.pointer[text.length - 1] != '}')
+    {
+        return false;
+    }
+    String8 body = string_slice(text, 1, text.length - 1);
+    u64 cursor = 0;
+    u32 count = 0;
+    u32 base = 0;
+    while (cursor < body.length)
+    {
+        String8 member = {0};
+        if (count >= expected_count || assembly_operand_split_next(body, &cursor, &member) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            return false;
+        }
+        AssemblyAarch64DirectSIMDParsedRegister parsed = {0};
+        if (!assembly_aarch64_direct_simd_register_parse_any(member, &parsed) || parsed.prefix != 'v' ||
+            parsed.arrangement != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B)
+        {
+            return false;
+        }
+        if (count == 0)
+        {
+            base = parsed.number;
+        }
+        else if (parsed.number != ((base + count) & 31u))
+        {
+            return false;
+        }
+        count += 1;
+    }
+    if (count != expected_count)
+    {
+        return false;
+    }
+    *first = base;
+    return true;
+}
+
 typedef enum AssemblyAarch64DirectSIMDCandidateResult
 {
     ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID,
@@ -7718,6 +7815,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
     }
     u32 source_index[8] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
     u32 source_count = 0;
+    u32 list_source = UINT32_MAX;
+    u32 index_vector_source = UINT32_MAX;
     for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
     {
         BusterA64SemanticOperand operand = {0};
@@ -7725,7 +7824,37 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
         {
             return false;
         }
-        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+        bool list_member = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                           (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+        bool index_vector = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+        if (list_member)
+        {
+            if (list_source == UINT32_MAX)
+            {
+                if (source_count >= 4)
+                {
+                    return false;
+                }
+                list_source = source_count++;
+            }
+            source_index[operand_index] = list_source;
+        }
+        else if (index_vector)
+        {
+            if (index_vector_source == UINT32_MAX)
+            {
+                if (source_count >= 4)
+                {
+                    return false;
+                }
+                index_vector_source = source_count++;
+            }
+            source_index[operand_index] = index_vector_source;
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
         {
             if (source_count >= 4)
             {
@@ -7753,7 +7882,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
         {
             return false;
         }
-        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+        bool list_member = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                           (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+        bool index_vector = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+        if (list_member)
+        {
+            u32 source = source_index[operand_index];
+            if (source != list_source)
+            {
+                return false;
+            }
+            u32 count = 0;
+            for (u32 list_index = 0; list_index < form.operand_count; list_index += 1)
+            {
+                BusterA64SemanticOperand candidate = {0};
+                if (!buster_a64_semantic_operand(form.operand_first + list_index, &candidate))
+                {
+                    return false;
+                }
+                bool candidate_list = candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                                      (candidate.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+                if (candidate_list)
+                {
+                    count += 1;
+                }
+            }
+            instruction.operands[operand_index] =
+                buster_a64_direct_simd_value_list(registers[source], count, arrangements[source]);
+        }
+        else if (index_vector)
+        {
+            u32 source = source_index[operand_index];
+            if (source != index_vector_source)
+            {
+                return false;
+            }
+            instruction.operands[operand_index] = buster_a64_direct_simd_value_vector(registers[source], arrangements[source]);
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
         {
             u32 source = source_index[operand_index];
             if (source >= source_count)
@@ -7794,7 +7963,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
                 BusterA64SemanticOperand candidate = {0};
                 BusterA64DirectSIMDArrangementBinding binding = {0};
                 if (!buster_a64_semantic_operand(form.operand_first + register_index, &candidate) ||
-                    candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                    (candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
+                     !(candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                       (candidate.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+                       (candidate.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+                       (candidate.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0)) ||
                     !buster_a64_direct_simd_arrangement_binding(row_index, register_index, &binding) ||
                     binding.selector_index != operand_index)
                 {
@@ -7980,6 +8153,93 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
     if (!buster_a64_semantic_form(row.semantic_form_id, &form) || form.operand_count > BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
     {
         return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    bool has_list = false;
+    u32 list_operand_count = 0;
+    u32 index_vector_count = 0;
+    u32 vector_register_count = 0;
+    u32 arrangement_count = 0;
+    bool list_shape_valid = true;
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterA64SemanticOperand operand = {0};
+        if (!buster_a64_semantic_operand(form.operand_first + operand_index, &operand))
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        bool list_member = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                           (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+        bool index_vector = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+        if (list_member)
+        {
+            has_list = true;
+            list_operand_count += 1;
+        }
+        else if (index_vector)
+        {
+            index_vector_count += 1;
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
+                 (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0)
+        {
+            vector_register_count += 1;
+        }
+        else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT)
+        {
+            arrangement_count += 1;
+        }
+        else
+        {
+            list_shape_valid = false;
+        }
+    }
+    if (has_list)
+    {
+        /* The only currently admitted list-bearing direct rows are the
+         * eight TBL/TBX forms.  Their public grammar is exactly
+         * `<Vd>.<Ta>, { <Vn>.16B, ... }, <Vm>.<Ta>` while generated metadata
+         * expands the brace list and records Vm as a lane-shaped vector. */
+        if (!list_shape_valid || token_count != 3 || list_operand_count == 0 || list_operand_count > 4 || index_vector_count != 1 ||
+            vector_register_count != 1 || arrangement_count != 2)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        AssemblyAarch64DirectSIMDParsedRegister destination = {0};
+        AssemblyAarch64DirectSIMDParsedRegister index = {0};
+        if (!assembly_aarch64_direct_simd_register_parse_any(tokens[0], &destination) || destination.prefix != 'v' ||
+            (destination.arrangement != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8B &&
+             destination.arrangement != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B) ||
+            !assembly_aarch64_direct_simd_list_parse(tokens[1], list_operand_count, &registers[1]) ||
+            !assembly_aarch64_direct_simd_register_parse_any(tokens[2], &index) || index.prefix != 'v' ||
+            index.arrangement != destination.arrangement)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        registers[0] = destination.number;
+        registers[2] = index.number;
+        arrangements[0] = destination.arrangement;
+        arrangements[1] = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B;
+        arrangements[2] = index.arrangement;
+        BusterA64DirectSIMDInstruction instruction = {0};
+        if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, conditions, &instruction))
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        instruction.fixed_field_kind = spelling.fixed_field_kind;
+        instruction.fixed_field_value = spelling.fixed_field_value;
+        if (!buster_a64_direct_simd_requirement_supported(target, spelling.requirement))
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE;
+        }
+        u32 encoded_word = 0;
+        if (buster_a64_direct_simd_encode(target, &instruction, &encoded_word) != BUSTER_A64_DIRECT_SIMD_STATUS_OK)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_MATCH;
     }
     u32 source_count = 0;
     u32 token_index = 0;
