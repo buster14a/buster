@@ -352,7 +352,6 @@ BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options
         u64 target = (u64)(uintptr_t)binding->address;
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
-            String8 features[1] = {S8("*")};
             BusterX86MetadataPhysicalOperand memory = {
                 .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
                 .width = 64,
@@ -368,7 +367,7 @@ BUSTER_GLOBAL_LOCAL bool jit_emit_thunks(JitProgram* program, JitOptions options
                     .mnemonic = S8("JMP"),
                     .operands = &memory,
                     .operand_count = 1,
-                    .features = {.names = features, .count = 1},
+                    .features = {.names = 0, .count = 0},
                     .address_size = 64,
                     .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
                     .source_semantics = false,

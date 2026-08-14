@@ -78,7 +78,7 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
             .reg = {.index = (u16)source_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
         },
     };
-    String8 apx_features[1] = {S8("*")};
+    String8 apx_features[1] = {S8("APX_F")};
     BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
         .physical = {
             .mnemonic = mnemonics[operation],

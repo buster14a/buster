@@ -188,13 +188,12 @@ BUSTER_GLOBAL_LOCAL bool link_x86_emit(LinkX86InstructionBuilder* builder, Strin
                                        BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
 {
     if (!builder || builder->count > builder->capacity || (operand_count && !operands) || operand_count > 16) return false;
-    String8 features[1] = {S8("*")};
     BusterX86MetadataEmitResult result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
         .physical = {
             .mnemonic = mnemonic,
             .operands = operands,
             .operand_count = operand_count,
-            .features = {.names = features, .count = 1},
+            .features = {.names = 0, .count = 0},
             .address_size = 64,
             .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
             .include_privileged = true,

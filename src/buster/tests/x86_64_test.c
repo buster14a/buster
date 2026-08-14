@@ -67,7 +67,6 @@ UnitTestResult x86_64_tests(UnitTestArguments* arguments)
     // The source-independent bridge is also the canonical path used by
     // fixed link/JIT producers.  Keep a small byte differential here so
     // those callers cannot silently regress to hand-written opcode blobs.
-    String8 all_features[] = {S8("*")};
     BusterX86MetadataPhysicalOperand rip_memory = {
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
         .width = 64,
@@ -84,7 +83,6 @@ UnitTestResult x86_64_tests(UnitTestArguments* arguments)
             .mnemonic = S8("JMP"),
             .operands = &rip_memory,
             .operand_count = 1,
-            .features = {.names = all_features, .count = 1},
             .address_size = 64,
             .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         },
