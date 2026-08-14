@@ -11035,7 +11035,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
         if (x87_alias_rewrite)
         {
-            x87_alias_operands = x87_alias_att ? S8("%st(1), %st") : S8("st(1), st(0)");
+            // Metadata rows for FXCH/FCOM-style aliases keep ST0 as the
+            // fixed ModRM.reg operand.  Intel's source spelling is written
+            // destination-first, so preserve that hidden ST0 position when
+            // materializing an omitted operand; ATT is reversed by the
+            // ordinary source parser and keeps its established order.
+            x87_alias_operands = x87_alias_att ? (x87_arithmetic || x87_pop_arithmetic ? S8("%st, %st(1)") : S8("%st(1), %st"))
+                                               : (x87_omitted_register ? S8("st(0), st(1)") : S8("st(1), st(0)"));
         }
     }
     else if (x87_one_register_source && (x87_arithmetic || x87_pop_arithmetic))
@@ -11053,7 +11059,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                            : string_format(builder->arena, S8("st(0), {S8}"), x87_one_operand);
         if (x87_pop_arithmetic)
         {
-            x87_alias_operands = x87_alias_att ? string_format(builder->arena, S8("{S8}, %st"), x87_one_operand)
+            x87_alias_operands = x87_alias_att ? string_format(builder->arena, S8("%st, {S8}"), x87_one_operand)
                                                : string_format(builder->arena, S8("{S8}, st(0)"), x87_one_operand);
         }
     }
@@ -11368,41 +11374,6 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                                      physical + index))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-        }
-    }
-    // X87 metadata rows expose only the explicit stack operand; ST0 (and the
-    // status/pop/push pseudo-registers) are implicit schema operands.  The
-    // handwritten front end accepts the conventional two-register spelling,
-    // so project an explicit ST0 pair down to its visible non-ST0 operand
-    // before physical form selection.
-    u32 x87_register_count = 0;
-    for (u32 index = 0; index < operand_count; index += 1)
-    {
-        x87_register_count += physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                              physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL &&
-                              physical[index].reg.width == 80;
-    }
-    if (x87_register_count == 2 && operand_count == 2)
-    {
-        u32 drop_index = UINT32_MAX;
-        for (u32 index = 0; index < operand_count; index += 1)
-        {
-            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                physical[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL &&
-                physical[index].reg.width == 80 && physical[index].reg.index == 0)
-            {
-                drop_index = index;
-                break;
-            }
-        }
-        if (drop_index != UINT32_MAX)
-        {
-            for (u32 index = drop_index + 1; index < operand_count; index += 1)
-            {
-                physical[index - 1] = physical[index];
-                operands[index - 1] = operands[index];
-            }
-            operand_count -= 1;
         }
     }
     bool mmx_instruction = false;

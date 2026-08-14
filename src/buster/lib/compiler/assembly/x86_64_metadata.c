@@ -2925,6 +2925,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operan
     // the architectural CL identity; an omitted CL remains the ordinary
     // implicit form.
     bool explicit_cl = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_CL"));
+    // X87 two-register source spellings expose ST0 as the architectural
+    // fixed operand even though XED stores it as hidden.  Consume it when
+    // the caller preserves the pair; a one-register source query continues
+    // to omit ST0 and selects the ordinary ST0-destination form.
+    bool explicit_x87_st0 = query.operand_count == 2 &&
+                            buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST0"));
     // FNSTSW's register spelling exposes the architectural AX destination in
     // source syntax even though XED stores it as a fixed implicit operand.
     // Consume that one fixed AX when callers query `fnstsw ax`; memory forms
@@ -2934,7 +2940,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operan
     return !query.include_implicit && !metadata.visible &&
            (!query.source_semantics || form.operand_count > 1) &&
            metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && actual_index < query.operand_count &&
-           (explicit_bsr0 || explicit_cl || explicit_fnstsw_ax) &&
+           (explicit_bsr0 || explicit_cl || explicit_x87_st0 || explicit_fnstsw_ax) &&
            buster_x86_metadata_emit_fixed_register_matches(metadata, query.operands[actual_index]);
 }
 

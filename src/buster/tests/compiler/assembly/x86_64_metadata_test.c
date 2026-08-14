@@ -9569,6 +9569,45 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                            x87_cases[case_index].bytes, BUSTER_ARRAY_LENGTH(x87_cases[case_index].bytes)));
             }
 
+            // Preserve the explicit ST(0) in two-register source spellings:
+            // Intel `fmul st(3), st(0)` is the DC destination form, while
+            // `fmul st(0), st(3)` remains the D8 form.  The checked selector
+            // must retain this direction instead of projecting ST(0) away.
+            BusterX86MetadataPhysicalOperand x87_direction_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 3, 80),
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 80),
+            };
+            BusterX86MetadataPhysicalQuery x87_direction_query = x86_64_metadata_test_physical_query(
+                S8("FMUL"), x87_direction_operands, BUSTER_ARRAY_LENGTH(x87_direction_operands),
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+            x87_direction_query.source_semantics = true;
+            BusterX86MetadataSelectResult x87_direction_selection = buster_x86_metadata_select_form(x87_direction_query);
+            u8 x87_direction_bytes[8] = {0};
+            BusterX86MetadataEmitResult x87_direction_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = x87_direction_query,
+                .output = x87_direction_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(x87_direction_bytes),
+            });
+            BUSTER_TEST(arguments, x87_direction_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       x87_direction_selection.form_id == 9191 &&
+                                       x87_direction_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       x87_direction_emit.byte_count == 2 && x87_direction_bytes[0] == 0xdc &&
+                                       x87_direction_bytes[1] == 0xcb);
+            x87_direction_operands[0].reg.index = 0;
+            x87_direction_operands[1].reg.index = 3;
+            x87_direction_query.operands = x87_direction_operands;
+            BusterX86MetadataSelectResult x87_reverse_direction_selection = buster_x86_metadata_select_form(x87_direction_query);
+            x87_direction_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = x87_direction_query,
+                .output = x87_direction_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(x87_direction_bytes),
+            });
+            BUSTER_TEST(arguments, x87_reverse_direction_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       x87_reverse_direction_selection.form_id == 9085 &&
+                                       x87_direction_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       x87_direction_emit.byte_count == 2 && x87_direction_bytes[0] == 0xd8 &&
+                                       x87_direction_bytes[1] == 0xcb);
+
             // Real-memory x87 widths are encoded by distinct legacy opcodes,
             // not by REX.W.  The selector must therefore distinguish the
             // m32real/m64real/mem80real rows, and a RIP-relative symbol must
