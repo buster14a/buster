@@ -8060,20 +8060,49 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
                             C_X64_LOAD(0x9d, instruction->operands[1]);
                             C_X64_LOAD_HIGH(0x8d, instruction->operands[1]);
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xd2);
+                            BusterX86MetadataPhysicalOperand zero_rax_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand zero_rdx_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand atomic_memory = codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, 128, 0);
+                            String8 cx16_features_names[] = {S8("cx16")};
+                            if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_rax_operands,
+                                                                                       BUSTER_ARRAY_LENGTH(zero_rax_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_rdx_operands,
+                                                                     BUSTER_ARRAY_LENGTH(zero_rdx_operands)))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
                             u32 retry = (u32)buffer.count;
-                            codegen_emit_u8(&buffer, 0xf0);
-                            codegen_emit_u8(&buffer, 0x49);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xc7);
-                            codegen_emit_u8(&buffer, 0x0a);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x85);
-                            s32 retry_delta = (s32)((s64)retry - ((s64)buffer.count + 4));
-                            codegen_emit_u32(&buffer, (u32)retry_delta);
+                            BusterX86MetadataPhysicalOperand retry_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            if (!codegen_canonical_x64_metadata_emit_attributes(
+                                    &buffer, S8("CMPXCHG16B"), &atomic_memory, 1,
+                                    (BusterX86MetadataFeatureInput){.names = cx16_features_names, .count = BUSTER_ARRAY_LENGTH(cx16_features_names)},
+                                    (BusterX86MetadataPhysicalAttributes){.lock = true}))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            u32 retry_branch_offset = (u32)buffer.count;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNZ"), &retry_operand, 1))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            s64 retry_delta = (s64)retry - ((s64)retry_branch_offset + 6);
+                            if (retry_delta < INT32_MIN || retry_delta > INT32_MAX || !buffer.bytes || retry_branch_offset + 6 > buffer.count)
+                            {
+                                result.error = retry_delta < INT32_MIN || retry_delta > INT32_MAX ? CODEGEN_ERROR_CAPACITY
+                                                                                                    : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            s32 retry_displacement = (s32)retry_delta;
+                            memcpy(buffer.bytes + retry_branch_offset + 2, &retry_displacement, sizeof(retry_displacement));
                             instruction_id = instruction->next;
                             continue;
                         }
@@ -8098,56 +8127,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     u64 remaining = part_size - part_copied;
                                     u32 chunk = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
                                     u64 copy_offset = part_offset + part_copied;
-                                    if (chunk == 8)
+                                    s32 source_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]);
+                                    s32 destination_displacement = indirect ? 0 : C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]);
+                                    if (copy_offset > INT32_MAX || (s64)source_displacement + (s64)copy_offset > INT32_MAX ||
+                                        (s64)source_displacement + (s64)copy_offset < INT32_MIN ||
+                                        (!indirect && ((s64)destination_displacement + (s64)copy_offset > INT32_MAX ||
+                                                       (s64)destination_displacement + (s64)copy_offset < INT32_MIN)))
                                     {
-                                        codegen_emit_u8(&buffer, 0x48);
+                                        result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                        return result;
                                     }
-                                    if (chunk == 1 || chunk == 2)
+                                    u16 chunk_width = (u16)(chunk * 8);
+                                    String8 load_mnemonic = chunk == 1 || chunk == 2 ? S8("MOVZX") : S8("MOV");
+                                    u16 load_register_width = chunk <= 4 ? 32 : 64;
+                                    BusterX86MetadataPhysicalOperand load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, load_register_width),
+                                        codegen_canonical_x64_metadata_memory(
+                                            X64_REGISTER_RBP, chunk_width, (s64)source_displacement + (s64)copy_offset),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, load_mnemonic, load_operands, BUSTER_ARRAY_LENGTH(load_operands)))
                                     {
-                                        codegen_emit_u8(&buffer, 0x0f);
-                                        codegen_emit_u8(&buffer, chunk == 1 ? 0xb6 : 0xb7);
+                                        result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                        return result;
                                     }
-                                    else
+                                    BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                        indirect ? codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, chunk_width, (s64)copy_offset)
+                                                  : codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, chunk_width,
+                                                                                           (s64)destination_displacement + (s64)copy_offset),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, chunk_width),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
+                                                                              BUSTER_ARRAY_LENGTH(store_operands)))
                                     {
-                                        codegen_emit_u8(&buffer, 0x8b);
-                                    }
-                                    codegen_emit_u8(&buffer, 0x85);
-                                    codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]) + (s32)copy_offset));
-                                    if (chunk == 8)
-                                    {
-                                        codegen_emit_u8(&buffer, 0x48);
-                                    }
-                                    else if (chunk == 2)
-                                    {
-                                        codegen_emit_u8(&buffer, 0x66);
-                                    }
-                                    codegen_emit_u8(&buffer, chunk == 1 ? 0x88 : 0x89);
-                                    if (indirect)
-                                    {
-                                        if (copy_offset > INT32_MAX)
-                                        {
-                                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                                            return result;
-                                        }
-                                        if (!copy_offset)
-                                        {
-                                            codegen_emit_u8(&buffer, 0x02);
-                                        }
-                                        else if (copy_offset <= INT8_MAX)
-                                        {
-                                            codegen_emit_u8(&buffer, 0x42);
-                                            codegen_emit_u8(&buffer, (u8)copy_offset);
-                                        }
-                                        else
-                                        {
-                                            codegen_emit_u8(&buffer, 0x82);
-                                            codegen_emit_u32(&buffer, (u32)copy_offset);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        codegen_emit_u8(&buffer, 0x85);
-                                        codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]) + (s32)copy_offset));
+                                        result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                        return result;
                                     }
                                     part_copied += chunk;
                                 }
