@@ -7343,6 +7343,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
+                            u32 retry = (u32)buffer.count;
                             BusterX86MetadataPhysicalOperand move_rax_to_rbx_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
@@ -7371,7 +7372,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            u32 retry = (u32)buffer.count;
                             BusterX86MetadataPhysicalOperand retry_operand = codegen_canonical_x64_metadata_relative(0, 32);
                             // The branch is emitted with a neutral rel32 and patched after the metadata encoder reports its
                             // exact length.  Keep the retry displacement as the only hand-written field in this sequence.
