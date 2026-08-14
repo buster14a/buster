@@ -7013,12 +7013,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                   BUSTER_ARRAY_LENGTH(stack_add_operands));
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        u64 stack_probe_compare_offset = buffer.count;
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), stack_compare_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_compare_operands));
                         u64 stack_probe_final_patch = buffer.count;
                         BusterX86MetadataPhysicalOperand stack_probe_final_branch = codegen_canonical_x64_metadata_relative(0, 8);
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("JB"), &stack_probe_final_branch, 1);
-                        u64 stack_probe_loop_offset = buffer.count;
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_sub_rsp_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_sub_rsp_operands));
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), stack_test_operands,
@@ -7036,7 +7036,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_move_rax_rsp_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_move_rax_rsp_operands));
                         s64 stack_probe_final_delta = (s64)stack_probe_final_offset - (s64)(stack_probe_final_patch + 2);
-                        s64 stack_probe_loop_delta = (s64)stack_probe_loop_offset - (s64)(stack_probe_loop_patch + 2);
+                        // Recheck the remaining count before every page touch.
+                        // Branching to the first SUB skips CMP after the first
+                        // page, so any allocation larger than one page keeps
+                        // subtracting through the stack guard until SIGSEGV.
+                        s64 stack_probe_loop_delta = (s64)stack_probe_compare_offset - (s64)(stack_probe_loop_patch + 2);
                         if (buffer.error == CODEGEN_ERROR_NONE && stack_probe_final_delta >= INT8_MIN && stack_probe_final_delta <= INT8_MAX &&
                             stack_probe_loop_delta >= INT8_MIN && stack_probe_loop_delta <= INT8_MAX && stack_probe_final_patch + 1 < buffer.count &&
                             stack_probe_loop_patch + 1 < buffer.count)
