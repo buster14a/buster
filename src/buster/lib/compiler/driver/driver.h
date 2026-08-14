@@ -33,7 +33,6 @@ typedef enum CompilerDriverError
 typedef enum CompilerDriverLanguage
 {
     COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
-    COMPILER_DRIVER_LANGUAGE_BUSTER,
     COMPILER_DRIVER_LANGUAGE_C,
     COMPILER_DRIVER_LANGUAGE_OPENCL,
     COMPILER_DRIVER_LANGUAGE_CUDA,
@@ -67,23 +66,6 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
-typedef enum CompilerDriverOutputKind
-{
-    // Value zero preserves the existing compile-to-native-executable API.
-    COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE,
-    COMPILER_DRIVER_OUTPUT_KIND_JIT,
-    COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE,
-    COMPILER_DRIVER_OUTPUT_KIND_COUNT,
-} CompilerDriverOutputKind;
-
-typedef enum CompilerDriverEntrySignature
-{
-    COMPILER_DRIVER_ENTRY_SIGNATURE_NONE,
-    COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID,
-    COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP,
-    COMPILER_DRIVER_ENTRY_SIGNATURE_COUNT,
-} CompilerDriverEntrySignature;
-
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
@@ -100,7 +82,6 @@ struct CompilerDriverInvocation
     String8* gpu_arguments;
     String8 output_path;
     String8 sysroot;
-    String8 module_root;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -144,20 +125,6 @@ struct CompilerDriverInvocation
     bool c_dialect_explicit;
 };
 
-typedef struct CompilerDriverOptions CompilerDriverOptions;
-struct CompilerDriverOptions
-{
-    String8 source_path;
-    String8 output_path;
-    String8 module_root;
-    Target target;
-    CompilerDriverOutputKind output_kind;
-    bool debug_info;
-    // A CodegenRegisterAllocatorMode value.
-    u8 register_allocator;
-    u8 reserved[2];
-};
-
 typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
@@ -177,7 +144,6 @@ struct CompilerDriverResult
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;
-    CompilerDriverEntrySignature entry_signature;
     u32 tokenizer_error_count;
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
@@ -188,13 +154,12 @@ struct CompilerDriverResult
     u8 reserved;
 };
 
-// Fills every table the compile pipeline builds on first use -- tokenizer, C
-// frontend, codegen, and x86 assembly metadata -- on the calling thread. Call this before lane_run:
+// Fills every table the compile pipeline builds on first use -- the C
+// frontend and codegen -- on the calling thread. Call this before lane_run:
 // those tables are written once and read afterwards through plain loads, so
 // they must be complete before a second lane can reach them, and a gang that
 // finds one unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION
 // rather than racing.
 BUSTER_F_DECL void compiler_prewarm(void);
-BUSTER_F_DECL CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions options);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);

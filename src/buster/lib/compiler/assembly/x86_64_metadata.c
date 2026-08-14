@@ -824,6 +824,11 @@ struct BusterX86MetadataExactPlanRecord
     u8 operand_flags[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
     u16 operand_count;
     u8 pattern_control_blocker;
+    // XED's LOCKABLE atomic aliases are normalized with `nolock_prefix`.
+    // Keep the public pattern/cache immutable and carry this exact-only
+    // policy fact beside the prepared plan instead of mutating the cached
+    // lock selector after prewarm.
+    u8 lock_alias;
     u8 moffs_form;
     u8 maskmov_form;
     u8 requires_dfv;
@@ -921,6 +926,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_moffs_source_accumulator(Buste
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_cet_no_track(BusterX86MetadataForm form,
                                                                            BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataString string, String8 needle);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_exact_lock_alias(BusterX86MetadataForm form,
+                                                               BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mode66_residual(BusterX86MetadataForm form,
@@ -4224,6 +4231,30 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataSt
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_exact_lock_alias(BusterX86MetadataForm form,
+                                                               BusterX86MetadataPatternSemantics pattern)
+{
+    // XED emits these LOCKABLE memory rows with `nolock_prefix`, while the
+    // compiler's durable atomic recipes intentionally retain their canonical
+    // row identity and request LOCK as a physical query attribute.  Keep the
+    // bridge closed over the three checked snapshot identities: this helper
+    // is never used by generic mnemonic selection or public form emission.
+    bool known_identity =
+        (form.id == 10278u && form.stable_hash == UINT64_C(0xd8600a40453775c4)) ||
+        (form.id == 10281u && form.stable_hash == UINT64_C(0xe00e3e190c8fe6bf)) ||
+        (form.id == 9530u && form.stable_hash == UINT64_C(0xd4c9fe07eb8a6554));
+    if (!known_identity || form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+        form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY || form.prefix_kind != BUSTER_X86_METADATA_PREFIX_LEGACY ||
+        !(form.field_flags & BUSTER_X86_METADATA_FIELD_MEMORY) || pattern.unresolved_blocker ||
+        pattern.lock_control != 2 || !pattern.has_memory || pattern.mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_MEMORY ||
+        !pattern.has_modrm || !pattern.explicit_modrm ||
+        !buster_x86_metadata_emit_string_has(form.attributes, S8("LOCKABLE")))
+        return false;
+    if (form.id == 9530u)
+        return buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CMPXCHG16B"));
+    return buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CMPXCHG"));
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_iform_requires_dfv(BusterX86MetadataForm form)
 {
     // DFV is a normalized XED operand role.  The checked-in generated operand
@@ -4547,6 +4578,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (!pattern_valid) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     bool moffs_form = plan ? plan->moffs_form : buster_x86_metadata_emit_is_moffs(form, pattern);
+    bool exact_lock_alias = plan && plan->lock_alias;
     if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE &&
         (!pattern.has_segment_override || !(plan ? plan->canonical_hidden_segment_override
                                                  : buster_x86_metadata_emit_canonical_hidden_segment_override(form, pattern))))
@@ -4635,7 +4667,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         // only the prefix family is promoted when the typed query actually
         // names an EGPR.  Explicit norex2 rows and maps outside the REX2
         // contract remain precise prefix blockers.
-        u8 promotion_map = pattern.map ? pattern.map : form.map;
+        u8 promotion_map = (u8)pattern.map;
+        if (!promotion_map) promotion_map = (u8)form.map;
         if (pattern.no_rex2 || (promotion_map != BUSTER_X86_METADATA_MAP_LEGACY &&
                                 promotion_map != BUSTER_X86_METADATA_MAP_0F))
             return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
@@ -4680,7 +4713,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (pattern.has_nf && pattern.nf_value != requested_nf) return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 && requested_nf)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
-    u8 encoding_map = pattern.map ? pattern.map : form.map;
+    u8 encoding_map = (u8)pattern.map;
+    if (!encoding_map) encoding_map = (u8)form.map;
     // Some legacy normalized rows retain the literal 0F opcode in their
     // pattern while the compact map field remains LEGACY.  REX2 consumes
     // that byte as M0, so recover the 0F map from the normalized opcode
@@ -4981,7 +5015,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
     }
 
-    u8 mandatory_prefix = pattern.mandatory_prefix ? pattern.mandatory_prefix : form.mandatory_prefix;
+    u8 mandatory_prefix = (u8)pattern.mandatory_prefix;
+    if (!mandatory_prefix) mandatory_prefix = (u8)form.mandatory_prefix;
     u8 pp = buster_x86_metadata_emit_mandatory_pp(mandatory_prefix);
     u16 data_width = buster_x86_metadata_emit_data_operand_width(bindings, binding_count);
     // In a MODE16 row the default operand size is already 16 bits.  Do not
@@ -4999,8 +5034,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (operand_size_override && immune_to_66) return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if ((query.attributes.rep && mandatory_prefix == 0xf2) || (query.attributes.repne && mandatory_prefix == 0xf3))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
-    if ((pattern.lock_control == 1 && !query.attributes.lock) || (pattern.lock_control == 2 && query.attributes.lock) ||
-        (query.attributes.lock && pattern.lock_control != 1) || (query.attributes.lock && !has_memory))
+    if ((pattern.lock_control == 1 && !query.attributes.lock) ||
+        (!exact_lock_alias && pattern.lock_control == 2 && query.attributes.lock) ||
+        (!exact_lock_alias && query.attributes.lock && pattern.lock_control != 1) ||
+        (query.attributes.lock && !has_memory))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (pattern.rep_not_f3 && query.attributes.rep) return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if ((pattern.rep_control == 1 && !query.attributes.rep) || (pattern.rep_control == 2 && !query.attributes.repne) ||
@@ -5077,7 +5114,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     }
     else if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP)
     {
-        u8 map = pattern.map ? pattern.map : form.map;
+        u8 map = (u8)pattern.map;
+        if (!map) map = (u8)form.map;
         u8 l = pattern.vector_length == 256 ? 1 : 0;
         u8 v = (u8)(vvvv_index & 0xf);
         u8 p1 = (u8)((rex_w ? 0x80u : 0u) | ((u32)((u8)((~v) & 0xf)) << 3) | ((u32)l << 2) | (u32)pp);
@@ -5098,7 +5136,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     }
     else if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX)
     {
-        u8 map = pattern.map ? pattern.map : form.map;
+        u8 map = (u8)pattern.map;
+        if (!map) map = (u8)form.map;
         u8 v = (u8)(vvvv_index & 0xf);
         u8 aaa = (u8)(mask_index & 7);
         u8 b = (query.attributes.broadcast_elements || query.attributes.sae ||
@@ -5156,11 +5195,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             else
                 p1 |= apx_evex_fixed_width_no_w ? (u8)(0x7c | pp) : 0x7c;
             if (has_memory && memory.has_index && !memory.vsib && (memory.index.index & 16)) p1 &= (u8)~0x04;
-            p2 = pattern.has_scc
-                     ? pattern.scc_value
-                     : pattern.has_nd && pattern.nd_value
-                           ? (u8)(0x10 | (requested_nf ? 0x04 : 0) | (vvvv_index < 16 ? 0x08 : 0))
-                           : (u8)(0x08 | (requested_nf ? 0x04 : 0));
+            if (pattern.has_scc)
+                p2 = (u8)pattern.scc_value;
+            else if (pattern.has_nd && pattern.nd_value)
+                p2 = (u8)(0x10 | (requested_nf ? 0x04 : 0) | (vvvv_index < 16 ? 0x08 : 0));
+            else
+                p2 = (u8)(0x08 | (requested_nf ? 0x04 : 0));
         }
         else
         {
@@ -5228,7 +5268,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     }
     if (pattern.has_modrm)
     {
-        u8 reg_field = pattern.reg_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY ? pattern.reg_fixed : (u8)(reg_index & 7);
+        u8 reg_field = (u8)pattern.reg_fixed;
+        if (pattern.reg_fixed == BUSTER_X86_METADATA_PATTERN_FIXED_ANY) reg_field = (u8)(reg_index & 7);
         if (pattern.has_reg_range) reg_field = (u8)(reg_index & 7);
         if (has_memory)
         {
@@ -5254,7 +5295,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         }
         else
         {
-            u8 rm_field = pattern.rm_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY ? pattern.rm_fixed : (u8)(rm_index & 7);
+            u8 rm_field = (u8)pattern.rm_fixed;
+            if (pattern.rm_fixed == BUSTER_X86_METADATA_PATTERN_FIXED_ANY) rm_field = (u8)(rm_index & 7);
             if (!buster_x86_metadata_emit_write_byte(scratch, (u8)(0xc0 | ((reg_field & 7) << 3) | (rm_field & 7))))
                 return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
         }
@@ -5283,7 +5325,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     }
     if (pattern.immediate_count > BUSTER_ARRAY_LENGTH(pattern.immediate_widths))
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
-    u32 immediate_count = pattern.immediate_count ? pattern.immediate_count : immediate_binding ? 1 : 0;
+    u32 immediate_count = (u32)pattern.immediate_count;
+    if (!immediate_count && immediate_binding) immediate_count = 1;
     for (u32 immediate_index = 0; immediate_index < immediate_count; immediate_index += 1)
     {
         BusterX86MetadataPhysicalBinding* binding = pattern.immediate_count
@@ -5296,9 +5339,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             return pattern.immediate_count ? BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH
                                             : BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
         }
-        u8 width = pattern.immediate_count ? pattern.immediate_widths[immediate_index] : pattern.immediate_width;
-        u8 signed_immediate = pattern.immediate_count ? pattern.immediate_signeds[immediate_index] : pattern.immediate_signed;
-        u8 variable = pattern.immediate_count ? pattern.immediate_variables[immediate_index] : pattern.immediate_variable;
+        u8 width = (u8)pattern.immediate_width;
+        u8 signed_immediate = (u8)pattern.immediate_signed;
+        u8 variable = (u8)pattern.immediate_variable;
+        if (pattern.immediate_count)
+        {
+            width = pattern.immediate_widths[immediate_index];
+            signed_immediate = pattern.immediate_signeds[immediate_index];
+            variable = pattern.immediate_variables[immediate_index];
+        }
         if (!width && variable)
             width = buster_x86_metadata_emit_variable_width(data_width, form.immediate_width, !signed_immediate);
         if (!width) width = form.immediate_width;
@@ -6135,6 +6184,15 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86Meta
         .relocations = query.relocations,
         .relocation_capacity = query.relocation_capacity,
     };
+    if (query.force_lock)
+    {
+        if (!record->lock_alias)
+        {
+            result.status = BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            return result;
+        }
+        normalized.physical.attributes.lock = true;
+    }
     return buster_x86_metadata_emit_form_with_form(normalized, *record->form, false, record, &token, query.force_disp32);
 }
 
@@ -7666,6 +7724,7 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
             buster_x86_metadata_emit_effective_field_source_pattern(plan->operands[operand_index], pattern);
     }
     plan->pattern_control_blocker = buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
+    plan->lock_alias = buster_x86_metadata_exact_lock_alias(form, pattern);
     plan->moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);
     plan->maskmov_form = buster_x86_metadata_emit_is_maskmov(form, pattern);
     plan->requires_dfv = buster_x86_metadata_form_iform_requires_dfv(form);

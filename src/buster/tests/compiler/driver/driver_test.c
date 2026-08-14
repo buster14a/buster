@@ -1,7 +1,6 @@
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
-#include <buster/lib/compiler/frontend/buster/parser.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -726,10 +725,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Ar
     return result;
 }
 
-// One lane's share of the prewarm gang test. Both frontends are driven end to
-// end so every table compiler_prewarm() is responsible for is queried, and
-// nothing is asserted here: test macros are not thread-safe, so each lane only
-// records what it saw and the caller compares the lanes afterwards.
+// One lane's share of the prewarm gang test. The C frontend is driven through
+// preprocessing, syntax parsing, semantic analysis, and canonical IR lowering.
+// Test macros are not thread-safe, so each lane only records observations and
+// the caller compares them afterwards.
 enum
 {
     COMPILER_PREWARM_MAX_LANE_COUNT = 8,
@@ -738,11 +737,11 @@ enum
 typedef struct CompilerPrewarmLaneObservation CompilerPrewarmLaneObservation;
 struct CompilerPrewarmLaneObservation
 {
-    u64 buster_token_count;
-    u64 buster_diagnostic_count;
     u64 c_token_count;
     u64 c_error_count;
     u64 c_declaration_count;
+    u64 c_lower_diagnostic_count;
+    u64 c_ir_function_count;
     u32 abi_cpu_arch;
     u8 ran;
     u8 reserved[3];
@@ -751,34 +750,27 @@ struct CompilerPrewarmLaneObservation
 typedef struct CompilerPrewarmGangState CompilerPrewarmGangState;
 struct CompilerPrewarmGangState
 {
-    String8 buster_source;
     String8 c_source;
     CompilerPrewarmLaneObservation observations[COMPILER_PREWARM_MAX_LANE_COUNT];
 };
 
 BUSTER_GLOBAL_LOCAL void compiler_prewarm_observe(CompilerPrewarmGangState* state, CompilerPrewarmLaneObservation* observation)
 {
-    // Lane-owned arenas rather than the caller's or the thread's scratch: the
-    // caller's is shared across lanes, and parser_parse() needs a result and a
-    // staging arena that both differ from the two scratch arenas it borrows.
     Arena* result_arena = arena_create((ArenaCreation){0});
-    Arena* staging_arena = arena_create((ArenaCreation){0});
-
-    TokenizerResult tokens = tokenize(result_arena, state->buster_source.pointer, state->buster_source.length);
-    observation->buster_token_count = tokens.token_count;
-    ParserResult syntax = parser_parse(result_arena, staging_arena, state->buster_source, tokens);
-    observation->buster_diagnostic_count = syntax.diagnostic_count;
-
-    CPreprocessResult preprocess = c_preprocess(result_arena, state->c_source, (CPreprocessOptions){0});
+    Target target = target_native;
+    CPreprocessResult preprocess = c_preprocess(result_arena, state->c_source, (CPreprocessOptions){
+        .target = target,
+        .data_layout = target_data_layout(target),
+    });
     observation->c_token_count = preprocess.token_count;
     observation->c_error_count = preprocess.error_count;
-    CParserResult parsed = c_parse_ast(result_arena, preprocess);
-    observation->c_declaration_count = parsed.declaration_count;
-
+    CParserResult syntax = c_parse_ast(result_arena, preprocess);
+    observation->c_declaration_count = syntax.declaration_count;
+    CIRLowerResult lowered = c_analyze(result_arena, S8("compiler-prewarm.c"), preprocess, syntax, target);
+    observation->c_lower_diagnostic_count = lowered.diagnostic_count;
+    observation->c_ir_function_count = lowered.program && lowered.program->module_count ? lowered.program->modules[0].function_count : 0;
     observation->abi_cpu_arch = (u32)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V).cpu_arch;
     observation->ran = 1;
-
-    arena_destroy(staging_arena, 1);
     arena_destroy(result_arena, 1);
 }
 
@@ -805,8 +797,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
         CompilerPrewarmGangState* state = arena_allocate(arena, CompilerPrewarmGangState, 1);
         memset(state, 0, sizeof(*state));
-        state->buster_source = S8("code main : fn () s32\n{\n    data total: s32 = 1 + 2;\n    return total;\n}\n");
-        state->c_source = S8("static int compiler_prewarm_probe(int value)\n{\n    return value ? value + 1 : 0;\n}\n");
+        state->c_source = S8("int compiler_prewarm_probe(int value)\n{\n    return value ? value + 1 : 0;\n}\n");
 
         compiler_prewarm();
 
@@ -820,16 +811,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
         CompilerPrewarmLaneObservation serial = {0};
         compiler_prewarm_observe(state, &serial);
-        BUSTER_TEST(arguments, serial.ran && serial.buster_token_count && serial.c_token_count && !serial.c_error_count);
+        BUSTER_TEST(arguments, serial.ran && serial.c_token_count && !serial.c_error_count && !serial.c_lower_diagnostic_count && serial.c_ir_function_count);
 
         bool lanes_agree = true;
         for (u64 lane = 0; lane < lanes; lane += 1)
         {
             CompilerPrewarmLaneObservation* observation = &state->observations[lane];
-            lanes_agree = lanes_agree && observation->ran && observation->buster_token_count == serial.buster_token_count &&
-                          observation->buster_diagnostic_count == serial.buster_diagnostic_count &&
-                          observation->c_token_count == serial.c_token_count && observation->c_error_count == serial.c_error_count &&
-                          observation->c_declaration_count == serial.c_declaration_count && observation->abi_cpu_arch == serial.abi_cpu_arch;
+            lanes_agree = lanes_agree && observation->ran && observation->c_token_count == serial.c_token_count &&
+                          observation->c_error_count == serial.c_error_count &&
+                          observation->c_declaration_count == serial.c_declaration_count &&
+                          observation->c_lower_diagnostic_count == serial.c_lower_diagnostic_count &&
+                          observation->c_ir_function_count == serial.c_ir_function_count && observation->abi_cpu_arch == serial.abi_cpu_arch;
         }
         BUSTER_TEST(arguments, lanes_agree);
 
@@ -1309,52 +1301,34 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, memcmp(assembly_file_bytes.pointer, assembly_file.output.pointer, assembly_file.output.length) == 0);
     }
-    String8 buster_syntax_command_line[] = {
+    String8 retired_buster_path = buster_test_temporary_path(arguments->arena, S8("retired-buster-input"), S8(".bbb"));
+    BUSTER_TEST(arguments, file_write(retired_buster_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("retired language input\n"))));
+    String8 retired_buster_command_line[] = {
         S8("-fsyntax-only"),
-        S8("tests/basic_minimal.bbb"),
+        retired_buster_path,
     };
-    CompilerDriverResult buster_syntax = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_syntax_command_line)));
-    BUSTER_TEST(arguments, buster_syntax.error == COMPILER_DRIVER_ERROR_NONE);
-    String8 buster_assembly_command_line[] = {
-        S8("-S"),
+    CompilerDriverResult retired_buster = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retired_buster_command_line)));
+    BUSTER_TEST(arguments, retired_buster.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+    BUSTER_TEST(arguments, string_first_sequence(retired_buster.diagnostic, S8("unsupported C input")) != BUSTER_STRING_NO_MATCH);
+    String8 retired_language_command_line[] = {
         S8("-x"),
         S8("buster"),
-        S8("tests/basic_minimal.bbb"),
+        retired_buster_path,
     };
-    CompilerDriverResult buster_assembly = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_assembly_command_line)));
-    BUSTER_TEST(arguments, buster_assembly.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, string_first_sequence(buster_assembly.output, S8("main:\n")) != BUSTER_STRING_NO_MATCH);
-    String8 buster_object_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-object"), S8(".o"));
-    String8 buster_object_command_line[] = {
-        S8("-c"),
-        S8("-o"),
-        buster_object_path,
-        S8("tests/basic_minimal.bbb"),
-    };
-    CompilerDriverResult buster_object = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_object_command_line)));
-    BUSTER_TEST(arguments, buster_object.error == COMPILER_DRIVER_ERROR_NONE);
-    ByteSlice buster_object_bytes = file_read(arguments->arena, buster_object_path, (FileReadOptions){0});
-    BUSTER_TEST(arguments, buster_object_bytes.length != 0);
-    String8 buster_module_command_line[] = {
-        S8("-fsyntax-only"),
-        S8("-fmodule-root"),
+    CompilerDriverInvocation retired_language =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retired_language_command_line));
+    BUSTER_TEST(arguments, retired_language.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, retired_language.diagnostic, S8("unsupported language: buster"));
+    String8 retired_module_root_command_line[] = {
+        S8("--module-root"),
         S8("tests/modules"),
-        S8("tests/basic_import.bbb"),
+        S8("tests/basic_c_compile.c"),
     };
-    CompilerDriverResult buster_modules = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_module_command_line)));
-    BUSTER_TEST(arguments, buster_modules.error == COMPILER_DRIVER_ERROR_NONE);
-    String8 buster_preprocess_command_line[] = {
-        S8("-E"),
-        S8("tests/basic_minimal.bbb"),
-    };
-    CompilerDriverResult buster_preprocess = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_preprocess_command_line)));
-    BUSTER_TEST(arguments, buster_preprocess.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, buster_preprocess.diagnostic, S8("Buster input does not support preprocessing"));
+    CompilerDriverInvocation retired_module_root =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retired_module_root_command_line));
+    BUSTER_TEST(arguments, retired_module_root.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, retired_module_root.diagnostic, S8("unsupported option: --module-root"));
     String8 conflicting_actions[] = {
         S8("-c"),
         S8("-S"),
@@ -3943,218 +3917,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     scratch_end(c_multi_temporary);
-    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-test"), S8(".bbb"));
-    String8 output_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-test"),
-#if BUSTER_WINDOWS
-                                                     S8(".exe"));
-#else
-                                                     S8(""));
-#endif
-    String8 source = S8("code main[export] : fn () s32\n"
-                        "{\n"
-                        "    return 0;\n"
-                        "}\n");
-    BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){
-                                                       .pointer = (u8*)source.pointer,
-                                                       .length = source.length,
-                                                   }));
-    CompilerDriverResult jit_void_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                          .source_path = source_path,
-                                                                                          .target = target_native,
-                                                                                          .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                      });
-    BUSTER_TEST(arguments, jit_void_compile.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, jit_void_compile.has_object && jit_void_compile.object.symbol_count != 0);
-    BUSTER_TEST(arguments, jit_void_compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID);
-
-    String8 jit_arguments_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-arguments"), S8(".bbb"));
-    String8 jit_arguments_source = S8("code main[export] : fn[cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
-                                      "{\n"
-                                      "    return 0;\n"
-                                      "}\n");
-    BUSTER_TEST(arguments, file_write(jit_arguments_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_arguments_source)));
-    CompilerDriverResult jit_arguments_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                               .source_path = jit_arguments_path,
-                                                                                               .target = target_native,
-                                                                                               .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                           });
-    BUSTER_TEST(arguments, jit_arguments_compile.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, jit_arguments_compile.has_object && jit_arguments_compile.object.symbol_count != 0);
-    BUSTER_TEST(arguments, jit_arguments_compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP);
-
-    String8 jit_wrong_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-wrong-main"), S8(".bbb"));
-    String8 jit_wrong_source = S8("code main[export] : fn[cc(c)] (value: s64) s32\n"
-                                  "{\n"
-                                  "    return 0;\n"
-                                  "}\n");
-    BUSTER_TEST(arguments, file_write(jit_wrong_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_wrong_source)));
-    CompilerDriverResult jit_wrong_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                           .source_path = jit_wrong_path,
-                                                                                           .target = target_native,
-                                                                                           .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                       });
-    BUSTER_TEST(arguments, jit_wrong_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_wrong_compile.has_object);
-    BUSTER_STRING_TEST(arguments, jit_wrong_compile.diagnostic,
-                       S8("JIT entry point main must have signature s32(void) or s32(s32|u32, u8**, u8**)"));
-
-    String8 jit_missing_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-missing-main"), S8(".bbb"));
-    String8 jit_missing_source = S8("code helper[export] : fn[cc(c)] () s32\n"
-                                    "{\n"
-                                    "    return 0;\n"
-                                    "}\n");
-    BUSTER_TEST(arguments, file_write(jit_missing_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_missing_source)));
-    CompilerDriverResult jit_missing_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                             .source_path = jit_missing_path,
-                                                                                             .target = target_native,
-                                                                                             .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                         });
-    BUSTER_TEST(arguments, jit_missing_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_missing_compile.has_object);
-    BUSTER_STRING_TEST(arguments, jit_missing_compile.diagnostic, S8("JIT entry point main was not found in the root module"));
-
-    String8 jit_private_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-private-main"), S8(".bbb"));
-    String8 jit_private_source = S8("code main : fn[cc(c)] () s32\n"
-                                    "{\n"
-                                    "    return 0;\n"
-                                    "}\n");
-    BUSTER_TEST(arguments, file_write(jit_private_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_private_source)));
-    CompilerDriverResult jit_private_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                             .source_path = jit_private_path,
-                                                                                             .target = target_native,
-                                                                                             .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                         });
-    BUSTER_TEST(arguments, jit_private_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_private_compile.has_object);
-    BUSTER_STRING_TEST(arguments, jit_private_compile.diagnostic, S8("JIT entry point main must be exported"));
-
-    String8 jit_module_directory = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-modules"), S8(""));
-    String8 jit_module_root_path = string_format_z(arguments->arena, S8("{S8}/root.bbb"), jit_module_directory);
-    String8 jit_module_dependency_path = string_format_z(arguments->arena, S8("{S8}/dependency.bbb"), jit_module_directory);
-    os_make_directory(jit_module_directory);
-    String8 jit_module_root_source = S8("import dependency = \"dependency\";\n"
-                                        "code root[export] : fn[cc(c)] () s32\n"
-                                        "{\n"
-                                        "    return dependency.main();\n"
-                                        "}\n");
-    String8 jit_module_dependency_source = S8("code main[export] : fn[cc(c)] () s32\n"
-                                              "{\n"
-                                              "    return 0;\n"
-                                              "}\n");
-    BUSTER_TEST(arguments, file_write(jit_module_root_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_module_root_source)));
-    BUSTER_TEST(arguments, file_write(jit_module_dependency_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_module_dependency_source)));
-    CompilerDriverResult jit_non_root_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                              .source_path = jit_module_root_path,
-                                                                                              .module_root = jit_module_directory,
-                                                                                              .target = target_native,
-                                                                                              .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
-                                                                                          });
-    BUSTER_TEST(arguments, jit_non_root_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_non_root_compile.has_object);
-    BUSTER_STRING_TEST(arguments, jit_non_root_compile.diagnostic, S8("JIT entry point main was not found in the root module"));
-
-    CompilerDriverResult compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                 .source_path = source_path,
-                                                                                 .output_path = output_path,
-                                                                                 .target = target_native,
-                                                                             });
-    if (compile.error != COMPILER_DRIVER_ERROR_NONE && compile.diagnostic.length)
-    {
-        arguments->show(arguments, S8("compiler driver error: {S8}\n"), compile.diagnostic);
-    }
-    BUSTER_TEST(arguments, compile.error == COMPILER_DRIVER_ERROR_NONE);
-    if (compile.error == COMPILER_DRIVER_ERROR_NONE)
-    {
-        String8 run_arguments[] = {
-            output_path,
-        };
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                    (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
-                                                    });
-        BUSTER_TEST(arguments, spawn.handle != 0);
-        if (spawn.handle)
-        {
-            ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
-            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
-        }
-    }
-#if BUSTER_LINUX
-    // The buster driver path must also emit resolvable DWARF when asked.
-    String8 buster_debug_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-debug"), S8(""));
-    CompilerDriverResult buster_debug_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                              .source_path = source_path,
-                                                                                              .output_path = buster_debug_path,
-                                                                                              .target = target_native,
-                                                                                              .debug_info = true,
-                                                                                          });
-    BUSTER_TEST(arguments, buster_debug_compile.error == COMPILER_DRIVER_ERROR_NONE);
-    if (buster_debug_compile.error == COMPILER_DRIVER_ERROR_NONE)
-    {
-        ByteSlice buster_debug_image = file_read(arguments->arena, buster_debug_path, (FileReadOptions){0});
-        ByteSlice buster_debug_line = compiler_driver_test_elf_section(buster_debug_image, S8(".debug_line"));
-        ByteSlice buster_debug_info = compiler_driver_test_elf_section(buster_debug_image, S8(".debug_info"));
-        u64 buster_debug_text_address = compiler_driver_test_elf_section_address(buster_debug_image, S8(".text"));
-        BUSTER_TEST(arguments, buster_debug_line.length > 4);
-        BUSTER_TEST(arguments, buster_debug_info.length > 11);
-        BUSTER_TEST(arguments, buster_debug_text_address != 0);
-        DwarfLineRow buster_debug_row = {0};
-        BUSTER_TEST(arguments, dwarf_line_lookup(buster_debug_line, buster_debug_text_address, &buster_debug_row));
-        BUSTER_TEST(arguments, buster_debug_row.line == 1 && buster_debug_row.file == 1);
-    }
-#endif
-    String8 module_directory = buster_test_temporary_path(arguments->arena, S8("buster-driver-modules"), S8(""));
-    String8 module_child_directory = string_format_z(arguments->arena, S8("{S8}/core"), module_directory);
-    String8 module_root_path = string_format_z(arguments->arena, S8("{S8}/main.bbb"), module_directory);
-    String8 module_dependency_path = string_format_z(arguments->arena, S8("{S8}/core/math.bbb"), module_directory);
-    String8 module_output_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-modules-executable"),
-#if BUSTER_WINDOWS
-                                                            S8(".exe"));
-#else
-                                                            S8(""));
-#endif
-    os_make_directory(module_directory);
-    os_make_directory(module_child_directory);
-    String8 module_root_source = S8("import math = \"core/math\";\n"
-                                    "code main[export] : fn[cc(c)] () s32\n"
-                                    "{\n"
-                                    "    return math.answer() - 42;\n"
-                                    "}\n");
-    String8 module_dependency_source = S8("code answer : fn () s32\n"
-                                          "{\n"
-                                          "    return 42;\n"
-                                          "}\n");
-    BUSTER_TEST(arguments, file_write(module_root_path, (ByteSlice){
-                                                            .pointer = (u8*)module_root_source.pointer,
-                                                            .length = module_root_source.length,
-                                                        }));
-    BUSTER_TEST(arguments, file_write(module_dependency_path, (ByteSlice){
-                                                                  .pointer = (u8*)module_dependency_source.pointer,
-                                                                  .length = module_dependency_source.length,
-                                                              }));
-    CompilerDriverResult module_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
-                                                                                        .source_path = module_root_path,
-                                                                                        .output_path = module_output_path,
-                                                                                        .module_root = module_directory,
-                                                                                        .target = target_native,
-                                                                                    });
-    if (module_compile.error != COMPILER_DRIVER_ERROR_NONE && module_compile.diagnostic.length)
-    {
-        arguments->show(arguments, S8("module compiler driver error: {S8}\n"), module_compile.diagnostic);
-    }
-    BUSTER_TEST(arguments, module_compile.error == COMPILER_DRIVER_ERROR_NONE);
-    if (module_compile.error == COMPILER_DRIVER_ERROR_NONE)
-    {
-        String8 run_arguments[] = {
-            module_output_path,
-        };
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                    (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
-                                                    });
-        BUSTER_TEST(arguments, spawn.handle != 0);
-        if (spawn.handle)
-        {
-            ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
-            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
-        }
-    }
 #else
     BUSTER_UNUSED(arguments);
 #endif

@@ -877,7 +877,11 @@ struct BusterX86MetadataMachineExactQuery
     // disp8 relaxation.  The checked/prevalidated exact APIs do not expose
     // this policy and retain their ordinary relaxation rules.
     bool force_disp32;
-    u8 reserved[3];
+    // Atomic machine recipes use this typed policy bit for the optional
+    // LOCK prefix.  The metadata token must prove that its durable form is
+    // one of the checked lockable atomic aliases before this is honored.
+    bool force_lock;
+    u8 reserved[2];
     u8* output;
     u32 output_capacity;
     BusterX86MetadataRelocation* relocations;

@@ -295,8 +295,8 @@ UnitTestResult window_tests(UnitTestArguments* arguments)
     if (source_arena)
     {
         String8 source_path_values[] = {
-            S8("C:/workspace/first.bbb"),
-            S8("C:/workspace/second.bbb"),
+            S8("C:/workspace/first.c"),
+            S8("C:/workspace/second.c"),
         };
         String8* source_paths = arena_allocate(source_arena, String8, BUSTER_ARRAY_LENGTH(source_path_values));
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(source_path_values); i += 1)
@@ -338,8 +338,8 @@ UnitTestResult window_tests(UnitTestArguments* arguments)
         arena_destroy(source_arena, 1);
         if (ui_event && ui_event->paths.length == 2)
         {
-            BUSTER_STRING_TEST(arguments, ui_event->paths.pointer[0], S8("C:/workspace/first.bbb"));
-            BUSTER_STRING_TEST(arguments, ui_event->paths.pointer[1], S8("C:/workspace/second.bbb"));
+            BUSTER_STRING_TEST(arguments, ui_event->paths.pointer[0], S8("C:/workspace/first.c"));
+            BUSTER_STRING_TEST(arguments, ui_event->paths.pointer[1], S8("C:/workspace/second.c"));
         }
     }
     else

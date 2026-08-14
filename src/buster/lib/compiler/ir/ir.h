@@ -1,7 +1,8 @@
 #pragma once
 
-#include <buster/lib/compiler/frontend/buster/analysis.h>
+#include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
+#include <buster/lib/target.h>
 
 typedef struct IrFunctionId IrFunctionId;
 struct IrFunctionId
@@ -283,8 +284,8 @@ typedef enum IrSimdOperation
 } IrSimdOperation;
 
 // The fixed operand/immediate arity of one SIMD operation. Every consumer —
-// the frontend that builds the instruction, the validator, the interpreter's
-// shape check, and the backend — reads the arity from here so a new operation
+// the frontend that builds the instruction, the validator, and the backend
+// read the arity from here so a new operation
 // cannot be half-taught to the pipeline.
 typedef struct IrSimdShape IrSimdShape;
 struct IrSimdShape
@@ -309,7 +310,6 @@ struct IrLabelProvenancePath
 
 struct IrValue
 {
-    AnalysisTypeId type;
     IrTypeId canonical_type;
     IrInstructionId definition;
     IrValueCategory category;
@@ -352,8 +352,6 @@ struct IrBlockParameter
     IrBlockParameter* next;
     IrIncoming* first_incoming;
     IrIncoming* last_incoming;
-    AnalysisTypeId type;
-    AnalysisLocalId local;
     IrTypeId canonical_type;
     IrLocalId canonical_local;
     IrValueId value;
@@ -370,10 +368,8 @@ struct IrPredecessor
 // Rare per-instruction payloads — the inline-assembly name arrays and the
 // string/float literal bytes — live in a sorted per-function side table
 // (ir_instruction_extra_find/ensure) instead of widening every instruction
-// row; the buster-frontend source range lives in a dense parallel array on
-// IrFunction for the same reason. The row is 112 bytes on 64-bit builds —
-// asserted by the size census in machine_test.c, which is where a designed
-// change must be recorded — and every consumer walks instructions linearly.
+// row. Every consumer walks instructions linearly, so the canonical source
+// range remains in a dense parallel array indexed by instruction id.
 typedef struct IrInstructionExtra IrInstructionExtra;
 struct IrInstructionExtra
 {
@@ -393,10 +389,6 @@ struct IrInstruction
     IrValueId* operands;
     IrBlockId* targets;
     u64* immediates;
-    AnalysisTypeId type;
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
-    AnalysisLocalId local;
     IrTypeId canonical_type;
     IrSymbolId symbol;
     IrLocalId canonical_local;
@@ -511,9 +503,6 @@ struct IrFunction
     String8 name;
     IrSymbolId symbol;
     IrSourceRange source;
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
-    AnalysisTypeId type;
     IrTypeId canonical_type;
     IrFunctionId id;
     IrBlockId entry;
@@ -527,11 +516,8 @@ struct IrFunction
     IrValueLabelMetadata* label_metadata;
     IrInstructionId* extra_instructions;
     IrInstructionExtra* extras;
-    ParserSourceRange* instruction_sources;
-    // Dense parallel array: the canonical source range for every
-    // instruction, filled by the appenders (C frontend) or the canonical
-    // mapping pass (buster frontend). Kept out of the row like the parser
-    // range: consumers that want it index by instruction id.
+    // Dense parallel array containing the canonical source range for every
+    // instruction. Consumers that need it index by instruction id.
     IrSourceRange* instruction_canonical_sources;
     u32 block_count;
     u32 block_capacity;
@@ -562,18 +548,12 @@ struct IrModule
     IrFunction* functions;
     IrGlobal* globals;
     IrModuleAssembly* assemblies;
-    IrTypeId* frontend_type_map;
-    IrSymbolId* frontend_symbol_map;
-    IrSourceId* frontend_source_map;
     u32 function_count;
     u32 function_capacity;
     u32 global_count;
     u32 global_capacity;
     u32 assembly_count;
     u32 assembly_capacity;
-    u32 frontend_type_count;
-    u32 frontend_symbol_count;
-    u32 frontend_source_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
 };
@@ -640,9 +620,6 @@ struct IrInstructionOwnership
     IrInstructionId instruction;
 };
 
-BUSTER_F_DECL IrModule ir_generate_module(Arena* result_arena, AnalysisResult* analysis);
-BUSTER_F_DECL IrModule ir_analyze_and_generate_module(Arena* result_arena, AnalysisResult* analysis);
-BUSTER_F_DECL IrProgram ir_generate_program(Arena* result_arena, AnalysisProgram* analysis);
 BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
 BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
 BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
@@ -661,9 +638,6 @@ BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena,
 BUSTER_F_DECL IrInstructionExtra* ir_instruction_extra_find(IrFunction* function, IrInstructionId instruction);
 BUSTER_F_DECL IrInstructionExtra ir_instruction_extra(IrFunction* function, IrInstructionId instruction);
 BUSTER_F_DECL IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFunction* function, IrInstructionId instruction);
-// The buster-frontend source range for one instruction; zero when the
-// function's dense source array is absent (canonical C functions).
-BUSTER_F_DECL ParserSourceRange ir_instruction_source(IrFunction* function, IrInstructionId instruction);
 BUSTER_F_DECL IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction);
 // Where a range points, line and column included. This is the only place
 // line and column are computed: everything upstream of it carries the source
@@ -693,6 +667,4 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // validation - register allocation and the emitters - reuse it instead of
 // re-deriving block membership or guarding their walks with a counter.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
-BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
-BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);

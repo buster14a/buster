@@ -113,7 +113,7 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
         {.name = S8("Node*"), .id = {.value = 2}, .unqualified_type = IR_TYPE_ID_INVALID, .element_type = {.value = 1},
          .layout = {.size = 8, .alignment = 8}, .kind = IR_TYPE_POINTER},
     };
-    IrSource canonical_source = {.path = S8("node.bbb"), .text = canonical_text, .id = {.value = 0}};
+    IrSource canonical_source = {.path = S8("node.c"), .text = canonical_text, .id = {.value = 0}};
     IrSymbol canonical_symbol = {
         .name = S8("node_function"), .id = {.value = 0}, .type = {.value = 1}, .source = {.source = {.value = 0}, .offset = 4},
         .kind = IR_SYMBOL_FUNCTION,
@@ -128,45 +128,13 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
                                                                           .program = &canonical_program,
                                                                           .functions = &canonical_function,
                                                                           .function_count = 1,
-                                                                          .canonical = true,
                                                                       });
     BUSTER_TEST(arguments, canonical_model.valid && canonical_model.type_count == 3);
     BUSTER_TEST(arguments, canonical_model.types[1].kind == DEBUG_TYPE_STRUCT && canonical_model.types[1].fields[0].type == 2);
     BUSTER_TEST(arguments, canonical_model.types[2].kind == DEBUG_TYPE_POINTER && canonical_model.types[2].element_type == 1);
     BUSTER_TEST(arguments, string_equal(canonical_model.types[1].name, S8("Node")));
 
-    // The Buster frontend uses frontend type IDs before canonical lowering;
-    // its aggregate graph is mapped through the same neutral representation.
-    AnalysisSource analysis_source = {.path = S8("node.bbb"), .id = {.value = 0}};
-    AnalysisEntity analysis_entity = {
-        .name = S8("Node"), .id = {.module = {.value = 0}, .index = {.value = 0}}, .source = {.value = 0},
-        .kind = ANALYSIS_ENTITY_TYPE,
-    };
-    AnalysisField analysis_field = {.name = S8("next"), .type = {.value = 2}, .range = {.line = 3}};
-    AnalysisEntitySemantic analysis_semantic = {.fields = &analysis_field, .field_count = 1};
-    AnalysisType analysis_types[] = {
-        {.name = S8("void"), .id = {.value = 0}, .kind = ANALYSIS_TYPE_VOID},
-        {.name = S8("Node"), .id = {.value = 1}, .kind = ANALYSIS_TYPE_STRUCT, .layout = {.size = 8, .alignment = 8},
-         .as.declaration = {.module = {.value = 0}, .index = {.value = 0}}},
-        {.name = S8("Node*"), .id = {.value = 2}, .kind = ANALYSIS_TYPE_POINTER, .layout = {.size = 8, .alignment = 8},
-         .as.element_type = {.value = 1}},
-    };
-    AnalysisResult analysis = {
-        .module = {.sources = &analysis_source, .entities = &analysis_entity, .semantics = &analysis_semantic, .id = {.value = 0},
-                   .source_count = 1, .entity_count = 1},
-        .types = {.types = analysis_types, .count = BUSTER_ARRAY_LENGTH(analysis_types)},
-    };
-    DebugFunctionSeed analysis_function = {
-        .name = S8("analysis_function"), .declaration = {.path = S8("node.bbb"), .source = 0, .line = 1}, .code_size = 16,
-    };
-    DebugModel analysis_model = debug_model_build(arguments->arena, (DebugModelInput){
-                                                                         .analysis = &analysis,
-                                                                         .functions = &analysis_function,
-                                                                         .function_count = 1,
-                                                                     });
-    BUSTER_TEST(arguments, analysis_model.valid && analysis_model.type_count == 3);
-    BUSTER_TEST(arguments, analysis_model.types[1].kind == DEBUG_TYPE_STRUCT && analysis_model.types[1].field_count == 1);
-    BUSTER_TEST(arguments, analysis_model.types[1].fields[0].type == 2 && analysis_model.types[2].element_type == 1);
+
     return result;
 }
 #endif

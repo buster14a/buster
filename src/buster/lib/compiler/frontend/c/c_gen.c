@@ -1873,10 +1873,6 @@ BUSTER_C_INTERNAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* buil
 BUSTER_C_INTERNAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type)
 {
     return (IrInstruction){
-        .type = ANALYSIS_TYPE_ID_INVALID,
-        .entity = ANALYSIS_ENTITY_ID_INVALID,
-        .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
-        .local = ANALYSIS_LOCAL_ID_INVALID,
         .canonical_type = type,
         .symbol = IR_SYMBOL_ID_INVALID,
         .canonical_local = IR_LOCAL_ID_INVALID,
@@ -2720,7 +2716,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrTypeId
 {
     IrValueId result = ir_function_add_value(builder->arena, builder->function,
                                              (IrValue){
-                                                 .type = ANALYSIS_TYPE_ID_INVALID,
                                                  .canonical_type = type,
                                                  .definition = IR_INSTRUCTION_ID_INVALID,
                                                  .category = IR_VALUE_VALUE,
@@ -2893,7 +2888,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     };
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = type,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -3010,7 +3004,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     }
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = symbol_value->type,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -3057,7 +3050,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
     };
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = type,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -3512,7 +3504,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         aggregate_type_id = pointer_type->element_type;
         base = ir_function_add_value(builder->arena, builder->function,
                                      (IrValue){
-                                         .type = ANALYSIS_TYPE_ID_INVALID,
                                          .canonical_type = aggregate_type_id,
                                          .definition = IR_INSTRUCTION_ID_INVALID,
                                          .category = IR_VALUE_PLACE,
@@ -3675,7 +3666,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         }
         IrValueId next = ir_function_add_value(builder->arena, builder->function,
                                                (IrValue){
-                                                   .type = ANALYSIS_TYPE_ID_INVALID,
                                                    .canonical_type = field_type,
                                                    .definition = IR_INSTRUCTION_ID_INVALID,
                                                    .category = IR_VALUE_PLACE,
@@ -3749,7 +3739,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, Ir
     IrTypeId element_type = base_type->element_type;
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = element_type,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -3868,7 +3857,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* build
     IrTypeId element = pointer_type->element_type;
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = element,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -6195,7 +6183,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* b
                          });
     IrValueId place = ir_function_add_value(builder->arena, builder->function,
                                             (IrValue){
-                                                .type = ANALYSIS_TYPE_ID_INVALID,
                                                 .canonical_type = array_type,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
@@ -19285,9 +19272,6 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
                                             .name = entity->name,
                                             .symbol = symbol,
                                             .source = source,
-                                            .entity = ANALYSIS_ENTITY_ID_INVALID,
-                                            .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
-                                            .type = ANALYSIS_TYPE_ID_INVALID,
                                             .canonical_type = canonical_type,
                                             .entry = IR_BLOCK_ID_INVALID,
                                             .state = IR_FUNCTION_DECLARATION,
@@ -29834,9 +29818,14 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
+        IrField* fields = c_type->member_count ? arena_allocate(arena, IrField, c_type->member_count) : 0;
+        if (fields)
+        {
+            memset(fields, 0, sizeof(*fields) * c_type->member_count);
+        }
         c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
                                                                      .name = c_type->tag,
-                                                                     .fields = arena_allocate(arena, IrField, c_type->member_count),
+                                                                     .fields = fields,
                                                                      .element_type = IR_TYPE_ID_INVALID,
                                                                      .return_type = IR_TYPE_ID_INVALID,
                                                                      .layout = (IrTypeLayout){0},
@@ -30931,9 +30920,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                           .name = declaration.name,
                                                           .symbol = symbol,
                                                           .source = source,
-                                                          .entity = ANALYSIS_ENTITY_ID_INVALID,
-                                                          .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
-                                                          .type = ANALYSIS_TYPE_ID_INVALID,
                                                           .canonical_type = function_type,
                                                           .entry = IR_BLOCK_ID_INVALID,
                                                           .state = declaration.is_definition ? IR_FUNCTION_REJECTED : IR_FUNCTION_DECLARATION,

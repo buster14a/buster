@@ -1,5 +1,6 @@
 #pragma once
 
+#include <buster/lib/file.h>
 #include <buster/tests/test.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/string.h>

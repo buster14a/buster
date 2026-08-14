@@ -4,13 +4,6 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-if [[ -f /opt/vulkan-sdk/current/setup-env.sh ]]; then
-    # Desktop CI uses the same SDK setup; Android still needs glslc/slangc to
-    # compile shaders even though Vulkan headers come from the NDK sysroot.
-    # shellcheck disable=SC1091
-    source /opt/vulkan-sdk/current/setup-env.sh
-fi
-
 android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 if [[ -z ${android_sdk} ]]; then
     echo "error: ANDROID_HOME or ANDROID_SDK_ROOT must point at an Android SDK" >&2

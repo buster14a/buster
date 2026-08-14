@@ -6,6 +6,11 @@ time; the methodology for taking new measurements — which benchmark to trust,
 how to profile the sanitized and Release trees, how to symbolize — stays in
 the "Benchmarking and diagnostics" section of `AGENTS.md`.
 
+Entries written before the C-only consolidation on 2026-08-14 may mention the
+removed experimental frontend, its fixtures, or its editor model. Those names
+are historical measurement context only and are not current architecture or
+implementation guidance.
+
 **Read the newest entry before starting performance work.** It carries the
 reference points the next audit is measured against, the finds that were
 deliberately left untaken, and the mistakes an earlier audit already paid for.

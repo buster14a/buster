@@ -6173,10 +6173,10 @@ BUSTER_C_SHARED void c_declaration_keyword_slots_build(void)
     c_declaration_keyword_slots_built = true;
 }
 
-// Every C frontend table that is built on first use, filled here on the
-// calling thread instead. See tokenizer_prewarm() for why the character-class
-// tables are still derived at runtime rather than spelled as constant
-// initializers.
+// Every C frontend table that is built on first use is filled here on the
+// calling thread. The character-class tables remain runtime-derived because
+// spelling their predicates through the preprocessor measurably inflates the
+// frontend translation unit.
 void c_prewarm(void)
 {
 #if BUSTER_C_LEX_COMPACT

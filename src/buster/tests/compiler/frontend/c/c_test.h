@@ -3,6 +3,7 @@
 #include <buster/tests/test.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/file.h>
 #include <buster/lib/string.h>
 
 #if BUSTER_INCLUDE_TESTS

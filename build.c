@@ -1341,10 +1341,6 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_fingerprint(String8 cache, 
         S8("BUSTER_USE_VULKAN"),
         S8("BUSTER_USE_D3D12"),
         S8("BUSTER_USE_METAL"),
-        S8("BUSTER_VULKAN_SDK"),
-        S8("BUSTER_VULKAN_INCLUDE_DIR"),
-        S8("BUSTER_SLANGC_EXECUTABLE"),
-        S8("BUSTER_SPIRV_OPT_EXECUTABLE"),
         S8("CMAKE_LINKER_TYPE"),
     };
     u64 hash = 1469598103934665603ULL;
@@ -1441,7 +1437,6 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_environment_fingerprint(u64* fing
     String8 observed_names[] = {
         S8("SDKROOT"),
         S8("MACOSX_DEPLOYMENT_TARGET"),
-        S8("VULKAN_SDK"),
         S8("CPATH"),
         S8("C_INCLUDE_PATH"),
         S8("CPLUS_INCLUDE_PATH"),
@@ -1542,16 +1537,16 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_graph_definitions_match(Arena* ar
     {
         String8 graph = BYTE_SLICE_TO_STRING(8, map.bytes);
         String8 expected[] = {
-            string_format(arena, S8("BUSTER_USE_VULKAN={u64}"), BUSTER_LINUX != 0),
-            string_format(arena, S8("BUSTER_USE_D3D12={u64}"), BUSTER_WINDOWS != 0),
-            string_format(arena, S8("BUSTER_USE_METAL={u64}"), BUSTER_MACOS != 0),
-            S8("BUSTER_USE_SLANG_SHADERS=1"),
+            S8("BUSTER_USE_VULKAN=0"),
+            S8("BUSTER_USE_D3D12=0"),
+            S8("BUSTER_USE_METAL=0"),
+            S8("BUSTER_USE_SLANG_SHADERS=0"),
         };
         String8 opposite[] = {
-            string_format(arena, S8("BUSTER_USE_VULKAN={u64}"), BUSTER_LINUX == 0),
-            string_format(arena, S8("BUSTER_USE_D3D12={u64}"), BUSTER_WINDOWS == 0),
-            string_format(arena, S8("BUSTER_USE_METAL={u64}"), BUSTER_MACOS == 0),
-            S8("BUSTER_USE_SLANG_SHADERS=0"),
+            S8("BUSTER_USE_VULKAN=1"),
+            S8("BUSTER_USE_D3D12=1"),
+            S8("BUSTER_USE_METAL=1"),
+            S8("BUSTER_USE_SLANG_SHADERS=1"),
         };
         for (u32 define_i = 0; define_i < BUSTER_ARRAY_LENGTH(expected); define_i += 1)
         {
@@ -1576,7 +1571,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_inputs_match(String8 c
     u64 fingerprint = 0;
     bool compile_shaders = false;
     bool result = build_artifact_fanout_cache_fingerprint(cache, &fingerprint) && build_artifact_fanout_restricted_cache_inputs_match(cache) &&
-                  build_artifact_fanout_cache_bool(cache, S8("BUSTER_COMPILE_SHADERS"), &compile_shaders) && compile_shaders;
+                  build_artifact_fanout_cache_bool(cache, S8("BUSTER_COMPILE_SHADERS"), &compile_shaders) && !compile_shaders;
     return result;
 }
 
@@ -1632,7 +1627,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_config_matches(Generate generate,
     bool result = ci == (bool)generate.ci && link_libc == (bool)generate.link_libc && unity_build && include_tests == (bool)generate.include_tests &&
                   sanitize == (bool)generate.sanitize && time_trace == (bool)generate.time_trace && instrument == (bool)generate.instrument &&
                   fuzz_available == (bool)generate.fuzz_available && lto == (bool)generate.lto && !single_threaded &&
-                  use_vulkan == (BUSTER_LINUX != 0) && check_optional_warnings == (bool)generate.check_optional_warnings &&
+                  !use_vulkan && check_optional_warnings == (bool)generate.check_optional_warnings &&
                   developer_targets == (bool)generate.developer_targets && string_equal(linker, expected_linker);
     return result;
 }
@@ -1730,7 +1725,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_read_live_config(Arena* arena, St
                  build_artifact_fanout_cache_string(result->cache, S8("CMAKE_LINKER"), &result->linker_path) &&
                  build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_CI"), &result->ci) &&
                  build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_COMPILE_SHADERS"), &result->compile_shaders) &&
-                 result->compile_shaders &&
+                 !result->compile_shaders &&
                  build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_LINK_LIBC"), &result->link_libc) &&
                  build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_UNITY_BUILD"), &result->unity_build) &&
                  build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_INCLUDE_TESTS"), &result->include_tests) &&
@@ -1754,9 +1749,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_tool_digests(Arena* arena, BuildA
 {
     *tools = (BuildArtifactFanoutToolMetadata){
         .linker_path = live.linker_path,
-        .slangc_path = live.slangc_path,
-        .spirv_opt_path = live.spirv_opt_path,
     };
+    if (live.compile_shaders)
+    {
+        tools->slangc_path = live.slangc_path;
+        tools->spirv_opt_path = live.spirv_opt_path;
+    }
     if (!tools->linker_path.length || string_first_sequence(tools->linker_path, S8("NOTFOUND")) != BUSTER_STRING_NO_MATCH ||
         !build_artifact_fanout_hash_file(arena, tools->linker_path, &tools->linker_hash, &tools->linker_size))
     {
@@ -2850,20 +2848,6 @@ BUSTER_GLOBAL_LOCAL u32 build_artifact_fanout_producer_output_paths(Arena* arena
     u32 producer_output_count = 0;
     paths[producer_output_count++] = fanout.artifact_path;
     paths[producer_output_count++] = object_path;
-#if BUSTER_WINDOWS
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.hlsl"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.hlsl"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("generated/buster/lib/shaders/d3d12.h"));
-#elif BUSTER_MACOS
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.metal"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.metal"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("generated/buster/lib/shaders/metal.h"));
-#else
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.spv"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.spv"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/blur.vert.spv"));
-    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/blur.frag.spv"));
-#endif
     return producer_output_count;
 }
 
@@ -8502,14 +8486,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
 
     String8 expected_linker = generate_linker(canonical, S8("clang"));
     bool config_matches = build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, false,
-                                                                BUSTER_LINUX != 0, false, false, expected_linker);
+                                                                false, false, false, expected_linker);
     if (!config_matches)
     {
         string_print(S8("error: artifact fan-out canonical configuration acceptance test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
     String8 canonical_flags_cache = S8(
-        "BUSTER_COMPILE_SHADERS:BOOL=ON\n"
+        "BUSTER_COMPILE_SHADERS:BOOL=OFF\n"
         "CMAKE_C_FLAGS:STRING=\n"
         "CMAKE_C_FLAGS_DEBUG:STRING=-g\n"
         "CMAKE_C_FLAGS_MINSIZEREL:STRING=-Os -DNDEBUG\n"
@@ -8546,12 +8530,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical configuration fingerprint test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    String8 shaders_off_cache = string_format(arena, S8("BUSTER_COMPILE_SHADERS:BOOL=OFF\n{S8}"), canonical_flags_cache);
-    u64 shaders_off_fingerprint = 0;
-    if (build_artifact_fanout_provenance_inputs_match(shaders_off_cache) ||
-        !build_artifact_fanout_cache_fingerprint(shaders_off_cache, &shaders_off_fingerprint) || shaders_off_fingerprint == canonical_fingerprint)
+    String8 shaders_on_cache = string_format(arena, S8("BUSTER_COMPILE_SHADERS:BOOL=ON\n{S8}"), canonical_flags_cache);
+    u64 shaders_on_fingerprint = 0;
+    if (build_artifact_fanout_provenance_inputs_match(shaders_on_cache) ||
+        !build_artifact_fanout_cache_fingerprint(shaders_on_cache, &shaders_on_fingerprint) || shaders_on_fingerprint == canonical_fingerprint)
     {
-        string_print(S8("error: artifact fan-out accepted disabled shader compilation provenance\n"));
+        string_print(S8("error: artifact fan-out accepted enabled shader compilation provenance\n"));
         return PROCESS_RESULT_FAILED;
     }
     String8 launcher_cache = string_format(arena, S8("CMAKE_C_COMPILER_LAUNCHER:FILEPATH=/tmp/ccache\n{S8}"), canonical_flags_cache);
@@ -8574,7 +8558,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out accepted a noncanonical linker flag state\n"));
         return PROCESS_RESULT_FAILED;
     }
-    String8 windows_cache = S8("BUSTER_COMPILE_SHADERS:BOOL=ON\n"
+    String8 windows_cache = S8("BUSTER_COMPILE_SHADERS:BOOL=OFF\n"
                                "CMAKE_C_FLAGS_DEBUG:STRING=-O0 -gcodeview\n"
                                "CMAKE_C_FLAGS_RELEASE:STRING=-O2 -DNDEBUG\n"
                                "CMAKE_C_STANDARD_LIBRARIES_RELEASE:STRING=kernel32.lib;user32.lib;oldnames.lib\n"
@@ -8627,28 +8611,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
             return PROCESS_RESULT_FAILED;
         }
     }
-    if (build_artifact_fanout_config_matches(canonical, false, true, true, true, false, false, false, false, false, false, BUSTER_LINUX != 0, false,
+    if (build_artifact_fanout_config_matches(canonical, false, true, true, true, false, false, false, false, false, false, false, false,
                                              false, expected_linker))
     {
         string_print(S8("error: artifact fan-out accepted a configuration mismatch\n"));
         return PROCESS_RESULT_FAILED;
     }
-    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, true, false, false, false, false, false, BUSTER_LINUX != 0, false,
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, true, false, false, false, false, false, false, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, true, false, false, false, false, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, true, false, false, false, false, false, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, true, false, false, false, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, true, false, false, false, false, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, true, false, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, true, false, false, false,
                                              false, expected_linker))
     {
         string_print(S8("error: artifact fan-out accepted a sanitizer/instrument/time-trace/LTO mismatch\n"));
         return PROCESS_RESULT_FAILED;
     }
-    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, true, BUSTER_LINUX != 0, false,
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, true, false, false,
                                              false, expected_linker))
     {
         string_print(S8("error: artifact fan-out accepted a single-threaded producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, false, true, false, false,
+                                             expected_linker))
+    {
+        string_print(S8("error: artifact fan-out accepted a graphics-enabled producer\n"));
         return PROCESS_RESULT_FAILED;
     }
 
@@ -9119,7 +9109,6 @@ struct MatrixTestCombination
     Generate generate;
     BuildCompiler compiler;
     u32 sanitize : 1;
-    u32 run_app_tests : 1;
 };
 
 typedef struct MatrixTestTree MatrixTestTree;
@@ -9544,14 +9533,14 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         MatrixTestTree tree = trees[tree_i];
         MatrixTestCombination first = combinations[tree.combination_indices[0]];
         String8 first_config = cmake_build_config(first.options);
-        String8 first_target = first.run_app_tests ? S8("test_all") : S8("test_units");
+        String8 first_target = S8("test_all");
         String8 second_config = {0};
         String8 second_target = {0};
         if (tree.combination_count > 1)
         {
             MatrixTestCombination second = combinations[tree.combination_indices[1]];
             second_config = cmake_build_config(second.options);
-            second_target = second.run_app_tests ? S8("test_all") : S8("test_units");
+            second_target = S8("test_all");
         }
 
         String8 analyze_config = {0};
@@ -9737,7 +9726,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                         .compiler = compiler,
                         .generate = generate,
                         .sanitize = sanitize,
-                        .run_app_tests = (sanitize && !optimize) || (!sanitize && optimize),
                     };
                 }
             }
@@ -9924,7 +9912,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .callback_data = fanout,
         };
 
-        // CMake does not model compiler/linker/shader executable bytes as
+        // CMake does not model compiler/linker executable bytes as
         // dependencies of every producer output. A reused canonical tree can
         // therefore be a successful Ninja no-op after a same-path tool change.
         // Run the generated Release clean target after capture and before any
@@ -10026,7 +10014,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     {
         MatrixTestCombination combination = combinations[combination_i];
         String8 test_targets[] = {
-            combination.run_app_tests ? S8("test_all") : S8("test_units"),
+            S8("test_all"),
         };
         build_add(arena, combination.build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, combination.options);
 

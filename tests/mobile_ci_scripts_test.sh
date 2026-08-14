@@ -203,10 +203,8 @@ test_ios_batch_and_cleanup() (
     set -euo pipefail
     local state="$test_root/ios-success"
     local build="$state/build"
-    local font="$state/font.ttf"
     local log="$state/xcrun.log"
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app"
-    : >"$font"
     : >"$log"
 
     export PATH="$fake_bin:$PATH"
@@ -214,7 +212,6 @@ test_ios_batch_and_cleanup() (
     export FAKE_IOS_LOG="$log"
     export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
     export BUSTER_IOS_BUILD_DIRECTORY="$build"
-    export BUSTER_IOS_FONT="$font"
     export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
     export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=3
     export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=3

@@ -52,13 +52,10 @@ typedef struct X64Builder X64Builder;
 struct X64Builder
 {
     Arena* arena;
-    AnalysisResult* analysis;
     IrFunction* function;
     CodegenBuffer buffer;
     CodegenRelocation* first_relocation;
     CodegenRelocation* last_relocation;
-    CodegenCallRelocation* first_call_relocation;
-    CodegenCallRelocation* last_call_relocation;
     u32* block_offsets;
     u32 frame_size;
     u32 temporary_base;
@@ -137,11 +134,6 @@ struct CodegenCanonicalCallLayout
     bool windows_indirect_return;
 };
 
-BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis,
-                                                                                  AnalysisTypeId function_type_id, AnalysisTypeId* argument_types,
-                                                                                  u32 argument_count, Target target);
-BUSTER_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
-                                                                     u32* stack_size);
 BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                     CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout);
 BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80(IrType* type);

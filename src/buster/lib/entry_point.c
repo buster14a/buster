@@ -79,12 +79,7 @@ ProcessResult buster_argument_process(u64 argument_index)
 
 bool update(void)
 {
-#if BUSTER_USE_GRAPHICS
-    bool result = frame();
-    return result;
-#else
     return false;
-#endif
 }
 
 #if !BUSTER_SANITIZE
@@ -357,8 +352,8 @@ int main(int argc, char* argv[], char* envp[])
         FreeEnvironmentStringsW(environment);
     }
 #elif BUSTER_IOS
-    // UIApplicationMain owns the main thread/run loop and never returns; the IDE
-    // loop runs on a worker thread started from the app delegate.
+    // UIApplicationMain owns the main thread/run loop and never returns; the
+    // compiler/test runner runs on a worker started from the app delegate.
     buster_ios_argv = argv;
     buster_ios_envp = envp;
     buster_ios_application_main(argc, argv);
@@ -378,9 +373,9 @@ int main(int argc, char* argv[], char* envp[])
 #if BUSTER_IOS
 #include <stdlib.h>
 
-// Worker-thread trampoline started by the app delegate (window.c). Runs the IDE
-// loop, then terminates the process so the simulator app exits and CI can read
-// the test result (the IDE loop is otherwise expected to run indefinitely).
+// Worker-thread trampoline started by the app delegate (window.c). Runs the
+// compiler/test entry point, then terminates the process so the simulator app
+// exits and CI can read the test result.
 ProcessResult buster_ios_worker_entry(void)
 {
     char* fallback_argv[] = {(char*)"buster-ide", 0};

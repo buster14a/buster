@@ -337,6 +337,6 @@ extern struct android_app* buster_android_app;
 #if BUSTER_IOS
 // Runs UIApplicationMain with the buster app delegate (called from main()).
 BUSTER_F_DECL void buster_ios_application_main(int argc, char* argv[]);
-// Worker-thread trampoline (defined in entry_point.c) that runs the IDE loop.
+// Worker-thread trampoline (defined in entry_point.c) for the compiler/test runner.
 BUSTER_F_DECL ProcessResult buster_ios_worker_entry(void);
 #endif

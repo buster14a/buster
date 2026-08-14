@@ -1,7 +1,6 @@
 #pragma once
 
 #include <buster/lib/arena.h>
-#include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
 
@@ -319,8 +318,6 @@ struct DebugFunction
     String8 name;
     DebugSourceLocation declaration;
     IrSymbolId symbol;
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
     DebugTypeId type;
     DebugScopeId scope;
     u32 code_offset;
@@ -347,8 +344,6 @@ struct DebugFunctionSeed
     String8 name;
     DebugSourceLocation declaration;
     IrSymbolId symbol;
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
     u32 code_offset;
     u32 code_size;
 };
@@ -366,7 +361,6 @@ struct DebugInlineSeed
 typedef struct DebugModelInput DebugModelInput;
 struct DebugModelInput
 {
-    AnalysisResult* analysis;
     IrProgram* program;
     IrModule* module;
     String8 producer;
@@ -381,8 +375,6 @@ struct DebugModelInput
     u32 function_count;
     u32 location_count;
     u32 inline_site_count;
-    bool canonical;
-    u8 reserved[3];
 };
 
 typedef struct DebugModel DebugModel;

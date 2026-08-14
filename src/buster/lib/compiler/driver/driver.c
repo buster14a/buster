@@ -1,7 +1,5 @@
 #include <buster/lib/compiler/driver/driver.h>
 
-#include <buster/lib/compiler/frontend/buster/parser.h>
-#include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/codegen/codegen.h>
@@ -11,7 +9,6 @@
 
 void compiler_prewarm(void)
 {
-    tokenizer_prewarm();
     c_prewarm();
     codegen_prewarm();
 }
@@ -466,10 +463,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 if (string_equal(value, S8("c")) || string_equal(value, S8("cpp-output")))
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_C;
-                }
-                else if (string_equal(value, S8("buster")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_BUSTER;
                 }
                 else if (string_equal(value, S8("cl")) || string_equal(value, S8("opencl")))
                 {
@@ -1226,18 +1219,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invoca
     return path.pointer[path.length - 2] == '.' && (path.pointer[path.length - 1] == 'c' || path.pointer[path.length - 1] == 'i');
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_buster_input(CompilerDriverInvocation invocation, String8 path)
-{
-    if (invocation.language == COMPILER_DRIVER_LANGUAGE_BUSTER)
-    {
-        return true;
-    }
-    if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 4)
-    {
-        return false;
-    }
-    return string_equal(string_slice(path, path.length - 4, path.length), S8(".bbb"));
-}
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_input(String8 path)
 {
@@ -2056,9 +2037,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             if (code.failed_instruction.value < failed_function->instruction_count)
             {
                 IrInstruction* failed_instruction = &failed_function->instructions[code.failed_instruction.value];
-                ParserSourceRange failed_source = ir_instruction_source(failed_function, failed_instruction->id);
-                source_line = failed_source.line;
-                source_column = failed_source.column;
+                IrSourceRange failed_source = failed_function->instruction_canonical_sources[failed_instruction->id.value];
+                IrSourcePosition failed_position = ir_source_position(lowered.program, failed_source);
+                source_line = failed_position.line;
+                source_column = failed_position.column;
                 operation = failed_instruction->opcode == IR_OPCODE_BINARY  ? (u32)failed_instruction->binary_operation
                             : failed_instruction->opcode == IR_OPCODE_UNARY ? (u32)failed_instruction->unary_operation
                                                                             : (u32)IR_BINARY_COUNT;
@@ -2204,249 +2186,6 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, St
                                                        });
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_parser_diagnostic(Arena* arena, String8 path, ParserDiagnostic* diagnostic);
-
-static CompilerDriverResult compiler_driver_execute_buster(Arena* arena, CompilerDriverInvocation invocation)
-{
-    CompilerDriverResult result = {
-        .error = invocation.error,
-        .diagnostic = invocation.diagnostic,
-    };
-    if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
-    {
-        return result;
-    }
-    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("Buster input does not support preprocessing");
-        return result;
-    }
-    if (invocation.input_count != 1 || !compiler_driver_buster_input(invocation, invocation.input_paths[0]))
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("the Buster frontend currently requires exactly one .bbb input");
-        return result;
-    }
-
-    Arena* expression_arena = arena_create((ArenaCreation){0});
-    if (!expression_arena)
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("could not allocate Buster expression arena");
-        return result;
-    }
-    TargetDataLayout data_layout = target_data_layout(invocation.target);
-    AnalysisProgram analysis = analysis_program_load(arena, expression_arena,
-                                                     (AnalysisProgramOptions){
-                                                         .root_path = invocation.input_paths[0],
-                                                         .module_root = invocation.module_root.length ? invocation.module_root : S8("."),
-                                                         .data_layout = data_layout,
-                                                         .pointer_size = data_layout.pointer.size,
-                                                         .pointer_alignment = data_layout.pointer.alignment,
-                                                     });
-    result.parser_diagnostic_count = analysis.parser_diagnostic_count;
-    result.analysis_diagnostic_count = analysis.analysis_diagnostic_count;
-    if (analysis.load_failed)
-    {
-        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-        result.diagnostic = string_format(arena, S8("could not load {S8} or one of its imported modules"), invocation.input_paths[0]);
-        goto cleanup;
-    }
-    if (analysis.parser_diagnostic_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_PARSE;
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisProgramModule* module = &analysis.modules[module_index];
-            if (module->parser.first_diagnostic)
-            {
-                result.diagnostic = compiler_driver_parser_diagnostic(arena, module->path, module->parser.first_diagnostic);
-                break;
-            }
-        }
-        if (!result.diagnostic.length)
-        {
-            result.diagnostic = string_format(arena, S8("Buster parsing failed with {u32} diagnostic(s)"), analysis.parser_diagnostic_count);
-        }
-        goto cleanup;
-    }
-    if (analysis.analysis_diagnostic_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisResult* module = analysis.module_results[module_index];
-            if (module && module->first_diagnostic)
-            {
-                result.diagnostic = analysis_format_diagnostic(arena, module, module->first_diagnostic);
-                break;
-            }
-        }
-        goto cleanup;
-    }
-    if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
-    {
-        goto cleanup;
-    }
-
-    IrProgram ir = ir_generate_program(arena, &analysis);
-    if (invocation.target.cpu_arch == CPU_ARCH_WASM64)
-    {
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisResult* module_analysis = analysis.module_results[module_index];
-            if (!module_analysis)
-            {
-                continue;
-            }
-            IrValidationResult validation = ir_validate_module(module_analysis, &ir.modules[module_index]);
-            if (validation.error != IR_VALIDATION_NONE)
-            {
-                result.error = COMPILER_DRIVER_ERROR_IR;
-                result.diagnostic = string_format(arena, S8("Buster IR validation failed in module {S8} with error {u32}"),
-                                                  module_analysis->module.name, (u32)validation.error);
-                goto cleanup;
-            }
-        }
-        Wasm64Artifact artifact = wasm64_emit(arena, &ir, ir.modules, ir.module_count);
-        compiler_driver_write_wasm64(arena, invocation, artifact, &result);
-        goto cleanup;
-    }
-    ObjectFile* objects = arena_allocate(arena, ObjectFile, analysis.module_count);
-    u32 object_count = 0;
-    for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-    {
-        AnalysisResult* module_analysis = analysis.module_results[module_index];
-        if (!module_analysis)
-        {
-            continue;
-        }
-        IrModule* module_ir = &ir.modules[module_index];
-        IrValidationResult validation = ir_validate_module(module_analysis, module_ir);
-        if (validation.error != IR_VALIDATION_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_IR;
-            result.diagnostic = string_format(arena, S8("Buster IR validation failed in module {S8} with error {u32}"), module_analysis->module.name,
-                                              (u32)validation.error);
-            goto cleanup;
-        }
-        CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, invocation.target,
-                                                     (CodegenModuleOptions){
-                                                         .debug_info = invocation.debug_info,
-                                                         .register_allocator = invocation.register_allocator,
-                                                         .assembly_syntax = ASSEMBLY_SYNTAX_DEFAULT,
-                                                     });
-        result.codegen_statistics = code.statistics;
-        result.codegen_error = code.error;
-        if (code.error != CODEGEN_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-            result.diagnostic = string_format(arena, S8("Buster native code generation failed in module {S8} with error {u32}"), module_analysis->module.name,
-                                              (u32)code.error);
-            goto cleanup;
-        }
-        ObjectFile object = object_from_codegen_module(arena, module_analysis, &code, invocation.target);
-        result.object_error = object.error;
-        if (object.error != OBJECT_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.diagnostic = string_format(arena, S8("Buster object generation failed in module {S8} with error {u32}"), module_analysis->module.name,
-                                              (u32)object.error);
-            goto cleanup;
-        }
-        objects[object_count++] = object;
-    }
-    if (!object_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("the Buster program contains no compilable modules");
-        goto cleanup;
-    }
-    LinkObjectResult linked = link_objects(arena, objects, object_count,
-                                           (LinkOptions){
-                                               .allow_undefined_symbols = true,
-                                           });
-    if (linked.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("Buster object linking failed with error {u32}: {S8}"), (u32)linked.error, linked.symbol);
-        goto cleanup;
-    }
-    result.object = linked.object;
-    result.has_object = true;
-    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
-    {
-        result.output = object_print_assembly(arena, &linked.object);
-        if (!result.output.length)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.diagnostic = S8("could not format Buster object as textual assembly");
-            goto cleanup;
-        }
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
-        }
-        goto cleanup;
-    }
-    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
-    {
-        ObjectArtifact artifact = object_write(arena, &linked.object, object_format_for_target(invocation.target));
-        if (artifact.error != OBJECT_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.object_error = artifact.error;
-            goto cleanup;
-        }
-        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_write(output, artifact.bytes))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), output);
-        }
-        goto cleanup;
-    }
-    String8 output = invocation.output_path.length ? invocation.output_path :
-#if BUSTER_WINDOWS
-                                                   S8("a.exe");
-#else
-                                                   S8("a.out");
-#endif
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_dynamic_libraries(arena, invocation, 0);
-    result.native_link = link_native_executable(arena, &linked.object,
-                                                (NativeExecutableLinkOptions){
-                                                    .output_path = output,
-                                                    .entry_symbol = S8("main"),
-                                                    .sysroot = invocation.sysroot,
-                                                    .library_paths = invocation.library_paths,
-                                                    .framework_paths = invocation.framework_paths,
-                                                    .frameworks = invocation.frameworks,
-                                                    .linker_arguments = invocation.linker_arguments,
-                                                    .library_path_count = invocation.library_path_count,
-                                                    .framework_path_count = invocation.framework_path_count,
-                                                    .framework_count = invocation.framework_count,
-                                                    .linker_argument_count = invocation.linker_argument_count,
-                                                    .dynamic_libraries = dynamic_libraries.pointer,
-                                                    .dynamic_library_count = dynamic_libraries.count,
-                                                    .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
-                                                    .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
-                                                    .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                });
-    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-    if (result.native_link.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("Buster native executable linking failed with error {u32}: {S8}"),
-                                          (u32)result.native_link.error, result.native_link.symbol);
-    }
-
-cleanup:
-    analysis_program_unmap_sources(&analysis);
-    arena_destroy(expression_arena, 1);
-    return result;
-}
 
 BUSTER_GLOBAL_LOCAL GpuPipelineAction compiler_driver_gpu_action(CompilerDriverAction action)
 {
@@ -2578,53 +2317,29 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             goto finish;
         }
     }
-    bool has_buster_input = false;
-    bool has_c_input = false;
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
         String8 path = invocation.input_paths[input_index];
-        if (compiler_driver_object_input(path) || compiler_driver_archive_input(path))
+        bool object_input = compiler_driver_object_input(path);
+        bool archive_input = compiler_driver_archive_input(path);
+        if ((object_input || archive_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
         {
-            continue;
-        }
-        has_buster_input |= compiler_driver_buster_input(invocation, path);
-        has_c_input |= compiler_driver_c_input(invocation, path);
-    }
-    if (has_buster_input)
-    {
-        if (has_c_input)
-        {
-            result = (CompilerDriverResult){
-                .error = COMPILER_DRIVER_ERROR_INVALID_INPUT,
-                .diagnostic = S8("cannot mix C and Buster inputs in one invocation"),
-            };
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        result = compiler_driver_execute_buster(arena, invocation);
-        goto finish;
+        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path))
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = string_format(arena, S8("unsupported C input {S8}"), path);
+            goto finish;
+        }
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
         (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))
     {
         result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
         goto finish;
-    }
-    for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
-    {
-        bool object_input = compiler_driver_object_input(invocation.input_paths[input_index]);
-        bool archive_input = compiler_driver_archive_input(invocation.input_paths[input_index]);
-        if ((object_input || archive_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
-        {
-            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), invocation.input_paths[input_index]);
-            goto finish;
-        }
-        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, invocation.input_paths[input_index]))
-        {
-            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = string_format(arena, S8("unsupported C input {S8}"), invocation.input_paths[input_index]);
-            goto finish;
-        }
     }
     if ((invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
          invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY) && invocation.output_path.length)
@@ -2975,309 +2690,5 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
 finish:
     result.warning = compiler_driver_warning_flatten(warnings);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_parser_diagnostic(Arena* arena, String8 path, ParserDiagnostic* diagnostic)
-{
-    if (!diagnostic)
-    {
-        return string_format(arena, S8("{S8}: parsing failed"), path);
-    }
-    return string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic->range.line, diagnostic->range.column, diagnostic->message);
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_jit_u8_pointer_pointer(AnalysisResult* analysis, AnalysisTypeId type_id)
-{
-    AnalysisType* pointer = analysis_type_from_id(analysis, type_id);
-    if (pointer->kind != ANALYSIS_TYPE_POINTER)
-    {
-        return false;
-    }
-    pointer = analysis_type_from_id(analysis, pointer->as.element_type);
-    if (pointer->kind != ANALYSIS_TYPE_POINTER)
-    {
-        return false;
-    }
-    return pointer->as.element_type.value == analysis->types.builtin.u8_type.value;
-}
-
-BUSTER_GLOBAL_LOCAL CompilerDriverEntrySignature compiler_driver_jit_entry_signature(Arena* scratch_arena, AnalysisProgram* program, String8* diagnostic)
-{
-    AnalysisResult* analysis = program->root ? program->root->analysis : 0;
-    AnalysisEntity* main = analysis ? analysis_value_entity_find(analysis, S8("main")) : 0;
-    if (!main)
-    {
-        *diagnostic = S8("JIT entry point main was not found in the root module");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (main->kind != ANALYSIS_ENTITY_CODE || !main->ast.code)
-    {
-        *diagnostic = S8("JIT entry point main must be a code function");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (!main->ast.code->exported)
-    {
-        *diagnostic = S8("JIT entry point main must be exported");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (!main->ast.code->has_body)
-    {
-        *diagnostic = S8("JIT entry point main must be defined in the root module");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (analysis_entity_is_generic(scratch_arena, analysis, main))
-    {
-        *diagnostic = S8("JIT entry point main must not be generic");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-
-    AnalysisTypeId function_type_id = analysis->module.semantics[main->id.index.value].type;
-    AnalysisType* function = analysis_type_from_id(analysis, function_type_id);
-    if (function->kind != ANALYSIS_TYPE_FUNCTION)
-    {
-        *diagnostic = S8("JIT entry point main must have a function type");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (function->as.function.is_variadic)
-    {
-        *diagnostic = S8("JIT entry point main must not be variadic");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (function->as.function.calling_convention != AST_CALLING_CONVENTION_C)
-    {
-        *diagnostic = S8("JIT entry point main must use the C calling convention");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (function->as.function.return_type.value != analysis->types.builtin.s32_type.value)
-    {
-        *diagnostic = S8("JIT entry point main must return s32");
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-    }
-    if (function->as.function.argument_count == 0)
-    {
-        return COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID;
-    }
-    if (function->as.function.argument_count == 3)
-    {
-        AnalysisTypeId argc = function->as.function.argument_types[0];
-        bool argc_valid = argc.value == analysis->types.builtin.s32_type.value || argc.value == analysis->types.builtin.u32_type.value;
-        if (argc_valid && compiler_driver_jit_u8_pointer_pointer(analysis, function->as.function.argument_types[1]) &&
-            compiler_driver_jit_u8_pointer_pointer(analysis, function->as.function.argument_types[2]))
-        {
-            return COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP;
-        }
-    }
-    *diagnostic = S8("JIT entry point main must have signature s32(void) or s32(s32|u32, u8**, u8**)");
-    return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
-}
-
-CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions options)
-{
-    CompilerDriverResult result = {0};
-    if (!arena || !options.source_path.length || (u32)options.output_kind >= (u32)COMPILER_DRIVER_OUTPUT_KIND_COUNT ||
-        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE && !options.output_path.length) ||
-        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT && options.output_path.length) ||
-        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE && !options.output_path.length))
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        return result;
-    }
-    if (options.target.cpu_arch >= CPU_ARCH_COUNT || options.target.os >= OPERATING_SYSTEM_COUNT)
-    {
-        options.target = target_native;
-    }
-    if ((options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE) != (options.target.cpu_arch == CPU_ARCH_WASM64) ||
-        (options.target.cpu_arch == CPU_ARCH_WASM64 && options.target.os != OPERATING_SYSTEM_FREESTANDING))
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("Wasm64 module output requires target wasm64-unknown-freestanding");
-        return result;
-    }
-    TargetDataLayout data_layout = target_data_layout(options.target);
-    Arena* expression_arena = arena_create((ArenaCreation){0});
-    if (!expression_arena)
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        return result;
-    }
-    AnalysisProgram analysis = analysis_program_load(arena, expression_arena,
-                                                     (AnalysisProgramOptions){
-                                                         .root_path = options.source_path,
-                                                         .module_root = options.module_root.length ? options.module_root : S8("."),
-                                                         .data_layout = data_layout,
-                                                         .pointer_size = data_layout.pointer.size,
-                                                         .pointer_alignment = data_layout.pointer.alignment,
-                                                     });
-    result.parser_diagnostic_count = analysis.parser_diagnostic_count;
-    result.analysis_diagnostic_count = analysis.analysis_diagnostic_count;
-    if (analysis.load_failed)
-    {
-        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-        result.diagnostic = string_format(arena, S8("could not load {S8} or one of its imported modules"), options.source_path);
-        goto cleanup;
-    }
-    if (analysis.parser_diagnostic_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_PARSE;
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisProgramModule* module = &analysis.modules[module_index];
-            if (module->parser.first_diagnostic)
-            {
-                result.diagnostic = compiler_driver_parser_diagnostic(arena, module->path, module->parser.first_diagnostic);
-                break;
-            }
-        }
-        if (!result.diagnostic.length)
-        {
-            result.diagnostic = string_format(arena, S8("tokenization failed with {u32} error(s)"), analysis.parser_diagnostic_count);
-        }
-        goto cleanup;
-    }
-    if (analysis.analysis_diagnostic_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisResult* module = analysis.module_results[module_index];
-            if (module && module->first_diagnostic)
-            {
-                result.diagnostic = analysis_format_diagnostic(arena, module, module->first_diagnostic);
-                break;
-            }
-        }
-        goto cleanup;
-    }
-    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT)
-    {
-        result.entry_signature = compiler_driver_jit_entry_signature(expression_arena, &analysis, &result.diagnostic);
-        if (result.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            goto cleanup;
-        }
-    }
-    arena_destroy(expression_arena, 1);
-    expression_arena = 0;
-    IrProgram ir = ir_generate_program(arena, &analysis);
-    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_WASM64_MODULE)
-    {
-        for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-        {
-            AnalysisResult* module_analysis = analysis.module_results[module_index];
-            if (!module_analysis)
-            {
-                continue;
-            }
-            IrValidationResult validation = ir_validate_module(module_analysis, &ir.modules[module_index]);
-            if (validation.error != IR_VALIDATION_NONE)
-            {
-                result.error = COMPILER_DRIVER_ERROR_IR;
-                result.diagnostic =
-                    string_format(arena, S8("IR validation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)validation.error);
-                goto cleanup;
-            }
-        }
-        result.wasm64 = wasm64_emit(arena, &ir, ir.modules, ir.module_count);
-        if (result.wasm64.error.code != WASM64_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_WASM64;
-            result.diagnostic = result.wasm64.error.diagnostic.length ? result.wasm64.error.diagnostic
-                                : result.wasm64.error.message.length  ? result.wasm64.error.message
-                                                                      : S8("Wasm64 code generation failed");
-            goto cleanup;
-        }
-        result.has_wasm64 = true;
-        if (!file_write(options.output_path, result.wasm64.bytes))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), options.output_path);
-        }
-        goto cleanup;
-    }
-    ObjectFile* objects = arena_allocate(arena, ObjectFile, analysis.module_count);
-    u32 object_count = 0;
-    for (u32 module_index = 0; module_index < analysis.module_count; module_index += 1)
-    {
-        AnalysisResult* module_analysis = analysis.module_results[module_index];
-        if (!module_analysis)
-        {
-            continue;
-        }
-        IrModule* module_ir = &ir.modules[module_index];
-        IrValidationResult validation = ir_validate_module(module_analysis, module_ir);
-        if (validation.error != IR_VALIDATION_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_IR;
-            result.diagnostic =
-                string_format(arena, S8("IR validation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)validation.error);
-            goto cleanup;
-        }
-        CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, options.target,
-                                                     (CodegenModuleOptions){
-                                                         .debug_info = options.debug_info,
-                                                         .register_allocator = options.register_allocator,
-                                                         .assembly_syntax = ASSEMBLY_SYNTAX_DEFAULT,
-                                                     });
-        result.codegen_error = code.error;
-        if (code.error != CODEGEN_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-            result.diagnostic =
-                string_format(arena, S8("native code generation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)code.error);
-            goto cleanup;
-        }
-        ObjectFile object = object_from_codegen_module(arena, module_analysis, &code, options.target);
-        result.object_error = object.error;
-        if (object.error != OBJECT_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.diagnostic =
-                string_format(arena, S8("object generation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)object.error);
-            goto cleanup;
-        }
-        objects[object_count++] = object;
-    }
-    if (!object_count)
-    {
-        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = S8("the program contains no compilable modules");
-        goto cleanup;
-    }
-    LinkObjectResult linked = link_objects(arena, objects, object_count,
-                                           (LinkOptions){
-                                               .allow_undefined_symbols = true,
-                                           });
-    if (linked.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("object linking failed with error {u32}: {S8}"), (u32)linked.error, linked.symbol);
-        goto cleanup;
-    }
-    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT)
-    {
-        result.object = linked.object;
-        result.has_object = true;
-        goto cleanup;
-    }
-    result.native_link = link_native_executable(arena, &linked.object,
-                                                (NativeExecutableLinkOptions){
-                                                    .output_path = options.output_path,
-                                                    .entry_symbol = S8("main"),
-                                                    .debug_info = options.debug_info,
-                                                });
-    if (result.native_link.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic =
-            string_format(arena, S8("native executable linking failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
-    }
-cleanup:
-    analysis_program_unmap_sources(&analysis);
-    if (expression_arena)
-    {
-        arena_destroy(expression_arena, 1);
-    }
     return result;
 }

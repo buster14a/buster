@@ -49,7 +49,6 @@ BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);
 BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
-AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity);
 bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                   CodegenFunctionDescriptor* descriptor);
 
@@ -179,7 +178,6 @@ struct ObjectExecutable
 };
 
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
-BUSTER_F_DECL ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, CodegenModule* module, Target target);
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);

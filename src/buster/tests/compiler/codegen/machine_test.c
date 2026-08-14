@@ -23,10 +23,10 @@ BUSTER_CT_CHECK(sizeof(MachineSegment) == 8);
 BUSTER_CT_CHECK(sizeof(MachineUse) == 8);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
 BUSTER_CT_CHECK(sizeof(MachineLocationSegment) == 16);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 112);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 24);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 96);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 20);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 48);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
 BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 8);
 
@@ -523,7 +523,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     bool registry_statuses_are_valid = true;
     bool exact_rows_are_explicit = true;
     bool exact_rows_are_not_legacy = true;
-    bool exact_rows_have_direct_indices = true;
+    bool exact_rows_have_expected_indices = true;
     bool expansion_rows_are_policy = true;
     bool remaining_rows_are_legacy = true;
     for (u32 ordinal = 0; ordinal < registry_count; ordinal += 1)
@@ -547,6 +547,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // spelling at every incoming-argument offset.
             bool expected_exact = false;
             u16 expected_exact_index = 0;
+            MachineEmitRecipeCategory expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
             if (entry->opcode >= MACHINE_X64_MOV_RR && entry->opcode <= MACHINE_X64_NOT64)
             {
                 expected_exact = true;
@@ -602,6 +603,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 expected_exact = true;
                 expected_exact_index = entry->opcode == MACHINE_X64_MFENCE ? 45 : 46;
             }
+            else if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY && machine_emit_recipe_index(entry->recipe) <= 17)
+            {
+                expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_FAMILY;
+                expected_exact_index = machine_emit_recipe_index(entry->recipe);
+            }
             registry_statuses_are_valid &= status_is_valid;
             registry_recipes_match &= machine_emit_recipe_is_valid(entry->recipe);
             registry_recipes_match &= machine_opcode_emit_recipe((u16)entry->opcode) == entry->recipe;
@@ -610,7 +617,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             if (expected_exact)
             {
                 exact_rows_are_not_legacy &= status != MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
-                exact_rows_have_direct_indices &= category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT && machine_emit_recipe_index(entry->recipe) == expected_exact_index;
+                exact_rows_have_expected_indices &= category == expected_exact_category && machine_emit_recipe_index(entry->recipe) == expected_exact_index;
             }
             if (category == MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION)
             {
@@ -635,7 +642,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, registry_statuses_are_valid);
     BUSTER_TEST(arguments, exact_rows_are_explicit);
     BUSTER_TEST(arguments, exact_rows_are_not_legacy);
-    BUSTER_TEST(arguments, exact_rows_have_direct_indices);
+    BUSTER_TEST(arguments, exact_rows_have_expected_indices);
     BUSTER_TEST(arguments, expansion_rows_are_policy);
     BUSTER_TEST(arguments, remaining_rows_are_legacy);
     BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW] == MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT);
@@ -2986,7 +2993,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineEncodeResult stack_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_stack);
             MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_fast);
             MachineEncodeResult quality_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_quality);
-            BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid);
+            BUSTER_TEST_RAW(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid,
+                            string_format(arguments->arena,
+                                          S8("vector encode {S8}: stack={u32}/{u32}/{u32}/{u32} fast={u32}/{u32}/{u32}/{u32} quality={u32}/{u32}/{u32}/{u32}"),
+                                          vector_names[name_index], stack_encoded.valid, stack_encoded.exact_attempts, stack_encoded.exact_successes,
+                                          stack_encoded.exact_failures, fast_encoded.valid, fast_encoded.exact_attempts, fast_encoded.exact_successes,
+                                          fast_encoded.exact_failures, quality_encoded.valid, quality_encoded.exact_attempts,
+                                          quality_encoded.exact_successes, quality_encoded.exact_failures));
             // Eighteen live vectors against the thirty-two-register file:
             // every accumulator fits, so the scan must keep the vector
             // working set fully register-resident — any vector-class edit

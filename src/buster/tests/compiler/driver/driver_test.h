@@ -1,6 +1,8 @@
 #pragma once
 
 #include <buster/tests/test.h>
+#include <buster/lib/file.h>
+#include <buster/lib/os.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #include <buster/lib/string.h>

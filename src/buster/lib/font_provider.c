@@ -242,7 +242,7 @@ String8 font_file_get_path(FontIndex index)
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
 #elif BUSTER_IOS
         // Bundled into the app's Resources by CMake; resolved via file_read's
-        // bundle-path lookup. See BUSTER_IOS_FONT in CMakeLists.txt.
+        // bundle-path lookup when an application chooses to package this font.
         font_candidate_append(candidates, &candidate_count, S8("FiraCode-Regular.ttf"));
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
 #elif BUSTER_MACOS

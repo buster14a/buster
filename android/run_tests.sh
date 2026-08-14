@@ -261,7 +261,7 @@ if [[ $monitor_reader_status -eq 10 || $monitor_reader_status -eq 11 ]]; then
 elif [[ $monitor_producer_status -ne 0 ]]; then
     status=$monitor_producer_status
 else
-    echo "error: Android GUI test log monitor ended without a terminal result" >&2
+    echo "error: Android compiler test log monitor ended without a terminal result" >&2
     status=1
 fi
 
@@ -269,20 +269,20 @@ adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >
 
 case "$status" in
     10)
-        echo "Android GUI tests passed"
+        echo "Android compiler tests passed"
         ;;
     11)
-        echo "Android GUI tests failed" >&2
+        echo "Android compiler tests failed" >&2
         print_adb_diagnostics
         exit 1
         ;;
     124|137)
-        echo "Android GUI tests timed out after ${timeout_seconds}s" >&2
+        echo "Android compiler tests timed out after ${timeout_seconds}s" >&2
         print_adb_diagnostics
         exit 1
         ;;
     *)
-        echo "Android GUI test log monitor exited with status ${status}" >&2
+        echo "Android compiler test log monitor exited with status ${status}" >&2
         print_adb_diagnostics
         exit "$status"
         ;;

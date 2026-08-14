@@ -12,8 +12,6 @@
 #endif
 
 #if BUSTER_INCLUDE_TESTS
-#include <buster/lib/compiler/frontend/buster/parser.h>
-#include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
@@ -30,7 +28,6 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
-#include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/dwarf/dwarf.h>
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/compiler/pdb/pdb.h>
@@ -38,7 +35,6 @@
 #include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
-#include <buster/lib/ide_document.h>
 
 #include <buster/tests/arena_test.h>
 #include <buster/tests/hash_test.h>
@@ -46,13 +42,7 @@
 #include <buster/tests/string_test.h>
 #include <buster/tests/os_test.h>
 #include <buster/tests/file_test.h>
-#include <buster/tests/ide_document_test.h>
-#include <buster/tests/window_test.h>
-#include <buster/tests/rendering_test.h>
-#include <buster/tests/ui_test.h>
 #include <buster/tests/target_test.h>
-#include <buster/tests/compiler/frontend/buster/parser_test.h>
-#include <buster/tests/compiler/frontend/buster/analysis_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
@@ -70,7 +60,6 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
-#include <buster/tests/compiler/ir/interpreter_test.h>
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -95,13 +84,7 @@
 #include <buster/tests/string_test.c>
 #include <buster/tests/os_test.c>
 #include <buster/tests/file_test.c>
-#include <buster/tests/ide_document_test.c>
-#include <buster/tests/window_test.c>
-#include <buster/tests/rendering_test.c>
-#include <buster/tests/ui_test.c>
 #include <buster/tests/target_test.c>
-#include <buster/tests/compiler/frontend/buster/parser_test.c>
-#include <buster/tests/compiler/frontend/buster/analysis_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
@@ -119,7 +102,6 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
-#include <buster/tests/compiler/ir/interpreter_test.c>
 #include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
@@ -239,15 +221,7 @@ typedef enum TestId
     TEST_ID_STRING,
     TEST_ID_OS,
     TEST_ID_FILE,
-    TEST_ID_IDE_DOCUMENT,
-    TEST_ID_WINDOW,
-    TEST_ID_RENDERING,
-    TEST_ID_UI,
     TEST_ID_TARGET,
-    TEST_ID_PARSER_TOKENIZER,
-    TEST_ID_PARSER_EXPRESSION,
-    TEST_ID_PARSER_RESULT,
-    TEST_ID_PARSER_FILE,
     TEST_ID_C_FRONTEND,
     TEST_ID_AARCH64_ENCODING,
     TEST_ID_AARCH64_EXACT_BRIDGE,
@@ -266,9 +240,7 @@ typedef enum TestId
 #if BUSTER_CPU_ARCH_X86_64
     TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
-    TEST_ID_ANALYSIS,
     TEST_ID_IR,
-    TEST_ID_IR_INTERPRETER,
     TEST_ID_MACHINE_SELECTION,
     TEST_ID_MACHINE,
     TEST_ID_CODEGEN,
@@ -294,15 +266,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_STRING] = {S8_INITIALIZER("string_tests"), &string_tests},
     [TEST_ID_OS] = {S8_INITIALIZER("os_tests"), &os_tests, true},
     [TEST_ID_FILE] = {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
-    [TEST_ID_IDE_DOCUMENT] = {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
-    [TEST_ID_WINDOW] = {S8_INITIALIZER("window_tests"), &window_tests},
-    [TEST_ID_RENDERING] = {S8_INITIALIZER("rendering_tests"), &rendering_tests},
-    [TEST_ID_UI] = {S8_INITIALIZER("ui_tests"), &ui_tests},
     [TEST_ID_TARGET] = {S8_INITIALIZER("target_tests"), &target_tests},
-    [TEST_ID_PARSER_TOKENIZER] = {S8_INITIALIZER("parser_tokenizer_tests"), &parser_tokenizer_tests},
-    [TEST_ID_PARSER_EXPRESSION] = {S8_INITIALIZER("parser_expression_tests"), &parser_expression_tests},
-    [TEST_ID_PARSER_RESULT] = {S8_INITIALIZER("parser_result_tests"), &parser_result_tests},
-    [TEST_ID_PARSER_FILE] = {S8_INITIALIZER("parser_file_tests"), &parser_file_tests},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
     [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
     [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
@@ -321,9 +285,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
 #if BUSTER_CPU_ARCH_X86_64
     [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
 #endif
-    [TEST_ID_ANALYSIS] = {S8_INITIALIZER("analysis_tests"), &analysis_tests},
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
-    [TEST_ID_IR_INTERPRETER] = {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},
@@ -812,6 +774,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
 
     compiler_prewarm();
     buster_x86_metadata_prewarm();
+#if BUSTER_CPU_ARCH_X86_64
+    machine_x86_64_exact_prewarm();
+#endif
     u64 requested_lanes = buster_test_worker_count(eligible_count);
     lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
 

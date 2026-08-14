@@ -197,28 +197,15 @@ if (BUSTER_FUZZ_AVAILABLE)
     endif()
 endif()
 
-set(BUSTER_USE_VULKAN_DEFAULT OFF)
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR C_COMPILER_TCC)
-    set(BUSTER_USE_VULKAN_DEFAULT ON)
-endif()
-
 # Adreno's shader compiler crashes on buffer_reference SPIR-V, so on Android the
 # Vulkan rect shader pulls vertices from a storage buffer instead of a raw pointer.
 set(BUSTER_SLANG_VULKAN_EXTRA_DEFINES "")
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     set(BUSTER_SLANG_VULKAN_EXTRA_DEFINES -DBUSTER_VULKAN_VERTEX_SSBO=1)
 endif()
-option(BUSTER_USE_VULKAN "Use the Vulkan renderer instead of the platform fallback" ${BUSTER_USE_VULKAN_DEFAULT})
-
-set(BUSTER_USE_D3D12 OFF)
-if (WIN32 AND NOT BUSTER_USE_VULKAN)
-    set(BUSTER_USE_D3D12 ON)
-endif()
-
-set(BUSTER_USE_METAL OFF)
-if (APPLE AND NOT BUSTER_USE_VULKAN)
-    set(BUSTER_USE_METAL ON)
-endif()
+option(BUSTER_USE_VULKAN "Build optional Vulkan renderer support" OFF)
+option(BUSTER_USE_D3D12 "Build optional D3D12 renderer support" OFF)
+option(BUSTER_USE_METAL "Build optional Metal renderer support" OFF)
 
 set(BUSTER_VULKAN_SDK_DEFAULT "")
 if (DEFINED ENV{VULKAN_SDK})
@@ -275,11 +262,7 @@ find_path(BUSTER_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h HINTS ${BUSTER_VULKAN_
 find_program(BUSTER_SLANGC_EXECUTABLE NAMES slangc HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 find_program(BUSTER_SPIRV_OPT_EXECUTABLE NAMES spirv-opt HINTS ${BUSTER_VULKAN_SDK_BIN_DIRS} NO_DEFAULT_PATH)
 option(BUSTER_REQUIRE_VULKAN_SDK "Require Vulkan SDK headers and shader tools" ON)
-set(BUSTER_COMPILE_SHADERS_DEFAULT OFF)
-if (BUSTER_USE_VULKAN OR BUSTER_USE_D3D12 OR BUSTER_USE_METAL)
-    set(BUSTER_COMPILE_SHADERS_DEFAULT ON)
-endif()
-option(BUSTER_COMPILE_SHADERS "Compile renderer shaders" ${BUSTER_COMPILE_SHADERS_DEFAULT})
+option(BUSTER_COMPILE_SHADERS "Compile optional renderer shaders" OFF)
 
 set(BUSTER_USE_SLANG_SHADERS_DEFINE OFF)
 if (BUSTER_COMPILE_SHADERS)
@@ -836,8 +819,6 @@ buster_register_module(string "${BUSTER_SOURCE_DIR}/string${COMMON_EXTENSION}")
 buster_register_module(integer "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}")
 buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
-buster_register_module(compiler_parser "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/parser${COMMON_EXTENSION}")
-buster_register_module(compiler_analysis "${BUSTER_SOURCE_DIR}/compiler/frontend/buster/analysis${COMMON_EXTENSION}")
 buster_register_module(compiler_c_frontend
     "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_source${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_parse${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_gen${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_encoding "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_encoding${COMMON_EXTENSION}")
@@ -856,7 +837,6 @@ buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_completion_census "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_completion_census${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
-buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
 buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
 buster_register_module(compiler_machine "${BUSTER_SOURCE_DIR}/compiler/codegen/machine${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
@@ -881,7 +861,6 @@ buster_register_module(rendering "${BUSTER_SOURCE_DIR}/rendering${COMMON_EXTENSI
 buster_register_module(truetype "${BUSTER_SOURCE_DIR}/truetype${COMMON_EXTENSION}")
 buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON_EXTENSION}")
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
-buster_register_module(ide_document "${BUSTER_SOURCE_DIR}/ide_document${COMMON_EXTENSION}")
 
 # Test sources follow the selected build mode: test.c includes them in unity
 # builds, while CMake compiles them as independent translation units otherwise.
@@ -892,13 +871,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/string_test.c
     src/buster/tests/os_test.c
     src/buster/tests/file_test.c
-    src/buster/tests/ide_document_test.c
-    src/buster/tests/window_test.c
-    src/buster/tests/rendering_test.c
-    src/buster/tests/ui_test.c
     src/buster/tests/target_test.c
-    src/buster/tests/compiler/frontend/buster/parser_test.c
-    src/buster/tests/compiler/frontend/buster/analysis_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
@@ -916,7 +889,6 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/ir/ir_test.c
-    src/buster/tests/compiler/ir/interpreter_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
     src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
@@ -938,14 +910,8 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
     src/buster/tests/file_test.h
-    src/buster/tests/ide_document_test.h
-    src/buster/tests/window_test.h
-    src/buster/tests/rendering_test.h
-    src/buster/tests/ui_test.h
     src/buster/tests/target_test.h
     src/buster/tests/x86_64_test.h
-    src/buster/tests/compiler/frontend/buster/parser_test.h
-    src/buster/tests/compiler/frontend/buster/analysis_test.h
     src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
@@ -963,7 +929,6 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/ir/ir_test.h
-    src/buster/tests/compiler/ir/interpreter_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
@@ -1117,8 +1082,6 @@ set(TEST_ARGUMENTS test --verbose=1)
 if (BUSTER_CI)
     list(APPEND TEST_ARGUMENTS --ci=1)
 endif()
-set(UNIT_TEST_ARGUMENTS test --verbose=1)
-set(APP_TEST_ARGUMENTS test_app --verbose=1 --ci=1)
 
 set(BUSTER_TEST_ENV)
 
@@ -1178,16 +1141,6 @@ if (NOT WIN32)
             list(APPEND BUSTER_TEST_ENV "LD_PRELOAD=${BUSTER_LD_PRELOAD}")
         endif()
     endif()
-endif()
-
-set(BUSTER_APP_TEST_ENV ${BUSTER_TEST_ENV})
-if (NOT WIN32 AND BUSTER_SANITIZE)
-    # The Vulkan validation layer loads an unsanitized C++ libLLVM whose
-    # allocator pairing is outside buster's control. Keep mismatch detection
-    # enabled for unit tests and fuzzing, and disable it only for this external
-    # graphical smoke-test process.
-    list(FILTER BUSTER_APP_TEST_ENV EXCLUDE REGEX "^ASAN_OPTIONS=")
-    list(APPEND BUSTER_APP_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}:alloc_dealloc_mismatch=0")
 endif()
 
 set(BUSTER_SHADER_SOURCE_DIR "${CMAKE_SOURCE_DIR}/src/buster/lib/shaders")
@@ -1688,7 +1641,9 @@ function(executable_add name is_buster_program main_file)
             target_link_options(${name} PRIVATE -u ANativeActivity_onCreate)
         endif()
         if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            # Drive the app through UIKit; Metal/QuartzCore back the render layer.
+            # UIKit owns the mobile test-harness lifecycle. The platform
+            # bootstrap currently creates a CAMetalLayer-backed view even though
+            # the compiler entry point itself is headless.
             target_link_libraries(${name} PRIVATE
                 "-framework UIKit"
                 "-framework Foundation"
@@ -1714,16 +1669,6 @@ function(executable_add name is_buster_program main_file)
                     "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/tests"
                 COMMENT "Bundling test data into ${name}.app")
 
-            # Bundle a monospace font if one is available (see BUSTER_IOS_FONT).
-            if (BUSTER_IOS_FONT AND EXISTS "${BUSTER_IOS_FONT}")
-                add_custom_command(TARGET ${name} POST_BUILD
-                    COMMAND "${CMAKE_COMMAND}" -E copy
-                        "${BUSTER_IOS_FONT}"
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${name}>/FiraCode-Regular.ttf"
-                    COMMENT "Bundling font into ${name}.app")
-            else()
-                message(STATUS "BUSTER_IOS_FONT not set or missing; ${name}.app will have no bundled font")
-            endif()
         endif()
     endif()
 
@@ -1744,24 +1689,13 @@ function(executable_add name is_buster_program main_file)
             COMMENT "Running ${name}"
             VERBATIM)
 
-        if (${is_buster_program} AND BUSTER_CI AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            add_custom_target(test_${name}
-                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${UNIT_TEST_ARGUMENTS}
-                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_APP_TEST_ENV} "$<TARGET_FILE:${name}>" ${APP_TEST_ARGUMENTS}
-                DEPENDS ${name}
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                USES_TERMINAL
-                COMMENT "Running ${name} tests and graphical smoke test"
-                VERBATIM)
-        else()
-            add_custom_target(test_${name}
-                COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
-                DEPENDS ${name}
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                USES_TERMINAL
-                COMMENT "Running ${name}"
-                VERBATIM)
-        endif()
+        add_custom_target(test_${name}
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:${name}>" ${TEST_ARGUMENTS}
+            DEPENDS ${name}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            USES_TERMINAL
+            COMMENT "Running ${name} tests"
+            VERBATIM)
 
         if(gdb_executable)
             add_custom_target(debug_${name}
@@ -1789,6 +1723,13 @@ function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})
 endfunction()
 
+# Mobile operating systems own the process lifecycle. Keep only the window
+# module's platform bootstrap there; desktop compiler builds remain headless.
+set(BUSTER_COMPILER_PLATFORM_MODULES)
+if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
+endif()
+
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
@@ -1798,8 +1739,6 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     integer
     string
     float
-    compiler_parser
-    compiler_analysis
     compiler_c_frontend
     compiler_aarch64_encoding
     compiler_aarch64_exact_bridge
@@ -1817,7 +1756,6 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_assembly_metadata
     compiler_assembly_completion_census
     compiler_ir
-    compiler_ir_interpreter
     compiler_debug
     compiler_machine
     compiler_codegen
@@ -1834,14 +1772,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     file
     target
     time
-    ui_core
-    ui_builder
-    window
-    rendering
-    truetype
-    font_provider
     hash
-    ide_document
+    ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
@@ -1858,11 +1790,6 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
         USES_TERMINAL
         VERBATIM
     )
-endif()
-
-if (TARGET buster_shaders)
-    add_dependencies(ide buster_shaders)
-    target_sources(ide PRIVATE ${BUSTER_SHADER_SOURCES})
 endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
@@ -1927,13 +1854,27 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     message(STATUS "Android APK tools: aapt2=${BUSTER_AAPT2} zipalign=${BUSTER_ZIPALIGN} apksigner=${BUSTER_APKSIGNER} jar=${BUSTER_JAR}")
     message(STATUS "Android APK jar: ${BUSTER_ANDROID_JAR}")
 
+    set(BUSTER_ANDROID_SHADER_ASSET_COMMANDS)
+    set(BUSTER_ANDROID_SHADER_ASSET_DEPENDS)
+    if (BUSTER_USE_VULKAN AND BUSTER_COMPILE_SHADERS)
+        list(APPEND BUSTER_ANDROID_SHADER_ASSET_COMMANDS
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/assets/shaders"
+            COMMAND "${CMAKE_COMMAND}" -E copy
+                "${CMAKE_BINARY_DIR}/shaders/rect.vert.spv"
+                "${CMAKE_BINARY_DIR}/shaders/rect.frag.spv"
+                "${CMAKE_BINARY_DIR}/shaders/blur.vert.spv"
+                "${CMAKE_BINARY_DIR}/shaders/blur.frag.spv"
+                "${CMAKE_BINARY_DIR}/assets/shaders/"
+        )
+        list(APPEND BUSTER_ANDROID_SHADER_ASSET_DEPENDS ${BUSTER_SHADER_TARGET_DEPENDS})
+    endif()
+
     add_custom_command(
         OUTPUT "${BUSTER_APK}"
-        # 0. Stage assets read at runtime via AAssetManager: tests + compiled shaders.
+        # 0. Stage test data and, only for an explicitly enabled renderer, shaders.
         COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/assets"
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/tests" "${CMAKE_BINARY_DIR}/assets/tests"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/assets/shaders"
-        COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_BINARY_DIR}/shaders/rect.vert.spv" "${CMAKE_BINARY_DIR}/shaders/rect.frag.spv" "${CMAKE_BINARY_DIR}/shaders/blur.vert.spv" "${CMAKE_BINARY_DIR}/shaders/blur.frag.spv" "${CMAKE_BINARY_DIR}/assets/shaders/"
+        ${BUSTER_ANDROID_SHADER_ASSET_COMMANDS}
         # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
         COMMAND "${BUSTER_AAPT2}" link
             -I "${BUSTER_ANDROID_JAR}"
@@ -1954,14 +1895,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
             "${BUSTER_KEYSTORE}"
             "${CMAKE_BINARY_DIR}/buster-base.apk"
             "${BUSTER_APK}"
-        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}" "${BUSTER_ANDROID_SIGN_SCRIPT}"
+        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}" "${BUSTER_ANDROID_SIGN_SCRIPT}" ${BUSTER_ANDROID_SHADER_ASSET_DEPENDS}
         COMMENT "Packaging buster.apk"
         VERBATIM
     )
     add_custom_target(apk DEPENDS "${BUSTER_APK}")
 
     if (BUSTER_ADB_EXECUTABLE AND BUSTER_BASH_EXECUTABLE)
-        # Install, launch, and wait for the on-device full GUI test result.
+        # Install, launch, and wait for the on-device compiler test result.
         add_custom_target(test_all
             COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_TEST_SCRIPT}"
                 "${BUSTER_ADB_EXECUTABLE}"
@@ -1998,7 +1939,7 @@ else()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-        "$<TARGET_FILE:ide>" ${UNIT_TEST_ARGUMENTS}
+        "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
         DEPENDS ide
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Run unit tests"
@@ -2008,13 +1949,10 @@ else()
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            "$<TARGET_FILE:ide>" ${UNIT_TEST_ARGUMENTS}
-            COMMAND
-            ${CMAKE_COMMAND} -E env ${BUSTER_APP_TEST_ENV}
-            "$<TARGET_FILE:ide>" ${APP_TEST_ARGUMENTS}
+            "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Test all and run graphical smoke test"
+            COMMENT "Run all compiler and library tests"
             VERBATIM
         )
     else()

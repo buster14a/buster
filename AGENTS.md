@@ -5,16 +5,28 @@ and the code disagree, the code wins — update this file in the same change.
 
 ## Project
 
-**buster** is a from-scratch IDE and compiler for the buster programming
-language (`.bbb` files), written entirely in C with zero third-party
-dependencies. One executable, `ide`, contains everything: UI toolkit, GPU
-renderers (Vulkan/Metal/D3D12), TrueType rasterizer, compiler frontend, IR,
-codegen backends (x86_64, aarch64), linker, and the in-process test suite.
-Targets: Linux, macOS, Windows, Android, iOS, and direct
-`wasm64-unknown-freestanding` core modules using Memory64. The `ide cc`
+**buster** is a from-scratch C compiler and toolchain written in C. The C
+frontend is the sole source-language frontend. The `ide` executable is a
+headless compiler, test runner, benchmark driver, fuzz entrypoint, and metadata
+tool; the target name is retained for build-script compatibility. The `ide cc`
 driver also orchestrates optional external shader toolchains for SPIR-V,
 NVPTX/PTX, AMDGCN/HSA code objects, Metal AIR/metallib, and DXIL; these
 pipelines add no linked or vendored dependency to the executable.
+
+The compiler pipeline is:
+
+```text
+C source -> preprocessing/parsing/semantic analysis -> canonical IR
+         -> native machine IR/code generation -> object writer -> linker
+         -> direct core Wasm64 emission for wasm64 targets
+```
+
+The former experimental custom-language frontend, its semantic model, its
+source-level interpreter/JIT entrypoints, and the editor model built around it
+are intentionally absent. Shared facilities remain: the canonical IR,
+optimizers, machine selection and scheduling, register allocators, x86-64 and
+AArch64 encoders, debug emitters, object formats, linker, generic object JIT,
+assembler, and Wasm64 backend.
 
 ## Current compiler priority
 
@@ -33,8 +45,8 @@ self-hosting fixed point from the repository root before changing the compiler:
 ```
 
 `test_self_host` builds the trusted bootstrap compiler, compiles the complete
-unity-build IDE twice with buster, requires both generations to be
-byte-identical, and runs the stage-2 benchmark. The same build.c-owned workflow
+unity-build compiler executable twice with its own C compiler, requires both
+generations to be byte-identical, and runs the stage-2 benchmark. The same build.c-owned workflow
 is also exposed as the `test_self_host` Ninja target. On Linux x86-64, its
 expanded equivalent is:
 
@@ -127,8 +139,7 @@ desktop CI platforms, the canonical trusted Clang Release tree also gets a
 self-host worker in this same pool. The build-driver boundary is mandatory:
 capture provenance, clean the canonical Release producer, then start the outer
 superbuild. The clean preserves the configured CMake/Ninja graph and cache while
-forcing producer objects, links, and generated shader outputs to rebuild under
-the captured inputs. The worker depends only on the canonical compile target,
+forcing producer objects and links to rebuild under the captured inputs. The worker depends only on the canonical compile target,
 consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
@@ -158,9 +169,8 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
-Clang static analysis runs only against unsanitized Release. GUI/GPU smoke
-tests run for Debug sanitized and Release non-sanitized configurations; other
-combinations run unit tests only.
+Clang static analysis runs only against unsanitized Release. Every matrix
+configuration runs `test_all`; platform packages use their native test runner.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`** for public workflows; `build` rejects them with an explicit
@@ -188,69 +198,35 @@ free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
 
-GPU targets are a separate driver domain rather than CPU targets with unusual
-architectures. Their source-to-artifact command graphs, target/profile
-validation, tool discovery, artifact checks, and temporary-file ownership live
-in `compiler/gpu/gpu.{c,h}`. They accept the vendor source or intermediate
-languages documented in `docs/gpu-target-pipelines.md`; do not route ordinary
-Buster or C through them until canonical IR represents GPU address spaces,
-kernels, resources, barriers, execution scopes, and shader interfaces.
-
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 `test_self_host` (Linux x86-64 and macOS), `run_ide`, `test_ide`, `debug_ide`,
-`buster_shaders`, `apk` (Android), `clang_analyze`. The Vulkan SDK
-(`VULKAN_SDK` env) is required whenever Vulkan or Slang shader compilation is
-enabled.
+`buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
+shader compilation are retained as opt-in infrastructure and default off. The
+Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
+compilation is explicitly enabled.
 
 ## Tests
 
-- All tests use the `ide` executable with no external test framework.
-  `test_all` runs `ide test --verbose=1`, which calls `library_tests()` in
-  `src/buster/tests/test.c`; fuzz-capable builds then run their bounded fuzz session
-  in that process. Desktop CI runs the IDE window/rendering path separately as
-  `ide test_app --verbose=1 --ci=1`, so external Vulkan/LLVM sanitizer policy
-  cannot weaken unit-test or fuzz coverage. Android and iOS retain the combined
-  in-app test and counted graphical smoke-test flow.
-- Module tests live under `src/buster/tests/` as mirrored `*_test.c`/`*_test.h`
-  pairs. `test.c` includes their headers and owns registration. In unity builds
-  it also includes their implementations before the production sources; in
-  non-unity builds CMake compiles `test.c` and every test implementation as an
-  independent translation unit. Production sources expose only the narrow
-  seams needed by tests. Each `*_test.h` has one `BUSTER_INCLUDE_TESTS` block
-  around its test-only declarations and types. Each paired `*_test.c` keeps its
-  own header include outside one block guarding the rest of the file, so
-  tests-disabled non-unity builds still compile a non-empty translation unit.
-  Private data shared by codegen and interpreter tests belongs in their
-  `*_internal.h` headers under `src/buster/lib/`.
-- Run from the **repo root**: parser tests open `tests/*.bbb` by relative
-  path.
-- To add a language test: drop a `.bbb` file in `tests/` **and** append it to
-  the hardcoded `parser_file_test_cases` list in
-  `src/buster/lib/compiler/frontend/buster/parser.c` (covered by
-  `parser_file_tests()`) **and** bump `PARSER_FILE_TEST_CASE_COUNT` in
-  `parser.h` to match — a compile-time equality check beside the array catches
-  drift in every build. Valid fixtures must also be appended to
-  `analysis_fixture_tests` in
-  `src/buster/tests/compiler/frontend/buster/analysis_test.c` with their exact
-  semantic diagnostic count and to `ir_fixture_tests` in
-  `src/buster/tests/compiler/ir/ir_test.c`; this keeps the complete frontend
-  pipeline covered. Invalid-syntax fixtures live in `tests/errors/` and use
-  the parser list with exact expected diagnostics plus an expected recovered
-  AST expression. Commented-out entries there are known-failing/WIP.
-- CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
-  `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
-  Debug+Release on an Android emulator and the iOS simulator, on every push.
-  Main-push CI is skipped only when the exact pushed SHA already carries current
-  success statuses for all four required matrix contexts; the check lives in
-  `.forgejo/scripts/ci_main_gate.sh` and uses Forgejo's commit-status API, so a
-  merge strategy other than fast-forward cannot silently land an untested tree.
-  The run being gated publishes its own `pending` statuses for those contexts
-  before the gate job starts, so the gate reads the newest *terminal* status per
-  context and ignores `pending`; reading the newest status of any kind only ever
-  sees the gate's own run and can never skip. Every other outcome — a missing
-  context, a non-success verdict, an API failure, or a gate job that failed
-  outright — runs the full matrix.
+- All tests run inside the `ide` executable; there is no external unit-test
+  framework. From the repository root, run `ide test --verbose=1 --ci=1` or
+  build the `test_all` target.
+- Test modules live under `src/buster/tests/` as mirrored `*_test.c` and
+  `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
+  include implementations into the main translation unit; non-unity builds
+  compile each test source independently.
+- C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
+  object, archive, and shell-script inputs. Keep fixture paths relative to the
+  repository root because tests intentionally exercise the real file loader.
+- A new production module or public behavior must receive a focused module
+  test. Frontend changes should cover preprocessing, parsing/diagnostics,
+  semantic typing, canonical-IR lowering, and driver behavior as applicable.
+- Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
+  shared with tests belong in a narrow `*_internal.h` seam rather than being
+  exposed through a production public header.
+- CI is defined under `.forgejo/`, not GitHub. Preserve Debug/Release,
+  unity/non-unity, sanitizer/fuzz, self-host, and supported-platform coverage
+  when changing build orchestration or the compiler pipeline.
 
 ## Benchmarking and diagnostics
 
@@ -261,28 +237,13 @@ enabled.
   primary completeness/fixed-point signal for compiler-throughput changes.
   For performance measurements, run the benchmark with the trusted
   Clang-compiled `ide` executable, whose generated host code has the best
-  quality; buster-compiled stage executables are useful for self-hosting
+  quality; self-compiled stage executables are useful for fixed-point
   validation, not as the default benchmark host.
-- `ide bench` (built via the `bench_all` ninja target) runs both modes over the
-  `parser_file_test_cases` corpus 200 times and prints one line per mode:
-  `BENCH_IO parse_all_tests iterations=... files=... min_ns=... median_ns=...`
-  reads every source during every iteration, while
-  `BENCH_PARSE parse_all_tests iterations=... files=... min_ns=... median_ns=...`
-  loads every source once and repeatedly tokenizes/parses the preloaded bytes.
-  Both modes share `parser_bench_run()` in
-  `src/buster/lib/compiler/frontend/buster/parser.c`, deliberately **not** gated
-  behind `BUSTER_INCLUDE_TESTS` (they are benchmarks, not tests, and must stay
-  buildable in Release) and deliberately independent of the windowing/rendering
-  path `ide test` also drives, so they run headless on a plain CI runner with no
-  display server.
-- **`BUSTER_INSTRUMENT`** (CMake option, mirrors `BUSTER_TIME_TRACE`
-  end-to-end — `--instrument`/`--no-instrument` on `generate`) compiles in
-  finer-grained bench timing, compiled out entirely by default. With it on,
-  `ide bench` additionally prints `BENCH_IO_PHASE`/`BENCH_PARSE_PHASE`
-  tokenize/parse lines (splitting `tokenize()` from `parser_parse()`) and
-  `BENCH_IO_FILE`/`BENCH_PARSE_FILE` lines per test file, slowest first. The
-  mode prefix is part of every diagnostic line so phase and per-file timings
-  cannot be confused between the filesystem and preloaded runs.
+- `ide bench` (also exposed through the `bench_all` target) reads
+  `tests/basic_c_operations.c` and measures the complete C frontend path:
+  preprocessing, syntax construction, semantic analysis, and canonical-IR
+  lowering. It prints one `BENCH_C_FRONTEND` line with minimum and median
+  latency plus source throughput. Run it from the repository root.
 - **`STEP_INSTRUCTIONS` lines** report instructions retired for every build step
   that already reports wall time, printed straight after its `took ... seconds`
   line. The one to watch is `Self-host stage 1`, which is compile throughput on
@@ -555,18 +516,17 @@ history.
   writes function- or item-local fragments into stable source-indexed slots,
   and merges them only after a lane barrier.
 - **A global built on first use is prewarmed, never raced.** Several hot
-  tables are derived once and read forever after through plain loads — the
-  tokenizer's character classes, keyword slots and operator NFA, the C
-  frontend's punctuator dispatch and declaration keywords, the codegen ABI
-  target cache, the font provider's resolved paths, and the x86 metadata
-  decode plus the three caches over it. That shape is sound only while no
-  other thread can be reading, so every such build states
-  `BUSTER_CHECK_SERIAL_INITIALIZATION()` (`<buster/lib/os.h>`, always
-  compiled in, over `os_is_only_live_thread()`), and every owning module
-  publishes a prewarm entry point that fills it on the calling thread:
-  `tokenizer_prewarm`, `c_prewarm`, `codegen_prewarm`,
-  `font_provider_prewarm`, `buster_x86_metadata_prewarm`, and
-  `compiler_prewarm` for the compile pipeline as a whole. **Call the prewarm
+  tables are derived once and read forever after through plain loads — the C
+  frontend's character classes, compact lexer tables, punctuator dispatch and
+  declaration keywords, the codegen ABI target cache, the font provider's
+  resolved paths, and the x86 metadata decode plus the three caches over it.
+  That shape is sound only while no other thread can be reading, so every such
+  build states `BUSTER_CHECK_SERIAL_INITIALIZATION()` (`<buster/lib/os.h>`,
+  always compiled in, over `os_is_only_live_thread()`), and every owning
+  module publishes a prewarm entry point that fills it on the calling thread:
+  `c_prewarm`, `codegen_prewarm`, `font_provider_prewarm`,
+  `buster_x86_metadata_prewarm`, and `compiler_prewarm` for the compile
+  pipeline as a whole. **Call the prewarm
   before `lane_run`** — x86 metadata separately, since no part of the compile
   path queries it and its prewarm costs a full table decode. A new lazily
   built global adds both the check and a line in its module's prewarm.
@@ -635,69 +595,60 @@ history.
   and mask shifts, Boolean combinations, `mask64_count` and `mask64_first_set`
   stay on the general-purpose ALUs, which retire more of them per cycle on
   Zen 4/5 than the k unit does.
-- **SIMD lexing/parsing method: the Validark lineage.** The buster-language
-  parser began as a scalar port of Niles Salter's (Validark's) Accelerated
-  Zig Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream
-  `github.com/Validark/Accelerated-Zig-Parser` — and that work plus
-  validark.dev (start with `posts/deus-lex-machina` and
-  `posts/eine-kleine-vectorized-classification`) and the three Utah Zig
-  talks (YouTube `oN8LDpWuPWw`, `FDiUKafPs0U`, `NM1FNB5nagk`) are
-  project-endorsed inspiration: when accelerating lexing/parsing, reach for
-  these techniques first and keep new code compatible with their shapes.
-  The core vocabulary: (1) per-64-byte-chunk classification — every class
-  (whitespace, newline/CR, alpha/digit/underscore, quotes, backslash,
-  slash, operator chars) becomes one comparison into a `k`-mask bitstring,
-  all classes over the same chunk in lockstep sharing one load; (2) token
-  extents by mask arithmetic — starts `x & ~(x << 1)`, ends
-  `x & ~(x >> 1)`, then either cursor queries (shift by cursor, count
-  trailing ones — one tzcnt replaces an unpredictable byte loop) or full
-  vector compaction: `vpcompressb` an iota vector through the starts and
-  ends masks, subtract, and every token length in the chunk materializes at
-  once; kinds come from masked broadcasts into a kinds vector compressed by
-  the same starts mask, interleaved with lengths on store; (3) charset
-  membership via nibble-decomposed `vpshufb`/`vpermb` tables —
-  `table[c & 0xF] & (1 << (c >> 4))` per lane, the upper-nibble
-  powers-of-two vector shared across charsets, `vptestmb` folding the AND
-  and test on AVX-512; (4) multi-character operators as a bit-channel
-  `vpshufb` NFA: three per-position tables whose looked-up bytes AND
-  together so each of the 8 bit-channels legalizes one family of 2-/3-char
-  sequences, plus a short effectively-branchless reconciliation of
-  overlaps; (5) keyword and builtin recognition by perfect hash, never a
-  memcmp ladder — `((len << 14) ^ first_two_bytes) * last_two_bytes >> 8`
-  to 7 bits, Bagwell array-mapped compression (two u64 bitmaps + popcount
-  rank) into a dense table of length-padded entries validated by a single
-  wide compare, with compile/startup-time collision checks so editing the
-  keyword set stays safe; (6) sentinels instead of bounds checks — a
-  leading newline, trailing quote/NUL sentinels, and chunk-aligned
-  overallocation let the hot loops drop every length test; (7) upper-bound
-  allocation plus post-scan shrink instead of grow-and-check (the
-  `2026-08-08k` tokenizer change is this trick alone, `-21.6%` bench
-  instructions); (8) length-based token streams — kind + length with a
-  0-length escape to a wide length, no per-token start offsets or eagerly
-  materialized line/column, offsets rebuilt by a running cursor and line
-  numbers recovered by popcount over retained newline bitmasks. Escape-run
-  parity uses the simdjson backslash algorithm (simdjson PR #2042 has the
-  current best form). All of it sits behind the guard rules of the tuning
-  target above; scalar fallbacks keep the exact current semantics.
-  **Both lexers now run this architecture**: `tokenize_compact` in
-  `parser.c` for the buster language and `c_lex_compact` in `frontend/c/c.c`
-  for C, each walking its source in **item-aligned 64-byte windows** so no
-  lexer state crosses a window — the item touching a window's last byte is
-  deferred and rescanned by the next one, and the shapes the masks do not
-  model escape to the scalar path's own single-item scanner
-  (`tokenizer_scan_one_token`, `c_lex_scan_one`), which is what makes the two
-  paths agree by construction rather than by duplicated reasoning. Read
-  `c_lex_compact` before writing a third: it is the one that had to solve the
-  general cases, because C skips whitespace and comments instead of
-  tokenizing them (so token ends need an explicit boundary mask, not
-  `starts >> 1`), and because lookahead loads there are masked by the **file**
-  bounds rather than the window's — a delimiter near the window end is
-  spelled from bytes the next window owns. Every such emitter must ship a
-  differential gate asserting byte-identical agreement with its scalar
-  reference over construct cases slid across the window boundary, items
-  longer than a window, the real corpus at every window phase, and fuzz
-  blobs over the full alphabet; that gate is what catches the ordering bugs,
-  and it caught one in each emitter so far.
+- **SIMD C lexing method: the Validark lineage.** `c_lex_compact` in
+  `frontend/c/c_source.c` draws on Niles Salter's (Validark's) Accelerated Zig
+  Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream
+  `github.com/Validark/Accelerated-Zig-Parser` — plus validark.dev (start with
+  `posts/deus-lex-machina` and
+  `posts/eine-kleine-vectorized-classification`) and the three Utah Zig talks
+  (YouTube `oN8LDpWuPWw`, `FDiUKafPs0U`, `NM1FNB5nagk`). When accelerating the
+  C lexer, reach for these techniques first and keep new code compatible with
+  their shapes. The core vocabulary: (1) per-64-byte-chunk classification —
+  every class (whitespace, newline/CR, alpha/digit/underscore, quotes,
+  backslash, slash, operator chars) becomes one comparison into a `k`-mask
+  bitstring, all classes over the same chunk in lockstep sharing one load; (2)
+  token extents by mask arithmetic — starts `x & ~(x << 1)`, ends
+  `x & ~(x >> 1)`, then either cursor queries (shift by cursor, count trailing
+  ones — one tzcnt replaces an unpredictable byte loop) or full vector
+  compaction: `vpcompressb` an iota vector through the starts and ends masks,
+  subtract, and every token length in the chunk materializes at once; kinds
+  come from masked broadcasts into a kinds vector compressed by the same
+  starts mask, interleaved with lengths on store; (3) charset membership via
+  nibble-decomposed `vpshufb`/`vpermb` tables —
+  `table[c & 0xF] & (1 << (c >> 4))` per lane, the upper-nibble powers-of-two
+  vector shared across charsets, `vptestmb` folding the AND and test on
+  AVX-512; (4) multi-character operators as a bit-channel `vpshufb` NFA: three
+  per-position tables whose looked-up bytes AND together so each of the 8
+  bit-channels legalizes one family of 2-/3-char sequences, plus a short
+  effectively-branchless reconciliation of overlaps; (5) keyword and builtin
+  recognition by perfect hash, never a memcmp ladder —
+  `((len << 14) ^ first_two_bytes) * last_two_bytes >> 8` to 7 bits, Bagwell
+  array-mapped compression (two u64 bitmaps + popcount rank) into a dense table
+  of length-padded entries validated by a single wide compare, with
+  compile/startup-time collision checks so editing the keyword set stays safe;
+  (6) sentinels instead of bounds checks — a leading newline, trailing
+  quote/NUL sentinels, and chunk-aligned overallocation let the hot loops drop
+  every length test; (7) upper-bound allocation plus post-scan shrink instead
+  of grow-and-check (the `2026-08-08k` tokenizer change is this trick alone,
+  `-21.6%` bench instructions); (8) length-based token streams — kind + length
+  with a 0-length escape to a wide length, no per-token start offsets or
+  eagerly materialized line/column, offsets rebuilt by a running cursor and
+  line numbers recovered by popcount over retained newline bitmasks.
+  Escape-run parity uses the simdjson backslash algorithm (simdjson PR #2042
+  has the current best form). All of it sits behind the guard rules of the
+  tuning target above; scalar fallbacks keep the exact current semantics.
+  `c_lex_compact` walks source in **item-aligned 64-byte windows** so no lexer
+  state crosses a window: the item touching a window's last byte is deferred
+  and rescanned by the next one, and shapes the masks do not model escape to
+  the scalar single-item scanner `c_lex_scan_one`. C skips whitespace and
+  comments instead of tokenizing them, so token ends need an explicit boundary
+  mask rather than `starts >> 1`; lookahead loads are masked by the **file**
+  bounds rather than the window's because a delimiter near the window end can
+  be spelled from bytes the next window owns. Every SIMD lexer change must keep
+  the differential gate asserting byte-identical agreement with the scalar
+  reference over construct cases slid across the window boundary, items longer
+  than a window, the real corpus at every window phase, and fuzz blobs over the
+  full alphabet.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
@@ -745,266 +696,46 @@ history.
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
-## Parser rules
+## C frontend and canonical IR rules
 
-The buster-language parser (`src/buster/lib/compiler/frontend/buster/parser.c`)
-has hard design constraints:
-
-- **No recursion in C.** The parser is a state machine driven by an explicit,
-  arena-backed `ParserState` stack (`state_push`/`state_pop`). New grammar
-  constructs get new state kinds and stack frames — never recursive helper
-  calls.
-- `parser_parse()` writes its public `ParserResult` AST and diagnostics into a
-  caller-owned result arena. It also takes a distinct caller-owned expression
-  arena, resets it at the start of each parse, and uses it only as reusable
-  staging before copying completed expressions into the result arena. Source/
-  token storage must outlive the result; neither expression staging nor the
-  `ParserState` stack (including pending prefix-unary frames) may escape. The
-  state stack is scratch, borrowed via `scratch_begin`/`scratch_end`.
-- Invalid user input produces `ParserDiagnostic` entries and synchronizes at a
-  statement or top-level declaration boundary. `BUSTER_TODO()`/assertions are
-  reserved for internal invariants, never ordinary syntax errors.
-- **Unary operators are AST expression nodes** (for example,
-  `AST_NODE_UNARY_MINUS`), not part of numeric literal tokens.
-- Expression precedence may use binding-power concepts, but the
-  implementation must remain state-machine based.
-
-## Semantic analysis and IR rules
-
-- Every valid parser fixture in `tests/*.bbb` must also be run through semantic
-  analysis and IR generation. Functions with semantic diagnostics must not
-  publish IR; tests must still verify that lowering was attempted and rejected
-  for the diagnosed function rather than silently skipping the fixture.
-- New semantic or IR behavior needs focused unit coverage in addition to the
-  fixture-wide pipeline test. IR tests must validate structural invariants, not
-  merely check that generation returned a non-null pointer.
-- **Both validators prove instruction ownership before they check anything
-  else**, through `ir_function_instruction_owners` and the
-  `ir_validate_module_ownership` pre-pass: one `owner[instruction_count]` array
-  per function, filled by walking each block's chain, where a second visit to
-  an instruction is the error. That one O(instructions + blocks) pass rules out
-  cycles, chains shared between blocks, a `last_instruction` the chain never
-  reaches, and instructions owned by no block at all while later passes still
-  read them out of the dense array — none of which chain traversal alone can
-  see. Everything downstream depends on it and must not re-derive it: the
-  validators' own walks, the canonical emitter's block loop, and
-  `codegen_allocate_registers` all carry no cycle guard and no range test,
-  because a counter that only notices a cycle after re-walking the function is
-  both slower and weaker than the proof. Keep new consumers on the same array
-  rather than adding another local one, and report an ownership failure as
-  `IR_VALIDATION_INSTRUCTION_OWNERSHIP`.
-- **An `IrSourceRange` is a source, a byte offset and a length — never a line
-  or a column.** Lowering builds one range per instruction; a compile asks for
-  a line at four places only: diagnostic formatting, DWARF line-table
-  generation, CodeView line generation, and source-navigation requests.
-  `ir_source_position` is the one place line and column are computed. It
-  resolves either through the program's `IrSourceMap` — sorted regions over
-  the frontend's byte space, with per-line checkpoints and one stamped
-  position per macro expansion, which the C frontend hands over as its
-  preprocessing map so ranges carry spelling-space offsets — or by scanning
-  `IrSource.text`, for frontends whose ranges index the parsed bytes
-  directly. Producers must not resolve a position to fill a range, and
-  consumers that record one row per instruction must reject the repeat on the
-  range's own offset before resolving: consecutive instructions overwhelmingly
-  come from one token, and resolving first puts the search back on the hot
-  path it was moved off (measured at `+99 M` stage-1 instructions when it was).
-- **A frontend that preallocates `IrFunction.instructions` must preallocate
-  `instruction_canonical_sources` beside it.** `ir_function_add_instruction`
-  stores a canonical source only into an array that already exists, so sizing
-  the instructions alone silently drops every range the lowering built and
-  leaves the line table with nothing below one row per function — a gap that
-  costs nothing anywhere the compiler checks and shows up only in a debugger.
-- The typed IR must not retain parser/AST operation identifiers.
-  Unary and binary instructions use IR-native operations that encode the
-  semantic domain (integer, float, boolean, or pointer) and signed behavior;
-  the IR value type supplies the width.
-- Conversions are explicit `IR_OPCODE_CAST` instructions with an IR-native
-  operation that records extension, truncation, reinterpretation, or numeric
-  domain conversion. Contextually typed literals are materialized directly at
-  their final type rather than carrying conversion metadata on their producer.
-- `for` loops lower to ordinary blocks, block parameters, comparisons,
-  indexing, and arithmetic. Range and reverse operations produce immutable
-  iterable values; stateful iterator begin/next/value instructions do not
-  belong in the IR.
-- Native code generation consumes the typed IR directly. The Buster-language
-  backends (`codegen_generate_x86_64`/`codegen_generate_aarch64`) perform a
-  conservative linear-scan allocation of same-block scalar IR values to
-  backend-owned caller-saved registers. Values crossing calls or control-flow
-  edges, aggregates, and excess live values retain stack slots as spill
-  storage; block parameters are resolved with parallel edge copies. The
-  canonical path (`codegen_generate_canonical_module`, used by the C frontend
-  and therefore by self-hosting) runs **no** register allocation: every value
-  owns a frame slot and every operand is reloaded from it. Its only register
-  reuse is a local peephole that drops an x86-64 `rax` frame reload when the
-  immediately preceding emission was the store of `rax` to that same slot,
-  tracked by buffer position and reset at every block start so no branch can
-  reach the elided load. Codegen publishes format-neutral function
-  descriptors with exact code ranges, ordered prolog unwind actions, and
-  AArch64 epilog offsets; object formats consume those descriptors instead of
-  inferring sizes from the next symbol. Unwind `nop` actions describe prolog
-  instructions that do not change unwind state but must remain positionally
-  visible to the Windows AArch64 unwinder. Executable tests use writable memory
-  only while copying code, then switch it to read/execute before calling it.
-- Standalone code generation must consume target layouts before allocating
-  locals or aggregate backing storage. Analysis-backed IR ABI decisions come
-  from `analysis_classify_function_abi`; canonical IR types own convention-
-  indexed multi-part ABI metadata populated as each type layout is completed.
-  Backends translate that IR-owned classification rather than maintaining a
-  second classifier.
-  System V x86-64, Win64, AAPCS64, and Darwin AArch64 classifications include
-  split integer/float aggregates, homogeneous floating aggregates, stack
-  placement, caller-owned copies for indirect arguments, and hidden result
-  pointers (`rdi`, `rcx`, or `x8` as required). Code generation must reject a
-  calling convention that is incompatible with the selected architecture and
-  validate every part against the type layout, register limits, and outgoing
-  stack area before emitting it.
-- Module code generation emits each lowered function into an independent
-  source-indexed fragment. A stable source-order prefix merge assigns final
-  code offsets and combines entries, relocations, line rows, debug-location
-  seeds, unwind descriptors, and statistics; completion order must never
-  affect output or error selection. Global layout and assembly remain serial,
-  and direct-call relocations resolve by `(entity, instantiation)` after the
-  merge. Aggregate values use frame-owned backing storage while
-  array/slice/range descriptors remain ordinary typed IR values; aggregate
-  assignment is a value copy, not descriptor aliasing. The x86-64 and AArch64
-  baselines share this value representation even though their stack addressing
-  and instruction emission are backend-specific.
-- Separate compilation merges format-neutral `ObjectFile` values before native
-  serialization. Global definitions resolve by symbol name, private
-  object symbols remain object-local, non-exported language definitions use
-  deterministic internal names, duplicate definitions are diagnosed, and
-  unresolved symbols are retained only when the final platform linker is
-  allowed to satisfy them.
-- `ide jit <source.bbb> [--module-root=<path>] [-- <program args>...]` compiles
-  the complete Buster program directly into a host-native merged object, loads
-  code/read-only/writable sections with RX/R/RW page protections, and invokes
-  an exported C-convention `main` returning `s32`. The accepted entry forms are
-  `s32(void)` and `s32(s32|u32, u8**, u8**)`; the latter receives UTF-8 argv and
-  envp. The loader uses explicit function bindings for unresolved imports and
-  rejects foreign CPU features, TLS, external data imports, and unsupported
-  relocations before execution.
-- Canonical static-storage objects are `IrGlobal` values. Zero, integer, float,
-  byte aggregate, and symbol-address initializers are materialized into
-  read-only or writable object sections; mutable non-TLS zero objects use BSS,
-  const zero objects retain read-only bytes, and TLS zero objects use TBSS.
-  Zero-fill sections preserve virtual size without serialized bytes through
-  object merging and native image writing. Static locals use deterministic
-  internal global symbols. C aggregate initializer lowering uses an explicit
-  task stack, and incomplete character-array bounds are inferred from string
-  initializers before layout.
-- Debug info is **on by default** for both `ide cc` and `ide compile`; `-g0`
-  turns it off and `-g` is accepted for compatibility. Both frontends lower
-  through one path: codegen records per-instruction line entries plus a
-  function-start row, and the object builders hand those neutral
-  function/line descriptors to the emitter selected by the **target's native
-  format** — CodeView for Windows, DWARF everywhere else. Canonical IR source
-  ranges are one-based; the zero-based buster parser lines are converted at
-  the parser→IR boundary.
-- DWARF 4 (Linux, macOS, iOS, Android) emits
-  `.debug_info`/`.debug_abbrev`/`.debug_line`/`.debug_str` plus
-  `.debug_loc`/`.debug_ranges`, with relocations against local text and
-  debug-base symbols, so 32-bit cross-section offsets survive object
-  concatenation. ELF objects also emit `.eh_frame` independently of source
-  debug information and preserve its x86-64 PC-relative and AArch64 PREL32
-  relocations through object reading and merging. ELF executable writers
-  resolve those relocations into the loaded unwind section, emit a sorted
-  `.eh_frame_hdr` plus `PT_GNU_EH_FRAME`, and always append a coherent section
-  header table for loaded code/data, BSS, TLS, loader and dynamic-linking
-  metadata, debug data, and the section-name string table, including for `-g0`
-  images. DWARF relocations are resolved statically before the non-loaded debug
-  payload is appended. Mach-O objects and final images likewise carry
-  `__TEXT,__eh_frame` independently of source debug information; arm64
-  relocatable objects represent PREL32 fields with the canonical paired
-  `ARM64_RELOC_SUBTRACTOR`/`ARM64_RELOC_UNSIGNED` form. The Mach-O reader
-  converts supported external `__LD,__compact_unwind` frame-pointer and
-  frameless rows into neutral DWARF CFI, and rejects personality/LSDA,
-  authenticated-frame, vector-save, and unfamiliar-prolog encodings rather
-  than silently dropping unwind coverage. Mach-O executables carry the same
-  six source-debug sections in a read-only, file-backed
-  `__DWARF` segment (each section is flagged `S_ATTR_DEBUG`) placed before
-  `__LINKEDIT`; its virtual size is page-rounded to satisfy dyld while the
-  ad-hoc code signature covers the complete image. LLDB reads DWARF straight
-  from the image, with no dSYM step.
-- CodeView (Windows) emits `.debug$S` (C13: `S_OBJNAME`, `S_COMPILE3`,
-  per-function `S_GPROC32`/`S_END`, line blocks, file checksums, string
-  table) and a minimal `.debug$T`. Its `SECREL32`/`SECTION` relocations
-  resolve against each function's own object symbol. Those COFF relocation
-  numbers are shared with the TLS relocations, so the reader disambiguates
-  them by section. COFF section names longer than eight bytes use the
-  `/<offset>` string-table form.
-- `pdb_build` turns resolved CodeView modules into a PDB: each input object
-  remains a DBI module stream, symbol subsections become that module's symbol
-  region, the remaining subsections its C13 region, and checksum entries are
-  remapped from object-local string tables onto the PDB `/names` stream. TPI
-  records are merged into the shared type stream, but only after every record
-  has been rewritten through its own module's index map: type indices are
-  object-local, so two records can be byte-identical while naming different
-  types, and comparing raw `.debug$T` bytes silently gives one module's symbols
-  the other module's types. Merging then runs over the rewritten records, whose
-  references are global and therefore comparable. Records reference each other
-  in both directions — `LF_STRUCTURE` names an `LF_FIELDLIST` that comes after
-  it — so nothing may assume a record only refers to lower indices. Function
-  and global symbol locations use their actual final PE section number and
-  section-relative offset across text, read-only data, writable data, BSS, and
-  TLS. Readers need
-  more than the streams they will read — an empty globals or publics stream
-  still needs its GSI hash header, and the DBI needs an edit-and-continue name
-  table, or module iteration fails. Windows links with debug enabled derive a
-  sibling `.pdb`,
-  emit a read-only PE `.debug` section containing a matching RSDS record, and
-  derive the GUID deterministically from the pre-debug PE image and canonical
-  debug-module data. Validate changes with `llvm-pdbutil dump --all`, which is
-  strict about all of this.
-- Windows x86-64 unwind metadata is emitted independently of source debug
-  information. Each generated function has a `.pdata` runtime-function entry
-  and x64 `UNWIND_INFO` in `.xdata`; COFF uses `ADDR32NB` relocations and the
-  final PE exception directory covers the resolved `.pdata` table. Large
-  frames use a constant-size inline guard-page probe loop followed by one
-  described stack allocation so the prolog remains representable by the x64
-  unwind format.
-- Windows AArch64 emits ordered 8-byte `.pdata` runtime-function entries and
-  full `.xdata` records with explicit prolog operations and epilog scopes.
-  Large frames use a constant-size inline guard-page probe followed by one
-  `alloc_l`; its probe instructions and frame-base moves have matching unwind
-  `nop` entries, and the x28 save uses a reserved low frame slot so it remains
-  directly encodable. The PE writer prepends unwind records for its
-  architecture-specific process-entry stub on both Windows architectures and
-  points the exception directory at the complete table.
-- `object_section_name_for_kind` and `object_section_default_alignment` are
-  the single source of truth for section naming and defaults. Use them when
-  adding a section kind rather than adding another local table, otherwise
-  every reader, writer, and test helper silently misses the new kind.
-- Native executables target the platform libc and CRT without invoking a host
-  compiler or linker. Buster writes final ELF64 images for Linux and Android,
-  PE32+ images for Windows, and ad-hoc-signed Mach-O images for macOS and iOS,
-  for both x86-64 and AArch64 where the platform supports the architecture.
-  The writers supply process startup where the format requires it, apply
-  internal relocations, and emit the dynamic-loader metadata, import veneers,
-  symbol tables, and libc/UCRT/libSystem dependencies themselves. Android
-  images are PIE and use the system linker and bionic `libc.so`; Apple images
-  are PIE and use `LC_MAIN`, dyld rebase/bind opcodes, libSystem, and an
-  internally generated SHA-256 CodeDirectory. Freestanding startup remains a
-  separate mode.
-- Semantic analysis and IR lowering follow the repository-wide recursion rule:
-  nested expressions, statements, types, and control flow use arena-backed
-  explicit stacks or worklists.
-- Runtime IR interpretation follows the same rule: language calls use an
-  explicit bounded frame stack, and every execution has explicit instruction
-  and call-depth limits. The interpreter is a runtime correctness oracle; it
-  must not silently acquire compile-time execution semantics.
-- Interpreter memory is arena-owned and bounds-checked. Language pointers are
-  symbolic object-plus-offset references, never host addresses; loads track
-  byte initialization, aggregate copies preserve symbolic values, and invalid
-  memory access must return an execution trap instead of asserting.
-- `$` function parameters and `$T` types are compile-time generic inputs.
-  Semantic analysis interns concrete instantiations by a canonical key made
-  from the declaration identity, normalized type bindings, and normalized
-  compile-time values; never use arena-local type/constant IDs as a persistent
-  specialization identity. Compile-time parameters are absent from runtime
-  signatures and call operands; uninstantiated templates publish no IR. The
-  defining module owns exactly one body-analysis job and specialized IR function
-  for each key, while interface summaries record deterministic symbols and the
-  requesting modules so cached builds preserve specialization demand.
+- The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the
+  implementation is split across `c_source.c`, `c_parse.c`, and `c_gen.c`;
+  `c.c` preserves the unity include order and diagnostic mapping.
+- Keep the frontend pipeline explicit: source loading and preprocessing,
+  parsing and semantic construction, then canonical-IR lowering. Do not add a
+  parallel frontend-specific IR or route code generation around canonical IR.
+- Invalid user input must produce structured C diagnostics and a failed driver
+  result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
+  never ordinary syntax or semantic errors.
+- Arena ownership is part of the API contract. Returned source, syntax,
+  semantic, and IR structures may reference earlier-stage storage; callers must
+  retain the translation-unit arena until every downstream consumer finishes.
+- Zero-initialize aggregate tables before publishing a partially resolved type.
+  Recursive and mutually dependent declarations can expose an aggregate while
+  later members are still unresolved; an uninitialized `IrField` must never be
+  mistaken for a valid type or source reference.
+- Canonical IR owns format-neutral functions, blocks, instructions, values,
+  symbols, source ranges, types, and relocations. Shared layers must not contain
+  frontend entity IDs, parser AST pointers, or language-specific invalid
+  sentinels.
+- Validate IR before machine selection or Wasm emission. A diagnosed frontend
+  failure must not publish an apparently valid partial function to codegen.
+- Source diagnostics in shared layers use canonical `IrSourceRange` and
+  `IrSourcePosition`. Do not reintroduce parser-specific source-range APIs into
+  codegen, debug information, object writing, or the linker.
+- Native lowering is `canonical IR -> machine IR -> scheduling/register
+  allocation -> encoding`. Selection patterns and scheduling classes remain
+  separate metadata domains even when they share instruction-form IDs.
+- The generic JIT loads already-produced host-native objects and resolves
+  explicit bindings. It is not a second source-language compiler and must stay
+  independent of frontend semantic structures.
+- The command-line driver accepts C source/preprocessed C plus native
+  objects/archives where the selected action permits them. Unknown languages,
+  retired module-root options, and unsupported source extensions must fail
+  explicitly rather than being forwarded or guessed.
+- The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
+  instruction shapes must be diagnosed; never silently fall back to a native
+  backend.
 
 ## Repository map
 
@@ -1012,68 +743,42 @@ Top level:
 
 | Path | Contents |
 |---|---|
-| `build.c` / `build.sh` / `build.ps1` | Build driver (C, tcc-bootstrapped) and its POSIX/Windows bootstrap scripts. |
-| `CMakeLists.txt` | The real build definition: compiler detection, warning sets, sanitizer runtimes, shader compilation, module registry, targets, Android/iOS packaging. |
-| `cmake/` | `embed_d3d12_shaders.cmake`, `embed_metal_shaders.cmake` — turn compiled shaders into embeddable C data. |
-| `src/buster/apps/` | Application entrypoints and standalone tools. |
-| `src/buster/lib/` | Reusable runtime, UI, platform, compiler, and rendering code. |
-| `src/buster/tests/` | Test harness and module test pairs, unity-included or independently compiled according to the build mode. |
-| `tests/` | Runtime compiler fixture corpus: `.bbb` language programs and C frontend/driver fixtures. Test implementations themselves live under `src/buster/tests/`. |
-| `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
-| `.forgejo/workflows/ci.yml` | CI pipeline for correctness, sanitizer/fuzz, self-host, and mobile tests. |
-| `PERFORMANCE_AUDITS.md` | Performance audit history, newest first: what was measured, what was fixed, and the reference numbers the next audit starts from. |
-| `lsan.supp` | LeakSanitizer suppressions. |
-| `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
-
-`src/buster/lib/` — foundation modules (each `name.c` + `name.h`):
-
-| Path | Contents |
-|---|---|
-| `base.h` | Root header: platform detection, fixed-width types (`u8`…`s64`), `String8` + `S8("...")`, `STRUCT`/`BUSTER_*` macros, build-mode flags. Header-only. |
-| `system_headers.h` | Central OS/libc header includes. `tls.h` is an empty placeholder. |
-| `apple_runtime.h` | Objective-C runtime includes and ABI-compatible scalar/geometry types shared by Apple windowing and Metal. |
-| `os.{c,h}`, `entry_point.{c,h}` | OS abstraction (processes, virtual memory) and per-platform entry glue (`main`, NativeActivity, UIKit). |
-| `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; file IO; clocks. |
-| `simd.{c,h}` | The target-fixed 512-bit AVX-512 vocabulary — `Simd512`, `Mask64`, and the macros over them — with three implementations: self-hosted builtins, host intrinsics, and a scalar fallback. Header-only in practice; `simd.c` exists to give the module a translation unit. |
-| `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/data-layout descriptions, CPU models/features, and per-architecture instruction encoders. |
-
-UI / graphics:
-
-| Path | Contents |
-|---|---|
-| `ui_core.{c,h}`, `ui_builder.{c,h}` | Immediate-mode UI core (widget tree, layout, input) and higher-level construction helpers. |
-| `window.{c,h}`, `window/internal.h`, `window/*.c` | Shared window/event front door, private backend contract, and xcb/xkbcommon, AppKit/UIKit, Win32, Android, and null backends. |
-| `rendering.{c,h}`, `rendering/internal.h`, `rendering/*.c` | Shared CPU-side renderer front door, private backend contract, and Vulkan, Metal, D3D12, and null backends selected at compile time. |
-| `truetype.{c,h}`, `font_provider.{c,h}` | From-scratch TrueType rasterizer; system font discovery (fontconfig on Linux). |
-| `shaders/` | `rect.slang` is the shared Slang source for SPIR-V, Metal, and HLSL outputs; `rect_shared.h` contains declarations shared with C. Android selects its SSBO vertex path with `BUSTER_VULKAN_VERTEX_SSBO` (Adreno workaround). Generated `rect.vert.*`/`rect.frag.*` files live under `build/shaders/`, never in the source directory. |
+| `build.c`, `build.sh`, `build.ps1` | Native build driver and its bootstrap scripts. |
+| `CMakeLists.txt` | Compiler detection, warnings, sanitizers, module graph, targets, and platform packaging. |
+| `src/buster/apps/` | Command-line application entrypoints and standalone tools. |
+| `src/buster/lib/` | Runtime, platform, compiler, assembler, linker, JIT, and retained UI/rendering libraries. |
+| `src/buster/tests/` | In-process unit/module tests. |
+| `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
+| `.forgejo/` | Forgejo CI workflows and scripts. |
+| `PERFORMANCE_AUDITS.md` | Append-only measurement history; older entries may describe components that no longer exist. |
+| `WASM64.md` | Direct core Wasm64 target contract and usage. |
+| `build/` | Generated output. Never edit or archive it as source. |
 
 Compiler (`src/buster/lib/compiler/`):
 
 | Path | Contents |
 |---|---|
-| `frontend/buster/parser.{c,h}` | Lexer + explicit-stack parser; owns the `.bbb` fixture array and parser benchmarks. `parser_file_tests()` lives in `src/buster/tests/compiler/frontend/buster/parser_test.c`. |
-| `frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, the compaction lexer described below, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
-| `assembly/assembly.{c,h}` | Standalone target assembly parser and encoder with labels, expressions, relocations, symbols, and structured diagnostics. `assembly/generated/` contains pinned reduced XED/LLVM metadata and its provenance; regenerate it only through `build.c`'s explicit `import_assembly_metadata` command. |
-| `frontend/buster/analysis.{c,h}` | Buster semantic indexing, interface resolution, body analysis, layouts, ABI classification, specialization, and dependency scheduling. Fixture-wide tests live in `src/buster/tests/compiler/frontend/buster/analysis_test.c`. |
-| `ir/model.h` | Format-neutral canonical typed IR data model shared by frontends, codegen, debug metadata, objects, and the interpreter. |
-| `ir/ir.{c,h}` | Buster semantic-to-IR lowering, IR validation, and printing. Fixture-wide and structural tests live in `src/buster/tests/compiler/ir/ir_test.c`. |
-| `ir/interpreter.{c,h}`, `ir/interpreter_internal.h` | Bounded, explicit-stack runtime IR interpreter and its private test seam/types. Tests live in `interpreter_test.{c,h}`. |
-| `debug/debug.{c,h}` | Target-neutral debug type, scope, variable, inline-site, source, and location model built from canonical IR or Buster analysis. |
-| `dwarf/dwarf.{c,h}` | DWARF 4 source-debug and call-frame-information emitter. Produces debug sections plus target-neutral `.eh_frame` bytes and relocations from codegen function descriptors. |
-| `codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
-| `pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages CodeView modules and remaps checksum entries onto the PDB string table. |
-| `object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers/readers; assembly printing; in-memory object linking. |
-| `jit/jit.{c,h}` | Host-native in-process object loader: explicit host-function bindings, import thunks, named symbol lookup, writable data, W^X finalization, and executable-memory lifetime management. TLS and external data imports are rejected explicitly. |
-| `link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
-| `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. Tests live in `src/buster/tests/compiler/gpu/gpu_test.{c,h}`. |
-| `driver/driver.{c,h}` | End-to-end source-to-object compilation with either an in-memory JIT object result or libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported native target, multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset, direct Wasm64 emission, and dispatch into the isolated external GPU pipelines. |
-| `codegen/codegen.{c,h}`, `codegen/codegen_internal.h` | Direct typed-IR ABI translation, conservative register allocation, native x86-64/AArch64 emission, executable-memory support, and private codegen test seams. Tests live in `codegen_test.{c,h}`. |
-| `wasm/wasm.{c,h}` | Direct canonical typed-IR to core Wasm64 emitter. It uses Memory64 and i64 addresses, exports linear memory, lowers arbitrary CFGs through a dispatcher, and diagnoses unsupported ABI and instruction shapes instead of falling back to native code. |
+| `frontend/c/c.h` | Public C frontend API. |
+| `frontend/c/c_source.c` | Source loading, lexing, preprocessing, includes, macros, and source metrics. |
+| `frontend/c/c_parse.c` | Parsing, declarations, scopes, types, semantic analysis, and diagnostics. |
+| `frontend/c/c_gen.c` | Target-aware lowering from analyzed C into canonical IR. |
+| `frontend/c/c.c` | Unity-build aggregator for the three C frontend implementation files. |
+| `ir/model.h`, `ir/ir.{c,h}` | Canonical typed IR model, construction, validation, and printing. |
+| `assembly/` | Standalone x86-64/AArch64 assembly parsing, metadata, semantics, and encoders. Generated metadata stays under `assembly/generated/`. |
+| `codegen/machine*.{c,h}` | Machine IR, instruction selection, scheduling, ABI lowering, and target-specific emission. |
+| `codegen/register_allocator_*.c` | Fast and quality register allocators. |
+| `codegen/codegen.{c,h}` | Canonical-IR-to-native-code orchestration and codegen statistics. |
+| `debug/`, `dwarf/`, `codeview/`, `pdb/` | Canonical debug model and platform debug-format emitters. |
+| `object/object.{c,h}` | Format-neutral object model plus ELF64, COFF, and Mach-O readers/writers. |
+| `link/link.{c,h}` | Section merging, symbol resolution, and native executable linking. |
+| `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization. |
+| `wasm/wasm.{c,h}` | Direct canonical-IR-to-core-Wasm64 emitter using Memory64. |
+| `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |
+| `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, plus isolated external GPU-pipeline orchestration. |
 
-Applications and standalone tools:
+Applications:
 
 | Path | Contents |
 |---|---|
-| `apps/ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). Its headless compiler commands include `ide compile`, `ide cc`, and host-native `ide jit`. |
-| `apps/disk_builder.c` | Standalone MBR/GPT disk-image builder. Not wired into CMake. |
-| `lib/sanitizer_coe_win.c` | Windows continue-on-error sanitizer shim (raw `WriteFile` to stderr, no CRT). |
+| `src/buster/apps/ide/ide.c` | Headless `ide` executable: `cc`, `test`, `bench`, fuzzing, and x86-64 completion census. The name is retained for build compatibility. |
+| `src/buster/apps/disk_builder.c` | Standalone disk-image builder; not part of the default CMake target. |

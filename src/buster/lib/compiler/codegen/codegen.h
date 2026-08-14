@@ -48,7 +48,7 @@ struct CodegenAbiPart
 
 enum
 {
-    CODEGEN_ABI_MAX_PARTS = ANALYSIS_ABI_MAX_PARTS,
+    CODEGEN_ABI_MAX_PARTS = IR_ABI_MAX_PARTS,
 };
 
 struct CodegenAbiLocation
@@ -112,7 +112,6 @@ struct CodegenFunctionDescriptor
     u32 epilog_count;
 };
 
-typedef struct CodegenCallRelocation CodegenCallRelocation;
 typedef enum CodegenDataRelocationKind
 {
     CODEGEN_DATA_RELOCATION_X86_64_PC32,
@@ -129,17 +128,6 @@ struct CodegenDataRelocation
     CodegenDataRelocationKind kind;
 };
 
-struct CodegenCallRelocation
-{
-    CodegenCallRelocation* next;
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
-    u32 displacement_offset;
-    bool aarch64;
-    bool absolute;
-    u8 reserved[2];
-};
-
 typedef struct CodegenLineEntry CodegenLineEntry;
 struct CodegenLineEntry
 {
@@ -154,7 +142,6 @@ struct CodegenFunction
     ByteSlice code;
     ByteSlice read_only_data;
     CodegenFunctionDescriptor descriptor;
-    CodegenCallRelocation* first_call_relocation;
     CodegenDataRelocation* first_data_relocation;
     CodegenLineEntry* line_entries;
     DebugLocationSeed* debug_locations;
@@ -176,8 +163,6 @@ struct CodegenFunction
 typedef struct CodegenModuleEntry CodegenModuleEntry;
 struct CodegenModuleEntry
 {
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
     IrSymbolId symbol;
     u32 offset;
 };
@@ -225,8 +210,6 @@ typedef enum CodegenModuleRelocationKind
 
 struct CodegenModuleRelocation
 {
-    AnalysisEntityId entity;
-    AnalysisInstantiationId instantiation;
     IrSymbolId symbol;
     s64 addend;
     u32 offset;
@@ -248,21 +231,19 @@ struct CodegenModuleRelocation
 
 BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 48);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, entity) == 0);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, instantiation) == 8);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 12);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 16);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 24);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 28);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 32);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 36);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 37);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 38);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 39);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 40);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 41);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 42);
+BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 40);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 8);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 16);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 20);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 24);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 28);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 29);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 30);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 31);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 33);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 34);
 
 typedef struct CodegenModuleDataRelocation CodegenModuleDataRelocation;
 struct CodegenModuleDataRelocation
@@ -417,19 +398,17 @@ struct CodegenModuleOptions
     u8 assembly_syntax;
 };
 
-// Fills the per-abi target cache and x86 metadata tables on the calling
-// thread. Call before lane_run; these caches are read without synchronization,
-// so a gang that reaches them unwarmed reports through
-// BUSTER_CHECK_SERIAL_INITIALIZATION instead of racing. compiler_prewarm()
-// covers this along with the rest of the compiler.
+// Fills the per-abi target cache on the calling thread. Call before lane_run;
+// the cache is read without synchronization, so a gang that reaches it
+// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
+// racing. Target-specific x86 metadata and exact machine plans are filled by
+// codegen_prewarm_for_target() immediately before x86 worker execution.
 BUSTER_F_DECL void codegen_prewarm(void);
+BUSTER_F_DECL void codegen_prewarm_for_target(Target target);
 BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
-BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);
-BUSTER_F_DECL CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target);
-BUSTER_F_DECL CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target, CodegenModuleOptions options);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);
 BUSTER_F_DECL void codegen_release_executable(CodegenExecutable executable);

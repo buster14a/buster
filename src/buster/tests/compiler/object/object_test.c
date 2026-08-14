@@ -317,9 +317,9 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 48);
+    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 40);
     BUSTER_TEST(arguments, BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 42);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 34);
     BUSTER_TEST(arguments, CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
     typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
     struct CodegenRelocationKindExpectation
@@ -373,19 +373,6 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(UINT8_MAX));
 
-    AnalysisResult missing_entities = {0};
-    missing_entities.module.id.value = 7;
-    missing_entities.module.entity_count = 1;
-    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 7}));
-    missing_entities.module.import_count = 1;
-    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 8}));
-    AnalysisImport missing_import_entities[1] = {0};
-    AnalysisResult imported_missing_entities = {0};
-    imported_missing_entities.module.id.value = 8;
-    imported_missing_entities.module.entity_count = 1;
-    missing_import_entities[0].target = &imported_missing_entities;
-    missing_entities.module.imports = missing_import_entities;
-    BUSTER_TEST(arguments, !object_entity_find(&missing_entities, (AnalysisEntityId){.module.value = 8}));
     u8 x86_text[] = {
         0xe8, 0, 0, 0, 0, 0xc3, 0xb8, 42, 0, 0, 0, 0xc3,
     };
@@ -1562,44 +1549,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 #else
     BUSTER_UNUSED(aarch64_text);
 #endif
-    AstCode defined_code = {
+    IrProgram separate_program = ir_program_initialize(arguments->arena, 0, 0, 256, 0);
+    IrSymbolId defined_symbol = ir_program_add_symbol(&separate_program, (IrSymbol){
         .name = S8("defined_function"),
-        .has_body = true,
-    };
-    AnalysisEntity defined_entity = {
-        .name = defined_code.name,
-        .id =
-            {
-                .module = {.value = 11},
-                .index = {.value = 0},
-            },
-        .kind = ANALYSIS_ENTITY_CODE,
-        .ast.code = &defined_code,
-    };
-    AnalysisResult separate_analysis = {
-        .module =
-            {
-                .entities = &defined_entity,
-                .id = {.value = 11},
-                .entity_count = 1,
-            },
-    };
+        .kind = IR_SYMBOL_FUNCTION,
+        .linkage = IR_LINKAGE_EXTERNAL,
+        .is_definition = true,
+    });
+    IrSymbolId undefined_symbol = ir_program_add_symbol(&separate_program, (IrSymbol){
+        .name = S8("external_function"),
+        .kind = IR_SYMBOL_FUNCTION,
+        .linkage = IR_LINKAGE_EXTERNAL,
+    });
     u8 separate_code[] = {
         0xe8, 0, 0, 0, 0, 0xc3,
     };
     CodegenModuleEntry separate_entry = {
-        .entity = defined_entity.id,
+        .symbol = defined_symbol,
     };
     CodegenFunctionDescriptor separate_function = {
+        .symbol = defined_symbol,
         .code_size = (u32)sizeof(separate_code),
     };
     CodegenModuleRelocation separate_relocation = {
-        .entity =
-            {
-                .module = {.value = 12},
-                .index = {.value = 3},
-            },
-        .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+        .symbol = undefined_symbol,
         .offset = 1,
     };
     CodegenModule separate_module = {
@@ -1612,7 +1585,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .function_count = 1,
         .relocation_count = 1,
     };
-    ObjectFile separate_object = object_from_codegen_module(arguments->arena, &separate_analysis, &separate_module,
+    ObjectFile separate_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &separate_module,
                                                             (Target){
                                                                 .cpu_arch = CPU_ARCH_X86_64,
                                                                 .os = OPERATING_SYSTEM_LINUX,
@@ -1652,43 +1625,39 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     memset(lookup_stress_relocations, 0, sizeof(*lookup_stress_relocations) * OBJECT_LOOKUP_STRESS_RELOCATION_COUNT);
     for (u32 index = 0; index < OBJECT_LOOKUP_STRESS_ENTRY_COUNT; index += 1)
     {
+        IrSymbolId symbol = ir_program_add_symbol(&separate_program, (IrSymbol){
+            .name = string_format(arguments->arena, S8("lookup_{u32}"), index),
+            .kind = IR_SYMBOL_FUNCTION,
+            .linkage = IR_LINKAGE_EXTERNAL,
+            .is_definition = true,
+        });
         lookup_stress_entries[index] = (CodegenModuleEntry){
-            .entity =
-                {
-                    .module = {.value = 1000 + index},
-                    .index = {.value = index * 3 + 1},
-                },
-            .instantiation = {.value = index * 5 + 2},
-            .symbol = {.value = index},
+            .symbol = symbol,
             .offset = index * 4,
         };
         lookup_stress_functions[index] = (CodegenFunctionDescriptor){
-            .symbol = lookup_stress_entries[index].symbol,
-            .code_offset = lookup_stress_entries[index].offset,
+            .symbol = symbol,
+            .code_offset = index * 4,
             .code_size = 4,
         };
     }
-    // Duplicate tuple lookup is deliberately first-entry-wins.
-    lookup_stress_entries[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].entity = lookup_stress_entries[0].entity;
-    lookup_stress_entries[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].instantiation = lookup_stress_entries[0].instantiation;
-    AnalysisEntityId missing_lookup_entity = {
-        .module = {.value = 9000},
-        .index = {.value = 77},
-    };
-    AnalysisInstantiationId missing_lookup_instantiation = {.value = 19};
+    // Duplicate canonical symbol lookup is deliberately first-entry-wins.
+    lookup_stress_entries[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].symbol = lookup_stress_entries[0].symbol;
+    lookup_stress_functions[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].symbol = lookup_stress_entries[0].symbol;
+    IrSymbolId missing_lookup_symbol = ir_program_add_symbol(&separate_program, (IrSymbol){
+        .name = S8("lookup_missing"),
+        .kind = IR_SYMBOL_FUNCTION,
+        .linkage = IR_LINKAGE_EXTERNAL,
+    });
     for (u32 index = 0; index < OBJECT_LOOKUP_STRESS_RELOCATION_COUNT; index += 1)
     {
         u32 target_index = (index * 37) % OBJECT_LOOKUP_STRESS_ENTRY_COUNT;
         bool missing = index % 29 == 0;
         lookup_stress_relocations[index] = (CodegenModuleRelocation){
-            .entity = missing ? missing_lookup_entity : lookup_stress_entries[target_index].entity,
-            .instantiation = missing ? missing_lookup_instantiation : lookup_stress_entries[target_index].instantiation,
+            .symbol = missing ? missing_lookup_symbol : lookup_stress_entries[target_index].symbol,
             .offset = index * 4,
         };
     }
-    AnalysisResult lookup_stress_analysis = {
-        .module.id = {.value = 1},
-    };
     CodegenModule lookup_stress_module = {
         .code = {.pointer = lookup_stress_code, .length = OBJECT_LOOKUP_STRESS_RELOCATION_COUNT * 4},
         .entries = lookup_stress_entries,
@@ -1699,7 +1668,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .function_count = OBJECT_LOOKUP_STRESS_ENTRY_COUNT,
         .relocation_count = OBJECT_LOOKUP_STRESS_RELOCATION_COUNT,
     };
-    ObjectFile lookup_stress_object = object_from_codegen_module(arguments->arena, &lookup_stress_analysis, &lookup_stress_module,
+    ObjectFile lookup_stress_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &lookup_stress_module,
                                                                   (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
     BUSTER_TEST(arguments, lookup_stress_object.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, lookup_stress_object.symbol_count == OBJECT_LOOKUP_STRESS_ENTRY_COUNT + 1);
@@ -1771,7 +1740,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .os = OPERATING_SYSTEM_WINDOWS,
     };
     ObjectFile windows_unwind_object =
-        object_from_codegen_module(arguments->arena, &separate_analysis, &windows_unwind_module, windows_unwind_target);
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_unwind_module, windows_unwind_target);
     BUSTER_TEST(arguments, windows_unwind_object.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_UNWIND].data.length == 0);
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
@@ -1820,7 +1789,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenModule windows_save_module = windows_unwind_module;
     windows_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_save_code);
     windows_save_module.functions = &windows_save_function;
-    ObjectFile windows_save_object = object_from_codegen_module(arguments->arena, &separate_analysis, &windows_save_module, windows_unwind_target);
+    ObjectFile windows_save_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_save_module, windows_unwind_target);
     BUSTER_TEST(arguments, windows_save_object.error == OBJECT_ERROR_NONE);
     u8 expected_windows_save_xdata[] = {
         1, 8, 2, 0, 8, 0x34, 64, 0,
@@ -1832,7 +1801,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     windows_save_actions[0].value = 524288;
     CodegenModule windows_far_save_module = windows_save_module;
     windows_far_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_far_save_code);
-    ObjectFile windows_far_save_object = object_from_codegen_module(arguments->arena, &separate_analysis, &windows_far_save_module, windows_unwind_target);
+    ObjectFile windows_far_save_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_far_save_module, windows_unwind_target);
     BUSTER_TEST(arguments, windows_far_save_object.error == OBJECT_ERROR_NONE);
     u8 expected_windows_far_save_xdata[] = {
         1, 8, 3, 0, 8, 0x35, 0, 0, 8, 0, 0, 0,
@@ -1892,7 +1861,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .os = OPERATING_SYSTEM_WINDOWS,
     };
     ObjectFile windows_arm64_object =
-        object_from_codegen_module(arguments->arena, &separate_analysis, &windows_arm64_module, windows_arm64_target);
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_module, windows_arm64_target);
     BUSTER_TEST(arguments, windows_arm64_object.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
     u8 expected_windows_arm64_xdata[] = {
@@ -1919,7 +1888,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenModule mach_cfi_module = separate_module;
     mach_cfi_module.relocations = 0;
     mach_cfi_module.relocation_count = 0;
-    ObjectFile mach_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &mach_cfi_module,
+    ObjectFile mach_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &mach_cfi_module,
                                                             (Target){
                                                                 .cpu_arch = CPU_ARCH_X86_64,
                                                                 .os = OPERATING_SYSTEM_MACOS,
@@ -1944,7 +1913,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     a64_cfi_module.relocations = 0;
     a64_cfi_module.relocation_count = 0;
     a64_cfi_module.abi = CODEGEN_ABI_AARCH64_AAPCS64;
-    ObjectFile a64_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &a64_cfi_module,
+    ObjectFile a64_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &a64_cfi_module,
                                                            (Target){
                                                                .cpu_arch = CPU_ARCH_AARCH64,
                                                                .os = OPERATING_SYSTEM_LINUX,
@@ -1960,7 +1929,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
         BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
     }
-    ObjectFile a64_mach_cfi_object = object_from_codegen_module(arguments->arena, &separate_analysis, &a64_cfi_module,
+    ObjectFile a64_mach_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &a64_cfi_module,
                                                                 (Target){
                                                                     .cpu_arch = CPU_ARCH_AARCH64,
                                                                     .os = OPERATING_SYSTEM_MACOS,
@@ -2404,7 +2373,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     invalid_function.prolog_size = invalid_function.code_size + 1;
     CodegenModule invalid_module = separate_module;
     invalid_module.functions = &invalid_function;
-    ObjectFile invalid_object = object_from_codegen_module(arguments->arena, &separate_analysis, &invalid_module,
+    ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module,
                                                            (Target){
                                                                .cpu_arch = CPU_ARCH_X86_64,
                                                                .os = OPERATING_SYSTEM_LINUX,

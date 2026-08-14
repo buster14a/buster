@@ -4641,6 +4641,16 @@ enum
     MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID = 10574u,
     MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID = 10575u,
     MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID = 9845u,
+    MACHINE_X64_MOV_RI_B8_EXACT_FORM_ID = 10018u,
+    MACHINE_X64_MOV_RI_C7_EXACT_FORM_ID = 9533u,
+    MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID = 9849u,
+    MACHINE_X64_ADD_IMM8_EXACT_FORM_ID = 9316u,
+    MACHINE_X64_IMUL_IMM8_EXACT_FORM_ID = 9748u,
+    MACHINE_X64_IMUL_IMM32_EXACT_FORM_ID = 9745u,
+    MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID = 9840u,
+    MACHINE_X64_MOV_MEM_EXACT_FORM_ID = 9841u,
+    MACHINE_X64_MOVZX8_MEM_EXACT_FORM_ID = 10289u,
+    MACHINE_X64_MOVZX16_MEM_EXACT_FORM_ID = 10291u,
     MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID = 9722u,
     MACHINE_X64_ADD_RSP_EXACT_FORM_ID = 9270u,
 };
@@ -4670,8 +4680,20 @@ typedef enum MachineX64ExactOperandProjection
     MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO,
     MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO,
     MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO,
+    MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME,
+    MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED,
     MACHINE_X64_EXACT_OPERAND_PROJECTION_COUNT,
 } MachineX64ExactOperandProjection;
+
+typedef enum MachineX64ExactVariantPolicy
+{
+    MACHINE_X64_EXACT_VARIANT_NONE,
+    MACHINE_X64_EXACT_VARIANT_MOV_RI,
+    MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
+    MACHINE_X64_EXACT_VARIANT_POLICY_COUNT,
+} MachineX64ExactVariantPolicy;
 
 // The metadata plan cache is keyed by unique durable form keys rather than
 // by DIRECT recipe rows: width variants and other projections share one
@@ -4710,6 +4732,15 @@ typedef enum MachineX64ExactPlanId
     MACHINE_X64_EXACT_PLAN_MFENCE,
     MACHINE_X64_EXACT_PLAN_INT3,
     MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
+    MACHINE_X64_EXACT_PLAN_MOV_RI_B8,
+    MACHINE_X64_EXACT_PLAN_MOV_RI_C7,
+    MACHINE_X64_EXACT_PLAN_ADD_IMM8,
+    MACHINE_X64_EXACT_PLAN_IMUL_IMM8,
+    MACHINE_X64_EXACT_PLAN_IMUL_IMM32,
+    MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
+    MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    MACHINE_X64_EXACT_PLAN_MOVZX8_MEM,
+    MACHINE_X64_EXACT_PLAN_MOVZX16_MEM,
     MACHINE_X64_EXACT_PLAN_COUNT,
     MACHINE_X64_EXACT_PLAN_INVALID = UINT8_MAX,
 } MachineX64ExactPlanId;
@@ -4723,9 +4754,13 @@ struct MachineX64ExactRecipe
     u32 feature_count;
     u8 operand_count;
     u8 flags;
-    u8 operand_slots[2];
-    u8 operand_kinds[2];
-    u16 operand_widths[2];
+    u8 variant_count;
+    u8 variant_policy;
+    X64ExactFormKey alternate_keys[2];
+    u8 alternate_plan_ids[2];
+    u8 operand_slots[3];
+    u8 operand_kinds[3];
+    u16 operand_widths[3];
 };
 
 // Flat DIRECT recipe projections.  Each descriptor is keyed by the stable
@@ -4984,6 +5019,156 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
     },
 };
 
+// FAMILY recipe projections for the safe scalar x86 cohort.  The producer
+// status remains attached to the source registry row; these descriptors only
+// carry the immutable metadata form identity and the post-placement operand
+// projection.  Immediate families retain both architectural spellings so
+// the legacy producer's size policy stays byte-for-byte observable.
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_family_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
+    [0] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 0),
+        .key = {MACHINE_X64_MOV_RI_B8_EXACT_FORM_ID, UINT64_C(0x2a2535c90ada7adc)},
+        .alternate_keys = {{MACHINE_X64_MOV_RI_C7_EXACT_FORM_ID, UINT64_C(0x2f91860fef63a638)}},
+        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_MOV_RI_C7},
+        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_MOV_RI,
+        .operand_count = 2, .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED},
+        .operand_widths = {64, 64},
+    },
+    [1] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 1),
+        .key = {MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD},
+        .operand_widths = {64, 64},
+    },
+    [2] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 2),
+        .key = {MACHINE_X64_ADD_IMM8_EXACT_FORM_ID, UINT64_C(0xc4d75f09ceeb4f69)},
+        .alternate_keys = {{MACHINE_X64_ADD_RSP_EXACT_FORM_ID, UINT64_C(0xcebed63a599832c0)}},
+        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_ADD_RSP},
+        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
+        .operand_count = 2, .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 8},
+    },
+    [3] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 3),
+        .key = {MACHINE_X64_IMUL_IMM8_EXACT_FORM_ID, UINT64_C(0xcc57ef111fd55ec5)},
+        .alternate_keys = {{MACHINE_X64_IMUL_IMM32_EXACT_FORM_ID, UINT64_C(0x0c283301d404723a)}},
+        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_IMUL_IMM32},
+        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
+        .operand_count = 3, .operand_slots = {0, 1, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_GPR,
+                          MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 64, 8},
+    },
+    [4] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 4),
+        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME},
+        .operand_widths = {64, 64},
+    },
+    [5] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 5),
+        .key = {MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {8, 8},
+    },
+    [6] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 6),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {16, 16},
+    },
+    [7] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 7),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {32, 32},
+    },
+    [8] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 8),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {64, 64},
+    },
+    [9] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 9),
+        .key = {MACHINE_X64_MOVZX8_MEM_EXACT_FORM_ID, UINT64_C(0x6d04093431c32330)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
+        .operand_widths = {64, 8},
+    },
+    [10] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 10),
+        .key = {MACHINE_X64_MOVZX16_MEM_EXACT_FORM_ID, UINT64_C(0xa910655fd16f6729)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
+        .operand_widths = {64, 16},
+    },
+    [11] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 11),
+        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
+        .operand_widths = {32, 32},
+    },
+    [12] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 12),
+        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
+        .operand_widths = {64, 64},
+    },
+    [13] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 13),
+        .key = {MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {8, 8},
+    },
+    [14] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 14),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {16, 16},
+    },
+    [15] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 15),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {32, 32},
+    },
+    [16] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 16),
+        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {64, 64},
+    },
+    [17] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 17),
+        .key = {MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME},
+        .operand_widths = {64, 64},
+    },
+};
+
 // DIRECT recipe index -> compact unique exact-plan identity.  Width variants
 // and projection variants share a plan; LOAD_INCOMING has its own plan because
 // its memory operand is a distinct metadata form.  The table is immutable;
@@ -5039,6 +5224,27 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_
     [46] = MACHINE_X64_EXACT_PLAN_INT3,
 };
 
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_family_recipe[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
+    [0] = MACHINE_X64_EXACT_PLAN_MOV_RI_B8,
+    [1] = MACHINE_X64_EXACT_PLAN_LEA_SYMBOL,
+    [2] = MACHINE_X64_EXACT_PLAN_ADD_IMM8,
+    [3] = MACHINE_X64_EXACT_PLAN_IMUL_IMM8,
+    [4] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
+    [5] = MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
+    [6] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [7] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [8] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [9] = MACHINE_X64_EXACT_PLAN_MOVZX8_MEM,
+    [10] = MACHINE_X64_EXACT_PLAN_MOVZX16_MEM,
+    [11] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
+    [12] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
+    [13] = MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
+    [14] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [15] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [16] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [17] = MACHINE_X64_EXACT_PLAN_LEA_SYMBOL,
+};
+
 // The encoder's hot row loop sees x86 opcodes as one contiguous ordinal span
 // (MACHINE_X64_MOV_RI .. MACHINE_X64_VBINARY).  Keep the exact projection in
 // that same dense namespace so workers do not re-enter the registry, decode a
@@ -5049,24 +5255,29 @@ typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
 struct MachineX64PreparedExactOpcode
 {
     MachineX64ExactRecipe const* descriptor;
-    // The token is resolved beside the descriptor's feature policy during
-    // serial prewarm and remains opaque to the machine layer.
-    BusterX86MetadataMachineExactToken metadata_token;
+    // Tokens are resolved beside the descriptor's feature policy during
+    // serial prewarm and remain opaque to the machine layer. A family row may
+    // have an alternate architectural spelling (imm8 vs imm32), so publish
+    // all variants together with the descriptor.
+    BusterX86MetadataMachineExactToken metadata_tokens[3];
     u8 exact_required;
     u8 plan_valid;
-    u8 reserved[2];
+    u8 variant_count;
+    u8 reserved;
 };
-BUSTER_CT_CHECK(sizeof(MachineX64PreparedExactOpcode) == 16);
+BUSTER_CT_CHECK(sizeof(MachineX64PreparedExactOpcode) == 24);
 
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(index) (&machine_x64_exact_recipe_table[(index)])
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW(index) 0
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY(index) 0
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_DIRECT(index) (&machine_x64_exact_recipe_table[(index)])
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_FAMILY(index) (&machine_x64_exact_family_recipe_table[(index)])
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(category, index) MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##category(index)
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW(category, index) 0
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY(category, index) 0
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM 1u
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW 0u
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY 0u
 #define MACHINE_X64_EXACT_OPCODE_MAP_ROW(opcode_value, category_value, index_value, status_value) \
     [opcode_value - MACHINE_X64_MOV_RI] = { \
-        .descriptor = MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##status_value(index_value), \
+        .descriptor = MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##status_value(category_value, index_value), \
         .exact_required = MACHINE_X64_EXACT_OPCODE_REQUIRED_##status_value, \
     },
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
@@ -5078,6 +5289,8 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[M
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_FAMILY
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_DIRECT
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
@@ -5104,6 +5317,26 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
         keys[plan_id] = machine_x64_exact_recipe_table[recipe_index].key;
         key_found[plan_id] = true;
     }
+    for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_family_recipe_table); recipe_index += 1)
+    {
+        MachineX64ExactRecipe const* descriptor = machine_x64_exact_family_recipe_table + recipe_index;
+        u8 plan_id = machine_x64_exact_plan_id_by_family_recipe[recipe_index];
+        if (plan_id < MACHINE_X64_EXACT_PLAN_COUNT && !key_found[plan_id])
+        {
+            keys[plan_id] = descriptor->key;
+            key_found[plan_id] = true;
+        }
+        u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
+        for (u32 variant = 1; variant < variant_count && variant <= BUSTER_ARRAY_LENGTH(descriptor->alternate_keys); variant += 1)
+        {
+            plan_id = descriptor->alternate_plan_ids[variant - 1];
+            if (plan_id < MACHINE_X64_EXACT_PLAN_COUNT && !key_found[plan_id])
+            {
+                keys[plan_id] = descriptor->alternate_keys[variant - 1];
+                key_found[plan_id] = true;
+            }
+        }
+    }
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
     {
@@ -5122,35 +5355,52 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
             MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
             MachineX64ExactRecipe const* descriptor = entry.descriptor;
             bool descriptor_valid = registry_entry && registry_entry->producer_status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM &&
-                                    descriptor && descriptor->key.stable_hash != 0 && descriptor->recipe == registry_entry->recipe &&
-                                    machine_emit_recipe_category(descriptor->recipe) == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
+                                    descriptor && descriptor->key.stable_hash != 0 && descriptor->recipe == registry_entry->recipe;
+            MachineEmitRecipeCategory category = descriptor_valid ? machine_emit_recipe_category(descriptor->recipe)
+                                                                    : MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
+            descriptor_valid &= category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT || category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY;
             u16 recipe_index = descriptor_valid ? machine_emit_recipe_index(descriptor->recipe) : 0;
-            u8 plan_id = descriptor_valid && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_recipe)
-                             ? machine_x64_exact_plan_id_by_recipe[recipe_index]
-                             : MACHINE_X64_EXACT_PLAN_INVALID;
-            descriptor_valid &= plan_id < MACHINE_X64_EXACT_PLAN_COUNT;
-            descriptor_valid &= descriptor_valid && plan_valid[plan_id];
-            descriptor_valid &= descriptor_valid && prepared[plan_id].form_id == descriptor->key.form_id &&
-                                prepared[plan_id].stable_hash == descriptor->key.stable_hash;
+            u8 primary_plan_id = MACHINE_X64_EXACT_PLAN_INVALID;
             if (descriptor_valid)
             {
-                BusterX86MetadataMachineExactToken metadata_token = {0};
-                descriptor_valid = buster_x86_metadata_machine_exact_token_for_plan(
-                    prepared[plan_id],
-                    (BusterX86MetadataFeatureInput){
-                        .names = descriptor->features,
-                        .count = descriptor->feature_count,
-                    },
-                    &metadata_token);
-                if (descriptor_valid)
+                if (category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_recipe))
                 {
-                    entry.metadata_token = metadata_token;
+                    primary_plan_id = machine_x64_exact_plan_id_by_recipe[recipe_index];
                 }
+                else if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_family_recipe))
+                {
+                    primary_plan_id = machine_x64_exact_plan_id_by_family_recipe[recipe_index];
+                }
+                else
+                {
+                    descriptor_valid = false;
+                }
+            }
+            u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
+            descriptor_valid &= variant_count <= BUSTER_ARRAY_LENGTH(entry.metadata_tokens);
+            for (u32 variant = 0; variant < variant_count; variant += 1)
+            {
+                u8 plan_id = variant == 0 ? primary_plan_id : descriptor->alternate_plan_ids[variant - 1];
+                X64ExactFormKey key = variant == 0 ? descriptor->key : descriptor->alternate_keys[variant - 1];
+                bool variant_valid = descriptor_valid && plan_id < MACHINE_X64_EXACT_PLAN_COUNT && plan_valid[plan_id] &&
+                                     prepared[plan_id].form_id == key.form_id && prepared[plan_id].stable_hash == key.stable_hash;
+                if (variant_valid)
+                {
+                    variant_valid = buster_x86_metadata_machine_exact_token_for_plan(
+                        prepared[plan_id],
+                        (BusterX86MetadataFeatureInput){
+                            .names = descriptor->features,
+                            .count = descriptor->feature_count,
+                        },
+                        entry.metadata_tokens + variant);
+                }
+                descriptor_valid &= variant_valid;
             }
             if (descriptor_valid)
             {
                 entry.descriptor = descriptor;
                 entry.plan_valid = true;
+                entry.variant_count = (u8)variant_count;
             }
             else
             {
@@ -5158,8 +5408,9 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
                 // and rejected by the worker lane instead of using the old
                 // switch as an accidental fallback.
                 entry.descriptor = 0;
-                entry.metadata_token = (BusterX86MetadataMachineExactToken){0};
+                entry.metadata_tokens[0] = (BusterX86MetadataMachineExactToken){0};
                 entry.plan_valid = false;
+                entry.variant_count = 0;
             }
         }
         prepared_opcode_map[ordinal] = entry;
@@ -5228,6 +5479,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_immediate
     };
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_immediate_unsigned_operand(u64 value, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+        .width = width,
+        .unsigned_value = value,
+        .has_unsigned_value = true,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_relative_operand(s64 value, u16 width)
 {
     return (BusterX86MetadataPhysicalOperand){
@@ -5253,14 +5514,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rip_memor
     };
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memory_operand(u32 displacement)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_memory_operand(u32 base, s64 displacement, u16 width)
 {
     return (BusterX86MetadataPhysicalOperand){
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-        .width = 64,
+        .width = width,
         .memory = {
             .base = {
-                .index = MACHINE_X64_RBP,
+                .index = (u16)base,
                 .width = 64,
                 .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
             },
@@ -5268,9 +5529,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memor
             .address_size = 64,
             .scale = 1,
             .has_base = true,
-            .has_displacement = true,
+            .has_displacement = displacement != 0,
         },
     };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memory_operand(u32 displacement)
+{
+    return machine_x64_exact_memory_operand(MACHINE_X64_RBP, (s64)(s32)displacement, 64);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
@@ -5313,11 +5579,30 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcod
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
-                                                       u8 const* operand_registers, u32 payload,
+                                                       u8 const* operand_registers, u64 payload,
                                                        MachineX64ExactEmitCounters* counters)
 {
     MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
     if (!descriptor || !entry->plan_valid)
+    {
+        if (counters) counters->attempts += 1;
+        if (counters) counters->fallbacks += 1;
+        return false;
+    }
+    u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
+    u32 variant = 0;
+    if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI)
+    {
+        // The legacy mov-immediate producer uses B8 without REX.W for values
+        // that fit unsigned 32 bits, C7/0 for sign-extended 32-bit values,
+        // and B8 with REX.W/imm64 for all other values.
+        variant = payload > UINT32_MAX && payload >= UINT64_C(0xffffffff80000000) ? 1 : 0;
+    }
+    else if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE)
+    {
+        variant = payload <= INT8_MAX ? 0 : 1;
+    }
+    if (variant >= variant_count || variant >= BUSTER_ARRAY_LENGTH(entry->metadata_tokens))
     {
         if (counters) counters->attempts += 1;
         if (counters) counters->fallbacks += 1;
@@ -5330,11 +5615,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
-    BusterX86MetadataPhysicalOperand operands[2];
+    BusterX86MetadataPhysicalOperand operands[3];
     bool force_disp32 = (descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
     for (u32 operand_index = 0; operand_index < descriptor->operand_count; operand_index += 1)
     {
         u16 width = descriptor->operand_widths[operand_index];
+        if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI)
+        {
+            width = payload <= UINT32_MAX ? 32 : 64;
+            if (operand_index == 1 && variant == 1) width = 32;
+        }
+        else if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE && operand_index + 1 == descriptor->operand_count)
+        {
+            width = variant == 0 ? 8 : 32;
+        }
         switch ((MachineX64ExactOperandProjection)descriptor->operand_kinds[operand_index])
         {
             break;
@@ -5342,13 +5636,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[descriptor->operand_slots[operand_index]], width);
             break;
         case MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_xmm_operand(payload, width);
+            operands[operand_index] = machine_x64_exact_xmm_operand((u32)payload, width);
             break;
         case MACHINE_X64_EXACT_OPERAND_FIXED_RSP:
             operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RSP, width);
             break;
         case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)payload, width);
+            operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)(u32)payload, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED:
+            operands[operand_index] = descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI && variant == 1
+                                          ? machine_x64_exact_immediate_operand((s64)(s32)(u32)payload, width)
+                                          : machine_x64_exact_immediate_unsigned_operand(payload, width);
             break;
         case MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO:
             operands[operand_index] = machine_x64_exact_relative_operand(0, width);
@@ -5357,7 +5656,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             operands[operand_index] = machine_x64_exact_rip_memory_operand();
             break;
         case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + payload);
+            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + (u32)payload);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
+            operands[operand_index] = machine_x64_exact_memory_operand(
+                operand_registers[descriptor->operand_slots[operand_index]], 0, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD:
+            operands[operand_index] = machine_x64_exact_memory_operand(
+                operand_registers[descriptor->operand_slots[operand_index]], (s64)(s32)(u32)payload, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME:
+            operands[operand_index] = machine_x64_exact_memory_operand(MACHINE_X64_RBP, (s64)(s32)(u32)payload, width);
             break;
         default:
             if (counters) counters->attempts += 1;
@@ -5365,7 +5675,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             return false;
         }
     }
-    return machine_x64_emit_exact_form(encoder, entry->metadata_token, operands, descriptor->operand_count, force_disp32, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant], operands, descriptor->operand_count, force_disp32, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
@@ -5943,7 +6253,63 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             if (exact_required)
             {
                 u32 exact_start = encoder.count;
-                bool exact_emitted = machine_x64_emit_exact_recipe(&encoder, exact_entry, operand_registers, instruction->payload, &exact_counters);
+                // Family rows keep their hot MachineInstruction shape, while
+                // the cold side tables and frame placement supply the actual
+                // immediate/displacement value required by the metadata
+                // projection. Direct rows continue to use the inline payload
+                // unchanged.
+                u64 exact_payload = instruction->payload;
+                switch (instruction->opcode)
+                {
+                break;
+                case MACHINE_X64_MOV_RI:
+                case MACHINE_X64_ADD64_IMM:
+                    if (machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE &&
+                        machine_ref_payload(instruction->operands[1]) < function->immediate_count)
+                    {
+                        exact_payload = function->immediates[machine_ref_payload(instruction->operands[1])];
+                    }
+                    else
+                    {
+                        exact_payload = UINT64_MAX;
+                    }
+                    break;
+                case MACHINE_X64_IMUL64_RRI:
+                    if (machine_ref_kind(instruction->operands[2]) == MACHINE_REF_IMMEDIATE &&
+                        machine_ref_payload(instruction->operands[2]) < function->immediate_count)
+                    {
+                        exact_payload = function->immediates[machine_ref_payload(instruction->operands[2])];
+                    }
+                    else
+                    {
+                        exact_payload = UINT64_MAX;
+                    }
+                    break;
+                case MACHINE_X64_LOAD_FRAME:
+                case MACHINE_X64_STORE_FRAME8:
+                case MACHINE_X64_STORE_FRAME16:
+                case MACHINE_X64_STORE_FRAME32:
+                case MACHINE_X64_STORE_FRAME64:
+                case MACHINE_X64_LEA_FRAME:
+                {
+                    u32 slot_operand = instruction->opcode == MACHINE_X64_LOAD_FRAME || instruction->opcode == MACHINE_X64_LEA_FRAME ? 1 : 0;
+                    MachineRef slot_ref = instruction->operands[slot_operand];
+                    u32 slot = machine_ref_payload(slot_ref);
+                    if (machine_ref_kind(slot_ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count)
+                    {
+                        u32 stack_offset = placement->stack_slot_offsets[slot] - instruction->payload;
+                        exact_payload = (u32)(0u - stack_offset);
+                    }
+                    else
+                    {
+                        exact_payload = UINT64_MAX;
+                    }
+                }
+                break;
+                default:
+                    break;
+                }
+                bool exact_emitted = machine_x64_emit_exact_recipe(&encoder, exact_entry, operand_registers, exact_payload, &exact_counters);
                 if (!exact_entry)
                 {
                     // A registry row marked EXACT_FORM is itself an exact
@@ -5992,44 +6358,6 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 switch (instruction->opcode)
                 {
                 break;
-            case MACHINE_X64_MOV_RI:
-                machine_x64_emit_immediate(&encoder, operand_registers[0], function->immediates[machine_ref_payload(instruction->operands[1])]);
-                break;
-            case MACHINE_X64_ADD64_IMM:
-            {
-                u32 reg = operand_registers[0];
-                u64 value = function->immediates[machine_ref_payload(instruction->operands[1])];
-                machine_x64_emit8(&encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, value <= INT8_MAX ? 0x83 : 0x81);
-                machine_x64_emit8(&encoder, (u8)(0xc0 | (reg & 7)));
-                if (value <= INT8_MAX)
-                {
-                    machine_x64_emit8(&encoder, (u8)value);
-                }
-                else
-                {
-                    machine_x64_emit32(&encoder, (u32)value);
-                }
-            }
-            break;
-            case MACHINE_X64_IMUL64_RRI:
-            {
-                u32 destination = operand_registers[0];
-                u32 source = operand_registers[1];
-                u64 value = function->immediates[machine_ref_payload(instruction->operands[2])];
-                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0) | (source >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, value <= INT8_MAX ? 0x6b : 0x69);
-                machine_x64_emit8(&encoder, machine_x64_modrm_register(destination, source));
-                if (value <= INT8_MAX)
-                {
-                    machine_x64_emit8(&encoder, (u8)value);
-                }
-                else
-                {
-                    machine_x64_emit32(&encoder, (u32)value);
-                }
-            }
-            break;
             case MACHINE_X64_SDIV32:
             case MACHINE_X64_SDIV64:
             case MACHINE_X64_SREM32:
@@ -6093,86 +6421,6 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x0f);
                 machine_x64_emit8(&encoder, 0xb6);
                 machine_x64_emit8(&encoder, 0xc0);
-            }
-            break;
-            case MACHINE_X64_LOAD_FRAME:
-                machine_x64_emit_frame_load(&encoder, operand_registers[0],
-                                            placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
-                break;
-            case MACHINE_X64_STORE_FRAME8:
-            case MACHINE_X64_STORE_FRAME16:
-            case MACHINE_X64_STORE_FRAME32:
-            case MACHINE_X64_STORE_FRAME64:
-            {
-                u32 slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] - instruction->payload;
-                u32 value_register = operand_registers[1];
-                if (instruction->opcode == MACHINE_X64_STORE_FRAME16)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                u8 rex = (u8)(0x40 | (value_register >= 8 ? 0x04 : 0) | (instruction->opcode == MACHINE_X64_STORE_FRAME64 ? 0x08 : 0));
-                if (rex != 0x40 || (instruction->opcode == MACHINE_X64_STORE_FRAME8 &&
-                                    (value_register == MACHINE_X64_RSI || value_register == MACHINE_X64_RDI)))
-                {
-                    machine_x64_emit8(&encoder, rex);
-                }
-                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_STORE_FRAME8 ? 0x88 : 0x89);
-                machine_x64_emit_frame_modrm(&encoder, value_register, slot_offset);
-            }
-            break;
-            case MACHINE_X64_LOAD_PTR8:
-            case MACHINE_X64_LOAD_PTR16:
-            case MACHINE_X64_LOAD_PTR32:
-            case MACHINE_X64_LOAD_PTR64:
-            {
-                u32 destination = operand_registers[0];
-                u32 address = operand_registers[1];
-                u8 rex = (u8)(0x40 | (destination >= 8 ? 0x04 : 0) | (address >= 8 ? 0x01 : 0));
-                if (instruction->opcode == MACHINE_X64_LOAD_PTR8 || instruction->opcode == MACHINE_X64_LOAD_PTR16)
-                {
-                    machine_x64_emit8(&encoder, (u8)(rex | 0x08));
-                    machine_x64_emit8(&encoder, 0x0f);
-                    machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_LOAD_PTR8 ? 0xb6 : 0xb7);
-                }
-                else
-                {
-                    if (instruction->opcode == MACHINE_X64_LOAD_PTR64)
-                    {
-                        rex |= 0x08;
-                    }
-                    if (rex != 0x40)
-                    {
-                        machine_x64_emit8(&encoder, rex);
-                    }
-                    machine_x64_emit8(&encoder, 0x8b);
-                }
-                machine_x64_emit_memory_modrm(&encoder, destination, address, 0);
-            }
-            break;
-            case MACHINE_X64_STORE_PTR8:
-            case MACHINE_X64_STORE_PTR16:
-            case MACHINE_X64_STORE_PTR32:
-            case MACHINE_X64_STORE_PTR64:
-            {
-                u32 address = operand_registers[0];
-                u32 value_register = operand_registers[1];
-                if (instruction->opcode == MACHINE_X64_STORE_PTR16)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                u8 rex = (u8)(0x40 | (value_register >= 8 ? 0x04 : 0) | (address >= 8 ? 0x01 : 0));
-                if (instruction->opcode == MACHINE_X64_STORE_PTR64)
-                {
-                    rex |= 0x08;
-                }
-                // Byte stores to SIL/DIL and every extended register need the
-                // REX prefix even without W.
-                if (rex != 0x40 || (instruction->opcode == MACHINE_X64_STORE_PTR8 && (value_register == MACHINE_X64_RSI || value_register == MACHINE_X64_RDI)))
-                {
-                    machine_x64_emit8(&encoder, rex);
-                }
-                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_STORE_PTR8 ? 0x88 : 0x89);
-                machine_x64_emit_memory_modrm(&encoder, value_register, address, 0);
             }
             break;
             case MACHINE_X64_JCC:
@@ -6298,25 +6546,6 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
                 machine_x64_emit8(&encoder, 0xff);
                 machine_x64_emit8(&encoder, (u8)(0xd0 | (operand_registers[0] & 7)));
-            }
-            break;
-            case MACHINE_X64_LEA_FRAME:
-            {
-                // The payload is a byte offset into the slot, so a member
-                // address needs no separate add.
-                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
-                machine_x64_emit8(&encoder, 0x8d);
-                machine_x64_emit_frame_modrm(&encoder, operand_registers[0],
-                                             placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
-            }
-            break;
-            case MACHINE_X64_LEA_OFFSET:
-            {
-                u32 destination = operand_registers[0];
-                u32 base = operand_registers[1];
-                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0) | (base >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, 0x8d);
-                machine_x64_emit_memory_modrm(&encoder, destination, base, instruction->payload);
             }
             break;
             case MACHINE_X64_LEA_TLS:

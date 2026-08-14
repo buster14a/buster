@@ -4,13 +4,6 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-if [[ -f /opt/vulkan-sdk/current/setup-env.sh ]]; then
-    # Metal shaders are compiled from Slang, so slangc from the Vulkan SDK is
-    # still required even though iOS does not use the Vulkan renderer.
-    # shellcheck disable=SC1091
-    source /opt/vulkan-sdk/current/setup-env.sh
-fi
-
 if ! command -v xcrun >/dev/null 2>&1; then
     echo "error: xcrun was not found; Xcode command line tools are required" >&2
     exit 1
@@ -72,32 +65,6 @@ if [[ ${#build_configs[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# A monospace font to bundle into the .app. The in-app test always exercises the
-# GUI/rendering path (run_app), which builds a font atlas and hard-fails if no
-# font loads, so a font must be present. Prefer FiraCode (matches the desktop),
-# then fall back to a macOS system monospace font that is always installed. The
-# bundled file is renamed to FiraCode-Regular.ttf inside the .app regardless, and
-# the truetype parser handles .ttc collections, so any of these work.
-ios_font=${BUSTER_IOS_FONT:-}
-if [[ -z $ios_font ]]; then
-    for candidate in \
-        /Library/Fonts/FiraCode-Regular.ttf \
-        "$HOME/Library/Fonts/FiraCode-Regular.ttf" \
-        /System/Library/Fonts/SFNSMono.ttf \
-        /System/Library/Fonts/Menlo.ttc \
-        /System/Library/Fonts/Monaco.ttf; do
-        if [[ -f $candidate ]]; then
-            ios_font=$candidate
-            break
-        fi
-    done
-fi
-if [[ -z $ios_font || ! -f $ios_font ]]; then
-    echo "error: no font found to bundle into ide.app; set BUSTER_IOS_FONT to a .ttf/.ttc path" >&2
-    exit 1
-fi
-echo "Bundling font: $ios_font"
-
 cmake --version
 xcrun --sdk iphonesimulator --show-sdk-path
 
@@ -119,16 +86,15 @@ cmake --warn-uninitialized -Werror=dev \
     -DBUSTER_FUZZ_AVAILABLE=OFF \
     -DBUSTER_INCLUDE_TESTS=ON \
     -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
-    -DBUSTER_DEVELOPER_TARGETS=OFF \
-    -DBUSTER_IOS_FONT="$ios_font"
+    -DBUSTER_DEVELOPER_TARGETS=OFF
 echo "TIMING_IOS configure_seconds=$((SECONDS - configure_started))"
 
 app_paths=()
 for build_config in "${build_configs[@]}"; do
     echo "Building iOS ${build_config} app bundle"
     build_started=$SECONDS
-    # Build only the app bundle. Its POST_BUILD steps copy tests and the font
-    # into ide.app; simulator execution is deliberately kept outside Ninja so
+    # Build only the app bundle. Its POST_BUILD step copies tests into ide.app;
+    # simulator execution is deliberately kept outside Ninja so
     # output remains streamed and both configs can share one boot.
     cmake --build "$build_directory" --config "$build_config" --target ide --verbose
     app_bundle="$build_directory/$build_config/ide.app"

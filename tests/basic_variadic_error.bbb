@@ -1,4 +1,0 @@
-code invalid_start : fn () void
-{
-    data arguments = @va_start();
-}

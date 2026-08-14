@@ -1,5 +1,0 @@
-code main : fn () s32
-{
-    data values = [1 missing(2, 3), 4];
-    return 11;
-}

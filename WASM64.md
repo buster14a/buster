@@ -16,7 +16,6 @@ sets the Memory64 limits flag.
 
 ```sh
 build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc -O1 -o app.wasm app.c
-build/Release/ide cc -target wasm64-unknown-freestanding -O1 -o app.wasm app.bbb
 ```
 
 `-c source.c` writes `source.wasm`; a link action without `-o` writes

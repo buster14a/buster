@@ -1,7 +1,7 @@
 #include <buster/lib/window/internal.h>
 
-// UIKit owns the main thread and run loop; the buster IDE loop runs on a worker
-// thread (started in didFinishLaunching). UIWindow/UIView must be touched only
+// UIKit owns the main thread and run loop; the compiler/test runner uses a
+// worker thread (started in didFinishLaunching). UIWindow/UIView must be touched only
 // on the main thread, so the delegate builds them there and publishes them here
 // for the worker thread to wrap in wm_window_create (mirrors how Android waits
 // for android_app->window).
@@ -117,7 +117,7 @@ BUSTER_GLOBAL_LOCAL Class buster_ios_register_view_class(void)
     return view_class;
 }
 
-// pthread entry that runs the IDE loop (buster_ios_worker_entry calls exit()).
+// pthread entry for the compiler/test runner (buster_ios_worker_entry calls exit()).
 BUSTER_GLOBAL_LOCAL void* buster_ios_worker_thread(void* arg)
 {
     BUSTER_UNUSED(arg);
@@ -135,7 +135,7 @@ BUSTER_GLOBAL_LOCAL void buster_ios_worker_attributes_destroy(pthread_attr_t* at
 }
 
 // -[BusterAppDelegate application:didFinishLaunchingWithOptions:]: build the
-// window/view on the main thread, publish them, then start the IDE worker.
+// window/view on the main thread, publish them, then start the compiler worker.
 BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id application, id options)
 {
     BUSTER_UNUSED(self);
