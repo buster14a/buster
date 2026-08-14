@@ -146,6 +146,47 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fhm_boun
     {S8_INITIALIZER("FMLSL V31.4S, V30.4H, V29.4H\n"), {0xdf, 0xef, 0xbd, 0x4e}},
 };
 
+/* FRINT32X/Z and FRINT64X/Z AdvSIMD rows require LLVM's HasFRInt3264
+ * predicate, which maps to the local FPTOINT target feature.  These are the
+ * complete 2S/4S/2D selector set for each row, encoded independently with
+ * llvm-mc 22.1.8. */
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_frintts_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:FRINT32X_asimdmisc_R"), UINT64_C(0x418e0ab118cb28ba), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:FRINT32Z_asimdmisc_R"), UINT64_C(0x8dede1d564313c59), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:FRINT64X_asimdmisc_R"), UINT64_C(0x956ff9b673405173), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:FRINT64Z_asimdmisc_R"), UINT64_C(0x89795480cfdf8cbf), 2,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_frintts_cases[] = {
+    {S8_INITIALIZER("frint32x v0.2s, v1.2s\n"), {0x20, 0xe8, 0x21, 0x2e}},
+    {S8_INITIALIZER("frint32x v0.4s, v1.4s\n"), {0x20, 0xe8, 0x21, 0x6e}},
+    {S8_INITIALIZER("frint32x v0.2d, v1.2d\n"), {0x20, 0xe8, 0x61, 0x6e}},
+    {S8_INITIALIZER("frint32z v0.2s, v1.2s\n"), {0x20, 0xe8, 0x21, 0x0e}},
+    {S8_INITIALIZER("frint32z v0.4s, v1.4s\n"), {0x20, 0xe8, 0x21, 0x4e}},
+    {S8_INITIALIZER("frint32z v0.2d, v1.2d\n"), {0x20, 0xe8, 0x61, 0x4e}},
+    {S8_INITIALIZER("frint64x v0.2s, v1.2s\n"), {0x20, 0xf8, 0x21, 0x2e}},
+    {S8_INITIALIZER("frint64x v0.4s, v1.4s\n"), {0x20, 0xf8, 0x21, 0x6e}},
+    {S8_INITIALIZER("frint64x v0.2d, v1.2d\n"), {0x20, 0xf8, 0x61, 0x6e}},
+    {S8_INITIALIZER("frint64z v0.2s, v1.2s\n"), {0x20, 0xf8, 0x21, 0x0e}},
+    {S8_INITIALIZER("frint64z v0.4s, v1.4s\n"), {0x20, 0xf8, 0x21, 0x4e}},
+    {S8_INITIALIZER("frint64z v0.2d, v1.2d\n"), {0x20, 0xf8, 0x61, 0x4e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_frintts_boundary_cases[] = {
+    {S8_INITIALIZER("FRINT32X V31.2D, V30.2D\n"), {0xdf, 0xeb, 0x61, 0x6e}},
+    {S8_INITIALIZER("FRINT32Z V31.2D, V30.2D\n"), {0xdf, 0xeb, 0x61, 0x4e}},
+    {S8_INITIALIZER("FRINT64X V31.2D, V30.2D\n"), {0xdf, 0xfb, 0x61, 0x6e}},
+    {S8_INITIALIZER("FRINT64Z V31.2D, V30.2D\n"), {0xdf, 0xfb, 0x61, 0x4e}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cases[] = {
     {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
     {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
@@ -1359,9 +1400,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     u32 direct_simd_duplicate_row_count = 0;
     u32 direct_simd_compound_requirement_count = 0;
     u32 direct_simd_fhm_requirement_count = 0;
+    u32 direct_simd_frintts_requirement_count = 0;
     u32 direct_simd_fcsel_row_count = 0;
     bool direct_simd_compound_requirement_exact = true;
     bool direct_simd_fhm_requirement_exact = true;
+    bool direct_simd_frintts_requirement_exact = true;
     bool direct_simd_fcsel_rows_exact = true;
     bool direct_simd_first_fp16_row_exact = false;
     bool direct_simd_last_fp16_row_exact = false;
@@ -1414,6 +1457,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             direct_simd_fhm_requirement_exact =
                 direct_simd_fhm_requirement_exact && spelling_required_features.words[0] == (UINT64_C(1) << 10) &&
                 spelling_required_features.words[1] == (UINT64_C(1) << 55) && spelling_required_features.words[2] == 0 &&
+                spelling_required_features.words[3] == 0;
+        }
+        if (spelling_valid && spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT)
+        {
+            direct_simd_frintts_requirement_count += 1;
+            direct_simd_frintts_requirement_exact =
+                direct_simd_frintts_requirement_exact && spelling_required_features.words[0] == (UINT64_C(1) << 10) &&
+                spelling_required_features.words[1] == (UINT64_C(1) << 56) && spelling_required_features.words[2] == 0 &&
                 spelling_required_features.words[3] == 0;
         }
         if (spelling_valid && string_equal(spelling.semantic_id, S8("arm-a64@2026-06:FABD_asimdsamefp16_only")))
@@ -1570,16 +1621,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 343);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 343);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 47);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 218);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 347);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 347);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 43);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 222);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 45);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 41);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fhm_requirement_count == 4 && direct_simd_fhm_requirement_exact);
+    BUSTER_TEST(arguments, direct_simd_frintts_requirement_count == 4 && direct_simd_frintts_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
     arguments->show(arguments,
@@ -1655,6 +1707,40 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         else
         {
             BUSTER_TEST(arguments, found_index == fhm_first_spelling_index + expected_index);
+        }
+    }
+
+    /* Keep the four FRINTTS transform rows tied to their canonical IDs/digests
+     * and contiguous in the public spelling table. */
+    u32 frintts_first_spelling_index = UINT32_MAX;
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_frintts_spellings[expected_index];
+        u32 found_count = 0;
+        u32 found_index = UINT32_MAX;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                found_index = spelling_index;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+        if (expected_index == 0)
+        {
+            frintts_first_spelling_index = found_index;
+        }
+        else
+        {
+            BUSTER_TEST(arguments, found_index == frintts_first_spelling_index + expected_index);
         }
     }
 
@@ -4690,6 +4776,22 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target aarch64_invalid_fullfp16 = aarch64_fp_only;
     aarch64_invalid_fullfp16.cpu_features = target_cpu_features_from_array(
         (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FULLFP16}, 1);
+    Target aarch64_frintts_target = aarch64_fp16_both;
+    aarch64_frintts_target.cpu_model = CPU_MODEL_BASELINE;
+    aarch64_frintts_target.cpu_features_explicit = true;
+    aarch64_frintts_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_NEON,
+                                   TARGET_CPU_FEATURE_AARCH64_FPTOINT},
+        3);
+    Target aarch64_frintts_no_fptoint = aarch64_frintts_target;
+    aarch64_frintts_no_fptoint.cpu_features = target_cpu_features_remove(aarch64_frintts_no_fptoint.cpu_features,
+                                                                          TARGET_CPU_FEATURE_AARCH64_FPTOINT);
+    Target aarch64_frintts_no_neon = aarch64_frintts_target;
+    aarch64_frintts_no_neon.cpu_features = target_cpu_features_remove(aarch64_frintts_no_neon.cpu_features,
+                                                                       TARGET_CPU_FEATURE_AARCH64_NEON);
+    Target aarch64_frintts_invalid_no_fp = aarch64_frintts_target;
+    aarch64_frintts_invalid_no_fp.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_NEON, TARGET_CPU_FEATURE_AARCH64_FPTOINT}, 2);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_both));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_full));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_neon));
@@ -4702,6 +4804,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fhm_no_fp16fml));
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_fhm_invalid_no_fullfp16));
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_fhm_invalid_no_neon));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_frintts_target));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_frintts_no_fptoint));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_frintts_no_neon));
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_frintts_invalid_no_fp));
     TargetCpuFeatures invalid_requirement_features = {0};
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON, 0));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE,
@@ -4720,6 +4826,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     TargetCpuFeatures fp_requirement_features = {0};
     TargetCpuFeatures fullfp16_requirement_features = {0};
     TargetCpuFeatures fhm_requirement_features = {0};
+    TargetCpuFeatures frintts_requirement_features = {0};
     BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP,
                                                                         &fp_requirement_features) &&
                                fp_requirement_features.words[0] == 0 &&
@@ -4735,6 +4842,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                fhm_requirement_features.words[0] == (UINT64_C(1) << 10) &&
                                fhm_requirement_features.words[1] == (UINT64_C(1) << 55) &&
                                fhm_requirement_features.words[2] == 0 && fhm_requirement_features.words[3] == 0);
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT,
+                                                                        &frintts_requirement_features) &&
+                               frintts_requirement_features.words[0] == (UINT64_C(1) << 10) &&
+                               frintts_requirement_features.words[1] == (UINT64_C(1) << 56) &&
+                               frintts_requirement_features.words[2] == 0 && frintts_requirement_features.words[3] == 0);
     BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_fp_only,
                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_no_fp,
@@ -4753,6 +4865,64 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FP16FML));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_fhm_invalid_no_neon,
                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FP16FML));
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_frintts_target,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_frintts_no_fptoint,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_frintts_no_neon,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_frintts_invalid_no_fp,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_cases) == 12);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_boundary_cases) == 4);
+    for (u32 frintts_index = 0; frintts_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_cases); frintts_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase frintts_case = assembly_a64_direct_simd_frintts_cases[frintts_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, frintts_case.source, (AssemblyEncodeOptions){.target = aarch64_frintts_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, frintts_case.bytes, 4));
+    }
+    for (u32 frintts_index = 0; frintts_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_boundary_cases); frintts_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase frintts_case = assembly_a64_direct_simd_frintts_boundary_cases[frintts_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, frintts_case.source, (AssemblyEncodeOptions){.target = aarch64_frintts_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, frintts_case.bytes, 4));
+    }
+    Target const frintts_negative_targets[] = {aarch64_frintts_no_fptoint, aarch64_frintts_no_neon, aarch64_frintts_invalid_no_fp};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(frintts_negative_targets); target_index += 1)
+    {
+        for (u32 frintts_index = 0; frintts_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_cases); frintts_index += 1)
+        {
+            AssemblyEncodeResult without_feature = assembly_encode(
+                arguments->arena, assembly_a64_direct_simd_frintts_cases[frintts_index].source,
+                (AssemblyEncodeOptions){.target = frintts_negative_targets[target_index]});
+            BUSTER_TEST(arguments, without_feature.diagnostic_count == 1 && without_feature.bytes.length == 0 &&
+                                       without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        }
+    }
+    static String8 const invalid_aarch64_frintts[] = {
+        S8_INITIALIZER("frint32x v0.1d, v1.1d\n"),
+        S8_INITIALIZER("frint32x v0.2s, v1.4s\n"),
+        S8_INITIALIZER("frint32x v0.4s, v1.2s\n"),
+        S8_INITIALIZER("frint32x d0, d1\n"),
+        S8_INITIALIZER("frint32x q0, q1\n"),
+        S8_INITIALIZER("frint32x v0.2s, v1.2s, v2.2s\n"),
+        S8_INITIALIZER("frint32x v32.2s, v1.2s\n"),
+        S8_INITIALIZER("frint32x v0.2s, v32.2s\n"),
+        S8_INITIALIZER("frint32x v0.2s, v1.s\n"),
+        S8_INITIALIZER("frint32x v0.2s, v1.2s[0]\n"),
+        S8_INITIALIZER("frint32z v0.2s\n"),
+        S8_INITIALIZER("frint64x v0.2s, v1.2d\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_frintts); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_case = assembly_encode(
+            arguments->arena, invalid_aarch64_frintts[invalid_index], (AssemblyEncodeOptions){.target = aarch64_frintts_target});
+        BUSTER_TEST(arguments, invalid_case.diagnostic_count == 1 && invalid_case.bytes.length == 0 &&
+                                   invalid_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
 
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_cases) == 45);
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_boundary_cases) == 45);
