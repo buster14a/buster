@@ -4415,32 +4415,49 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                     break;
                 case IR_BINARY_VECTOR_SIGNED_DIVIDE:
                 case IR_BINARY_VECTOR_SIGNED_REMAINDER:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0x99);
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0xf7);
-                    codegen_emit_u8(&builder.buffer, 0xf9);
+                {
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("CQO"), 0, 0);
+                    BusterX86MetadataPhysicalOperand divide_operands[] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                    };
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("IDIV"), divide_operands,
+                                                               BUSTER_ARRAY_LENGTH(divide_operands));
                     if (operation == IR_BINARY_VECTOR_SIGNED_REMAINDER)
                     {
-                        codegen_emit_u8(&builder.buffer, 0x48);
-                        codegen_emit_u8(&builder.buffer, 0x89);
-                        codegen_emit_u8(&builder.buffer, 0xd0);
+                        BusterX86MetadataPhysicalOperand move_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
+                                                                   BUSTER_ARRAY_LENGTH(move_operands));
                     }
                     break;
+                }
                 case IR_BINARY_VECTOR_UNSIGNED_DIVIDE:
                 case IR_BINARY_VECTOR_UNSIGNED_REMAINDER:
-                    codegen_emit_u8(&builder.buffer, 0x31);
-                    codegen_emit_u8(&builder.buffer, 0xd2);
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0xf7);
-                    codegen_emit_u8(&builder.buffer, 0xf1);
+                {
+                    BusterX86MetadataPhysicalOperand zero_operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                    };
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), zero_operands,
+                                                               BUSTER_ARRAY_LENGTH(zero_operands));
+                    BusterX86MetadataPhysicalOperand divide_operands[] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                    };
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("DIV"), divide_operands,
+                                                               BUSTER_ARRAY_LENGTH(divide_operands));
                     if (operation == IR_BINARY_VECTOR_UNSIGNED_REMAINDER)
                     {
-                        codegen_emit_u8(&builder.buffer, 0x48);
-                        codegen_emit_u8(&builder.buffer, 0x89);
-                        codegen_emit_u8(&builder.buffer, 0xd0);
+                        BusterX86MetadataPhysicalOperand move_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                        };
+                        (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), move_operands,
+                                                                   BUSTER_ARRAY_LENGTH(move_operands));
                     }
                     break;
+                }
                 default:
                     return false;
                 }
