@@ -885,9 +885,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_features(CodegenBuffer* buffer, String8 mnemonic,
-                                                                       BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                                       BusterX86MetadataFeatureInput features)
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenBuffer* buffer, String8 mnemonic,
+                                                                         BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                                         BusterX86MetadataFeatureInput features,
+                                                                         BusterX86MetadataPhysicalAttributes attributes)
 {
     if (!buffer)
     {
@@ -907,6 +908,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_features(CodegenBuf
         .operands = operands,
         .operand_count = operand_count,
         .features = features,
+        .attributes = attributes,
         .address_size = 64,
         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
         .include_privileged = false,
@@ -932,6 +934,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_features(CodegenBuf
     }
     buffer->count += emitted.byte_count;
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_features(CodegenBuffer* buffer, String8 mnemonic,
+                                                                       BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                                       BusterX86MetadataFeatureInput features)
+{
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, operand_count, features,
+                                                           (BusterX86MetadataPhysicalAttributes){0});
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit(CodegenBuffer* buffer, String8 mnemonic,
@@ -960,6 +970,18 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_store(CodegenBuffer* buffer, 
         codegen_canonical_x64_metadata_gpr(source, memory_width),
     };
     (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_atomic_register_memory(CodegenBuffer* buffer, String8 mnemonic,
+                                                                                 X64Register base, X64Register source, u16 width)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_memory_relaxed(base, width, 0),
+        codegen_canonical_x64_metadata_gpr(source, width),
+    };
+    return codegen_canonical_x64_metadata_emit_attributes(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                          (BusterX86MetadataFeatureInput){0},
+                                                          (BusterX86MetadataPhysicalAttributes){.lock = true});
 }
 
 
@@ -7781,76 +7803,111 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                             C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
-                            codegen_emit_u8(&buffer, 0x4c);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]));
-                            codegen_emit_u8(&buffer, 0x4c);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x8d);
-                            codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]) + 8));
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xd2);
+                            s32 atomic_value_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]);
+                            codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R8, X64_REGISTER_RBP, (u32)atomic_value_displacement, 8);
+                            codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R9, X64_REGISTER_RBP, (u32)(atomic_value_displacement + 8), 8);
+                            BusterX86MetadataPhysicalOperand zero_low_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand zero_high_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_low_operands,
+                                                                      BUSTER_ARRAY_LENGTH(zero_low_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_high_operands,
+                                                                      BUSTER_ARRAY_LENGTH(zero_high_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             u32 retry = (u32)buffer.count;
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, 0xc3);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, 0xd1);
-                            u8 low_opcode = 0;
-                            u8 high_opcode = 0;
+                            BusterX86MetadataPhysicalOperand copy_low_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand copy_high_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), copy_low_operands,
+                                                                      BUSTER_ARRAY_LENGTH(copy_low_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), copy_high_operands,
+                                                                      BUSTER_ARRAY_LENGTH(copy_high_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            String8 low_mnemonic = {0};
+                            String8 high_mnemonic = {0};
                             switch (instruction->atomic_operation)
                             {
                             case IR_ATOMIC_ADD:
-                                low_opcode = 0x01;
-                                high_opcode = 0x11;
+                                low_mnemonic = S8("ADD");
+                                high_mnemonic = S8("ADC");
                                 break;
                             case IR_ATOMIC_SUBTRACT:
-                                low_opcode = 0x29;
-                                high_opcode = 0x19;
+                                low_mnemonic = S8("SUB");
+                                high_mnemonic = S8("SBB");
                                 break;
                             case IR_ATOMIC_BITWISE_AND:
-                                low_opcode = 0x21;
-                                high_opcode = 0x21;
+                                low_mnemonic = S8("AND");
+                                high_mnemonic = S8("AND");
                                 break;
                             case IR_ATOMIC_BITWISE_OR:
-                                low_opcode = 0x09;
-                                high_opcode = 0x09;
+                                low_mnemonic = S8("OR");
+                                high_mnemonic = S8("OR");
                                 break;
                             case IR_ATOMIC_BITWISE_XOR:
-                                low_opcode = 0x31;
-                                high_opcode = 0x31;
+                                low_mnemonic = S8("XOR");
+                                high_mnemonic = S8("XOR");
                                 break;
                             case IR_ATOMIC_EXCHANGE:
-                                low_opcode = 0x89;
-                                high_opcode = 0x89;
+                                low_mnemonic = S8("MOV");
+                                high_mnemonic = S8("MOV");
                                 break;
                             case IR_ATOMIC_OPERATION_COUNT:
                                 break;
                             }
-                            codegen_emit_u8(&buffer, 0x4c);
-                            codegen_emit_u8(&buffer, low_opcode);
-                            codegen_emit_u8(&buffer, 0xc3);
-                            codegen_emit_u8(&buffer, 0x4c);
-                            codegen_emit_u8(&buffer, high_opcode);
-                            codegen_emit_u8(&buffer, 0xc9);
-                            codegen_emit_u8(&buffer, 0xf0);
-                            codegen_emit_u8(&buffer, 0x49);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xc7);
-                            codegen_emit_u8(&buffer, 0x0a);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x85);
-                            s64 retry_displacement = (s64)retry - ((s64)buffer.count + 4);
-                            if (retry_displacement < INT32_MIN || retry_displacement > INT32_MAX)
+                            BusterX86MetadataPhysicalOperand low_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand high_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                            };
+                            String8 cx16_features_names[] = {S8("cx16")};
+                            BusterX86MetadataPhysicalOperand cx16_memory = codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, 128, 0);
+                            if (!low_mnemonic.length || !codegen_canonical_x64_metadata_emit(&buffer, low_mnemonic, low_operands,
+                                                                                                  BUSTER_ARRAY_LENGTH(low_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, high_mnemonic, high_operands,
+                                                                      BUSTER_ARRAY_LENGTH(high_operands)) ||
+                                !codegen_canonical_x64_metadata_emit_attributes(
+                                    &buffer, S8("CMPXCHG16B"), &cx16_memory, 1,
+                                    (BusterX86MetadataFeatureInput){.names = cx16_features_names, .count = BUSTER_ARRAY_LENGTH(cx16_features_names)},
+                                    (BusterX86MetadataPhysicalAttributes){.lock = true}))
                             {
-                                result.error = CODEGEN_ERROR_CAPACITY;
+                                result.error = buffer.error;
                                 return result;
                             }
-                            codegen_emit_u32(&buffer, (u32)(s32)retry_displacement);
+                            BusterX86MetadataPhysicalOperand retry_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            u32 retry_branch_offset = (u32)buffer.count;
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNZ"), &retry_operand, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            s64 retry_displacement = (s64)retry - (s64)buffer.count;
+                            if (retry_displacement < INT32_MIN || retry_displacement > INT32_MAX || !buffer.bytes)
+                            {
+                                result.error = retry_displacement < INT32_MIN || retry_displacement > INT32_MAX ? CODEGEN_ERROR_CAPACITY
+                                                                                                                 : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            s32 retry_delta = (s32)retry_displacement;
+                            memcpy(buffer.bytes + retry_branch_offset + 2, &retry_delta, sizeof(retry_delta));
                             C_X64_STORE_RESULT();
                             C_X64_STORE_HIGH_RDX();
                             instruction_id = instruction->next;
@@ -7873,89 +7930,96 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8d);
-                            codegen_emit_u8(&buffer, 0x95);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
+                            BusterX86MetadataPhysicalOperand address_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory(
+                                    X64_REGISTER_RBP, 64, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), address_operands,
+                                                                       BUSTER_ARRAY_LENGTH(address_operands));
                         }
                         C_X64_LOAD(0x8d, instruction->operands[1]);
-                        if (value_type->layout.size == 1 || value_type->layout.size == 2)
+                        if (buffer.error)
                         {
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0xb6 : 0xb7);
+                            result.error = buffer.error;
+                            return result;
                         }
-                        else
+                        codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_RAX, X64_REGISTER_RDX, 0, (u32)value_type->layout.size);
+                        if (buffer.error)
                         {
-                            if (value_type->layout.size == 8)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0x8b);
+                            result.error = buffer.error;
+                            return result;
                         }
-                        codegen_emit_u8(&buffer, 0x02);
+                        u16 atomic_width = (u16)(value_type->layout.size * 8);
                         u32 retry_offset = (u32)buffer.count;
-                        if (value_type->layout.size == 2)
+                        BusterX86MetadataPhysicalOperand move_old_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, atomic_width),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, atomic_width),
+                        };
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), move_old_operands,
+                                                                  BUSTER_ARRAY_LENGTH(move_old_operands)))
                         {
-                            codegen_emit_u8(&buffer, 0x66);
+                            result.error = buffer.error;
+                            return result;
                         }
-                        codegen_emit_u8(&buffer, value_type->layout.size == 8 ? 0x49 : 0x41);
-                        codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0x88 : 0x89);
-                        codegen_emit_u8(&buffer, 0xc0);
-                        if (value_type->layout.size == 2)
-                        {
-                            codegen_emit_u8(&buffer, 0x66);
-                        }
-                        codegen_emit_u8(&buffer, value_type->layout.size == 8 ? 0x49 : 0x41);
+                        String8 operation_mnemonic = {0};
                         if (instruction->atomic_operation == IR_ATOMIC_EXCHANGE)
                         {
-                            codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0x88 : 0x89);
-                            codegen_emit_u8(&buffer, 0xc8);
+                            operation_mnemonic = S8("MOV");
                         }
                         else
                         {
-                            u8 operation_opcode = 0;
                             switch (instruction->atomic_operation)
                             {
                             case IR_ATOMIC_ADD:
-                                operation_opcode = value_type->layout.size == 1 ? 0x00 : 0x01;
+                                operation_mnemonic = S8("ADD");
                                 break;
                             case IR_ATOMIC_SUBTRACT:
-                                operation_opcode = value_type->layout.size == 1 ? 0x28 : 0x29;
+                                operation_mnemonic = S8("SUB");
                                 break;
                             case IR_ATOMIC_BITWISE_AND:
-                                operation_opcode = value_type->layout.size == 1 ? 0x20 : 0x21;
+                                operation_mnemonic = S8("AND");
                                 break;
                             case IR_ATOMIC_BITWISE_OR:
-                                operation_opcode = value_type->layout.size == 1 ? 0x08 : 0x09;
+                                operation_mnemonic = S8("OR");
                                 break;
                             case IR_ATOMIC_BITWISE_XOR:
-                                operation_opcode = value_type->layout.size == 1 ? 0x30 : 0x31;
+                                operation_mnemonic = S8("XOR");
                                 break;
                             case IR_ATOMIC_EXCHANGE:
                             case IR_ATOMIC_OPERATION_COUNT:
                                 break;
                             }
-                            codegen_emit_u8(&buffer, operation_opcode);
-                            codegen_emit_u8(&buffer, 0xc8);
                         }
-                        codegen_emit_u8(&buffer, 0xf0);
-                        if (value_type->layout.size == 2)
+                        BusterX86MetadataPhysicalOperand operation_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, atomic_width),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, atomic_width),
+                        };
+                        if (!operation_mnemonic.length ||
+                            !codegen_canonical_x64_metadata_emit(&buffer, operation_mnemonic, operation_operands,
+                                                                  BUSTER_ARRAY_LENGTH(operation_operands)) ||
+                            !codegen_canonical_x64_metadata_atomic_register_memory(&buffer, S8("CMPXCHG"), X64_REGISTER_RDX,
+                                                                                      X64_REGISTER_R8, atomic_width))
                         {
-                            codegen_emit_u8(&buffer, 0x66);
-                        }
-                        codegen_emit_u8(&buffer, value_type->layout.size == 8 ? 0x4c : 0x44);
-                        codegen_emit_u8(&buffer, 0x0f);
-                        codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0xb0 : 0xb1);
-                        codegen_emit_u8(&buffer, 0x02);
-                        codegen_emit_u8(&buffer, 0x0f);
-                        codegen_emit_u8(&buffer, 0x85);
-                        s64 retry_displacement = (s64)retry_offset - ((s64)buffer.count + 4);
-                        if (retry_displacement < INT32_MIN || retry_displacement > INT32_MAX)
-                        {
-                            result.error = CODEGEN_ERROR_CAPACITY;
+                            result.error = buffer.error;
                             return result;
                         }
-                        codegen_emit_u32(&buffer, (u32)(s32)retry_displacement);
+                        BusterX86MetadataPhysicalOperand retry_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                        u32 retry_branch_offset = (u32)buffer.count;
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNZ"), &retry_operand, 1))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
+                        s64 retry_displacement = (s64)retry_offset - (s64)buffer.count;
+                        if (retry_displacement < INT32_MIN || retry_displacement > INT32_MAX || !buffer.bytes)
+                        {
+                            result.error = retry_displacement < INT32_MIN || retry_displacement > INT32_MAX ? CODEGEN_ERROR_CAPACITY
+                                                                                                             : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        s32 retry_delta = (s32)retry_displacement;
+                        memcpy(buffer.bytes + retry_branch_offset + 2, &retry_delta, sizeof(retry_delta));
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
@@ -7978,11 +8042,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             C_X64_LOAD_HIGH(0x95, instruction->operands[1]);
                             C_X64_LOAD(0x9d, instruction->operands[2]);
                             C_X64_LOAD_HIGH(0x8d, instruction->operands[2]);
-                            codegen_emit_u8(&buffer, 0xf0);
-                            codegen_emit_u8(&buffer, 0x49);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xc7);
-                            codegen_emit_u8(&buffer, 0x0a);
+                            String8 cx16_features_names[] = {S8("cx16")};
+                            BusterX86MetadataPhysicalOperand cx16_memory = codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, 128, 0);
+                            if (buffer.error ||
+                                !codegen_canonical_x64_metadata_emit_attributes(
+                                    &buffer, S8("CMPXCHG16B"), &cx16_memory, 1,
+                                    (BusterX86MetadataFeatureInput){.names = cx16_features_names, .count = BUSTER_ARRAY_LENGTH(cx16_features_names)},
+                                    (BusterX86MetadataPhysicalAttributes){.lock = true}))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             C_X64_STORE_RESULT();
                             C_X64_STORE_HIGH_RDX();
                             instruction_id = instruction->next;
@@ -8000,30 +8070,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8d);
-                            codegen_emit_u8(&buffer, 0x95);
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]));
+                            BusterX86MetadataPhysicalOperand address_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory(
+                                    X64_REGISTER_RBP, 64, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value])),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), address_operands,
+                                                                       BUSTER_ARRAY_LENGTH(address_operands));
                         }
                         C_X64_LOAD(0x85, instruction->operands[1]);
                         C_X64_LOAD(0x8d, instruction->operands[2]);
-                        if (value_type->layout.size == 2)
+                        if (buffer.error)
                         {
-                            codegen_emit_u8(&buffer, 0x66);
+                            result.error = buffer.error;
+                            return result;
                         }
-                        codegen_emit_u8(&buffer, 0xf0);
-                        if (value_type->layout.size == 8)
+                        u16 atomic_width = (u16)(value_type->layout.size * 8);
+                        if (!codegen_canonical_x64_metadata_atomic_register_memory(&buffer, S8("CMPXCHG"), X64_REGISTER_RDX,
+                                                                                     X64_REGISTER_RCX, atomic_width))
                         {
-                            codegen_emit_u8(&buffer, 0x48);
+                            result.error = buffer.error;
+                            return result;
                         }
-                        codegen_emit_u8(&buffer, 0x0f);
-                        codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0xb0 : 0xb1);
-                        codegen_emit_u8(&buffer, 0x0a);
                         if (value_type->layout.size == 1 || value_type->layout.size == 2)
                         {
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, value_type->layout.size == 1 ? 0xb6 : 0xb7);
-                            codegen_emit_u8(&buffer, 0xc0);
+                            BusterX86MetadataPhysicalOperand widen_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, atomic_width),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), widen_operands,
+                                                                      BUSTER_ARRAY_LENGTH(widen_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                         C_X64_STORE_RESULT();
                     }
@@ -8031,7 +8111,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         if (!instruction->atomic_signal_fence && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
                         {
-                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MFENCE"), 0, 0);
+                            String8 fence_features[] = {S8("sse2")};
+                            if (!codegen_canonical_x64_metadata_emit_features(
+                                    &buffer, S8("MFENCE"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = fence_features, .count = BUSTER_ARRAY_LENGTH(fence_features)}))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
