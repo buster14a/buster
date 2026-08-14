@@ -3552,6 +3552,32 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // VEX vector width is encoded by the metadata W bit, not inferred
+        // from a qword memory operand.  VMOVAPD's YMM store therefore keeps
+        // the canonical W=0 prefix (c4 41 7d), even though the physical
+        // memory width is 64 bits in this folded-width probe.
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_mem_base(13, 64, 0),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 15, 256),
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalQuery query = x86_64_metadata_test_physical_query(
+            S8("vmovapd"), operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+            BUSTER_ARRAY_LENGTH(wildcard_features));
+        u8 output[16] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query,
+            .output = output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(output),
+        });
+        static u8 const expected[] = {0xc4, 0x41, 0x7d, 0x29, 0x7d, 0x00};
+        bool vmovapd_store = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                             emitted.byte_count == BUSTER_ARRAY_LENGTH(expected) &&
+                             memcmp(output, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
+        BUSTER_TEST(arguments, vmovapd_store);
+    }
+
+    {
         // The sparse plan table is populated by the serial prewarm contract;
         // each representative migrated shape must remain byte/result
         // equivalent to the checked exact query.

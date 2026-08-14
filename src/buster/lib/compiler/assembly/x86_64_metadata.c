@@ -5214,9 +5214,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         // this arm, e.g. `sub qword ptr [r8], imm8` selected the right form
         // but emitted 41 83 instead of 49 83.  Explicit W controls and the
         // fixed-width APX EVEX rows remain authoritative.
+        // Folded memory width is a scalar legacy/REX width authority.  VEX,
+        // XOP, EVEX, and APX vector forms carry their W bit exclusively in
+        // the metadata pattern; deriving it from a qword memory operand
+        // would turn VMOVAPD's canonical VEX.W=0 prefix into W=1.
+        bool scalar_memory_width_rex_w = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
+                                         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
         if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w &&
-            !has_mmx_operand)
+            !has_mmx_operand && scalar_memory_width_rex_w)
         {
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
