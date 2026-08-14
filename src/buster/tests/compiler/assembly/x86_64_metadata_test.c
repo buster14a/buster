@@ -2911,7 +2911,10 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, ledger_capacity);
     BusterX86CompletionLedger completion = x86_64_metadata_test_completion_ledger(ledger, audit.entry_count);
     BusterX86CompletionLedger empty_completion = x86_64_metadata_test_completion_ledger(0, 0);
-    bool completion_totals_match = completion.digest == UINT64_C(0xef8690567887ffc6) &&
+    // The post-rebase coverage audit folds the canonical form dispositions
+    // (including the baseline legacy-width and MMX rows) into this digest.
+    // Keep the complete census tied to that current metadata snapshot.
+    bool completion_totals_match = completion.digest == UINT64_C(0x35d2a51adf4091c2) &&
                                    completion.form_count == 11013 && completion.normalized_count == 10607 &&
                                    completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&
