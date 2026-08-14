@@ -8505,6 +8505,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
+                            else if (conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT && source_bit_width == 32)
+                            {
+                                // C integer arguments occupy an eight-byte canonical
+                                // slot, while an unsigned 32-bit parameter is
+                                // defined by its low word.  Clear the incoming
+                                // high bits before the 64-bit conversion so a
+                                // caller that supplies a sign-extended register
+                                // value still observes unsigned semantics.
+                                BusterX86MetadataPhysicalOperand zero_extend_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), zero_extend_operands,
+                                                                           BUSTER_ARRAY_LENGTH(zero_extend_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                            }
                             BusterX86MetadataPhysicalOperand convert_operands[2] = {
                                 codegen_canonical_x64_metadata_vector(0, (u16)target_bit_width),
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
