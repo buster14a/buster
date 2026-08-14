@@ -6976,6 +6976,27 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_xchg_accumulator_projection(
     return true;
 }
 
+// Linker PLT padding uses a byte-sized physical memory token for NOP even
+// though the architectural 0F 1F /0 form is an untyped 32-bit r/m NOP. Keep
+// that linker token canonical by projecting only the exact one-memory NOP
+// shape; ordinary NOP queries and all other mnemonics retain their widths.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_memory_projection(
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* projected_operand,
+    BusterX86MetadataPhysicalQuery* projected_query)
+{
+    if (!projected_operand || !projected_query || query.operand_count != 1 || !query.operands ||
+        !buster_x86_metadata_input_string_equal(query.mnemonic, S8("NOP")) ||
+        query.operands[0].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || query.operands[0].width != 8 ||
+        query.operands[0].memory.source_width != 8)
+        return false;
+    *projected_operand = query.operands[0];
+    projected_operand->width = 32;
+    projected_operand->memory.source_width = 32;
+    *projected_query = query;
+    projected_query->operands = projected_operand;
+    return true;
+}
+
 // APX NDD rows carry one additional source operand (or the second explicit
 // register of PUSH2/POP2), while the parser's physical query intentionally
 // leaves APX_NDD unset unless an explicit {ndd} decorator was written.  Infer
@@ -7033,6 +7054,10 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         .selected_memory_operand = UINT8_MAX,
     };
     if (!buster_x86_metadata_emit_physical_query_valid(query)) return result;
+    BusterX86MetadataPhysicalOperand nop_projected_operand = {0};
+    BusterX86MetadataPhysicalQuery nop_projected_query = {0};
+    if (buster_x86_metadata_nop_memory_projection(query, &nop_projected_operand, &nop_projected_query))
+        return buster_x86_metadata_select_form(nop_projected_query);
     BusterX86MetadataPhysicalQuery apx_projected_query = {0};
     if (buster_x86_metadata_apx_ndd_projection(query, &apx_projected_query))
     {
@@ -7080,6 +7105,13 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         // available for provenance and machine plans.
         BusterX86MetadataPatternSemantics filter_pattern = {0};
         if (!buster_x86_metadata_emit_parse_pattern(form, &filter_pattern)) continue;
+        // The public one-memory NOP spelling is the architectural 0F 1F /0
+        // padding form.  XED also indexes decode-only 0F 18/19 aliases under
+        // the NOP mnemonic; keep those aliases out of source/link selection.
+        if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("NOP")) && query.operand_count == 1 &&
+            query.operands && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            filter_pattern.opcode_count >= 2 && filter_pattern.opcode[0] == 0x0f && filter_pattern.opcode[1] != 0x1f)
+            continue;
         bool x87_free_pop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FFREEP"));
         if ((!x87_free_pop && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) ||
@@ -7248,7 +7280,10 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
     if ((query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations) ||
         query.physical.operand_count > 16)
         return result;
-    BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(query.physical);
+    BusterX86MetadataPhysicalOperand nop_projected_operand = {0};
+    BusterX86MetadataPhysicalQuery physical_query = query.physical;
+    buster_x86_metadata_nop_memory_projection(query.physical, &nop_projected_operand, &physical_query);
+    BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(physical_query);
     result.status = selection.status;
     result.form_id = selection.form_id;
     result.stable_hash = selection.stable_hash;
@@ -7261,7 +7296,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
     // when the caller supplied an unsized address.  Reuse that exact physical
     // query for emission rather than asking the form emitter to rediscover a
     // width and risking a different candidate or an operand mismatch.
-    BusterX86MetadataPhysicalQuery physical = query.physical;
+    BusterX86MetadataPhysicalQuery physical = physical_query;
     BusterX86MetadataPhysicalOperand operands[16] = {0};
     if (selection.selected_memory_width && selection.selected_memory_operand < physical.operand_count)
     {

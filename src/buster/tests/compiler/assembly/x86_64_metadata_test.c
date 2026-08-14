@@ -9306,6 +9306,19 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataSelectResult nop_selection = buster_x86_metadata_select_form(nop_query);
         BUSTER_TEST(arguments, nop_p4_zero.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
                                    nop_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && nop_selection.form_id == 9852);
+        BusterX86MetadataPhysicalOperand plt_nop_memory = x86_64_metadata_test_physical_mem_base(0, 8, 0);
+        plt_nop_memory.memory.has_displacement = true;
+        plt_nop_memory.memory.source_width = 8;
+        BusterX86MetadataPhysicalQuery plt_nop_query = x86_64_metadata_test_physical_query(
+            S8("NOP"), &plt_nop_memory, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataSelectResult plt_nop_selection = buster_x86_metadata_select_form(plt_nop_query);
+        u8 plt_nop_bytes[8] = {0};
+        BusterX86MetadataEmitResult plt_nop = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = plt_nop_query, .output = plt_nop_bytes, .output_capacity = sizeof(plt_nop_bytes)});
+        BUSTER_TEST(arguments, plt_nop_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && plt_nop_selection.form_id == 9587 &&
+                                   plt_nop.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && plt_nop.form_id == 9587 && plt_nop.byte_count == 4 &&
+                                   plt_nop_bytes[0] == 0x0f && plt_nop_bytes[1] == 0x1f && plt_nop_bytes[2] == 0x40 && plt_nop_bytes[3] == 0x00);
 
         BusterX86MetadataPhysicalOperand xchg_r8_low =
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 8, 32);
