@@ -4176,21 +4176,6 @@ BUSTER_GLOBAL_LOCAL AssemblyVectorForm const* assembly_x86_vector_form(AssemblyO
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_vector_form_w(AssemblyOpcode opcode)
-{
-    return opcode == ASSEMBLY_OPCODE_X86_VXORPD || opcode == ASSEMBLY_OPCODE_X86_VADDPD ||
-           opcode == ASSEMBLY_OPCODE_X86_VADDSD || opcode == ASSEMBLY_OPCODE_X86_VSUBPD ||
-           opcode == ASSEMBLY_OPCODE_X86_VMULPD || opcode == ASSEMBLY_OPCODE_X86_VDIVPD ||
-           opcode == ASSEMBLY_OPCODE_X86_VMOVAPD || opcode == ASSEMBLY_OPCODE_X86_VMOVUPD ||
-           opcode == ASSEMBLY_OPCODE_X86_VMOVDQA64 || opcode == ASSEMBLY_OPCODE_X86_VMOVDQU64 ||
-           opcode == ASSEMBLY_OPCODE_X86_VMOVDQU16 ||
-           opcode == ASSEMBLY_OPCODE_X86_VPADDQ || opcode == ASSEMBLY_OPCODE_X86_VPSUBQ ||
-           opcode == ASSEMBLY_OPCODE_X86_VPCMPEQQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPGTQ ||
-           opcode == ASSEMBLY_OPCODE_X86_VCMPPD || opcode == ASSEMBLY_OPCODE_X86_VPCMPQ ||
-           opcode == ASSEMBLY_OPCODE_X86_VPCMPUQ || opcode == ASSEMBLY_OPCODE_X86_VPCMPW ||
-           opcode == ASSEMBLY_OPCODE_X86_VRNDSCALEPD;
-}
-
 BUSTER_GLOBAL_LOCAL bool assembly_x86_vector_register(AssemblyRegister reg)
 {
     return reg.class == ASSEMBLY_REGISTER_XMM || reg.class == ASSEMBLY_REGISTER_YMM || reg.class == ASSEMBLY_REGISTER_ZMM;
@@ -10970,14 +10955,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_operand_decorators(BusterX86Metad
     for (u32 index = 0; index < operand_count; index += 1)
     {
         AssemblyOperand operand = operands[index];
-        bool vsib_memory_mask = index == 0 && operand.has_mask && operand.kind == ASSEMBLY_OPERAND_MEMORY && operand.memory.vsib;
-        if ((operand.has_mask || operand.zeroing || operand.rounding || operand.sae) &&
-            !((index == 0 && operand.kind == ASSEMBLY_OPERAND_REGISTER) || vsib_memory_mask))
+        if ((operand.has_mask || operand.zeroing || operand.rounding || operand.sae) && index != 0)
         {
             return false;
         }
-        if (vsib_memory_mask && (operand.zeroing || operand.rounding || operand.sae)) return false;
-        if (operand.zeroing && !operand.has_mask)
+        if (operand.zeroing && (!operand.has_mask || operand.kind != ASSEMBLY_OPERAND_REGISTER))
         {
             return false;
         }
@@ -11432,6 +11414,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         else if ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 's') ||
                  assembly_word_equal(mnemonic, S8("vmovaps")) || assembly_word_equal(mnemonic, S8("vmovups")))
             scalar_memory_width = 32;
+        else if (assembly_word_equal(mnemonic, S8("vmovdqa32")) || assembly_word_equal(mnemonic, S8("vmovdqu32")))
+            scalar_memory_width = 32;
+        else if (assembly_word_equal(mnemonic, S8("vmovdqa64")) || assembly_word_equal(mnemonic, S8("vmovdqu64")))
+            scalar_memory_width = 64;
+        else if (assembly_word_equal(mnemonic, S8("vmovdqu8")))
+            scalar_memory_width = 8;
+        else if (assembly_word_equal(mnemonic, S8("vmovdqu16")))
+            scalar_memory_width = 16;
         for (u32 index = 0; index < operand_count; index += 1)
         {
             if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
@@ -11908,10 +11898,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
 {
     // APX extended-GPR encodings remain on the handwritten path until their
     // dedicated metadata forms are migrated.
-    // This tranche covers legacy VEX forms. EVEX/mask/SAE spellings retain
-    // the handwritten parser until their decorator topology is represented
-    // losslessly by the physical metadata adapter.
-    if (instruction.no_flags || instruction.evex || assembly_x86_instruction_has_extended_gpr(instruction))
+    // No-flags/APX forms remain on their dedicated paths. EVEX vector forms
+    // are admitted below only when their physical decorator topology is
+    // represented by the metadata adapter.
+    bool vector_instruction = assembly_x86_vector_form(instruction.opcode) != 0;
+    if (instruction.no_flags ||
+        (assembly_x86_instruction_has_extended_gpr(instruction) && (!instruction.evex || !vector_instruction)))
     {
         return false;
     }
@@ -12042,6 +12034,22 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_uses_metadata_authority(Assemb
     case ASSEMBLY_OPCODE_X86_VPCMPGTQ:
     case ASSEMBLY_OPCODE_X86_VPMULLW:
     case ASSEMBLY_OPCODE_X86_VPMULLD:
+    case ASSEMBLY_OPCODE_X86_VMOVDQA32:
+    case ASSEMBLY_OPCODE_X86_VMOVDQU32:
+    case ASSEMBLY_OPCODE_X86_VMOVDQA64:
+    case ASSEMBLY_OPCODE_X86_VMOVDQU64:
+    case ASSEMBLY_OPCODE_X86_VMOVDQU8:
+    case ASSEMBLY_OPCODE_X86_VMOVDQU16:
+    case ASSEMBLY_OPCODE_X86_VCMPPS:
+    case ASSEMBLY_OPCODE_X86_VCMPPD:
+    case ASSEMBLY_OPCODE_X86_VPCMPD:
+    case ASSEMBLY_OPCODE_X86_VPCMPQ:
+    case ASSEMBLY_OPCODE_X86_VPCMPB:
+    case ASSEMBLY_OPCODE_X86_VPCMPW:
+    case ASSEMBLY_OPCODE_X86_VPCMPUD:
+    case ASSEMBLY_OPCODE_X86_VPCMPUQ:
+    case ASSEMBLY_OPCODE_X86_VRNDSCALEPS:
+    case ASSEMBLY_OPCODE_X86_VRNDSCALEPD:
         return true;
     default:
         return false;
@@ -13149,82 +13157,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_amd(AssemblyBuilder* builder, Assembl
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_evex_memory(AssemblyBuilder* builder, AssemblyInstruction* instruction, u8 reg,
-                                                        AssemblyMemory memory, u32 tuple_scale)
-{
-    u32 displacement_size = 0;
-    if (!assembly_x86_evex_memory_displacement_size(memory, tuple_scale, &displacement_size))
-    {
-        return false;
-    }
-    u8 sib = !memory.rip_relative && (memory.has_index || !memory.has_base || (memory.base.index & 7) == 4);
-    u8 mod = displacement_size == 0 ? 0 : displacement_size == 1 ? 1 : 2;
-    if (memory.rip_relative || !memory.has_base)
-    {
-        mod = 0;
-    }
-    u8 rm = memory.rip_relative ? 5 : sib ? 4 : (u8)(memory.base.index & 7);
-    assembly_emit_byte(builder, (u8)((mod << 6) | ((reg & 7) << 3) | rm));
-    if (sib)
-    {
-        u8 scale = memory.scale == 8 ? 3 : memory.scale == 4 ? 2 : memory.scale == 2 ? 1 : 0;
-        u8 index = memory.has_index ? (u8)(memory.index.index & 7) : 4;
-        u8 base = memory.has_base ? (u8)(memory.base.index & 7) : 5;
-        assembly_emit_byte(builder, (u8)((scale << 6) | (index << 3) | base));
-    }
-    if (displacement_size)
-    {
-        u64 relocation_offset = builder->output_count;
-        s64 value = memory.displacement.addend;
-        if (memory.displacement.has_symbol)
-        {
-            if (assembly_expression_target(builder, memory.displacement, &value))
-            {
-                if (memory.rip_relative)
-                {
-                    s64 next = (s64)(instruction->offset + instruction->size);
-                    if (value < next + INT32_MIN || value > next + INT32_MAX)
-                    {
-                        return false;
-                    }
-                    value -= next;
-                }
-            }
-            else if (!assembly_relocation_append(builder, relocation_offset, memory.displacement,
-                                                  memory.rip_relative ? ASSEMBLY_RELOCATION_X86_PC32 : ASSEMBLY_RELOCATION_X86_32,
-                                                  memory.rip_relative ? -4 - (s64)instruction->rip_relocation_trailing : 0))
-            {
-                return false;
-            }
-            else
-            {
-                value = 0;
-            }
-        }
-        if (displacement_size == 1)
-        {
-            if (!memory.displacement.has_symbol && tuple_scale > 1)
-            {
-                if (value % (s64)tuple_scale)
-                {
-                    return false;
-                }
-                value /= (s64)tuple_scale;
-            }
-            if (value < INT8_MIN || value > INT8_MAX)
-            {
-                return false;
-            }
-        }
-        if (displacement_size == 4 && (value < INT32_MIN || value > INT32_MAX))
-        {
-            return false;
-        }
-        assembly_emit_immediate(builder, (u64)value, displacement_size);
-    }
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL void assembly_x86_emit_evex_prefix(AssemblyBuilder* builder, AssemblyRegister reg, AssemblyOperand rm,
                                                         u16 width, u8 source, u8 pp, u8 map, bool w, u8 mask, bool zeroing,
                                                         bool broadcast, u8 rounding, bool sae)
@@ -13286,85 +13218,6 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_emit_evex_prefix(AssemblyBuilder* builder,
     assembly_emit_byte(builder, p0);
     assembly_emit_byte(builder, p1);
     assembly_emit_byte(builder, p2);
-}
-
-BUSTER_GLOBAL_LOCAL u8 assembly_x86_vector_opcode_byte(AssemblyVectorForm const* form, bool load)
-{
-    if (!load && (form->flags & ASSEMBLY_VECTOR_FORM_MOVE))
-    {
-        return form->opcode_byte == 0x6f ? 0x7f : (u8)(form->opcode_byte + 1);
-    }
-    return form->opcode_byte;
-}
-
-BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_evex_vector(AssemblyBuilder* builder, AssemblyInstruction* instruction,
-                                                        AssemblyVectorForm const* form)
-{
-    AssemblyOperand* first = instruction->operands;
-    AssemblyOperand* second = instruction->operands + 1;
-    AssemblyOperand* third = instruction->operands + 2;
-    u8 move = (form->flags & ASSEMBLY_VECTOR_FORM_MOVE) != 0;
-    u8 mask_destination = (form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) != 0;
-    u8 source_rm = (form->flags & ASSEMBLY_VECTOR_FORM_SOURCE_RM) != 0;
-    AssemblyRegister vector = {0};
-    AssemblyRegister prefix_reg = {0};
-    AssemblyOperand rm = {0};
-    u8 source = 0;
-    u8 load = true;
-    if (mask_destination)
-    {
-        prefix_reg = first->reg;
-        vector = second->reg;
-        rm = *third;
-        source = second->reg.index;
-    }
-    else if (source_rm)
-    {
-        prefix_reg = first->reg;
-        vector = first->reg;
-        rm = *second;
-    }
-    else if (move)
-    {
-        load = first->kind == ASSEMBLY_OPERAND_REGISTER;
-        vector = load ? first->reg : second->reg;
-        prefix_reg = vector;
-        rm = load ? *second : *first;
-    }
-    else
-    {
-        prefix_reg = first->reg;
-        vector = first->reg;
-        rm = *third;
-        source = second->reg.index;
-    }
-    u8 broadcast = rm.kind == ASSEMBLY_OPERAND_MEMORY && rm.broadcast;
-    u8 mask = first->has_mask ? first->mask : 0;
-    u8 zeroing = !mask_destination && first->zeroing;
-    u8 rounding = first->rounding;
-    u8 sae = first->sae;
-    u32 tuple_scale = rm.kind == ASSEMBLY_OPERAND_MEMORY
-                          ? (broadcast ? form->element_width
-                                       : (form->flags & ASSEMBLY_VECTOR_FORM_SCALAR ? form->element_width : vector.width / 8u))
-                          : 0;
-    assembly_x86_emit_evex_prefix(builder, prefix_reg, rm, vector.width, source, form->mandatory_prefix, form->map,
-                                  assembly_x86_vector_form_w(form->opcode), mask, zeroing, broadcast, rounding, sae);
-    assembly_emit_byte(builder, assembly_x86_vector_opcode_byte(form, load));
-    if (rm.kind == ASSEMBLY_OPERAND_REGISTER)
-    {
-        assembly_x86_emit_modrm(builder, prefix_reg.index, rm.reg.index);
-    }
-    else if (rm.kind == ASSEMBLY_OPERAND_MEMORY &&
-             !assembly_x86_emit_evex_memory(builder, instruction, prefix_reg.index, rm.memory, tuple_scale))
-    {
-        return false;
-    }
-    if (form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE)
-    {
-        u32 immediate_index = mask_destination ? 3u : 2u;
-        assembly_emit_byte(builder, (u8)instruction->operands[immediate_index].expression.addend);
-    }
-    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_mask(AssemblyBuilder* builder, AssemblyInstruction* instruction)
@@ -14579,17 +14432,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
              !(instruction->opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction->operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION)))
         {
             assembly_x86_emit_apx_ndd(builder, instruction);
-            continue;
-        }
-        AssemblyVectorForm const* evex_form = assembly_x86_vector_form(instruction->opcode);
-        if (instruction->evex && evex_form)
-        {
-            if (!assembly_x86_emit_evex_vector(builder, instruction, evex_form))
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION, instruction->line, instruction->column, 1,
-                                    S8("EVEX memory displacement is out of range"));
-                return;
-            }
             continue;
         }
         if (assembly_x86_instruction_has_extended_gpr(*instruction))
