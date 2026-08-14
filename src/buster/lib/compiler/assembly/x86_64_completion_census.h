@@ -226,6 +226,7 @@ BUSTER_F_DECL bool buster_x86_completion_census_test_query(u32 form_id, BusterX8
                                                             BusterX86MetadataPhysicalOperand operands[16],
                                                             String8 features[1], char8 mnemonic_buffer[128]);
 BUSTER_F_DECL bool buster_x86_completion_census_test_decorator_shape(u32 form_id, bool standalone_sae);
+BUSTER_F_DECL bool buster_x86_completion_census_test_control_prefix_shape(u32 form_id);
 BUSTER_F_DECL BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Arena* arena, Target target,
                                                                                              u32 form_id, bool att);
 #endif

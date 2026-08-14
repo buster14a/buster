@@ -626,6 +626,138 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_mnemonic(BusterX86MetadataForm
     return buster_x86_metadata_string_span(form.iclass);
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_control_prefix_shape(BusterX86MetadataForm form,
+                                                                     BusterX86MetadataPhysicalQuery query)
+{
+    String8 pattern = buster_x86_metadata_string_span(form.pattern);
+    u32 control_count = (u32)query.attributes.lock + (u32)query.attributes.rep +
+                        (u32)query.attributes.repne + (u32)query.attributes.notrack;
+    if (control_count != 1 || form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+        (form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY && form.encoder_family != BUSTER_X86_METADATA_ENCODER_REX) ||
+        query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_64 || query.address_size != 64 ||
+        query.attributes.decorator_flags || query.attributes.apx_flags || query.attributes.amx_flags ||
+        query.attributes.has_dfv || query.attributes.no_flags || query.attributes.branch_hint ||
+        query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE)
+        return false;
+    if (query.attributes.lock)
+    {
+        u32 memory_count = 0;
+        u32 nonmemory_count = 0;
+        u16 memory_width = 0;
+        for (u32 index = 0; index < query.operand_count; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = query.operands[index];
+            if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                if (operand.memory.address_size != 64 || operand.memory.vsib || operand.memory.has_segment) return false;
+                memory_count += 1;
+                memory_width = operand.width;
+            }
+            else if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                     operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+                return false;
+            else nonmemory_count += 1;
+        }
+        if (memory_count != 1 || !memory_width || !buster_x86_completion_string_contains(pattern, S8("lock_prefix")))
+            return false;
+        // The fixed-register CMPXCHG8B/16B rows have no visible companion
+        // operand, but advertise the architectural no-REX width explicitly.
+        // A bare 64-bit unary lock row has no source spelling that preserves
+        // the selected byte shape and remains outside this cohort.
+        if (memory_width == 64 && !nonmemory_count && !buster_x86_completion_string_contains(pattern, S8("norexw_prefix")))
+            return false;
+        u32 validation_index = 0;
+        for (validation_index = 0; validation_index < query.operand_count; validation_index += 1)
+            if (query.operands[validation_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                query.operands[validation_index].width != memory_width)
+                return false;
+        return true;
+    }
+    if (query.attributes.rep || query.attributes.repne)
+    {
+        // Canonical string instructions have only hidden architectural
+        // operands.  MODE16/MODE32 and the REX.W aliases are intentionally
+        // excluded: their public spelling would select a different width.
+        String8 mnemonic = buster_x86_completion_mnemonic(form);
+        u8 mnemonic_last = mnemonic.length ? (u8)mnemonic.pointer[mnemonic.length - 1] : 0;
+        bool rexw_alias = buster_x86_completion_string_contains(pattern, S8("rexw_prefix")) &&
+                          !buster_x86_completion_string_contains(pattern, S8("norexw_prefix"));
+        if (query.operand_count || buster_x86_completion_string_contains(pattern, S8("mode16")) ||
+            buster_x86_completion_string_contains(pattern, S8("mode32")) ||
+            (rexw_alias && mnemonic_last != 'Q') || buster_x86_completion_string_contains(pattern, S8("MODEP5")))
+            return false;
+        if (query.attributes.rep)
+            return buster_x86_completion_string_contains(pattern, S8("repe")) &&
+                   (buster_x86_completion_string_contains(mnemonic, S8("REP_")) ||
+                    buster_x86_completion_string_contains(mnemonic, S8("REPE_")));
+        return buster_x86_completion_string_contains(pattern, S8("repne")) &&
+               buster_x86_completion_string_contains(mnemonic, S8("REPNE_"));
+    }
+    if (query.operand_count != 1 || !buster_x86_completion_string_contains(pattern, S8("CET_NO_TRACK"))) return false;
+    BusterX86MetadataPhysicalOperand operand = query.operands[0];
+    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        return operand.width == 64 && operand.memory.address_size == 64 && !operand.memory.vsib && !operand.memory.has_segment;
+    return operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER && operand.width == 64;
+}
+
+BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_control_project_source(
+    Arena* arena, BusterX86MetadataPhysicalQuery query, String8 source, bool att)
+{
+    u32 token_start = 0;
+    u32 token_end = 0;
+    String8 expected_prefix = {0};
+    if (query.attributes.lock) expected_prefix = S8("lock");
+    else if (query.attributes.rep) expected_prefix = S8("rep");
+    else if (query.attributes.repne) expected_prefix = S8("repne");
+    else if (query.attributes.notrack) expected_prefix = S8("notrack");
+    while (token_start < source.length && source.pointer[token_start] == ' ') token_start += 1;
+    token_end = token_start;
+    while (token_end < source.length && source.pointer[token_end] != ' ' && source.pointer[token_end] != '\n') token_end += 1;
+    if (expected_prefix.length && token_end - token_start == expected_prefix.length &&
+        buster_x86_completion_string_equal(string_slice(source, token_start, token_end), expected_prefix))
+    {
+        u32 body_start = token_end;
+        while (body_start < source.length && source.pointer[body_start] == ' ') body_start += 1;
+        token_start = body_start;
+        token_end = token_start;
+        while (token_end < source.length && source.pointer[token_end] != ' ' && source.pointer[token_end] != '\n') token_end += 1;
+    }
+    String8 token = string_slice(source, token_start, token_end);
+    String8 base = token;
+    if (query.attributes.lock && token.length >= 5 && token.pointer[token.length - 5] == '_' &&
+        token.pointer[token.length - 4] == 'L' && token.pointer[token.length - 3] == 'O' &&
+        token.pointer[token.length - 2] == 'C' && token.pointer[token.length - 1] == 'K')
+        base = string_slice(token, 0, token.length - 5);
+    else if (query.attributes.repne && token.length > 6 && buster_x86_completion_string_equal(string_slice(token, 0, 6), S8("REPNE_")))
+        base = string_slice(token, 6, token.length);
+    else if (query.attributes.repne && token.length > 4 && buster_x86_completion_string_equal(string_slice(token, 0, 4), S8("REP_")))
+        base = string_slice(token, 4, token.length);
+    else if (query.attributes.rep && token.length > 5 && buster_x86_completion_string_equal(string_slice(token, 0, 5), S8("REPE_")))
+        base = string_slice(token, 5, token.length);
+    else if (query.attributes.rep && token.length > 4 && buster_x86_completion_string_equal(string_slice(token, 0, 4), S8("REP_")))
+        base = string_slice(token, 4, token.length);
+    if (att && query.attributes.lock)
+    {
+        u16 memory_width = 0;
+        u32 memory_index = 0;
+        for (memory_index = 0; memory_index < query.operand_count; memory_index += 1)
+            if (query.operands[memory_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+                memory_width = query.operands[memory_index].width;
+        char8 suffix = memory_width == 8 ? 'b' : memory_width == 16 ? 'w' : memory_width == 32 ? 'l' : memory_width == 64 ? 'q' : 0;
+        if (suffix && base.length)
+        {
+            u8 last = (u8)base.pointer[base.length - 1];
+            bool has_width = last == 'b' || last == 'w' || last == 'd' || last == 'q' ||
+                             ((last == 'B' || last == 'W' || last == 'Q') && base.length > 1 &&
+                              base.pointer[base.length - 2] >= '0' && base.pointer[base.length - 2] <= '9');
+            if (!has_width) base = string_format(arena, S8("{S8}{char8}"), base, suffix);
+        }
+    }
+    String8 tail = string_slice(source, token_end, source.length);
+    String8 body = string_format(arena, S8("{S8}{S8}"), base, tail);
+    return string_format(arena, S8("{S8} {S8}"), expected_prefix, body);
+}
+
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_typed_source(
     Arena* arena, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
     BusterX86CompletionCensusSourceReason* reason)
@@ -858,6 +990,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
         source = string_format(arena, S8("{S8}, {{{S8}}}"), source,
                                query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST ? S8("rn-sae") : S8("sae"));
     if (has_bsr0 && !bsr0_first && query.operand_count == 1) source = string_format(arena, S8("{S8}, bsr0"), source);
+    if (buster_x86_completion_control_prefix_shape(form, query))
+        source = buster_x86_completion_control_project_source(arena, query, source, false);
     return string_format(arena, S8("{S8}\n"), source);
 }
 
@@ -1001,8 +1135,9 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
         return (String8){0};
     }
     if ((query.attributes.apx_flags && !apx_amx_witness) || (query.attributes.amx_flags && !apx_amx_witness) ||
-        query.attributes.has_dfv || query.attributes.no_flags || query.attributes.branch_hint || query.attributes.notrack ||
-        query.attributes.rep || query.attributes.repne || query.attributes.lock)
+        query.attributes.has_dfv || query.attributes.no_flags || query.attributes.branch_hint ||
+        ((query.attributes.notrack || query.attributes.rep || query.attributes.repne || query.attributes.lock) &&
+         !buster_x86_completion_control_prefix_shape(form, query)))
     {
         buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL);
         return (String8){0};
@@ -1090,6 +1225,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
         source = index + 1 == source_operand_count ? string_format(arena, S8("{S8} {S8}"), source, spelling)
                                                    : string_format(arena, S8("{S8}, {S8}"), source, spelling);
     }
+    if (buster_x86_completion_control_prefix_shape(form, query))
+        source = buster_x86_completion_control_project_source(arena, query, source, true);
     return string_format(arena, S8("{S8}\n"), source);
 }
 
@@ -1622,6 +1759,18 @@ bool buster_x86_completion_census_test_decorator_shape(u32 form_id, bool standal
             return false;
     }
     return true;
+}
+
+bool buster_x86_completion_census_test_control_prefix_shape(u32 form_id)
+{
+    BusterX86MetadataForm form = {0};
+    BusterX86MetadataPhysicalQuery query = {0};
+    BusterX86MetadataPhysicalOperand operands[16] = {0};
+    String8 features[1] = {0};
+    char8 mnemonic_buffer[128] = {0};
+    return buster_x86_metadata_form(form_id, &form) &&
+           buster_x86_completion_census_test_query(form_id, &query, operands, features, mnemonic_buffer) &&
+           buster_x86_completion_control_prefix_shape(form, query);
 }
 
 BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Arena* arena, Target target, u32 form_id,
