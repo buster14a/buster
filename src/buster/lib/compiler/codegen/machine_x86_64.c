@@ -5026,15 +5026,60 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_
     [46] = MACHINE_X64_EXACT_PLAN_INT3,
 };
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataExactPlan machine_x64_exact_plans[MACHINE_X64_EXACT_PLAN_COUNT];
-BUSTER_GLOBAL_LOCAL bool machine_x64_exact_plans_ready;
+// The encoder's hot row loop sees x86 opcodes as one contiguous ordinal span
+// (MACHINE_X64_MOV_RI .. MACHINE_X64_VBINARY).  Keep the exact projection in
+// that same dense namespace so workers do not re-enter the registry, decode a
+// recipe category/index, or re-check a durable form key for every row.  The
+// descriptor/status portion is a static projection of the source registry;
+// the plan fields are filled and published by the serial prewarm below.
+typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
+struct MachineX64PreparedExactOpcode
+{
+    MachineX64ExactRecipe const* descriptor;
+    BusterX86MetadataExactPlan plan;
+    // Reserved for the compact metadata-trusted token.  Keep this field in
+    // the per-opcode record so the token can be published with the plan
+    // without changing the row or the hot lookup shape.
+    u32 metadata_token;
+    u8 exact_required;
+    u8 plan_valid;
+    u8 reserved[2];
+};
+
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(index) (&machine_x64_exact_recipe_table[(index)])
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW(index) 0
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY(index) 0
+#define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM 1u
+#define MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW 0u
+#define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY 0u
+#define MACHINE_X64_EXACT_OPCODE_MAP_ROW(opcode_value, category_value, index_value, status_value) \
+    [opcode_value - MACHINE_X64_MOV_RI] = { \
+        .descriptor = MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##status_value(index_value), \
+        .exact_required = MACHINE_X64_EXACT_OPCODE_REQUIRED_##status_value, \
+    },
+BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
+    MACHINE_X86_64_EMIT_REGISTRY(MACHINE_X64_EXACT_OPCODE_MAP_ROW)
+};
+#undef MACHINE_X64_EXACT_OPCODE_MAP_ROW
+#undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY
+#undef MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW
+#undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM
+
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_opcode_map_ready;
 
 // Prepare the immutable metadata plans once on the serial prewarm thread.
 // Width variants and projection variants deliberately share a plan identity;
-// workers only read the published value table after the ready bit is set.
+// workers only read the published value table after the ready bit is set.  The
+// opcode map is published even when one key is stale: its exact-required bits
+// remain set, while the affected descriptor/plan entries stay invalid so the
+// worker lane fails closed rather than falling through to handwritten bytes.
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
 {
-    if (machine_x64_exact_plans_ready) return;
+    if (machine_x64_exact_opcode_map_ready) return;
     BUSTER_CHECK_SERIAL_INITIALIZATION();
 
     BusterX86MetadataFormKey keys[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
@@ -5047,24 +5092,62 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
         keys[plan_id] = machine_x64_exact_recipe_table[recipe_index].key;
         key_found[plan_id] = true;
     }
+    bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
     {
-        if (!key_found[plan_id] ||
-            !buster_x86_metadata_exact_plan_prepare(keys[plan_id], &prepared[plan_id]) ||
-            prepared[plan_id].form_id != keys[plan_id].form_id ||
-            prepared[plan_id].stable_hash != keys[plan_id].stable_hash)
+        plan_valid[plan_id] = key_found[plan_id] &&
+                              buster_x86_metadata_exact_plan_prepare(keys[plan_id], &prepared[plan_id]) &&
+                              prepared[plan_id].form_id == keys[plan_id].form_id &&
+                              prepared[plan_id].stable_hash == keys[plan_id].stable_hash;
+    }
+
+    MachineX64PreparedExactOpcode prepared_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {0};
+    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+    {
+        MachineX64PreparedExactOpcode entry = machine_x64_exact_opcode_map[ordinal];
+        if (entry.exact_required)
         {
-            // Keep the table unpublished on any stale/missing key.  Exact
-            // rows then fail closed in the worker lane rather than silently
-            // re-entering the handwritten switch.
-            return;
+            MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
+            MachineX64ExactRecipe const* descriptor = entry.descriptor;
+            bool descriptor_valid = registry_entry && registry_entry->producer_status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM &&
+                                    descriptor && descriptor->key.stable_hash != 0 && descriptor->recipe == registry_entry->recipe &&
+                                    machine_emit_recipe_category(descriptor->recipe) == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
+            u16 recipe_index = descriptor_valid ? machine_emit_recipe_index(descriptor->recipe) : 0;
+            u8 plan_id = descriptor_valid && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_recipe)
+                             ? machine_x64_exact_plan_id_by_recipe[recipe_index]
+                             : MACHINE_X64_EXACT_PLAN_INVALID;
+            descriptor_valid &= plan_id < MACHINE_X64_EXACT_PLAN_COUNT;
+            descriptor_valid &= descriptor_valid && plan_valid[plan_id];
+            descriptor_valid &= descriptor_valid && prepared[plan_id].form_id == descriptor->key.form_id &&
+                                prepared[plan_id].stable_hash == descriptor->key.stable_hash;
+            if (descriptor_valid)
+            {
+                entry.descriptor = descriptor;
+                entry.plan = prepared[plan_id];
+                entry.plan_valid = true;
+            }
+            else
+            {
+                // Retain exact_required so an invalid exact row is counted
+                // and rejected by the worker lane instead of using the old
+                // switch as an accidental fallback.
+                entry.descriptor = 0;
+                entry.plan = (BusterX86MetadataExactPlan){0};
+                entry.metadata_token = 0;
+                entry.plan_valid = false;
+            }
         }
+        prepared_opcode_map[ordinal] = entry;
     }
-    for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
+
+    // Publish the complete dense map only after every local entry has been
+    // validated.  The ready bit is written last; codegen_prewarm() completes
+    // before any worker lane can observe these globals.
+    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
     {
-        machine_x64_exact_plans[plan_id] = prepared[plan_id];
+        machine_x64_exact_opcode_map[ordinal] = prepared_opcode_map[ordinal];
     }
-    machine_x64_exact_plans_ready = true;
+    machine_x64_exact_opcode_map_ready = true;
 }
 
 
@@ -5145,22 +5228,6 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rip_memor
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_exact_plan_for_recipe(MachineX64ExactRecipe const* descriptor,
-                                                            BusterX86MetadataExactPlan* result)
-{
-    if (!descriptor || !result || !machine_x64_exact_plans_ready) return false;
-    MachineEmitRecipeId recipe = descriptor->recipe;
-    if (machine_emit_recipe_category(recipe) != MACHINE_EMIT_RECIPE_CATEGORY_DIRECT) return false;
-    u16 recipe_index = machine_emit_recipe_index(recipe);
-    if (recipe_index >= BUSTER_ARRAY_LENGTH(machine_x64_exact_recipe_table)) return false;
-    u8 plan_id = machine_x64_exact_plan_id_by_recipe[recipe_index];
-    if (plan_id >= MACHINE_X64_EXACT_PLAN_COUNT) return false;
-    BusterX86MetadataExactPlan plan = machine_x64_exact_plans[plan_id];
-    if (plan.form_id != descriptor->key.form_id || plan.stable_hash != descriptor->key.stable_hash) return false;
-    *result = plan;
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder, X64ExactFormKey key,
                                                      BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
                                                      String8 const* features, u32 feature_count,
@@ -5193,52 +5260,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
         if (counters) counters->fallbacks += 1;
         return false;
     }
-    for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
-    {
-        machine_x64_emit8(encoder, exact_bytes[byte_index]);
-    }
+    memcpy(encoder->bytes + encoder->count, exact_bytes, emitted.byte_count);
+    encoder->count += emitted.byte_count;
     if (counters) counters->successes += 1;
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const* machine_x64_exact_recipe_for_opcode(u16 opcode, bool* exact_required)
+BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode)
 {
-    if (exact_required) *exact_required = false;
-    MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_find((MachineOpcode)opcode);
-    if (!registry_entry || registry_entry->producer_status != MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM)
+    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
     {
         return 0;
     }
-    if (exact_required) *exact_required = true;
-    MachineEmitRecipeId recipe = registry_entry->recipe;
-    if (machine_emit_recipe_category(recipe) != MACHINE_EMIT_RECIPE_CATEGORY_DIRECT)
-    {
-        return 0;
-    }
-    u16 index = machine_emit_recipe_index(recipe);
-    if (index >= BUSTER_ARRAY_LENGTH(machine_x64_exact_recipe_table))
-    {
-        return 0;
-    }
-    MachineX64ExactRecipe const* descriptor = machine_x64_exact_recipe_table + index;
-    return descriptor->recipe == recipe && descriptor->key.stable_hash != 0 ? descriptor : 0;
+    u32 ordinal = opcode - MACHINE_X64_MOV_RI;
+    return ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) ? machine_x64_exact_opcode_map + ordinal : 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64ExactRecipe const* descriptor,
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                        u8 const* operand_registers, u32 payload,
                                                        MachineX64ExactEmitCounters* counters)
 {
-    if ((descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
-        operand_registers[descriptor->operand_slots[0]] == operand_registers[descriptor->operand_slots[1]])
-    {
-        return true;
-    }
-    BusterX86MetadataExactPlan plan = {0};
-    if (!machine_x64_exact_plan_for_recipe(descriptor, &plan))
+    MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
+    if (!descriptor || !entry->plan_valid)
     {
         if (counters) counters->attempts += 1;
         if (counters) counters->fallbacks += 1;
         return false;
+    }
+    if ((descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
+        operand_registers[descriptor->operand_slots[0]] == operand_registers[descriptor->operand_slots[1]])
+    {
+        return true;
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
@@ -5274,7 +5326,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         }
     }
     return machine_x64_emit_exact_form(encoder, descriptor->key, operands, descriptor->operand_count,
-                                       descriptor->features, descriptor->feature_count, plan, counters);
+                                       descriptor->features, descriptor->feature_count, entry->plan, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
@@ -5847,14 +5899,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
                 edit_cursor += 1;
             }
-            bool exact_required = false;
-            MachineX64ExactRecipe const* exact_recipe = machine_x64_exact_recipe_for_opcode(instruction->opcode, &exact_required);
+            MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(instruction->opcode);
+            bool exact_required = exact_entry && exact_entry->exact_required;
             if (exact_required)
             {
                 u32 exact_start = encoder.count;
-                bool exact_emitted = exact_recipe &&
-                                     machine_x64_emit_exact_recipe(&encoder, exact_recipe, operand_registers, instruction->payload, &exact_counters);
-                if (!exact_recipe)
+                bool exact_emitted = machine_x64_emit_exact_recipe(&encoder, exact_entry, operand_registers, instruction->payload, &exact_counters);
+                if (!exact_entry)
                 {
                     // A registry row marked EXACT_FORM is itself an exact
                     // attempt even when its descriptor projection is absent
@@ -5872,14 +5923,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // authoritative.
                     encoder.overflow = true;
                 }
-                else if (exact_recipe)
+                else if (exact_entry->descriptor)
                 {
                     // Relative and symbolic forms deliberately query the
                     // metadata encoder with a neutral zero displacement. The
                     // existing machine fixup/call-site streams remain the
                     // owner of target resolution, preserving their canonical
                     // offsets and relocation semantics.
-                    if (exact_recipe->flags & MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP)
+                    if (exact_entry->descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP)
                     {
                         MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
                         *fixup = (MachineX64BranchFixup){
@@ -5887,7 +5938,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             .block = machine_ref_payload(instruction->operands[0]),
                         };
                     }
-                    if (exact_recipe->flags & MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE)
+                    if (exact_entry->descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE)
                     {
                         MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *site = (MachineCallSite){
