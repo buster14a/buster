@@ -329,6 +329,21 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_addp_cas
     {S8_INITIALIZER("addp v0.2d, v1.2d, v31.2d\n"), {0x20, 0xbc, 0xff, 0x4e}},
 };
 
+/* Exhaustive legal scalar pair reductions. Bytes are independent llvm-mc
+ * 22.1.8 literals; each row accepts S/2S and D/2D only. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_pair_fp_cases[] = {
+    {S8_INITIALIZER("faddp s0, v1.2s\n"), {0x20, 0xd8, 0x30, 0x7e}},
+    {S8_INITIALIZER("faddp d0, v1.2d\n"), {0x20, 0xd8, 0x70, 0x7e}},
+    {S8_INITIALIZER("fmaxnmp s0, v1.2s\n"), {0x20, 0xc8, 0x30, 0x7e}},
+    {S8_INITIALIZER("fmaxnmp d0, v1.2d\n"), {0x20, 0xc8, 0x70, 0x7e}},
+    {S8_INITIALIZER("fmaxp s0, v1.2s\n"), {0x20, 0xf8, 0x30, 0x7e}},
+    {S8_INITIALIZER("fmaxp d0, v1.2d\n"), {0x20, 0xf8, 0x70, 0x7e}},
+    {S8_INITIALIZER("fminnmp s0, v1.2s\n"), {0x20, 0xc8, 0xb0, 0x7e}},
+    {S8_INITIALIZER("fminnmp d0, v1.2d\n"), {0x20, 0xc8, 0xf0, 0x7e}},
+    {S8_INITIALIZER("fminp s0, v1.2s\n"), {0x20, 0xf8, 0xb0, 0x7e}},
+    {S8_INITIALIZER("fminp d0, v1.2d\n"), {0x20, 0xf8, 0xf0, 0x7e}},
+};
+
 /* Exhaustive legal vector unary forms. Bytes are independent llvm-mc 22.1.8
  * literals, not buster output. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_unary_cases[] = {
@@ -1162,12 +1177,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 268);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 268);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 122);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 206);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 273);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 273);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 117);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 211);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 57);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 52);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4376,6 +4391,74 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, invalid_addp.diagnostic_count == 1 && invalid_addp.bytes.length == 0 &&
                                    invalid_addp.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_pair_fp_cases) == 10);
+    for (u32 pair_fp_index = 0; pair_fp_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_pair_fp_cases); pair_fp_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase pair_fp_case = assembly_a64_direct_simd_pair_fp_cases[pair_fp_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, pair_fp_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, pair_fp_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, pair_fp_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult pair_fp_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("FADDP S31, V30.2S\nFADDP D31, V30.2D\n"
+           "FMAXNMP S31, V30.2S\nFMAXNMP D31, V30.2D\n"
+           "FMAXP S31, V30.2S\nFMAXP D31, V30.2D\n"
+           "FMINNMP S31, V30.2S\nFMINNMP D31, V30.2D\n"
+           "FMINP S31, V30.2S\nFMINP D31, V30.2D\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, pair_fp_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(pair_fp_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0xdb, 0x30, 0x7e,
+                                                                      0xdf, 0xdb, 0x70, 0x7e,
+                                                                      0xdf, 0xcb, 0x30, 0x7e,
+                                                                      0xdf, 0xcb, 0x70, 0x7e,
+                                                                      0xdf, 0xfb, 0x30, 0x7e,
+                                                                      0xdf, 0xfb, 0x70, 0x7e,
+                                                                      0xdf, 0xcb, 0xb0, 0x7e,
+                                                                      0xdf, 0xcb, 0xf0, 0x7e,
+                                                                      0xdf, 0xfb, 0xb0, 0x7e,
+                                                                      0xdf, 0xfb, 0xf0, 0x7e},
+                                                         40));
+    AssemblyEncodeResult pair_fp_h_regression = assembly_encode(
+        arguments->arena,
+        S8("FADDP H31, V30.2H\nFMAXNMP H31, V30.2H\nFMAXP H31, V30.2H\n"
+           "FMINNMP H31, V30.2H\nFMINP H31, V30.2H\n"),
+        (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+    BUSTER_TEST(arguments, pair_fp_h_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(pair_fp_h_regression.bytes,
+                                                         (u8 const[]){0xdf, 0xdb, 0x30, 0x5e,
+                                                                      0xdf, 0xcb, 0x30, 0x5e,
+                                                                      0xdf, 0xfb, 0x30, 0x5e,
+                                                                      0xdf, 0xcb, 0xb0, 0x5e,
+                                                                      0xdf, 0xfb, 0xb0, 0x5e},
+                                                         20));
+    static String8 const malformed_pair_fp_cases[] = {
+        S8_INITIALIZER("faddp s0, v1.2h\n"),
+        S8_INITIALIZER("faddp d0, v1.2s\n"),
+        S8_INITIALIZER("faddp s0, v1.4s\n"),
+        S8_INITIALIZER("faddp s0\n"),
+        S8_INITIALIZER("faddp s0, v1.2s, v2.2s\n"),
+        S8_INITIALIZER("faddp s32, v1.2s\n"),
+        S8_INITIALIZER("faddp s0, v1.s[0]\n"),
+        S8_INITIALIZER("faddp q0, q1\n"),
+        S8_INITIALIZER("faddp s0, x1\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_pair_fp_cases); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_pair_fp_cases[malformed_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    AssemblyEncodeResult pair_fp_h_without_full = assembly_encode(
+        arguments->arena, S8("faddp h0, v1.2h\n"), (AssemblyEncodeOptions){.target = aarch64_fp16_no_full});
+    BUSTER_TEST(arguments, pair_fp_h_without_full.diagnostic_count == 1 && pair_fp_h_without_full.bytes.length == 0 &&
+                               pair_fp_h_without_full.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_unary_cases) == 10);
     for (u32 unary_index = 0; unary_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_unary_cases); unary_index += 1)
     {
