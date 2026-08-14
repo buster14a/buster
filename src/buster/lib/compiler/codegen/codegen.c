@@ -8031,9 +8031,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         if (!instruction->atomic_signal_fence && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
                         {
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xae);
-                            codegen_emit_u8(&buffer, 0xf0);
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MFENCE"), 0, 0);
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
