@@ -331,6 +331,39 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_n
     {S8_INITIALIZER("UQXTN S31, D30\n"), {0xdf, 0x4b, 0xa1, 0x7e}},
 };
 
+/* Scalar widening multiply-accumulate rows use the generated size relation
+ * S <- H,H and D <- S,S.  IDs, digests, and bytes are pinned independently
+ * to the canonical metadata and llvm-mc 22.1.8. */
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_scalar_widen_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:SQDMLAL_asisddiff_only"), UINT64_C(0xa880474b2d693e03), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SQDMLSL_asisddiff_only"), UINT64_C(0xf39ad3663eebb936), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:SQDMULL_asisddiff_only"), UINT64_C(0x5eaf349cfe4c58fa), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_widen_cases[] = {
+    {S8_INITIALIZER("sqdmlal s0, h1, h2\n"), {0x20, 0x90, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqdmlal d0, s1, s2\n"), {0x20, 0x90, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqdmlsl s0, h1, h2\n"), {0x20, 0xb0, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqdmlsl d0, s1, s2\n"), {0x20, 0xb0, 0xa2, 0x5e}},
+    {S8_INITIALIZER("sqdmull s0, h1, h2\n"), {0x20, 0xd0, 0x62, 0x5e}},
+    {S8_INITIALIZER("sqdmull d0, s1, s2\n"), {0x20, 0xd0, 0xa2, 0x5e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_scalar_widen_boundary_cases[] = {
+    {S8_INITIALIZER("SQDMLAL S31, H30, H29\n"), {0xdf, 0x93, 0x7d, 0x5e}},
+    {S8_INITIALIZER("SQDMLAL D31, S30, S29\n"), {0xdf, 0x93, 0xbd, 0x5e}},
+    {S8_INITIALIZER("SQDMLSL S31, H30, H29\n"), {0xdf, 0xb3, 0x7d, 0x5e}},
+    {S8_INITIALIZER("SQDMLSL D31, S30, S29\n"), {0xdf, 0xb3, 0xbd, 0x5e}},
+    {S8_INITIALIZER("SQDMULL S31, H30, H29\n"), {0xdf, 0xd3, 0x7d, 0x5e}},
+    {S8_INITIALIZER("SQDMULL D31, S30, S29\n"), {0xdf, 0xd3, 0xbd, 0x5e}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cases[] = {
     {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
     {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
@@ -1789,12 +1822,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 359);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 359);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 31);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 234);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 362);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 362);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 28);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 237);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 29);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 26);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -2041,6 +2074,30 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
          expected_index += 1)
     {
         AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_scalar_narrow_spellings[expected_index];
+        u32 found_count = 0;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+    }
+
+    /* Keep the three scalar widening multiply rows tied to their canonical
+     * IDs and digests.  Their public arrangements are transform-derived, so
+     * all four table slots remain INVALID in the spelling metadata. */
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_widen_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_scalar_widen_spellings[expected_index];
         u32 found_count = 0;
         for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
         {
@@ -5540,6 +5597,87 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
                                    malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_widen_cases) == 6);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_widen_boundary_cases) == 6);
+    for (u32 scalar_widen_index = 0;
+         scalar_widen_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_widen_cases);
+         scalar_widen_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase scalar_widen_case =
+            assembly_a64_direct_simd_scalar_widen_cases[scalar_widen_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, scalar_widen_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, scalar_widen_case.bytes, 4));
+        AssemblyEncodeResult without_neon = assembly_encode(
+            arguments->arena, scalar_widen_case.source, (AssemblyEncodeOptions){.target = aarch64_fp_only});
+        BUSTER_TEST(arguments, without_neon.diagnostic_count == 1 && without_neon.bytes.length == 0 &&
+                                   without_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    for (u32 scalar_widen_index = 0;
+         scalar_widen_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_scalar_widen_boundary_cases);
+         scalar_widen_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase scalar_widen_case =
+            assembly_a64_direct_simd_scalar_widen_boundary_cases[scalar_widen_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, scalar_widen_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, scalar_widen_case.bytes, 4));
+    }
+
+    static String8 const malformed_aarch64_scalar_widen[] = {
+        /* Reserved destination/source widths and mismatched widening pairs. */
+        S8_INITIALIZER("sqdmlal b0, h1, h2\n"),
+        S8_INITIALIZER("sqdmlsl h0, s1, s2\n"),
+        S8_INITIALIZER("sqdmull d0, h1, h2\n"),
+        S8_INITIALIZER("sqdmlal s0, s1, s2\n"),
+        S8_INITIALIZER("sqdmlsl d0, h1, h2\n"),
+        S8_INITIALIZER("sqdmull s0, s1, s2\n"),
+        /* Arity, register range, lane, list, and vector forms. */
+        S8_INITIALIZER("sqdmlal s0, h1\n"),
+        S8_INITIALIZER("sqdmlsl s0, h1, h2, h3\n"),
+        S8_INITIALIZER("sqdmull s32, h1, h2\n"),
+        S8_INITIALIZER("sqdmlal s0, h32, h2\n"),
+        S8_INITIALIZER("sqdmlsl s0, h1, h32\n"),
+        S8_INITIALIZER("sqdmlal s0, h1, h2[0]\n"),
+        S8_INITIALIZER("sqdmlsl s0, {h1, h2}, h3\n"),
+        S8_INITIALIZER("sqdmull v0.2s, v1.4h, v2.4h\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_scalar_widen);
+         malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_scalar_widen[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    /* The same canonical vector spellings remain owned by the complex SIMD
+     * syntax table; adding scalar direct spellings must not erase them. */
+    static String8 const scalar_widen_complex_rows[] = {
+        S8_INITIALIZER("SQDMLAL <Va><d>, <Vb><n>, <Vb><m>"),
+        S8_INITIALIZER("SQDMLSL <Va><d>, <Vb><n>, <Vb><m>"),
+        S8_INITIALIZER("SQDMULL <Va><d>, <Vb><n>, <Vb><m>"),
+    };
+    BusterAarch64SyntaxCounts scalar_widen_syntax_counts = buster_aarch64_syntax_counts();
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(scalar_widen_complex_rows); expected_index += 1)
+    {
+        bool found = false;
+        for (u32 syntax_index = 0; syntax_index < scalar_widen_syntax_counts.row_count; syntax_index += 1)
+        {
+            BusterAarch64SyntaxRow syntax_row = {0};
+            if (buster_aarch64_syntax_row(syntax_index, &syntax_row) &&
+                string_equal(syntax_row.assembly, scalar_widen_complex_rows[expected_index]))
+            {
+                found = true;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, found);
     }
 
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_cases) == 45);
