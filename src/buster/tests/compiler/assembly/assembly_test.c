@@ -12226,7 +12226,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         // explicit-immediate spelling so the metadata fallback cannot confuse
         // an implicit ONE() operand with an ordinary immediate.
         u8 expected_apx_rol_one[] = {0xd5, 0x10, 0xd0, 0xc0};
-        u8 expected_apx_rol_immediate[] = {0xd5, 0x10, 0xc0, 0xc0, 0x01};
+        // An explicit count of one uses APX's documented implicit-ONE form;
+        // the metadata encoder therefore emits the shorter D0 /r encoding.
+        u8 expected_apx_rol_immediate[] = {0xd5, 0x10, 0xd0, 0xc0};
         AssemblyEncodeResult apx_rol_one_intel = assembly_encode(
             arguments->arena, S8("rol r16b\n"),
             (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
