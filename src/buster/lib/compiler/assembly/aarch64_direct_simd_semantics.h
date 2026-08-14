@@ -33,8 +33,19 @@ typedef enum BusterA64DirectSIMDRequirement
     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16,
     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FP16FML,
     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD,
     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT,
 } BusterA64DirectSIMDRequirement;
+
+/* Spelling-owned fixed semantic fields.  The encoder resolves the selected
+ * kind against the semantic form's field names, so generated field ordering
+ * is not part of the parser/encoder contract. */
+typedef enum BusterA64DirectSIMDFixedField
+{
+    BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_NONE,
+    BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE,
+    BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_COUNT,
+} BusterA64DirectSIMDFixedField;
 
 typedef enum BusterA64DirectSIMDStatus
 {
@@ -103,7 +114,12 @@ struct BusterA64DirectSIMDInstruction
 {
     u32 row_index;
     u8 operand_count;
-    u8 reserved[3];
+    /* A spelling-owned fixed semantic field override.  NONE is used by
+     * decoded instructions, which therefore retain every canonical raw field
+     * value. */
+    u8 fixed_field_kind;
+    u8 fixed_field_value;
+    u8 reserved[1];
     BusterA64SemanticVMValue operands[BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS];
 };
 

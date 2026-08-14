@@ -119,6 +119,8 @@ struct AssemblyAarch64DirectSIMDSpellingTest
     u8 operand_count;
     u8 requirement;
     u8 arrangements[4];
+    u8 fixed_field_kind;
+    u8 fixed_field_value;
 };
 BUSTER_F_DECL u32 assembly_test_aarch64_direct_simd_spelling_count(void);
 BUSTER_F_DECL bool assembly_test_aarch64_direct_simd_spelling_at(u32 index,

@@ -3,6 +3,7 @@
 
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_NEON == 11);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_AES == 111);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_DOTPROD == 117);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_FP_ARMV8 == 119);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_FP16FML == 120);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_FPTOINT == 121);
@@ -23,6 +24,7 @@ static TargetCpuFeatures const buster_a64_direct_simd_requirement_masks[BUSTER_A
     [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FULLFP16] = {{0, UINT64_C(1) << 57, 0, 0}},
     [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FP16FML] = {{UINT64_C(1) << 10, UINT64_C(1) << 55, 0, 0}},
     [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT] = {{UINT64_C(1) << 10, UINT64_C(1) << 56, 0, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD] = {{UINT64_C(1) << 10, UINT64_C(1) << 52, 0, 0}},
 };
 
 bool buster_a64_direct_simd_requirement_features(u8 requirement, TargetCpuFeatures* result)
@@ -238,6 +240,44 @@ static bool buster_a64_direct_simd_find_field(BusterA64SemanticForm form, Buster
         }
     }
     return count == 1;
+}
+
+static bool buster_a64_direct_simd_find_field_cstr(BusterA64SemanticForm form, char8 const* name, u32* local)
+{
+    if (!name || !local)
+    {
+        return false;
+    }
+    BusterA64SemanticString semantic_name = {0};
+    for (u32 index = 0; index < form.field_count; index += 1)
+    {
+        BusterA64SemanticString candidate = {0};
+        if (!buster_a64_direct_simd_field_name(form, index, &candidate))
+        {
+            return false;
+        }
+        if (buster_a64_direct_simd_semantic_equal_cstr(candidate, name))
+        {
+            semantic_name = candidate;
+            break;
+        }
+    }
+    return semantic_name.length != 0 && buster_a64_direct_simd_find_field(form, semantic_name, local);
+}
+
+static bool buster_a64_direct_simd_fixed_field_local(BusterA64SemanticForm form, u8 kind, u32* local)
+{
+    if (!local)
+    {
+        return false;
+    }
+    switch ((BusterA64DirectSIMDFixedField)kind)
+    {
+    case BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE:
+        return buster_a64_direct_simd_find_field_cstr(form, "size", local);
+    default:
+        return false;
+    }
 }
 
 static bool buster_a64_direct_simd_assign_field(BusterA64SemanticForm form, u32 local, u32 value, u32* fields, u64* assigned)
@@ -1362,6 +1402,15 @@ BusterA64DirectSIMDStatus buster_a64_direct_simd_encode(Target target, BusterA64
         if (!buster_a64_semantic_operand(form.operand_first + index, &operand) ||
             !buster_a64_direct_simd_encode_operand(instruction->row_index, form, index, operand, instruction->operands, instruction->operands[index], fields,
                                                    &assigned))
+        {
+            return BUSTER_A64_DIRECT_SIMD_STATUS_RANGE;
+        }
+    }
+    if (instruction->fixed_field_kind != BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_NONE)
+    {
+        u32 local = 0;
+        if (!buster_a64_direct_simd_fixed_field_local(form, instruction->fixed_field_kind, &local) ||
+            !buster_a64_direct_simd_assign_field(form, local, instruction->fixed_field_value, fields, &assigned))
         {
             return BUSTER_A64_DIRECT_SIMD_STATUS_RANGE;
         }

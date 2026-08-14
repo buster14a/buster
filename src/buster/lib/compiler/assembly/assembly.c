@@ -439,7 +439,8 @@ struct AssemblyInstruction
     u8 aarch64_direct_simd_gpr_widths[4];
     u8 aarch64_scalar_integer_operand_count;
     u8 aarch64_scalar_integer_modifier_count;
-    u8 aarch64_scalar_integer_reserved[2];
+    u8 aarch64_direct_simd_fixed_field_kind;
+    u8 aarch64_direct_simd_fixed_field_value;
     A64ScalarIntOperand aarch64_scalar_integer_operands[4];
     A64ScalarIntModifier aarch64_scalar_integer_modifiers[1];
     BusterAarch64ControlInstruction aarch64_control_instruction;
@@ -1504,6 +1505,8 @@ struct AssemblyInstructionInfo
     u8 aarch64_direct_simd_generated;
     u8 aarch64_direct_simd_requirement;
     BusterA64DirectSIMDArrangement aarch64_direct_simd_arrangements[4];
+    u8 aarch64_direct_simd_fixed_field_kind;
+    u8 aarch64_direct_simd_fixed_field_value;
     AssemblyAmdForm const* amd_form;
 };
 
@@ -2212,6 +2215,9 @@ struct AssemblyAarch64DirectSIMDSpelling
     u8 operand_count;
     u8 requirement;
     BusterA64DirectSIMDArrangement arrangements[4];
+    /* Spelling-owned semantic field kind; NONE means no override. */
+    u8 fixed_field_kind;
+    u8 fixed_field_value;
 };
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_direct_simd_spellings[] = {
@@ -3475,6 +3481,16 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("sdot"), UINT64_C(0x1aab66d054562284), S8_INITIALIZER("arm-a64@2026-06:SDOT_asimdsame2_D"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE, 2},
+    {S8_INITIALIZER("udot"), UINT64_C(0xd40495bc9d9aacdf), S8_INITIALIZER("arm-a64@2026-06:UDOT_asimdsame2_D"), 3,
+     BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID},
+     BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE, 2},
 };
 
 #if BUSTER_INCLUDE_TESTS
@@ -3498,7 +3514,9 @@ bool assembly_test_aarch64_direct_simd_spelling_at(u32 index, AssemblyAarch64Dir
                                                       .arrangements = {(u8)spelling.arrangements[0],
                                                                        (u8)spelling.arrangements[1],
                                                                        (u8)spelling.arrangements[2],
-                                                                       (u8)spelling.arrangements[3]}};
+                                                                       (u8)spelling.arrangements[3]},
+                                                      .fixed_field_kind = spelling.fixed_field_kind,
+                                                      .fixed_field_value = spelling.fixed_field_value};
     return true;
 }
 #endif
@@ -3599,6 +3617,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
         .aarch64_direct_simd_spelling_count = (u8)spelling_count,
         .aarch64_direct_simd_generated = generated,
         .aarch64_direct_simd_requirement = first_spelling.requirement,
+        .aarch64_direct_simd_fixed_field_kind = first_spelling.fixed_field_kind,
+        .aarch64_direct_simd_fixed_field_value = first_spelling.fixed_field_value,
     };
     memcpy(result->aarch64_direct_simd_arrangements, first_spelling.arrangements, sizeof(result->aarch64_direct_simd_arrangements));
     return true;
@@ -7869,7 +7889,10 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
         {
             return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE;
         }
-        BusterA64DirectSIMDInstruction fixed_instruction = {.row_index = row_index, .operand_count = (u8)token_count};
+        BusterA64DirectSIMDInstruction fixed_instruction = {.row_index = row_index,
+                                                            .operand_count = (u8)token_count,
+                                                            .fixed_field_kind = spelling.fixed_field_kind,
+                                                            .fixed_field_value = spelling.fixed_field_value};
         for (u32 operand_index = 0; operand_index < token_count; operand_index += 1)
         {
             if (gpr_widths[operand_index] != 0)
@@ -7984,6 +8007,8 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_di
     {
         return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
     }
+    instruction.fixed_field_kind = spelling.fixed_field_kind;
+    instruction.fixed_field_value = spelling.fixed_field_value;
     if (!buster_a64_direct_simd_requirement_supported(target, spelling.requirement))
     {
         return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE;
@@ -8027,6 +8052,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse_generate
     BusterA64DirectSIMDArrangement match_arrangements[4] = {0};
     u32 match_conditions[4] = {0};
     u8 match_gpr_widths[4] = {0};
+    u8 match_fixed_field_kind = BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_NONE;
+    u8 match_fixed_field_value = 0;
     bool feature_missing = false;
     for (u32 offset = 0; offset < spelling_count; offset += 1)
     {
@@ -8068,6 +8095,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse_generate
             memcpy(match_arrangements, arrangements, sizeof(match_arrangements));
             memcpy(match_conditions, conditions, sizeof(match_conditions));
             memcpy(match_gpr_widths, gpr_widths, sizeof(match_gpr_widths));
+            match_fixed_field_kind = spelling.fixed_field_kind;
+            match_fixed_field_value = spelling.fixed_field_value;
         }
     }
     if (match_count != 1)
@@ -8081,6 +8110,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse_generate
     }
     instruction->aarch64_direct_simd_row_index = match_row_index;
     instruction->operand_count = (u8)token_count;
+    instruction->aarch64_direct_simd_fixed_field_kind = match_fixed_field_kind;
+    instruction->aarch64_direct_simd_fixed_field_value = match_fixed_field_value;
     for (u32 index = 0; index < token_count; index += 1)
     {
         instruction->aarch64_direct_simd_registers[index] = (u8)match_registers[index];
@@ -8982,6 +9013,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
                                     (u32)operands.length, S8("invalid AArch64 direct SIMD instruction operands"));
             }
             return;
+        }
+        if (!info.aarch64_direct_simd_generated && info.aarch64_direct_simd_spelling_count <= 1)
+        {
+            instruction.aarch64_direct_simd_fixed_field_kind = info.aarch64_direct_simd_fixed_field_kind;
+            instruction.aarch64_direct_simd_fixed_field_value = info.aarch64_direct_simd_fixed_field_value;
         }
         builder->instructions[builder->instruction_count++] = instruction;
         return;
@@ -13210,6 +13246,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                     S8("AArch64 direct SIMD instruction could not be encoded"));
                 return;
             }
+            direct_simd_instruction.fixed_field_kind = instruction->aarch64_direct_simd_fixed_field_kind;
+            direct_simd_instruction.fixed_field_value = instruction->aarch64_direct_simd_fixed_field_value;
             BusterA64DirectSIMDStatus status = buster_a64_direct_simd_encode(
                 builder->target, &direct_simd_instruction, &word);
             if (status != BUSTER_A64_DIRECT_SIMD_STATUS_OK)

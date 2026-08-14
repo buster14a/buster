@@ -187,6 +187,30 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_frintts_
     {S8_INITIALIZER("FRINT64Z V31.2D, V30.2D\n"), {0xdf, 0xfb, 0x61, 0x4e}},
 };
 
+/* SDOT/UDOT AdvSIMD rows require LLVM's HasDotProd predicate.  These bytes
+ * are independent llvm-mc 22.1.8 encodings and cover both legal destination
+ * and source arrangements for each direct row. */
+static AssemblyA64DirectSIMDSpellingExpectation const assembly_a64_direct_simd_dotprod_spellings[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:SDOT_asimdsame2_D"), UINT64_C(0x1aab66d054562284), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("arm-a64@2026-06:UDOT_asimdsame2_D"), UINT64_C(0xd40495bc9d9aacdf), 3,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_dotprod_cases[] = {
+    {S8_INITIALIZER("sdot v0.2s, v1.8b, v2.8b\n"), {0x20, 0x94, 0x82, 0x0e}},
+    {S8_INITIALIZER("sdot v0.4s, v1.16b, v2.16b\n"), {0x20, 0x94, 0x82, 0x4e}},
+    {S8_INITIALIZER("udot v0.2s, v1.8b, v2.8b\n"), {0x20, 0x94, 0x82, 0x2e}},
+    {S8_INITIALIZER("udot v0.4s, v1.16b, v2.16b\n"), {0x20, 0x94, 0x82, 0x6e}},
+};
+
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_dotprod_boundary_cases[] = {
+    {S8_INITIALIZER("SDOT V31.4S, V30.16B, V29.16B\n"), {0xdf, 0x97, 0x9d, 0x4e}},
+    {S8_INITIALIZER("UDOT V31.4S, V30.16B, V29.16B\n"), {0xdf, 0x97, 0x9d, 0x6e}},
+};
+
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fp16_cases[] = {
     {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
     {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
@@ -1401,10 +1425,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     u32 direct_simd_compound_requirement_count = 0;
     u32 direct_simd_fhm_requirement_count = 0;
     u32 direct_simd_frintts_requirement_count = 0;
+    u32 direct_simd_dotprod_requirement_count = 0;
     u32 direct_simd_fcsel_row_count = 0;
     bool direct_simd_compound_requirement_exact = true;
     bool direct_simd_fhm_requirement_exact = true;
     bool direct_simd_frintts_requirement_exact = true;
+    bool direct_simd_dotprod_requirement_exact = true;
+    bool direct_simd_dotprod_fixed_field_exact = true;
     bool direct_simd_fcsel_rows_exact = true;
     bool direct_simd_first_fp16_row_exact = false;
     bool direct_simd_last_fp16_row_exact = false;
@@ -1466,6 +1493,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                 direct_simd_frintts_requirement_exact && spelling_required_features.words[0] == (UINT64_C(1) << 10) &&
                 spelling_required_features.words[1] == (UINT64_C(1) << 56) && spelling_required_features.words[2] == 0 &&
                 spelling_required_features.words[3] == 0;
+        }
+        if (spelling_valid && spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD)
+        {
+            direct_simd_dotprod_requirement_count += 1;
+            direct_simd_dotprod_requirement_exact =
+                direct_simd_dotprod_requirement_exact && spelling_required_features.words[0] == (UINT64_C(1) << 10) &&
+                spelling_required_features.words[1] == (UINT64_C(1) << 52) && spelling_required_features.words[2] == 0 &&
+                spelling_required_features.words[3] == 0;
+            direct_simd_dotprod_fixed_field_exact = direct_simd_dotprod_fixed_field_exact &&
+                                                     spelling.fixed_field_kind == BUSTER_A64_DIRECT_SIMD_FIXED_FIELD_SIZE &&
+                                                     spelling.fixed_field_value == 2;
         }
         if (spelling_valid && string_equal(spelling.semantic_id, S8("arm-a64@2026-06:FABD_asimdsamefp16_only")))
         {
@@ -1621,17 +1659,19 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 347);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 347);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 43);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 222);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 349);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 349);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 41);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 224);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 125);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 41);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 39);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 2);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_fhm_requirement_count == 4 && direct_simd_fhm_requirement_exact);
     BUSTER_TEST(arguments, direct_simd_frintts_requirement_count == 4 && direct_simd_frintts_requirement_exact);
+    BUSTER_TEST(arguments, direct_simd_dotprod_requirement_count == 2 && direct_simd_dotprod_requirement_exact);
+    BUSTER_TEST(arguments, direct_simd_dotprod_fixed_field_exact);
     BUSTER_TEST(arguments, direct_simd_fcsel_row_count == 3 && direct_simd_fcsel_rows_exact);
     BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
     arguments->show(arguments,
@@ -1741,6 +1781,40 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         else
         {
             BUSTER_TEST(arguments, found_index == frintts_first_spelling_index + expected_index);
+        }
+    }
+
+    /* Keep the two DotProd transform rows tied to their canonical IDs/digests
+     * and contiguous in the public spelling table. */
+    u32 dotprod_first_spelling_index = UINT32_MAX;
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_spellings);
+         expected_index += 1)
+    {
+        AssemblyA64DirectSIMDSpellingExpectation expected = assembly_a64_direct_simd_dotprod_spellings[expected_index];
+        u32 found_count = 0;
+        u32 found_index = UINT32_MAX;
+        for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+            if (assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                spelling.source_digest == expected.source_digest)
+            {
+                found_count += 1;
+                found_index = spelling_index;
+                BUSTER_TEST(arguments, string_equal(spelling.semantic_id, expected.semantic_id) &&
+                                           spelling.operand_count == expected.operand_count &&
+                                           spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD &&
+                                           memcmp(spelling.arrangements, expected.arrangements, sizeof(expected.arrangements)) == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_count == 1);
+        if (expected_index == 0)
+        {
+            dotprod_first_spelling_index = found_index;
+        }
+        else
+        {
+            BUSTER_TEST(arguments, found_index == dotprod_first_spelling_index + expected_index);
         }
     }
 
@@ -4792,6 +4866,25 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target aarch64_frintts_invalid_no_fp = aarch64_frintts_target;
     aarch64_frintts_invalid_no_fp.cpu_features = target_cpu_features_from_array(
         (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_NEON, TARGET_CPU_FEATURE_AARCH64_FPTOINT}, 2);
+    Target aarch64_dotprod_target = aarch64_fp16_both;
+    aarch64_dotprod_target.cpu_model = CPU_MODEL_BASELINE;
+    aarch64_dotprod_target.cpu_features_explicit = true;
+    aarch64_dotprod_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_NEON,
+                                   TARGET_CPU_FEATURE_AARCH64_DOTPROD},
+        3);
+    Target aarch64_dotprod_no_dotprod = aarch64_dotprod_target;
+    aarch64_dotprod_no_dotprod.cpu_features = target_cpu_features_remove(aarch64_dotprod_no_dotprod.cpu_features,
+                                                                          TARGET_CPU_FEATURE_AARCH64_DOTPROD);
+    Target aarch64_dotprod_no_neon = aarch64_dotprod_target;
+    aarch64_dotprod_no_neon.cpu_features = target_cpu_features_remove(aarch64_dotprod_no_neon.cpu_features,
+                                                                       TARGET_CPU_FEATURE_AARCH64_NEON);
+    Target aarch64_dotprod_no_both = aarch64_dotprod_no_dotprod;
+    aarch64_dotprod_no_both.cpu_features = target_cpu_features_remove(aarch64_dotprod_no_both.cpu_features,
+                                                                       TARGET_CPU_FEATURE_AARCH64_NEON);
+    Target aarch64_dotprod_invalid_no_fp = aarch64_dotprod_target;
+    aarch64_dotprod_invalid_no_fp.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_NEON, TARGET_CPU_FEATURE_AARCH64_DOTPROD}, 2);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_both));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_full));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_neon));
@@ -4808,6 +4901,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_frintts_no_fptoint));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_frintts_no_neon));
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_frintts_invalid_no_fp));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_dotprod_target));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_dotprod_no_dotprod));
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_dotprod_no_neon));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_dotprod_no_both));
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(aarch64_dotprod_invalid_no_fp));
     TargetCpuFeatures invalid_requirement_features = {0};
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON, 0));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE,
@@ -4827,6 +4925,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     TargetCpuFeatures fullfp16_requirement_features = {0};
     TargetCpuFeatures fhm_requirement_features = {0};
     TargetCpuFeatures frintts_requirement_features = {0};
+    TargetCpuFeatures dotprod_requirement_features = {0};
     BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP,
                                                                         &fp_requirement_features) &&
                                fp_requirement_features.words[0] == 0 &&
@@ -4847,6 +4946,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                frintts_requirement_features.words[0] == (UINT64_C(1) << 10) &&
                                frintts_requirement_features.words[1] == (UINT64_C(1) << 56) &&
                                frintts_requirement_features.words[2] == 0 && frintts_requirement_features.words[3] == 0);
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD,
+                                                                        &dotprod_requirement_features) &&
+                               dotprod_requirement_features.words[0] == (UINT64_C(1) << 10) &&
+                               dotprod_requirement_features.words[1] == (UINT64_C(1) << 52) &&
+                               dotprod_requirement_features.words[2] == 0 && dotprod_requirement_features.words[3] == 0);
     BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_fp_only,
                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_FP));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_no_fp,
@@ -4872,7 +4976,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_frintts_no_neon,
                                                                            BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
     BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_frintts_invalid_no_fp,
-                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FPTOINT));
+    BUSTER_TEST(arguments, buster_a64_direct_simd_requirement_supported(aarch64_dotprod_target,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_dotprod_no_dotprod,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_dotprod_no_neon,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_dotprod_no_both,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_dotprod_invalid_no_fp,
+                                                                          BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_DOTPROD));
 
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_cases) == 12);
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_frintts_boundary_cases) == 4);
@@ -4922,6 +5036,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, invalid_aarch64_frintts[invalid_index], (AssemblyEncodeOptions){.target = aarch64_frintts_target});
         BUSTER_TEST(arguments, invalid_case.diagnostic_count == 1 && invalid_case.bytes.length == 0 &&
                                    invalid_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_cases) == 4);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_boundary_cases) == 2);
+    for (u32 dotprod_index = 0; dotprod_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_cases); dotprod_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase dotprod_case = assembly_a64_direct_simd_dotprod_cases[dotprod_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, dotprod_case.source, (AssemblyEncodeOptions){.target = aarch64_dotprod_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, dotprod_case.bytes, 4));
+    }
+    for (u32 dotprod_index = 0; dotprod_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_boundary_cases); dotprod_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase dotprod_case = assembly_a64_direct_simd_dotprod_boundary_cases[dotprod_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, dotprod_case.source, (AssemblyEncodeOptions){.target = aarch64_dotprod_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, dotprod_case.bytes, 4));
+    }
+    Target const dotprod_negative_targets[] = {
+        aarch64_dotprod_no_dotprod,
+        aarch64_dotprod_no_neon,
+        aarch64_dotprod_no_both,
+        aarch64_dotprod_invalid_no_fp,
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(dotprod_negative_targets); target_index += 1)
+    {
+        for (u32 dotprod_index = 0; dotprod_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_dotprod_cases); dotprod_index += 1)
+        {
+            AssemblyEncodeResult without_feature = assembly_encode(
+                arguments->arena, assembly_a64_direct_simd_dotprod_cases[dotprod_index].source,
+                (AssemblyEncodeOptions){.target = dotprod_negative_targets[target_index]});
+            BUSTER_TEST(arguments, without_feature.diagnostic_count == 1 && without_feature.bytes.length == 0 &&
+                                       without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        }
+    }
+    static String8 const malformed_aarch64_dotprod[] = {
+        S8_INITIALIZER("sdot v0.2s, v1.4b, v2.8b\n"),
+        S8_INITIALIZER("sdot v0.2s, v1.8b, v2.16b\n"),
+        S8_INITIALIZER("sdot v0.4s, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("sdot v0.2d, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("sdot q0, q1, q2\n"),
+        S8_INITIALIZER("sdot s0, s1, s2\n"),
+        S8_INITIALIZER("sdot v0.2s, v1.8b, v2.8b[0]\n"),
+        S8_INITIALIZER("sdot {v0.2s, v1.2s}, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("sdot v0.2s, v1.8b\n"),
+        S8_INITIALIZER("sdot v0.2s, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("sdot v32.2s, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("sdot v0.2s, v32.8b, v2.8b\n"),
+        S8_INITIALIZER("sdot v0.2s, v1.8b, v32.8b\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_dotprod); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_dotprod[malformed_index], (AssemblyEncodeOptions){.target = aarch64_dotprod_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_gpr_cases) == 45);
