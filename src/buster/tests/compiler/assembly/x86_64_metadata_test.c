@@ -8328,6 +8328,42 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ADCX"), 7911, adcx64_operands, 2,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard_features, 1,
                                                                  (u8 const[]){0x66, 0x48, 0x0f, 0x38, 0xf6, 0xca}, 6));
+
+        // Unsized source memory is accepted for CMPXCHG8B/16B, whose
+        // architectural forms carry fixed qword/double-quadword widths.
+        // The checked public encoder must infer those widths before form
+        // selection while retaining LOCK and CX16 feature semantics.
+        BusterX86MetadataPhysicalOperand cmpxchg8b_unsized = x86_64_metadata_test_physical_mem_base(8, 0, 0);
+        BusterX86MetadataPhysicalQuery cmpxchg8b_unsized_query = x86_64_metadata_test_physical_query(
+            S8("CMPXCHG8B"), &cmpxchg8b_unsized, 1,
+            (BusterX86MetadataPhysicalAttributes){.lock = true}, wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features));
+        cmpxchg8b_unsized_query.source_semantics = true;
+        u8 cmpxchg_unsized_bytes[8] = {0};
+        BusterX86MetadataEmitResult cmpxchg8b_unsized_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = cmpxchg8b_unsized_query,
+            .output = cmpxchg_unsized_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(cmpxchg_unsized_bytes),
+        });
+        BUSTER_TEST(arguments, cmpxchg8b_unsized_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       cmpxchg8b_unsized_emit.form_id == 9526 && cmpxchg8b_unsized_emit.byte_count == 5 &&
+                                       x86_64_metadata_test_bytes_equal(cmpxchg_unsized_bytes, 5,
+                                                                         (u8 const[]){0xf0, 0x41, 0x0f, 0xc7, 0x08}, 5));
+        String8 cmpxchg16b_features[1] = {S8("cx16")};
+        BusterX86MetadataPhysicalOperand cmpxchg16b_unsized = x86_64_metadata_test_physical_mem_base(14, 0, 0);
+        BusterX86MetadataPhysicalQuery cmpxchg16b_unsized_query = x86_64_metadata_test_physical_query(
+            S8("CMPXCHG16B"), &cmpxchg16b_unsized, 1,
+            (BusterX86MetadataPhysicalAttributes){.lock = true}, cmpxchg16b_features,
+            BUSTER_ARRAY_LENGTH(cmpxchg16b_features));
+        cmpxchg16b_unsized_query.source_semantics = true;
+        BusterX86MetadataEmitResult cmpxchg16b_unsized_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = cmpxchg16b_unsized_query,
+            .output = cmpxchg_unsized_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(cmpxchg_unsized_bytes),
+        });
+        BUSTER_TEST(arguments, cmpxchg16b_unsized_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       cmpxchg16b_unsized_emit.form_id == 9529 && cmpxchg16b_unsized_emit.byte_count == 5 &&
+                                       x86_64_metadata_test_bytes_equal(cmpxchg_unsized_bytes, 5,
+                                                                         (u8 const[]){0xf0, 0x49, 0x0f, 0xc7, 0x0e}, 5));
     }
 
     {

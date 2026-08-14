@@ -7003,6 +7003,32 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_memory_projection(
     return true;
 }
 
+// The source parser accepts unsized memory for CMPXCHG8B/16B, while their
+// architectural rows carry fixed qword/double-quadword memory widths.  Keep
+// that source form checked by projecting only the exact one-memory spelling;
+// ordinary sized memory and all other mnemonics retain their requested width.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_cmpxchg_memory_projection(
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* projected_operand,
+    BusterX86MetadataPhysicalQuery* projected_query)
+{
+    if (!projected_operand || !projected_query || query.operand_count != 1 || !query.operands ||
+        query.operands[0].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || query.operands[0].width)
+        return false;
+    u16 width = 0;
+    if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("CMPXCHG8B")))
+        width = 64;
+    else if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("CMPXCHG16B")))
+        width = 128;
+    else
+        return false;
+    *projected_operand = query.operands[0];
+    projected_operand->width = width;
+    projected_operand->memory.source_width = width;
+    *projected_query = query;
+    projected_query->operands = projected_operand;
+    return true;
+}
+
 // APX NDD rows carry one additional source operand (or the second explicit
 // register of PUSH2/POP2), while the parser's physical query intentionally
 // leaves APX_NDD unset unless an explicit {ndd} decorator was written.  Infer
@@ -7064,6 +7090,10 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
     BusterX86MetadataPhysicalQuery nop_projected_query = {0};
     if (buster_x86_metadata_nop_memory_projection(query, &nop_projected_operand, &nop_projected_query))
         return buster_x86_metadata_select_form(nop_projected_query);
+    BusterX86MetadataPhysicalOperand cmpxchg_projected_operand = {0};
+    BusterX86MetadataPhysicalQuery cmpxchg_projected_query = {0};
+    if (buster_x86_metadata_cmpxchg_memory_projection(query, &cmpxchg_projected_operand, &cmpxchg_projected_query))
+        return buster_x86_metadata_select_form(cmpxchg_projected_query);
     BusterX86MetadataPhysicalQuery apx_projected_query = {0};
     if (buster_x86_metadata_apx_ndd_projection(query, &apx_projected_query))
     {
@@ -7289,6 +7319,8 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
     BusterX86MetadataPhysicalOperand nop_projected_operand = {0};
     BusterX86MetadataPhysicalQuery physical_query = query.physical;
     buster_x86_metadata_nop_memory_projection(query.physical, &nop_projected_operand, &physical_query);
+    BusterX86MetadataPhysicalOperand cmpxchg_projected_operand = {0};
+    buster_x86_metadata_cmpxchg_memory_projection(query.physical, &cmpxchg_projected_operand, &physical_query);
     BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(physical_query);
     result.status = selection.status;
     result.form_id = selection.form_id;
