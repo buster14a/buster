@@ -9642,12 +9642,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_operands,
                                                                        BUSTER_ARRAY_LENGTH(store_operands)))
                             {
-                                codegen_emit_u8(&buffer, (u8)(part * 8));
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x4c);
-                            codegen_emit_u8(&buffer, 0x89);
-                            codegen_emit_u8(&buffer, 0x85);
-                            codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)(part * 8)));
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_CALL)
