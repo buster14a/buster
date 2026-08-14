@@ -4271,12 +4271,26 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 {
                     return false;
                 }
-                codegen_emit_u8(&builder.buffer, 0x48);
-                codegen_emit_u8(&builder.buffer, 0xb9);
-                codegen_emit_u64(&builder.buffer, element->bit_width == 32 ? (u64)1 << 31 : (u64)1 << 63);
-                codegen_emit_u8(&builder.buffer, 0x48);
-                codegen_emit_u8(&builder.buffer, 0x31);
-                codegen_emit_u8(&builder.buffer, 0xc8);
+                BusterX86MetadataPhysicalOperand sign_mask_operands[2] = {
+                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
+                    codegen_canonical_x64_metadata_immediate(INT64_C(0x80000000), 32),
+                };
+                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("MOV"), sign_mask_operands,
+                                                           BUSTER_ARRAY_LENGTH(sign_mask_operands));
+                if (element->bit_width == 64)
+                {
+                    BusterX86MetadataPhysicalOperand shift_operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                        codegen_canonical_x64_metadata_immediate(32, 8),
+                    };
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("SHL"), shift_operands,
+                                                               BUSTER_ARRAY_LENGTH(shift_operands));
+                }
+                BusterX86MetadataPhysicalOperand xor_operands[2] = {
+                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                };
+                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("XOR"), xor_operands, BUSTER_ARRAY_LENGTH(xor_operands));
             }
             else if (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE)
             {
@@ -4284,9 +4298,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 {
                     return false;
                 }
-                codegen_emit_u8(&builder.buffer, 0x48);
-                codegen_emit_u8(&builder.buffer, 0xf7);
-                codegen_emit_u8(&builder.buffer, 0xd8);
+                BusterX86MetadataPhysicalOperand unary_operands[] = {codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64)};
+                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NEG"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands));
             }
             else if (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)
             {
@@ -4294,9 +4307,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 {
                     return false;
                 }
-                codegen_emit_u8(&builder.buffer, 0x48);
-                codegen_emit_u8(&builder.buffer, 0xf7);
-                codegen_emit_u8(&builder.buffer, 0xd0);
+                BusterX86MetadataPhysicalOperand unary_operands[] = {codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64)};
+                (void)codegen_canonical_x64_metadata_emit(&builder.buffer, S8("NOT"), unary_operands, BUSTER_ARRAY_LENGTH(unary_operands));
             }
             else
             {
@@ -4328,10 +4340,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 {
                     return false;
                 }
-                codegen_emit_u8(&builder.buffer, element->bit_width == 32 ? 0xf3 : 0xf2);
-                codegen_emit_u8(&builder.buffer, 0x0f);
-                codegen_emit_u8(&builder.buffer, opcode);
-                codegen_emit_u8(&builder.buffer, 0xc1);
+                String8 mnemonic = element->bit_width == 32
+                                       ? (opcode == 0x58 ? S8("ADDSS")
+                                          : opcode == 0x5c ? S8("SUBSS")
+                                          : opcode == 0x59 ? S8("MULSS")
+                                                           : S8("DIVSS"))
+                                       : (opcode == 0x58 ? S8("ADDSD")
+                                          : opcode == 0x5c ? S8("SUBSD")
+                                          : opcode == 0x59 ? S8("MULSD")
+                                                           : S8("DIVSD"));
+                BusterX86MetadataPhysicalOperand operands[2] = {
+                    codegen_canonical_x64_metadata_vector(0, (u16)element->bit_width),
+                    codegen_canonical_x64_metadata_vector(1, (u16)element->bit_width),
+                };
+                String8 feature_names[] = {element->bit_width == 32 ? S8("sse") : S8("sse2")};
+                (void)codegen_canonical_x64_metadata_emit_features(
+                    &builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                    (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
                 x64_emit_store_float_bits(&builder, X64_REGISTER_R10, offset, 0, lane_size);
                 continue;
             }
@@ -4360,30 +4385,25 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
                 switch (operation)
                 {
                 case IR_BINARY_VECTOR_INTEGER_ADD:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0x01);
-                    codegen_emit_u8(&builder.buffer, 0xc8);
-                    break;
                 case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0x29);
-                    codegen_emit_u8(&builder.buffer, 0xc8);
-                    break;
                 case IR_BINARY_VECTOR_INTEGER_MULTIPLY:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, 0x0f);
-                    codegen_emit_u8(&builder.buffer, 0xaf);
-                    codegen_emit_u8(&builder.buffer, 0xc1);
-                    break;
                 case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
                 case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
                 case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
-                    codegen_emit_u8(&builder.buffer, 0x48);
-                    codegen_emit_u8(&builder.buffer, operation == IR_BINARY_VECTOR_INTEGER_BITWISE_AND  ? 0x21
-                                                     : operation == IR_BINARY_VECTOR_INTEGER_BITWISE_OR ? 0x09
-                                                                                                        : 0x31);
-                    codegen_emit_u8(&builder.buffer, 0xc8);
+                {
+                    String8 mnemonic = operation == IR_BINARY_VECTOR_INTEGER_ADD        ? S8("ADD")
+                                       : operation == IR_BINARY_VECTOR_INTEGER_SUBTRACT   ? S8("SUB")
+                                       : operation == IR_BINARY_VECTOR_INTEGER_MULTIPLY   ? S8("IMUL")
+                                       : operation == IR_BINARY_VECTOR_INTEGER_BITWISE_AND ? S8("AND")
+                                       : operation == IR_BINARY_VECTOR_INTEGER_BITWISE_OR  ? S8("OR")
+                                                                                           : S8("XOR");
+                    BusterX86MetadataPhysicalOperand operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                    };
+                    (void)codegen_canonical_x64_metadata_emit(&builder.buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands));
                     break;
+                }
                 case IR_BINARY_VECTOR_SHIFT_LEFT:
                 case IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT:
                 case IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT:
