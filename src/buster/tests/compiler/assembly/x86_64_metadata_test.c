@@ -3461,6 +3461,57 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                         memcmp(source_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0 &&
                         memcmp(codegen_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
         BUSTER_TEST(arguments, shift_cl);
+
+        // Codegen queries intentionally carry no feature list.  A fixed
+        // low-GPR shift must stay on the baseline D3/C1/D1 rows; the APX
+        // NDD siblings have the same physical arity when CL or ONE is hidden
+        // and must not preempt the legacy candidate with a feature failure.
+        BusterX86MetadataPhysicalOperand no_feature_cl_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 8),
+        };
+        BusterX86MetadataPhysicalOperand no_feature_imm_operands[2] = {
+            no_feature_cl_operands[0],
+            x86_64_metadata_test_physical_imm(5, 8),
+        };
+        BusterX86MetadataPhysicalOperand no_feature_one_operands[2] = {
+            no_feature_cl_operands[0],
+            x86_64_metadata_test_physical_imm(1, 8),
+        };
+        BusterX86MetadataPhysicalQuery no_feature_cl_query = x86_64_metadata_test_physical_query(
+            S8("SHL"), no_feature_cl_operands, BUSTER_ARRAY_LENGTH(no_feature_cl_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        BusterX86MetadataPhysicalQuery no_feature_imm_query = x86_64_metadata_test_physical_query(
+            S8("SHL"), no_feature_imm_operands, BUSTER_ARRAY_LENGTH(no_feature_imm_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        BusterX86MetadataPhysicalQuery no_feature_one_query = x86_64_metadata_test_physical_query(
+            S8("SHL"), no_feature_one_operands, BUSTER_ARRAY_LENGTH(no_feature_one_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        u8 no_feature_cl_bytes[8] = {0};
+        u8 no_feature_imm_bytes[8] = {0};
+        u8 no_feature_one_bytes[8] = {0};
+        BusterX86MetadataEmitResult no_feature_cl = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = no_feature_cl_query, .output = no_feature_cl_bytes,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(no_feature_cl_bytes)});
+        BusterX86MetadataEmitResult no_feature_imm = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = no_feature_imm_query, .output = no_feature_imm_bytes,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(no_feature_imm_bytes)});
+        BusterX86MetadataEmitResult no_feature_one = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = no_feature_one_query, .output = no_feature_one_bytes,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(no_feature_one_bytes)});
+        static u8 const no_feature_cl_expected[] = {0x48, 0xd3, 0xe0};
+        static u8 const no_feature_imm_expected[] = {0x48, 0xc1, 0xe0, 0x05};
+        static u8 const no_feature_one_expected[] = {0x48, 0xd1, 0xe0};
+        bool no_feature_shifts = no_feature_cl.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && no_feature_cl.form_id == 9428 &&
+                                 no_feature_cl.byte_count == BUSTER_ARRAY_LENGTH(no_feature_cl_expected) &&
+                                 memcmp(no_feature_cl_bytes, no_feature_cl_expected, BUSTER_ARRAY_LENGTH(no_feature_cl_expected)) == 0 &&
+                                 no_feature_imm.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && no_feature_imm.form_id == 9380 &&
+                                 no_feature_imm.byte_count == BUSTER_ARRAY_LENGTH(no_feature_imm_expected) &&
+                                 memcmp(no_feature_imm_bytes, no_feature_imm_expected, BUSTER_ARRAY_LENGTH(no_feature_imm_expected)) == 0 &&
+                                 no_feature_one.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && no_feature_one.form_id == 9407 &&
+                                 no_feature_one.byte_count == BUSTER_ARRAY_LENGTH(no_feature_one_expected) &&
+                                 memcmp(no_feature_one_bytes, no_feature_one_expected, BUSTER_ARRAY_LENGTH(no_feature_one_expected)) == 0;
+        BUSTER_TEST(arguments, no_feature_shifts);
     }
 
     {

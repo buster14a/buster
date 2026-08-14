@@ -6961,6 +6961,22 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_apx_ndd_projection(BusterX86Metadat
     if (!projected_query || (query.attributes.apx_flags & BUSTER_X86_METADATA_APX_NDD) || !query.operand_count)
         return false;
     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(query.mnemonic);
+    // An ordinary legacy form can expose the same physical arity as an APX
+    // NDD row when XED hides a fixed source (for example SHL's implicit CL or
+    // ONE).  In that topology the source query is unambiguously the legacy
+    // spelling; do not project it into an APX NDD request merely because an
+    // APX sibling happens to have the same count.
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(form_id, &form) || (form.apx_flags & BUSTER_X86_METADATA_APX_NDD)) continue;
+        u32 expected_operand_count = 0;
+        if (buster_x86_metadata_emit_form_operand_count(query, form, &expected_operand_count) &&
+            expected_operand_count == query.operand_count)
+            return false;
+    }
     for (u32 position = 0; position < candidates.count; position += 1)
     {
         u32 form_id = 0;
