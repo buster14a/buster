@@ -105,11 +105,34 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDri
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_target(Arena* arena, CompilerDriverInvocation* invocation, String8 target_string)
 {
+    GpuTargetParseResult gpu = gpu_target_parse(target_string);
+    switch (gpu.error)
+    {
+    case GPU_TARGET_PARSE_ERROR_NONE:
+        invocation->gpu_target = gpu.target;
+        invocation->has_gpu_target = true;
+        return true;
+    case GPU_TARGET_PARSE_ERROR_INVALID_TRIPLE:
+        compiler_driver_argument_error(arena, invocation, S8("unsupported GPU target component: {S8}"), gpu.invalid_component);
+        return false;
+    case GPU_TARGET_PARSE_ERROR_SHADER_MODEL:
+        compiler_driver_argument_error(arena, invocation, S8("unsupported DXIL shader model: {S8}"), gpu.invalid_component);
+        return false;
+    case GPU_TARGET_PARSE_ERROR_STAGE:
+        compiler_driver_argument_error(arena, invocation, S8("unsupported GPU shader stage: {S8}"), gpu.invalid_component);
+        return false;
+    case GPU_TARGET_PARSE_ERROR_NOT_GPU:
+    case GPU_TARGET_PARSE_ERROR_COUNT:
+        break;
+    }
+
     TargetParseResult parsed = target_parse_triple(target_string);
     switch (parsed.error)
     {
     case TARGET_PARSE_ERROR_NONE:
         invocation->target = parsed.target;
+        invocation->gpu_target = (GpuTarget){0};
+        invocation->has_gpu_target = false;
         return true;
     case TARGET_PARSE_ERROR_CPU_MODEL:
         compiler_driver_argument_error(arena, invocation, S8("CPU model must be selected with -march=: {S8}"), parsed.invalid_component);
@@ -125,6 +148,80 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_target(Arena* arena, CompilerDriver
     }
     compiler_driver_argument_error(arena, invocation, S8("unsupported target: {S8}"), target_string);
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_gpu_kind_is_spirv(GpuTargetKind kind)
+{
+    return kind == GPU_TARGET_SPIRV || kind == GPU_TARGET_SPIRV32 || kind == GPU_TARGET_SPIRV64;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_gpu_target_uses_dxc(GpuTargetKind kind)
+{
+    return kind == GPU_TARGET_DXIL || kind == GPU_TARGET_SPIRV;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_gpu_stage_uses_entry_point(GpuShaderStage stage)
+{
+    return stage >= GPU_SHADER_STAGE_COMPUTE && stage <= GPU_SHADER_STAGE_AMPLIFICATION;
+}
+
+BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDriverLanguage language)
+{
+    switch (language)
+    {
+    case COMPILER_DRIVER_LANGUAGE_AUTOMATIC: return GPU_SOURCE_LANGUAGE_AUTOMATIC;
+    case COMPILER_DRIVER_LANGUAGE_OPENCL: return GPU_SOURCE_LANGUAGE_OPENCL;
+    case COMPILER_DRIVER_LANGUAGE_CUDA: return GPU_SOURCE_LANGUAGE_CUDA;
+    case COMPILER_DRIVER_LANGUAGE_HIP: return GPU_SOURCE_LANGUAGE_HIP;
+    case COMPILER_DRIVER_LANGUAGE_METAL: return GPU_SOURCE_LANGUAGE_METAL;
+    case COMPILER_DRIVER_LANGUAGE_HLSL: return GPU_SOURCE_LANGUAGE_HLSL;
+    case COMPILER_DRIVER_LANGUAGE_LLVM_IR: return GPU_SOURCE_LANGUAGE_LLVM_IR;
+    case COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY: return GPU_SOURCE_LANGUAGE_SPIRV_BINARY;
+    case COMPILER_DRIVER_LANGUAGE_METAL_AIR: return GPU_SOURCE_LANGUAGE_METAL_AIR;
+    case COMPILER_DRIVER_LANGUAGE_BUSTER:
+    case COMPILER_DRIVER_LANGUAGE_C:
+    case COMPILER_DRIVER_LANGUAGE_COUNT: break;
+    }
+    return GPU_SOURCE_LANGUAGE_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_effective_language(CompilerDriverInvocation invocation, String8 path)
+{
+    GpuSourceLanguage language = compiler_driver_gpu_language(invocation.language);
+    return language == GPU_SOURCE_LANGUAGE_AUTOMATIC ? gpu_source_language_from_path(path) : language;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_metal_sdk_is_valid(String8 sdk)
+{
+    String8 values[] = {
+        S8("macosx"), S8("iphoneos"), S8("iphonesimulator"), S8("appletvos"),
+        S8("appletvsimulator"), S8("xros"), S8("xrsimulator"),
+    };
+    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+    {
+        if (string_equal(sdk, values[value_index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_dxc_shader_model_is_valid(GpuTarget target)
+{
+    if (target.shader_model_major != 6 || target.shader_model_minor > 10)
+    {
+        return false;
+    }
+    if ((target.stage == GPU_SHADER_STAGE_MESH || target.stage == GPU_SHADER_STAGE_AMPLIFICATION) && target.shader_model_minor < 5)
+    {
+        return false;
+    }
+    if (target.stage >= GPU_SHADER_STAGE_LIBRARY && target.shader_model_minor == 0)
+    {
+        return false;
+    }
+    return true;
 }
 
 typedef struct CompilerDriverFeatureOverride CompilerDriverFeatureOverride;
@@ -216,6 +313,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
     invocation.frameworks = arena_allocate(arena, String8, arguments.length);
     invocation.linker_arguments = arena_allocate(arena, String8, arguments.length);
+    invocation.gpu_arguments = arena_allocate(arena, String8, arguments.length);
     u64 feature_override_capacity = 0;
     for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
     {
@@ -223,6 +321,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     }
     CompilerDriverFeatureOverride* feature_overrides = arena_allocate(arena, CompilerDriverFeatureOverride, feature_override_capacity);
     u64 feature_override_count = 0;
+    String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
     for (u64 argument_index = 0; argument_index < arguments.length; argument_index += 1)
@@ -302,13 +401,23 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.no_standard_includes = true;
             continue;
         }
+        if (string_equal(argument, S8("--save-temps")) || string_equal(argument, S8("-save-temps")))
+        {
+            invocation.save_gpu_temporaries = true;
+            continue;
+        }
         if (string_equal(argument, S8("-o")) || string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) ||
             string_equal(argument, S8("-D")) || string_equal(argument, S8("-U")) || string_equal(argument, S8("-L")) || string_equal(argument, S8("-l")) ||
             string_equal(argument, S8("-F")) || string_equal(argument, S8("-framework")) || string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
             string_equal(argument, S8("-mcpu")) || string_equal(argument, S8("-mattr")) || string_equal(argument, S8("-masm")) ||
             string_equal(argument, S8("-isysroot")) || string_equal(argument, S8("--sysroot")) ||
-            string_equal(argument, S8("-Xlinker")) || string_equal(argument, S8("-fmodule-root")) || string_equal(argument, S8("--module-root")))
+            string_equal(argument, S8("-Xlinker")) || string_equal(argument, S8("-fmodule-root")) || string_equal(argument, S8("--module-root")) ||
+            string_equal(argument, S8("--gpu-arch")) || string_equal(argument, S8("--gpu-stage")) || string_equal(argument, S8("--gpu-entry")) ||
+            string_equal(argument, S8("--shader-model")) || string_equal(argument, S8("--metal-sdk")) || string_equal(argument, S8("--cuda-path")) ||
+            string_equal(argument, S8("--rocm-path")) || string_equal(argument, S8("--gpu-clang")) || string_equal(argument, S8("--gpu-llc")) ||
+            string_equal(argument, S8("--spirv-link")) || string_equal(argument, S8("--spirv-dis")) || string_equal(argument, S8("--xcrun")) ||
+            string_equal(argument, S8("--dxc")) || string_equal(argument, S8("-Xgpu")))
         {
             if (argument_index + 1 >= arguments.length)
             {
@@ -362,6 +471,38 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_BUSTER;
                 }
+                else if (string_equal(value, S8("cl")) || string_equal(value, S8("opencl")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_OPENCL;
+                }
+                else if (string_equal(value, S8("cuda")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_CUDA;
+                }
+                else if (string_equal(value, S8("hip")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_HIP;
+                }
+                else if (string_equal(value, S8("metal")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_METAL;
+                }
+                else if (string_equal(value, S8("hlsl")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_HLSL;
+                }
+                else if (string_equal(value, S8("ir")) || string_equal(value, S8("llvm-ir")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_LLVM_IR;
+                }
+                else if (string_equal(value, S8("spirv")) || string_equal(value, S8("spirv-binary")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY;
+                }
+                else if (string_equal(value, S8("air")) || string_equal(value, S8("metal-air")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_METAL_AIR;
+                }
                 else if (string_equal(value, S8("none")))
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC;
@@ -381,10 +522,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-march")) || string_equal(argument, S8("-mcpu")))
             {
-                if (!compiler_driver_set_cpu_model(arena, &invocation, value))
-                {
-                    return invocation;
-                }
+                architecture_option = value;
             }
             else if (string_equal(argument, S8("-mattr")))
             {
@@ -409,6 +547,62 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 invocation.module_root = value;
             }
+            else if (string_equal(argument, S8("--gpu-arch")))
+            {
+                invocation.gpu_architecture = value;
+            }
+            else if (string_equal(argument, S8("--gpu-stage")))
+            {
+                invocation.gpu_stage = value;
+            }
+            else if (string_equal(argument, S8("--gpu-entry")))
+            {
+                invocation.gpu_entry_point = value;
+            }
+            else if (string_equal(argument, S8("--shader-model")))
+            {
+                invocation.gpu_shader_model = value;
+            }
+            else if (string_equal(argument, S8("--metal-sdk")))
+            {
+                invocation.metal_sdk = value;
+            }
+            else if (string_equal(argument, S8("--cuda-path")))
+            {
+                invocation.cuda_path = value;
+            }
+            else if (string_equal(argument, S8("--rocm-path")))
+            {
+                invocation.rocm_path = value;
+            }
+            else if (string_equal(argument, S8("--gpu-clang")))
+            {
+                invocation.gpu_tools.clang_path = value;
+            }
+            else if (string_equal(argument, S8("--gpu-llc")))
+            {
+                invocation.gpu_tools.llc_path = value;
+            }
+            else if (string_equal(argument, S8("--spirv-link")))
+            {
+                invocation.gpu_tools.spirv_link_path = value;
+            }
+            else if (string_equal(argument, S8("--spirv-dis")))
+            {
+                invocation.gpu_tools.spirv_dis_path = value;
+            }
+            else if (string_equal(argument, S8("--xcrun")))
+            {
+                invocation.gpu_tools.xcrun_path = value;
+            }
+            else if (string_equal(argument, S8("--dxc")))
+            {
+                invocation.gpu_tools.dxc_path = value;
+            }
+            else if (string_equal(argument, S8("-Xgpu")))
+            {
+                invocation.gpu_arguments[invocation.gpu_argument_count++] = value;
+            }
             else
             {
                 invocation.linker_arguments[invocation.linker_argument_count++] = value;
@@ -416,6 +610,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             continue;
         }
         String8 value = compiler_driver_option_value(argument, S8("--target="));
+        if (!value.length)
+        {
+            value = compiler_driver_option_value(argument, S8("-target="));
+        }
         if (value.length)
         {
             if (!compiler_driver_set_target(arena, &invocation, value))
@@ -428,6 +626,94 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (value.length)
         {
             invocation.sysroot = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-arch="));
+        if (value.length)
+        {
+            invocation.gpu_architecture = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-stage="));
+        if (value.length)
+        {
+            invocation.gpu_stage = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-entry="));
+        if (value.length)
+        {
+            invocation.gpu_entry_point = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--shader-model="));
+        if (value.length)
+        {
+            invocation.gpu_shader_model = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--metal-sdk="));
+        if (value.length)
+        {
+            invocation.metal_sdk = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--cuda-path="));
+        if (value.length)
+        {
+            invocation.cuda_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--rocm-path="));
+        if (value.length)
+        {
+            invocation.rocm_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-clang="));
+        if (value.length)
+        {
+            invocation.gpu_tools.clang_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-llc="));
+        if (value.length)
+        {
+            invocation.gpu_tools.llc_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--spirv-link="));
+        if (value.length)
+        {
+            invocation.gpu_tools.spirv_link_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--spirv-dis="));
+        if (value.length)
+        {
+            invocation.gpu_tools.spirv_dis_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--xcrun="));
+        if (value.length)
+        {
+            invocation.gpu_tools.xcrun_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--dxc="));
+        if (value.length)
+        {
+            invocation.gpu_tools.dxc_path = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--gpu-arg="));
+        if (!value.length)
+        {
+            value = compiler_driver_option_value(argument, S8("-Xgpu="));
+        }
+        if (value.length)
+        {
+            invocation.gpu_arguments[invocation.gpu_argument_count++] = value;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
@@ -443,18 +729,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // third fewer instructions. QUALITY stays out of the mapping on
         // purpose: it does not yet beat FAST on a measured corpus (see the
         // 2026-08-09ai audit entry), so it is reachable only by naming it.
-        if (string_starts_with_sequence(argument, S8("-O")) && argument.length <= 4)
+        if (string_starts_with_sequence(argument, S8("-O")))
         {
             String8 level = string_slice(argument, 2, argument.length);
             if (!level.length || string_equal(level, S8("0")))
             {
                 invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+                invocation.optimization_level = 0;
                 continue;
             }
             if (string_equal(level, S8("1")) || string_equal(level, S8("2")) || string_equal(level, S8("3")) || string_equal(level, S8("s")) ||
                 string_equal(level, S8("z")) || string_equal(level, S8("fast")))
             {
                 invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
+                invocation.optimization_level = string_equal(level, S8("1")) ? 1 : string_equal(level, S8("3")) ? 3 : 2;
                 continue;
             }
             compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
@@ -463,6 +751,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
+            invocation.register_allocator_explicit = true;
             if (string_equal(value, S8("none")))
             {
                 invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
@@ -493,10 +782,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (value.length)
         {
-            if (!compiler_driver_set_cpu_model(arena, &invocation, value))
-            {
-                return invocation;
-            }
+            architecture_option = value;
             continue;
         }
         if (string_starts_with_sequence(argument, S8("-mattr=")))
@@ -525,6 +811,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 compiler_driver_argument_error(arena, &invocation, S8("unsupported C dialect: {S8}"), value);
                 return invocation;
             }
+            invocation.c_dialect_explicit = true;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-Wl,"));
@@ -590,50 +877,274 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         return invocation;
     }
-    if (feature_override_count)
+    if (invocation.has_gpu_target)
     {
-        invocation.target.cpu_features = target_cpu_features_effective(invocation.target);
-        invocation.target.cpu_features_explicit = true;
-        for (u64 override_index = 0; override_index < feature_override_count; override_index += 1)
+        GpuTargetKind gpu_kind = invocation.gpu_target.kind;
+        bool spirv_target = compiler_driver_gpu_kind_is_spirv(gpu_kind);
+        bool dxc_target = compiler_driver_gpu_target_uses_dxc(gpu_kind);
+        bool llvm_gpu_target = spirv_target || gpu_kind == GPU_TARGET_NVPTX32 || gpu_kind == GPU_TARGET_NVPTX64 || gpu_kind == GPU_TARGET_AMDGCN;
+        if (feature_override_count)
         {
-            CompilerDriverFeatureOverride override = feature_overrides[override_index];
-            TargetCpuFeature feature = target_cpu_feature_from_string(invocation.target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_NONE)
+            compiler_driver_argument_error(arena, &invocation, S8("-mattr is not supported for GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.assembly_syntax != ASSEMBLY_SYNTAX_DEFAULT)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("assembly syntax is not supported for GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.register_allocator_explicit)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("the native register allocator is not used by GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.c_dialect_explicit)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("the native C dialect option is not used by GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.module_root.length)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("Buster module roots are not supported for GPU target: {S8}"), invocation.module_root);
+            return invocation;
+        }
+        if (invocation.source_metrics_path.length)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation.source_metrics_path);
+            return invocation;
+        }
+        if (invocation.language == COMPILER_DRIVER_LANGUAGE_BUSTER || invocation.language == COMPILER_DRIVER_LANGUAGE_C)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("native source language is incompatible with GPU target: {S8}"),
+                                           invocation.language == COMPILER_DRIVER_LANGUAGE_BUSTER ? S8("buster") : S8("c"));
+            return invocation;
+        }
+        if (invocation.library_path_count || invocation.library_count || invocation.framework_path_count || invocation.framework_count ||
+            invocation.linker_argument_count)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("native libraries, frameworks, and linker arguments cannot be used in a GPU pipeline; pass backend options with -Xgpu");
+            return invocation;
+        }
+        if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY && invocation.output_path.length)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("cannot specify -o with -fsyntax-only for a GPU target");
+            return invocation;
+        }
+        if (invocation.cuda_path.length && gpu_kind != GPU_TARGET_NVPTX32 && gpu_kind != GPU_TARGET_NVPTX64)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("CUDA toolkit path is incompatible with GPU target: {S8}"), invocation.cuda_path);
+            return invocation;
+        }
+        if (invocation.rocm_path.length && gpu_kind != GPU_TARGET_AMDGCN)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("ROCm path is incompatible with GPU target: {S8}"), invocation.rocm_path);
+            return invocation;
+        }
+        if ((invocation.gpu_tools.spirv_link_path.length || invocation.gpu_tools.spirv_dis_path.length) && !spirv_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("SPIR-V tool override is incompatible with GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.gpu_tools.xcrun_path.length && gpu_kind != GPU_TARGET_METAL_AIR64)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("xcrun override is incompatible with GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.gpu_tools.dxc_path.length && !dxc_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("DXC override is incompatible with GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.gpu_tools.clang_path.length && !llvm_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("GPU Clang override is incompatible with GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.gpu_tools.llc_path.length && !llvm_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("GPU llc override is incompatible with GPU target: {S8}"),
+                                           gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+
+        if (invocation.gpu_architecture.length && architecture_option.length &&
+            !string_equal(invocation.gpu_architecture, architecture_option))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("conflicting GPU architectures: {S8}"), invocation.gpu_architecture);
+            return invocation;
+        }
+        String8 gpu_architecture = invocation.gpu_architecture.length ? invocation.gpu_architecture : architecture_option;
+        if (gpu_architecture.length)
+        {
+            if (gpu_kind != GPU_TARGET_NVPTX32 && gpu_kind != GPU_TARGET_NVPTX64 && gpu_kind != GPU_TARGET_AMDGCN)
             {
-                compiler_driver_argument_error(arena, &invocation, S8("unsupported target feature: {S8}"), override.name);
+                compiler_driver_argument_error(arena, &invocation, S8("GPU architecture is incompatible with target: {S8}"), gpu_architecture);
                 return invocation;
             }
-            if (override.enable)
+            invocation.gpu_target.architecture = gpu_architecture;
+        }
+        if (invocation.gpu_stage.length)
+        {
+            GpuShaderStage stage = gpu_shader_stage_from_string(invocation.gpu_stage);
+            if (stage == GPU_SHADER_STAGE_NONE)
             {
-                invocation.target.cpu_features = target_cpu_features_add(invocation.target.cpu_features, feature);
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported GPU shader stage: {S8}"), invocation.gpu_stage);
+                return invocation;
+            }
+            if (gpu_kind == GPU_TARGET_METAL_AIR64 || (!dxc_target && stage != GPU_SHADER_STAGE_COMPUTE))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("shader stage is incompatible with GPU target: {S8}"), invocation.gpu_stage);
+                return invocation;
+            }
+            invocation.gpu_target.stage = stage;
+            if (dxc_target && !compiler_driver_gpu_stage_uses_entry_point(stage))
+            {
+                invocation.gpu_target.entry_point = (String8){0};
+            }
+        }
+        if (invocation.gpu_shader_model.length)
+        {
+            if (!dxc_target ||
+                !gpu_shader_model_parse(invocation.gpu_shader_model, &invocation.gpu_target.shader_model_major, &invocation.gpu_target.shader_model_minor))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("shader model is incompatible with GPU target: {S8}"), invocation.gpu_shader_model);
+                return invocation;
+            }
+        }
+        if (dxc_target && !compiler_driver_dxc_shader_model_is_valid(invocation.gpu_target))
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported shader model for target stage: {S8}"),
+                                           invocation.gpu_shader_model.length ? invocation.gpu_shader_model : gpu_target_to_string(arena, invocation.gpu_target));
+            return invocation;
+        }
+        if (invocation.gpu_entry_point.length)
+        {
+            if (!dxc_target || !compiler_driver_gpu_stage_uses_entry_point(invocation.gpu_target.stage))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("GPU entry point is incompatible with target or stage: {S8}"),
+                                               invocation.gpu_entry_point);
+                return invocation;
+            }
+            invocation.gpu_target.entry_point = invocation.gpu_entry_point;
+        }
+        else if (dxc_target && compiler_driver_gpu_stage_uses_entry_point(invocation.gpu_target.stage) && !invocation.gpu_target.entry_point.length)
+        {
+            invocation.gpu_target.entry_point = S8("main");
+        }
+        if (invocation.metal_sdk.length)
+        {
+            if (gpu_kind != GPU_TARGET_METAL_AIR64 || !compiler_driver_metal_sdk_is_valid(invocation.metal_sdk))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported Metal SDK for GPU target: {S8}"), invocation.metal_sdk);
+                return invocation;
+            }
+            invocation.gpu_target.metal_sdk = invocation.metal_sdk;
+        }
+        bool has_hlsl_input = gpu_kind == GPU_TARGET_DXIL;
+        bool has_cuda_input = false;
+        for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
+        {
+            GpuSourceLanguage input_language = compiler_driver_gpu_effective_language(invocation, invocation.input_paths[input_index]);
+            has_hlsl_input = has_hlsl_input || input_language == GPU_SOURCE_LANGUAGE_HLSL;
+            has_cuda_input = has_cuda_input || input_language == GPU_SOURCE_LANGUAGE_CUDA;
+        }
+        if (gpu_kind == GPU_TARGET_SPIRV && !has_hlsl_input &&
+            (invocation.gpu_entry_point.length || invocation.gpu_shader_model.length || invocation.gpu_tools.dxc_path.length ||
+             invocation.gpu_target.stage != GPU_SHADER_STAGE_COMPUTE))
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("SPIR-V shader stage, entry point, shader model, and DXC options require HLSL input");
+            return invocation;
+        }
+        if (invocation.cuda_path.length && !has_cuda_input)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("CUDA toolkit path requires CUDA input: {S8}"), invocation.cuda_path);
+            return invocation;
+        }
+        if (has_hlsl_input && (invocation.sysroot.length || invocation.no_standard_includes))
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("DXC HLSL pipelines do not support -isysroot/--sysroot or -nostdinc");
+            return invocation;
+        }
+        if (!gpu_target_is_valid(invocation.gpu_target))
+        {
+            String8 target = gpu_target_to_string(arena, invocation.gpu_target);
+            compiler_driver_argument_error(arena, &invocation, S8("incomplete GPU target configuration: {S8}"), target);
+            return invocation;
+        }
+    }
+    else
+    {
+        bool gpu_option = invocation.gpu_architecture.length || invocation.gpu_entry_point.length || invocation.gpu_stage.length ||
+                          invocation.gpu_shader_model.length || invocation.metal_sdk.length || invocation.cuda_path.length || invocation.rocm_path.length ||
+                          invocation.gpu_tools.clang_path.length || invocation.gpu_tools.llc_path.length || invocation.gpu_tools.spirv_link_path.length ||
+                          invocation.gpu_tools.spirv_dis_path.length || invocation.gpu_tools.xcrun_path.length || invocation.gpu_tools.dxc_path.length ||
+                          invocation.gpu_argument_count || invocation.save_gpu_temporaries || invocation.language > COMPILER_DRIVER_LANGUAGE_C;
+        if (gpu_option)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("GPU option requires a GPU target: {S8}"), S8("use --target=spirv64, nvptx64-nvidia-cuda, amdgcn-amd-amdhsa, air64-apple-macos, or dxil"));
+            return invocation;
+        }
+        if (architecture_option.length && !compiler_driver_set_cpu_model(arena, &invocation, architecture_option))
+        {
+            return invocation;
+        }
+        if (feature_override_count)
+        {
+            invocation.target.cpu_features = target_cpu_features_effective(invocation.target);
+            invocation.target.cpu_features_explicit = true;
+            for (u64 override_index = 0; override_index < feature_override_count; override_index += 1)
+            {
+                CompilerDriverFeatureOverride override = feature_overrides[override_index];
+                TargetCpuFeature feature = target_cpu_feature_from_string(invocation.target.cpu_arch, override.name);
+                if (feature == TARGET_CPU_FEATURE_NONE)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported target feature: {S8}"), override.name);
+                    return invocation;
+                }
+                if (override.enable)
+                {
+                    invocation.target.cpu_features = target_cpu_features_add(invocation.target.cpu_features, feature);
+                }
+                else
+                {
+                    invocation.target.cpu_features = target_cpu_features_remove(invocation.target.cpu_features, feature);
+                }
+            }
+        }
+        if (!target_cpu_features_are_valid(invocation.target))
+        {
+            if (feature_override_count)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("invalid target feature combination: {S8}"),
+                                               target_cpu_features_to_string(arena, invocation.target));
             }
             else
             {
-                invocation.target.cpu_features = target_cpu_features_remove(invocation.target.cpu_features, feature);
+                compiler_driver_argument_error(arena, &invocation, S8("CPU model is incompatible with target: {S8}"),
+                                               cpu_model_to_string_os(invocation.target.cpu_model));
             }
+            return invocation;
         }
-    }
-    if (!target_cpu_features_are_valid(invocation.target))
-    {
-        if (feature_override_count)
+        if (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.assembly_syntax != ASSEMBLY_SYNTAX_DEFAULT)
         {
-            compiler_driver_argument_error(arena, &invocation, S8("invalid target feature combination: {S8}"),
-                                           target_cpu_features_to_string(arena, invocation.target));
+            compiler_driver_argument_error(arena, &invocation, S8("assembly syntax is incompatible with target: {S8}"),
+                                           invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT ? S8("att") : S8("intel"));
+            return invocation;
         }
-        else
-        {
-            compiler_driver_argument_error(arena, &invocation, S8("CPU model is incompatible with target: {S8}"),
-                                           cpu_model_to_string_os(invocation.target.cpu_model));
-        }
-        return invocation;
     }
-    if (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.assembly_syntax != ASSEMBLY_SYNTAX_DEFAULT)
-    {
-        compiler_driver_argument_error(arena, &invocation, S8("assembly syntax is incompatible with target: {S8}"),
-                                       invocation.assembly_syntax == ASSEMBLY_SYNTAX_ATT ? S8("att") : S8("intel"));
-        return invocation;
-    }
-    if (!invocation.no_standard_includes)
+    if (!invocation.no_standard_includes && !invocation.has_gpu_target)
     {
 #if defined(BUSTER_HOST_C_RESOURCE_INCLUDE)
         if (sizeof(BUSTER_HOST_C_RESOURCE_INCLUDE) > 1)
@@ -689,7 +1200,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
 #endif
         }
     }
-    if (invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS && invocation.target.os != OPERATING_SYSTEM_IOS)
+    if (!invocation.has_gpu_target && invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS && invocation.target.os != OPERATING_SYSTEM_IOS)
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("-framework is only supported for Apple targets");
@@ -1937,15 +2448,105 @@ cleanup:
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL GpuPipelineAction compiler_driver_gpu_action(CompilerDriverAction action)
+{
+    switch (action)
+    {
+    case COMPILER_DRIVER_ACTION_LINK: return GPU_PIPELINE_ACTION_LINK;
+    case COMPILER_DRIVER_ACTION_PREPROCESS: return GPU_PIPELINE_ACTION_PREPROCESS;
+    case COMPILER_DRIVER_ACTION_ASSEMBLY: return GPU_PIPELINE_ACTION_ASSEMBLY;
+    case COMPILER_DRIVER_ACTION_OBJECT: return GPU_PIPELINE_ACTION_OBJECT;
+    case COMPILER_DRIVER_ACTION_SYNTAX_ONLY: return GPU_PIPELINE_ACTION_SYNTAX_ONLY;
+    case COMPILER_DRIVER_ACTION_COUNT: break;
+    }
+    return GPU_PIPELINE_ACTION_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* arena, CompilerDriverInvocation invocation,
+                                                                      CompilerDriverWarningCollector* warnings)
+{
+    CompilerDriverResult result = {0};
+    GpuSourceLanguage language = compiler_driver_gpu_language(invocation.language);
+    GpuPipelineAction action = compiler_driver_gpu_action(invocation.action);
+    if (language == GPU_SOURCE_LANGUAGE_COUNT || action == GPU_PIPELINE_ACTION_COUNT)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("invalid language or action for GPU compilation");
+        return result;
+    }
+    bool capture_text_output = !invocation.output_path.length &&
+                               (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY);
+    GpuPipelineResult pipeline = gpu_pipeline_execute(arena,
+                                                      (GpuPipelineOptions){
+                                                          .input_paths = invocation.input_paths,
+                                                          .include_paths = invocation.include_paths,
+                                                          .system_include_paths = invocation.system_include_paths,
+                                                          .definitions = invocation.definitions,
+                                                          .undefinitions = invocation.undefinitions,
+                                                          .extra_arguments = invocation.gpu_arguments,
+                                                          .output_path = invocation.output_path,
+                                                          .sysroot = invocation.sysroot,
+                                                          .cuda_path = invocation.cuda_path,
+                                                          .rocm_path = invocation.rocm_path,
+                                                          .tools = invocation.gpu_tools,
+                                                          .target = invocation.gpu_target,
+                                                          .input_count = invocation.input_count,
+                                                          .include_path_count = invocation.include_path_count,
+                                                          .system_include_path_count = invocation.system_include_path_count,
+                                                          .definition_count = invocation.definition_count,
+                                                          .undefinition_count = invocation.undefinition_count,
+                                                          .extra_argument_count = invocation.gpu_argument_count,
+                                                          .language = language,
+                                                          .action = action,
+                                                          .optimization_level = invocation.optimization_level,
+                                                          .debug_info = invocation.debug_info,
+                                                          .no_standard_includes = invocation.no_standard_includes,
+                                                          .save_temporaries = invocation.save_gpu_temporaries,
+                                                          .capture_text_output = capture_text_output,
+                                                      });
+    if (pipeline.error != GPU_PIPELINE_ERROR_NONE)
+    {
+        result.error = COMPILER_DRIVER_ERROR_GPU;
+        result.diagnostic = pipeline.diagnostic.length ? pipeline.diagnostic : S8("GPU pipeline failed without a diagnostic");
+        return result;
+    }
+    if (pipeline.log.length)
+    {
+        compiler_driver_warning_append_text(warnings, pipeline.log);
+    }
+    if (pipeline.artifact.format != GPU_OUTPUT_NONE)
+    {
+        result.gpu = pipeline.artifact;
+        result.has_gpu = true;
+        if (capture_text_output)
+        {
+            result.output = BYTE_SLICE_TO_STRING(8, pipeline.artifact.bytes);
+        }
+    }
+    return result;
+}
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverWarningCollector warnings = {
         .arena = arena,
     };
     CompilerDriverResult result = {0};
-    if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
+    if (!arena)
     {
-        result = compiler_driver_execute_c_single(arena, invocation, false, &warnings);
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("compiler driver requires an arena");
+        return result;
+    }
+    if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        result.error = invocation.error;
+        result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
+        goto finish;
+    }
+    if (invocation.has_gpu_target)
+    {
+        result = compiler_driver_execute_gpu(arena, invocation, &warnings);
         goto finish;
     }
     if (invocation.target.cpu_arch == CPU_ARCH_WASM64)

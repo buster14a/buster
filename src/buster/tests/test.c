@@ -81,6 +81,7 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/tests/compiler/jit/jit_test.h>
 #include <buster/tests/compiler/link/link_test.h>
+#include <buster/tests/compiler/gpu/gpu_test.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 
 #if BUSTER_CPU_ARCH_X86_64
@@ -129,6 +130,7 @@
 #include <buster/tests/compiler/object/object_test.c>
 #include <buster/tests/compiler/jit/jit_test.c>
 #include <buster/tests/compiler/link/link_test.c>
+#include <buster/tests/compiler/gpu/gpu_test.c>
 #include <buster/tests/compiler/driver/driver_test.c>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/tests/x86_64_test.c>
@@ -276,6 +278,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("object_tests"), &object_tests},
     {S8_INITIALIZER("jit_tests"), &jit_tests},
     {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
     {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
 #if BUSTER_CPU_ARCH_X86_64
     {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
@@ -364,9 +367,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
 }
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 46);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 47);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 44);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 45);
 #endif
 #endif
 

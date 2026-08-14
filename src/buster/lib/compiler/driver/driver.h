@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/link/link.h>
+#include <buster/lib/compiler/gpu/gpu.h>
 #include <buster/lib/compiler/wasm/wasm.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
@@ -23,6 +24,7 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_IR,
     COMPILER_DRIVER_ERROR_CODEGEN,
     COMPILER_DRIVER_ERROR_WASM64,
+    COMPILER_DRIVER_ERROR_GPU,
     COMPILER_DRIVER_ERROR_OBJECT,
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_COUNT,
@@ -33,6 +35,14 @@ typedef enum CompilerDriverLanguage
     COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
     COMPILER_DRIVER_LANGUAGE_BUSTER,
     COMPILER_DRIVER_LANGUAGE_C,
+    COMPILER_DRIVER_LANGUAGE_OPENCL,
+    COMPILER_DRIVER_LANGUAGE_CUDA,
+    COMPILER_DRIVER_LANGUAGE_HIP,
+    COMPILER_DRIVER_LANGUAGE_METAL,
+    COMPILER_DRIVER_LANGUAGE_HLSL,
+    COMPILER_DRIVER_LANGUAGE_LLVM_IR,
+    COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY,
+    COMPILER_DRIVER_LANGUAGE_METAL_AIR,
     COMPILER_DRIVER_LANGUAGE_COUNT,
 } CompilerDriverLanguage;
 
@@ -87,6 +97,7 @@ struct CompilerDriverInvocation
     String8* framework_paths;
     String8* frameworks;
     String8* linker_arguments;
+    String8* gpu_arguments;
     String8 output_path;
     String8 sysroot;
     String8 module_root;
@@ -94,7 +105,16 @@ struct CompilerDriverInvocation
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
     String8 source_metrics_path;
+    String8 gpu_architecture;
+    String8 gpu_entry_point;
+    String8 gpu_stage;
+    String8 gpu_shader_model;
+    String8 metal_sdk;
+    String8 cuda_path;
+    String8 rocm_path;
     String8 diagnostic;
+    GpuToolchain gpu_tools;
+    GpuTarget gpu_target;
     Target target;
     u32 input_count;
     u32 include_path_count;
@@ -106,6 +126,7 @@ struct CompilerDriverInvocation
     u32 framework_path_count;
     u32 framework_count;
     u32 linker_argument_count;
+    u32 gpu_argument_count;
     CompilerDriverLanguage language;
     CompilerDriverAction action;
     CompilerDriverCDialect c_dialect;
@@ -116,6 +137,11 @@ struct CompilerDriverInvocation
     bool debug_info;
     // A CodegenRegisterAllocatorMode value from -fregister-allocator=.
     u8 register_allocator;
+    u8 optimization_level;
+    bool has_gpu_target;
+    bool save_gpu_temporaries;
+    bool register_allocator_explicit;
+    bool c_dialect_explicit;
 };
 
 typedef struct CompilerDriverOptions CompilerDriverOptions;
@@ -140,6 +166,7 @@ struct CompilerDriverResult
     String8 output;
     NativeExecutableLinkResult native_link;
     Wasm64Artifact wasm64;
+    GpuArtifact gpu;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
     // What the C frontend consumed, per inclusion and per distinct file, and
@@ -157,7 +184,8 @@ struct CompilerDriverResult
     u32 analysis_diagnostic_count;
     bool has_object;
     bool has_wasm64;
-    u8 reserved[2];
+    bool has_gpu;
+    u8 reserved;
 };
 
 // Fills every table the compile pipeline builds on first use -- tokenizer, C

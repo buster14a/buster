@@ -867,6 +867,7 @@ buster_register_module(compiler_object "${BUSTER_SOURCE_DIR}/compiler/object/obj
 buster_register_module(compiler_jit "${BUSTER_SOURCE_DIR}/compiler/jit/jit${COMMON_EXTENSION}")
 buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${COMMON_EXTENSION}")
 buster_register_module(compiler_wasm "${BUSTER_SOURCE_DIR}/compiler/wasm/wasm${COMMON_EXTENSION}")
+buster_register_module(compiler_gpu "${BUSTER_SOURCE_DIR}/compiler/gpu/gpu${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
@@ -926,6 +927,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/object/object_test.c
     src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
+    src/buster/tests/compiler/gpu/gpu_test.c
     src/buster/tests/compiler/driver/driver_test.c
 )
 set(BUSTER_TEST_HEADERS
@@ -972,6 +974,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/object/object_test.h
     src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
+    src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/driver/driver_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -1825,6 +1828,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_jit
     compiler_link
     compiler_wasm
+    compiler_gpu
     compiler_driver
     simd
     file

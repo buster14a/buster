@@ -36,6 +36,7 @@
 #include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/wasm/wasm.h>
+#include <buster/lib/compiler/gpu/gpu.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/ide_document.h>
 #include <buster/lib/integer.h>
@@ -118,6 +119,7 @@
 #include <buster/lib/compiler/jit/jit.c>
 #include <buster/lib/compiler/link/link.c>
 #include <buster/lib/compiler/wasm/wasm.c>
+#include <buster/lib/compiler/gpu/gpu.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
 #include <buster/lib/ide_document.c>
@@ -3086,8 +3088,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
     {
-        string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
-                     target_cpu_features_to_string(arena, invocation.target));
+        if (invocation.has_gpu_target)
+        {
+            String8 target = gpu_target_to_string(arena, invocation.gpu_target);
+            GpuOutputFormat format = compile.has_gpu ? compile.gpu.format : GPU_OUTPUT_NONE;
+            String8 path = compile.has_gpu ? compile.gpu.path : (String8){0};
+            u64 byte_count = compile.has_gpu ? compile.gpu.bytes.length : 0;
+            string_print(S8("GPU target={S8} format={S8} path={S8} bytes={u64}\n"), target, gpu_output_format_to_string(format), path,
+                         byte_count);
+        }
+        else
+        {
+            string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
+                         target_cpu_features_to_string(arena, invocation.target));
+        }
     }
     if (compile.source_lexed.files && (invocation.verbose || invocation.source_metrics_path.length))
     {

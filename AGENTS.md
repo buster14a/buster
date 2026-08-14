@@ -11,7 +11,10 @@ dependencies. One executable, `ide`, contains everything: UI toolkit, GPU
 renderers (Vulkan/Metal/D3D12), TrueType rasterizer, compiler frontend, IR,
 codegen backends (x86_64, aarch64), linker, and the in-process test suite.
 Targets: Linux, macOS, Windows, Android, iOS, and direct
-`wasm64-unknown-freestanding` core modules using Memory64.
+`wasm64-unknown-freestanding` core modules using Memory64. The `ide cc`
+driver also orchestrates optional external shader toolchains for SPIR-V,
+NVPTX/PTX, AMDGCN/HSA code objects, Metal AIR/metallib, and DXIL; these
+pipelines add no linked or vendored dependency to the executable.
 
 ## Current compiler priority
 
@@ -184,6 +187,14 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+
+GPU targets are a separate driver domain rather than CPU targets with unusual
+architectures. Their source-to-artifact command graphs, target/profile
+validation, tool discovery, artifact checks, and temporary-file ownership live
+in `compiler/gpu/gpu.{c,h}`. They accept the vendor source or intermediate
+languages documented in `docs/gpu-target-pipelines.md`; do not route ordinary
+Buster or C through them until canonical IR represents GPU address spaces,
+kernels, resources, barriers, execution scopes, and shader interfaces.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
@@ -1054,7 +1065,8 @@ Compiler (`src/buster/lib/compiler/`):
 | `object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers/readers; assembly printing; in-memory object linking. |
 | `jit/jit.{c,h}` | Host-native in-process object loader: explicit host-function bindings, import thunks, named symbol lookup, writable data, W^X finalization, and executable-memory lifetime management. TLS and external data imports are rejected explicitly. |
 | `link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
-| `driver/driver.{c,h}` | End-to-end source-to-object compilation with either an in-memory JIT object result or libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
+| `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. Tests live in `src/buster/tests/compiler/gpu/gpu_test.{c,h}`. |
+| `driver/driver.{c,h}` | End-to-end source-to-object compilation with either an in-memory JIT object result or libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported native target, multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset, direct Wasm64 emission, and dispatch into the isolated external GPU pipelines. |
 | `codegen/codegen.{c,h}`, `codegen/codegen_internal.h` | Direct typed-IR ABI translation, conservative register allocation, native x86-64/AArch64 emission, executable-memory support, and private codegen test seams. Tests live in `codegen_test.{c,h}`. |
 | `wasm/wasm.{c,h}` | Direct canonical typed-IR to core Wasm64 emitter. It uses Memory64 and i64 addresses, exports linear memory, lowers arbitrary CFGs through a dispatcher, and diagnoses unsupported ABI and instruction shapes instead of falling back to native code. |
 
