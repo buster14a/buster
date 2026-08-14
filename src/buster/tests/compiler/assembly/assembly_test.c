@@ -287,6 +287,30 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_unary_ca
     {S8_INITIALIZER("ursqrte v0.4s, v1.4s\n"), {0x20, 0xc8, 0xa1, 0x6e}},
 };
 
+/* Scalar S/D FCVT forms are independent llvm-mc 22.1.8 literals. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_fcvt_scalar_cases[] = {
+    {S8_INITIALIZER("fcvtas s0, s1\n"), {0x20, 0xc8, 0x21, 0x5e}},
+    {S8_INITIALIZER("fcvtas d0, d1\n"), {0x20, 0xc8, 0x61, 0x5e}},
+    {S8_INITIALIZER("fcvtau s0, s1\n"), {0x20, 0xc8, 0x21, 0x7e}},
+    {S8_INITIALIZER("fcvtau d0, d1\n"), {0x20, 0xc8, 0x61, 0x7e}},
+    {S8_INITIALIZER("fcvtms s0, s1\n"), {0x20, 0xb8, 0x21, 0x5e}},
+    {S8_INITIALIZER("fcvtms d0, d1\n"), {0x20, 0xb8, 0x61, 0x5e}},
+    {S8_INITIALIZER("fcvtmu s0, s1\n"), {0x20, 0xb8, 0x21, 0x7e}},
+    {S8_INITIALIZER("fcvtmu d0, d1\n"), {0x20, 0xb8, 0x61, 0x7e}},
+    {S8_INITIALIZER("fcvtns s0, s1\n"), {0x20, 0xa8, 0x21, 0x5e}},
+    {S8_INITIALIZER("fcvtns d0, d1\n"), {0x20, 0xa8, 0x61, 0x5e}},
+    {S8_INITIALIZER("fcvtnu s0, s1\n"), {0x20, 0xa8, 0x21, 0x7e}},
+    {S8_INITIALIZER("fcvtnu d0, d1\n"), {0x20, 0xa8, 0x61, 0x7e}},
+    {S8_INITIALIZER("fcvtps s0, s1\n"), {0x20, 0xa8, 0xa1, 0x5e}},
+    {S8_INITIALIZER("fcvtps d0, d1\n"), {0x20, 0xa8, 0xe1, 0x5e}},
+    {S8_INITIALIZER("fcvtpu s0, s1\n"), {0x20, 0xa8, 0xa1, 0x7e}},
+    {S8_INITIALIZER("fcvtpu d0, d1\n"), {0x20, 0xa8, 0xe1, 0x7e}},
+    {S8_INITIALIZER("fcvtzs s0, s1\n"), {0x20, 0xb8, 0xa1, 0x5e}},
+    {S8_INITIALIZER("fcvtzs d0, d1\n"), {0x20, 0xb8, 0xe1, 0x5e}},
+    {S8_INITIALIZER("fcvtzu s0, s1\n"), {0x20, 0xb8, 0xa1, 0x7e}},
+    {S8_INITIALIZER("fcvtzu d0, d1\n"), {0x20, 0xb8, 0xe1, 0x7e}},
+};
+
 /* Exhaustive legal vector shift-by-register forms. Bytes are independent
  * llvm-mc 22.1.8 encodings. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_shift_cases[] = {
@@ -1081,12 +1105,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 241);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 241);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 149);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 179);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 251);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 251);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 139);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 189);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 84);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 74);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4107,6 +4131,68 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
         BUSTER_TEST(arguments, no_both.diagnostic_count == 1 && no_both.bytes.length == 0 &&
                                    no_both.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_scalar_cases) == 20);
+    for (u32 fcvt_index = 0; fcvt_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fcvt_scalar_cases); fcvt_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase fcvt_case = assembly_a64_direct_simd_fcvt_scalar_cases[fcvt_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fcvt_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, fcvt_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult fcvt_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("FCVTAS S31, S30\nFCVTAS D31, D30\nFCVTAU S31, S30\nFCVTAU D31, D30\n"
+           "FCVTMS S31, S30\nFCVTMS D31, D30\nFCVTMU S31, S30\nFCVTMU D31, D30\n"
+           "FCVTNS S31, S30\nFCVTNS D31, D30\nFCVTNU S31, S30\nFCVTNU D31, D30\n"
+           "FCVTPS S31, S30\nFCVTPS D31, D30\nFCVTPU S31, S30\nFCVTPU D31, D30\n"
+           "FCVTZS S31, S30\nFCVTZS D31, D30\nFCVTZU S31, S30\nFCVTZU D31, D30\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, fcvt_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(fcvt_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0xcb, 0x21, 0x5e,
+                                                                      0xdf, 0xcb, 0x61, 0x5e,
+                                                                      0xdf, 0xcb, 0x21, 0x7e,
+                                                                      0xdf, 0xcb, 0x61, 0x7e,
+                                                                      0xdf, 0xbb, 0x21, 0x5e,
+                                                                      0xdf, 0xbb, 0x61, 0x5e,
+                                                                      0xdf, 0xbb, 0x21, 0x7e,
+                                                                      0xdf, 0xbb, 0x61, 0x7e,
+                                                                      0xdf, 0xab, 0x21, 0x5e,
+                                                                      0xdf, 0xab, 0x61, 0x5e,
+                                                                      0xdf, 0xab, 0x21, 0x7e,
+                                                                      0xdf, 0xab, 0x61, 0x7e,
+                                                                      0xdf, 0xab, 0xa1, 0x5e,
+                                                                      0xdf, 0xab, 0xe1, 0x5e,
+                                                                      0xdf, 0xab, 0xa1, 0x7e,
+                                                                      0xdf, 0xab, 0xe1, 0x7e,
+                                                                      0xdf, 0xbb, 0xa1, 0x5e,
+                                                                      0xdf, 0xbb, 0xe1, 0x5e,
+                                                                      0xdf, 0xbb, 0xa1, 0x7e,
+                                                                      0xdf, 0xbb, 0xe1, 0x7e},
+                                                         80));
+    static String8 const invalid_fcvt_scalar_cases[] = {
+        S8_INITIALIZER("fcvtas h0, s1\n"),
+        S8_INITIALIZER("fcvtas b0, b1\n"),
+        S8_INITIALIZER("fcvtas q0, q1\n"),
+        S8_INITIALIZER("fcvtas s0, d1\n"),
+        S8_INITIALIZER("fcvtas s0\n"),
+        S8_INITIALIZER("fcvtas s0, s1, s2\n"),
+        S8_INITIALIZER("fcvtas s32, s1\n"),
+        S8_INITIALIZER("fcvtas s0, v1.s[0]\n"),
+        S8_INITIALIZER("fcvtps v0.2s, v1.4s\n"),
+        S8_INITIALIZER("fcvtps w0, w1\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_fcvt_scalar_cases); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_fcvt = assembly_encode(
+            arguments->arena, invalid_fcvt_scalar_cases[invalid_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_fcvt.diagnostic_count == 1 && invalid_fcvt.bytes.length == 0 &&
+                                   invalid_fcvt.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_widening_cases) == 48);
     for (u32 widening_index = 0; widening_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_widening_cases); widening_index += 1)
