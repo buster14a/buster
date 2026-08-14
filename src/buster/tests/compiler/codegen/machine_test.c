@@ -523,9 +523,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     bool registry_statuses_are_valid = true;
     bool exact_rows_are_explicit = true;
     bool exact_rows_are_not_legacy = true;
-    bool exact_rows_have_expected_indices = true;
+    bool exact_rows_have_direct_indices = true;
     bool expansion_rows_are_policy = true;
-    bool remaining_rows_are_legacy = true;
+    bool remaining_rows_are_not_legacy = true;
     for (u32 ordinal = 0; ordinal < registry_count; ordinal += 1)
     {
         MachineX64EmitRegistryEntry const* entry = machine_x86_64_emit_registry_entry(ordinal);
@@ -546,86 +546,126 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // disp32 policy so its metadata projection preserves the legacy
             // spelling at every incoming-argument offset.
             bool expected_exact = false;
+            bool expected_exact_sequence = false;
+            MachineEmitRecipeCategory expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_NONE;
             u16 expected_exact_index = 0;
-            MachineEmitRecipeCategory expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
+            if (entry->opcode == MACHINE_X64_MOV_RI || entry->opcode == MACHINE_X64_LEA_OFFSET || entry->opcode == MACHINE_X64_ADD64_IMM ||
+                entry->opcode == MACHINE_X64_IMUL64_RRI || entry->opcode == MACHINE_X64_LOAD_FRAME ||
+                (entry->opcode >= MACHINE_X64_STORE_FRAME8 && entry->opcode <= MACHINE_X64_STORE_FRAME64) ||
+                (entry->opcode >= MACHINE_X64_LOAD_PTR8 && entry->opcode <= MACHINE_X64_LOAD_PTR64) ||
+                (entry->opcode >= MACHINE_X64_STORE_PTR8 && entry->opcode <= MACHINE_X64_STORE_PTR64) ||
+                entry->opcode == MACHINE_X64_LEA_FRAME)
+            {
+                expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_FAMILY;
+                if (entry->opcode == MACHINE_X64_MOV_RI) expected_exact_index = 0;
+                else if (entry->opcode == MACHINE_X64_LEA_OFFSET) expected_exact_index = 1;
+                else if (entry->opcode == MACHINE_X64_ADD64_IMM) expected_exact_index = 2;
+                else if (entry->opcode == MACHINE_X64_IMUL64_RRI) expected_exact_index = 3;
+                else if (entry->opcode == MACHINE_X64_LOAD_FRAME) expected_exact_index = 4;
+                else if (entry->opcode >= MACHINE_X64_STORE_FRAME8 && entry->opcode <= MACHINE_X64_STORE_FRAME64)
+                    expected_exact_index = (u16)(5 + entry->opcode - MACHINE_X64_STORE_FRAME8);
+                else if (entry->opcode >= MACHINE_X64_LOAD_PTR8 && entry->opcode <= MACHINE_X64_LOAD_PTR64)
+                    expected_exact_index = (u16)(9 + entry->opcode - MACHINE_X64_LOAD_PTR8);
+                else if (entry->opcode >= MACHINE_X64_STORE_PTR8 && entry->opcode <= MACHINE_X64_STORE_PTR64)
+                    expected_exact_index = (u16)(13 + entry->opcode - MACHINE_X64_STORE_PTR8);
+                else expected_exact_index = 17;
+            }
             if (entry->opcode >= MACHINE_X64_MOV_RR && entry->opcode <= MACHINE_X64_NOT64)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(entry->opcode - MACHINE_X64_MOV_RR);
             }
             else if (entry->opcode >= MACHINE_X64_BSF32 && entry->opcode <= MACHINE_X64_BSR64)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(23 + (entry->opcode - MACHINE_X64_BSF32));
             }
             else if (entry->opcode >= MACHINE_X64_POPCNT32 && entry->opcode <= MACHINE_X64_POPCNT64)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(27 + (entry->opcode - MACHINE_X64_POPCNT32));
             }
             else if (entry->opcode >= MACHINE_X64_CMP32 && entry->opcode <= MACHINE_X64_TEST_RR)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(29 + (entry->opcode - MACHINE_X64_CMP32));
             }
             else if (entry->opcode == MACHINE_X64_JMP)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = 32;
             }
             else if (entry->opcode >= MACHINE_X64_SHL32 && entry->opcode <= MACHINE_X64_SHR64)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(33 + (entry->opcode - MACHINE_X64_SHL32));
             }
             else if (entry->opcode == MACHINE_X64_LEA_SYMBOL)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = 39;
             }
             else if (entry->opcode >= MACHINE_X64_MOVQ_TO_XMM && entry->opcode <= MACHINE_X64_MOVQ_FROM_XMM)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = (u16)(40 + (entry->opcode - MACHINE_X64_MOVQ_TO_XMM));
             }
             else if (entry->opcode == MACHINE_X64_LOAD_INCOMING)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = 42;
             }
             else if (entry->opcode == MACHINE_X64_PUSH_REGISTER || entry->opcode == MACHINE_X64_ADD_RSP)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = entry->opcode == MACHINE_X64_PUSH_REGISTER ? 43 : 44;
             }
             else if (entry->opcode == MACHINE_X64_MFENCE || entry->opcode == MACHINE_X64_INT3)
             {
                 expected_exact = true;
+                expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_DIRECT;
                 expected_exact_index = entry->opcode == MACHINE_X64_MFENCE ? 45 : 46;
             }
-            else if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY && machine_emit_recipe_index(entry->recipe) <= 17)
+            else if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY)
             {
+                u16 family_index = machine_emit_recipe_index(entry->recipe);
                 expected_exact = true;
                 expected_exact_category = MACHINE_EMIT_RECIPE_CATEGORY_FAMILY;
-                expected_exact_index = machine_emit_recipe_index(entry->recipe);
+                expected_exact_index = family_index;
+                expected_exact_sequence = (family_index >= 26 && family_index <= 31) || family_index == 35 ||
+                                          (family_index >= 36 && family_index <= 45) || family_index == 47 || family_index == 48;
             }
             registry_statuses_are_valid &= status_is_valid;
             registry_recipes_match &= machine_emit_recipe_is_valid(entry->recipe);
             registry_recipes_match &= machine_opcode_emit_recipe((u16)entry->opcode) == entry->recipe;
             registry_recipes_match &= machine_x86_64_emit_registry_find(entry->opcode) == entry;
-            exact_rows_are_explicit &= expected_exact ? status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM : status != MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM;
+            bool status_is_exact = status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM || status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE;
+            exact_rows_are_explicit &= expected_exact ? status_is_exact : !status_is_exact;
             if (expected_exact)
             {
                 exact_rows_are_not_legacy &= status != MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
-                exact_rows_have_expected_indices &= category == expected_exact_category && machine_emit_recipe_index(entry->recipe) == expected_exact_index;
+                exact_rows_have_direct_indices &= category == expected_exact_category && machine_emit_recipe_index(entry->recipe) == expected_exact_index;
+                exact_rows_have_direct_indices &= expected_exact_sequence ? status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE
+                                                                           : status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM;
             }
             if (category == MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION)
             {
                 expansion_rows_are_policy &= status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY;
             }
-            else if (!expected_exact)
+            else if (category != MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION)
             {
-                remaining_rows_are_legacy &= status == MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
+                remaining_rows_are_not_legacy &= status != MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW;
             }
             if (status_is_valid)
             {
@@ -642,11 +682,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, registry_statuses_are_valid);
     BUSTER_TEST(arguments, exact_rows_are_explicit);
     BUSTER_TEST(arguments, exact_rows_are_not_legacy);
-    BUSTER_TEST(arguments, exact_rows_have_expected_indices);
+    BUSTER_TEST(arguments, exact_rows_have_direct_indices);
     BUSTER_TEST(arguments, expansion_rows_are_policy);
-    BUSTER_TEST(arguments, remaining_rows_are_legacy);
+    BUSTER_TEST(arguments, remaining_rows_are_not_legacy);
     BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW] == MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT);
-    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM] == MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM] == MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE] == MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT);
+    BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM] +
+                             registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE] == MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT);
     BUSTER_TEST(arguments, registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY] == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT);
     BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT);
     BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT);
@@ -654,6 +697,25 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(registry_count) == 0);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MOV_RI - 1) == 0);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_VBINARY + 1) == 0);
+
+    // Serial exact prewarm publishes one immutable row map for all workers.
+    // Audit every row after publication: exact forms and sequences must have
+    // every variant token valid, while expansion-policy rows must remain
+    // deliberately non-exact so the machine layer cannot accidentally route
+    // them through a stale one-form plan.
+    MachineX64ExactMapAudit exact_map = machine_x86_64_exact_map_audit();
+    BUSTER_TEST(arguments, exact_map.valid);
+    BUSTER_TEST(arguments, exact_map.registry_rows == registry_count);
+    BUSTER_TEST(arguments, exact_map.exact_rows == MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT);
+    BUSTER_TEST(arguments, exact_map.exact_plan_valid_rows == exact_map.exact_rows);
+    BUSTER_TEST(arguments, exact_map.sequence_rows == MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT);
+    BUSTER_TEST(arguments, exact_map.sequence_variant_valid_rows == exact_map.sequence_rows);
+    BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
+    BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
+    MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
+    BUSTER_TEST(arguments, metadata_shape_cache.valid);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 166);
+    BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // The MIR census is only one raw-producer owner.  Pin the source-audited
     // subsystem anchors separately so a new producer site has to be named,
@@ -2048,7 +2110,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
                 else
                 {
-                    all_equal &= (s32)none_call(left, right) == (s32)machine_call(left, right);
+                    s64 none_value = none_call(left, right);
+                    s64 machine_value = machine_call(left, right);
+                    if ((string_equal(supported_names[name_index], S8("ucvt")) || string_equal(supported_names[name_index], S8("fmath")) ||
+                         string_equal(supported_names[name_index], S8("f32math")) || string_equal(supported_names[name_index], S8("fcompare")) ||
+                         string_equal(supported_names[name_index], S8("fuconv"))) && (s32)none_value != (s32)machine_value)
+                    {
+                        string_print(S8("FLOATDIFF {S8} left={s64} right={s64} none={s64} machine={s64}\\n"), supported_names[name_index], left, right,
+                                     none_value, machine_value);
+                    }
+                    all_equal &= (s32)none_value == (s32)machine_value;
                 }
             }
             BUSTER_TEST_RAW(arguments, all_equal, supported_names[name_index]);
@@ -2993,13 +3064,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineEncodeResult stack_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_stack);
             MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_fast);
             MachineEncodeResult quality_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_quality);
-            BUSTER_TEST_RAW(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid,
-                            string_format(arguments->arena,
-                                          S8("vector encode {S8}: stack={u32}/{u32}/{u32}/{u32} fast={u32}/{u32}/{u32}/{u32} quality={u32}/{u32}/{u32}/{u32}"),
-                                          vector_names[name_index], stack_encoded.valid, stack_encoded.exact_attempts, stack_encoded.exact_successes,
-                                          stack_encoded.exact_failures, fast_encoded.valid, fast_encoded.exact_attempts, fast_encoded.exact_successes,
-                                          fast_encoded.exact_failures, quality_encoded.valid, quality_encoded.exact_attempts,
-                                          quality_encoded.exact_successes, quality_encoded.exact_failures));
+            BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid);
             // Eighteen live vectors against the thirty-two-register file:
             // every accumulator fits, so the scan must keep the vector
             // working set fully register-resident — any vector-class edit

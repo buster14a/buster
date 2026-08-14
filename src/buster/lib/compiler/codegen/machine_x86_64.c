@@ -4614,6 +4614,18 @@ enum
 {
     MACHINE_X64_MFENCE_EXACT_FORM_ID = 9610u,
     MACHINE_X64_INT3_EXACT_FORM_ID = 10027u,
+    MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID = 10018u,
+    MACHINE_X64_MOV_SIGNED_IMMEDIATE_EXACT_FORM_ID = 9533u,
+    MACHINE_X64_LEA_EXACT_FORM_ID = 9849u,
+    MACHINE_X64_ADD_IMMEDIATE8_EXACT_FORM_ID = 9316u,
+    MACHINE_X64_ADD_IMMEDIATE32_EXACT_FORM_ID = 9270u,
+    MACHINE_X64_IMUL_IMMEDIATE8_EXACT_FORM_ID = 9748u,
+    MACHINE_X64_IMUL_IMMEDIATE32_EXACT_FORM_ID = 9745u,
+    MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID = 9845u,
+    MACHINE_X64_MOV_MEMORY8_EXACT_FORM_ID = 9840u,
+    MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID = 9841u,
+    MACHINE_X64_MOVZX_MEMORY8_EXACT_FORM_ID = 10289u,
+    MACHINE_X64_MOVZX_MEMORY16_EXACT_FORM_ID = 10291u,
     MACHINE_X64_MOV_RR_EXACT_FORM_ID = 9842u,
     MACHINE_X64_MOVSX8_RR_EXACT_FORM_ID = 10686u,
     MACHINE_X64_MOVSX16_RR_EXACT_FORM_ID = 10687u,
@@ -4641,27 +4653,72 @@ enum
     MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID = 10574u,
     MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID = 10575u,
     MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID = 9845u,
-    MACHINE_X64_MOV_RI_B8_EXACT_FORM_ID = 10018u,
-    MACHINE_X64_MOV_RI_C7_EXACT_FORM_ID = 9533u,
-    MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID = 9849u,
-    MACHINE_X64_ADD_IMM8_EXACT_FORM_ID = 9316u,
-    MACHINE_X64_IMUL_IMM8_EXACT_FORM_ID = 9748u,
-    MACHINE_X64_IMUL_IMM32_EXACT_FORM_ID = 9745u,
-    MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID = 9840u,
-    MACHINE_X64_MOV_MEM_EXACT_FORM_ID = 9841u,
-    MACHINE_X64_MOVZX8_MEM_EXACT_FORM_ID = 10289u,
-    MACHINE_X64_MOVZX16_MEM_EXACT_FORM_ID = 10291u,
     MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID = 9722u,
     MACHINE_X64_ADD_RSP_EXACT_FORM_ID = 9270u,
+    MACHINE_X64_PUSH_FRAME_EXACT_FORM_ID = 9490u,
+    MACHINE_X64_VMOV_RR_EXACT_FORM_ID = 5635u,
+    MACHINE_X64_VLOAD_EXACT_FORM_ID = 5636u,
+    MACHINE_X64_VSTORE_EXACT_FORM_ID = 5638u,
+    MACHINE_X64_VPSLLD_EXACT_FORM_ID = 7702u,
+    MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID = 7740u,
+    MACHINE_X64_VSPLATB_EXACT_FORM_ID = 5841u,
+    MACHINE_X64_XCHG_EXACT_FORM_ID = 9837u,
+    MACHINE_X64_CMPXCHG_EXACT_FORM_ID = 10280u,
+    MACHINE_X64_SUB_RSP_EXACT_FORM_ID = 9285u,
+    MACHINE_X64_VPADDB_EXACT_FORM_ID = 5739u,
+    MACHINE_X64_VPADDW_EXACT_FORM_ID = 5777u,
+    MACHINE_X64_VPADDD_EXACT_FORM_ID = 7515u,
+    MACHINE_X64_VPADDQ_EXACT_FORM_ID = 7517u,
+    MACHINE_X64_VPSUBB_EXACT_FORM_ID = 6595u,
+    MACHINE_X64_VPSUBW_EXACT_FORM_ID = 6633u,
+    MACHINE_X64_VPSUBD_EXACT_FORM_ID = 7736u,
+    MACHINE_X64_VPSUBQ_EXACT_FORM_ID = 7738u,
+    MACHINE_X64_VPANDD_EXACT_FORM_ID = 7519u,
+    MACHINE_X64_VPORD_EXACT_FORM_ID = 7674u,
+    MACHINE_X64_VPXORD_EXACT_FORM_ID = 7760u,
 };
 
 // x86-64 requires SSE2, so the MFENCE exact row always receives the target's
 // architectural baseline gate.  INT3 is BASE and deliberately carries no
 // optional feature names.
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse2_features[] = {S8_INITIALIZER("sse2")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse_features[] = {S8_INITIALIZER("sse")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx_features[] = {S8_INITIALIZER("avx")};
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_popcnt_features[] = {S8_INITIALIZER("popcnt")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512f_features[] = {S8_INITIALIZER("avx512f")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512bw_features[] = {S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512vbmi_features[] = {
+    S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw"), S8_INITIALIZER("avx512vbmi")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512vbmi2_features[] = {
+    S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw"), S8_INITIALIZER("avx512vbmi2")};
+/* Expansion rows use this name for the same architectural AVX-512 baseline. */
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
-BUSTER_GLOBAL_LOCAL void machine_x64_emit8(MachineX64Encoder* encoder, u8 byte);
+// Expansion/prologue instructions use a small, closed set of physical
+// shapes.  Resolve each shape through the metadata selector once during the
+// serial prewarm lane and publish only the resulting opaque machine token to
+// workers.  The signature deliberately describes physical shape/value
+// classes, not register numbers or byte templates; dynamic registers,
+// displacements, and immediates are still validated by the metadata transform
+// on every emission.
+#define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 256u
+#define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
+typedef struct MachineX64MetadataShapeCacheEntry MachineX64MetadataShapeCacheEntry;
+struct MachineX64MetadataShapeCacheEntry
+{
+    u64 signature;
+    u64 guard;
+    BusterX86MetadataMachineExactToken token;
+};
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeCacheEntry machine_x64_metadata_shape_cache[MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 machine_x64_metadata_shape_cache_slots[MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_count;
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_cache_invalid_count;
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_ready;
+BUSTER_CT_CHECK((MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u)) == 0);
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void);
 
 enum
 {
@@ -4669,31 +4726,46 @@ enum
     MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP = 1u << 1,
     MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE = 1u << 2,
     MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32 = 1u << 3,
+    MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK = 1u << 4,
+    MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY = 1u << 5,
+    MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_OR = 1u << 6,
 };
 
 typedef enum MachineX64ExactOperandProjection
 {
     MACHINE_X64_EXACT_OPERAND_GPR,
     MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_XMM_FIXED0,
+    MACHINE_X64_EXACT_OPERAND_XMM_FIXED1,
+    MACHINE_X64_EXACT_OPERAND_XMM_SLOT,
+    MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX,
+    MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX,
+    MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE,
+    MACHINE_X64_EXACT_OPERAND_ZMM_SLOT,
+    MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1,
+    MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K0,
     MACHINE_X64_EXACT_OPERAND_FIXED_RSP,
     MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT,
     MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO,
     MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO,
-    MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD,
     MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO,
+    MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE,
     MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD,
-    MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME,
-    MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED,
+    MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD,
+    MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT,
     MACHINE_X64_EXACT_OPERAND_PROJECTION_COUNT,
 } MachineX64ExactOperandProjection;
 
-typedef enum MachineX64ExactVariantPolicy
+typedef enum MachineX64ExactVariantSelector
 {
-    MACHINE_X64_EXACT_VARIANT_NONE,
-    MACHINE_X64_EXACT_VARIANT_MOV_RI,
+    MACHINE_X64_EXACT_VARIANT_FIXED,
+    MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE,
     MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
-    MACHINE_X64_EXACT_VARIANT_POLICY_COUNT,
-} MachineX64ExactVariantPolicy;
+    MACHINE_X64_EXACT_VARIANT_VBINARY,
+    MACHINE_X64_EXACT_VARIANT_SELECTOR_COUNT,
+} MachineX64ExactVariantSelector;
 
 // The metadata plan cache is keyed by unique durable form keys rather than
 // by DIRECT recipe rows: width variants and other projections share one
@@ -4732,20 +4804,54 @@ typedef enum MachineX64ExactPlanId
     MACHINE_X64_EXACT_PLAN_MFENCE,
     MACHINE_X64_EXACT_PLAN_INT3,
     MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
-    MACHINE_X64_EXACT_PLAN_MOV_RI_B8,
-    MACHINE_X64_EXACT_PLAN_MOV_RI_C7,
-    MACHINE_X64_EXACT_PLAN_ADD_IMM8,
-    MACHINE_X64_EXACT_PLAN_IMUL_IMM8,
-    MACHINE_X64_EXACT_PLAN_IMUL_IMM32,
-    MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
-    MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    MACHINE_X64_EXACT_PLAN_MOVZX8_MEM,
-    MACHINE_X64_EXACT_PLAN_MOVZX16_MEM,
+    MACHINE_X64_EXACT_PLAN_MOV_IMMEDIATE,
+    MACHINE_X64_EXACT_PLAN_MOV_SIGNED_IMMEDIATE,
+    MACHINE_X64_EXACT_PLAN_ADD_IMMEDIATE8,
+    MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE8,
+    MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE32,
+    MACHINE_X64_EXACT_PLAN_STORE8,
+    MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    MACHINE_X64_EXACT_PLAN_MOVZX8,
+    MACHINE_X64_EXACT_PLAN_MOVZX16,
+    MACHINE_X64_EXACT_PLAN_PUSH_FRAME,
+    MACHINE_X64_EXACT_PLAN_VMOV,
+    MACHINE_X64_EXACT_PLAN_VLOAD,
+    MACHINE_X64_EXACT_PLAN_VSTORE,
+    MACHINE_X64_EXACT_PLAN_VPSLLD,
+    MACHINE_X64_EXACT_PLAN_VPADDB,
+    MACHINE_X64_EXACT_PLAN_VPADDW,
+    MACHINE_X64_EXACT_PLAN_VPADDD,
+    MACHINE_X64_EXACT_PLAN_VPADDQ,
+    MACHINE_X64_EXACT_PLAN_VPSUBB,
+    MACHINE_X64_EXACT_PLAN_VPSUBW,
+    MACHINE_X64_EXACT_PLAN_VPSUBD,
+    MACHINE_X64_EXACT_PLAN_VPSUBQ,
+    MACHINE_X64_EXACT_PLAN_VPANDD,
+    MACHINE_X64_EXACT_PLAN_VPORD,
+    MACHINE_X64_EXACT_PLAN_VPXORD,
+    MACHINE_X64_EXACT_PLAN_VSPLATB,
+    MACHINE_X64_EXACT_PLAN_VPTERNLOGD,
+    MACHINE_X64_EXACT_PLAN_XCHG,
+    MACHINE_X64_EXACT_PLAN_CMPXCHG,
+    MACHINE_X64_EXACT_PLAN_SUB_RSP,
     MACHINE_X64_EXACT_PLAN_COUNT,
     MACHINE_X64_EXACT_PLAN_INVALID = UINT8_MAX,
 } MachineX64ExactPlanId;
 
 typedef struct MachineX64ExactRecipe MachineX64ExactRecipe;
+typedef struct MachineX64ExactRecipeVariant MachineX64ExactRecipeVariant;
+struct MachineX64ExactRecipeVariant
+{
+    X64ExactFormKey key;
+    String8 const* features;
+    u32 feature_count;
+    u8 operand_count;
+    u8 flags;
+    u8 operand_slots[4];
+    u8 operand_kinds[4];
+    u16 operand_widths[4];
+};
+
 struct MachineX64ExactRecipe
 {
     MachineEmitRecipeId recipe;
@@ -4754,14 +4860,73 @@ struct MachineX64ExactRecipe
     u32 feature_count;
     u8 operand_count;
     u8 flags;
+    u8 operand_slots[4];
+    u8 operand_kinds[4];
+    u16 operand_widths[4];
+    // A family row may select one of a small number of durable forms (for
+    // example MOV's zero-extending, sign-extending, and full-width immediate
+    // encodings).  Variant zero is the row itself; the optional array holds
+    // variants one and onward.  Direct rows keep variant_count at zero.
     u8 variant_count;
-    u8 variant_policy;
-    X64ExactFormKey alternate_keys[2];
-    u8 alternate_plan_ids[2];
-    u8 operand_slots[3];
-    u8 operand_kinds[3];
-    u16 operand_widths[3];
+    u8 variant_selector;
+    u8 reserved[2];
+    MachineX64ExactRecipeVariant const* variants;
 };
+
+// Composite family rows are represented as a short, immutable sequence of
+// metadata forms.  Steps carry the same projections as single-form recipes;
+// staging (for example GPR -> k1) is therefore expressed by another exact
+// token instead of a handwritten opcode helper.
+#define MACHINE_X64_EXACT_SEQUENCE_MAX_VARIANTS 16u
+#define MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS 8u
+typedef struct MachineX64ExactSequenceStep MachineX64ExactSequenceStep;
+typedef struct MachineX64ExactSequenceVariant MachineX64ExactSequenceVariant;
+typedef struct MachineX64ExactSequence MachineX64ExactSequence;
+struct MachineX64ExactSequenceStep
+{
+    X64ExactFormKey key;
+    String8 const* features;
+    u32 feature_count;
+    u8 operand_count;
+    u8 flags;
+    u8 operand_slots[4];
+    u8 operand_kinds[4];
+    u16 operand_widths[4];
+    u8 mask_register_plus_one;
+    bool zeroing;
+};
+struct MachineX64ExactSequenceVariant
+{
+    u8 step_count;
+    MachineX64ExactSequenceStep const* steps;
+};
+struct MachineX64ExactSequence
+{
+    MachineEmitRecipeId recipe;
+    u8 variant_count;
+    u8 variant_selector;
+    u8 reserved[2];
+    MachineX64ExactSequenceVariant const* variants;
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant machine_x64_exact_recipe_variant(MachineX64ExactRecipe const* recipe, u32 variant_index)
+{
+    MachineX64ExactRecipeVariant result = {
+        .key = recipe->key,
+        .features = recipe->features,
+        .feature_count = recipe->feature_count,
+        .operand_count = recipe->operand_count,
+        .flags = recipe->flags,
+        .operand_slots = {recipe->operand_slots[0], recipe->operand_slots[1], recipe->operand_slots[2], recipe->operand_slots[3]},
+        .operand_kinds = {recipe->operand_kinds[0], recipe->operand_kinds[1], recipe->operand_kinds[2], recipe->operand_kinds[3]},
+        .operand_widths = {recipe->operand_widths[0], recipe->operand_widths[1], recipe->operand_widths[2], recipe->operand_widths[3]},
+    };
+    if (variant_index && variant_index <= recipe->variant_count && recipe->variants)
+    {
+        result = recipe->variants[variant_index - 1];
+    }
+    return result;
+}
 
 // Flat DIRECT recipe projections.  Each descriptor is keyed by the stable
 // MachineEmitRecipeId assigned by machine.c; the operand slots are the
@@ -5019,154 +5184,725 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
     },
 };
 
-// FAMILY recipe projections for the safe scalar x86 cohort.  The producer
-// status remains attached to the source registry row; these descriptors only
-// carry the immutable metadata form identity and the post-placement operand
-// projection.  Immediate families retain both architectural spellings so
-// the legacy producer's size policy stays byte-for-byte observable.
-BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_family_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
+// FAMILY rows migrated to the metadata bridge.  The first cohort keeps the
+// machine selector's original opcode identities while replacing each
+// handwritten byte template with one or more durable form keys.  Immediate
+// rows use variants to retain the old shortest-form choice; memory rows carry
+// the exact operand width and frame-displacement policy in their descriptors.
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_mov_ri_variants[] = {
+    {
+        .key = {MACHINE_X64_MOV_SIGNED_IMMEDIATE_EXACT_FORM_ID, UINT64_C(0x2f91860fef63a638)},
+        .operand_count = 2,
+        .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 32},
+    },
+    {
+        .key = {MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID, UINT64_C(0x2a2535c90ada7adc)},
+        .operand_count = 2,
+        .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 64},
+    },
+};
+
+#define MACHINE_X64_VBINARY_VARIANT_COUNT 10u
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_vbinary_variants[MACHINE_X64_VBINARY_VARIANT_COUNT];
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_add_imm_variants[] = {
+    {
+        .key = {MACHINE_X64_ADD_IMMEDIATE32_EXACT_FORM_ID, UINT64_C(0xcebed63a599832c0)},
+        .operand_count = 2,
+        .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 32},
+    },
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_imul_imm_variants[] = {
+    {
+        .key = {MACHINE_X64_IMUL_IMMEDIATE32_EXACT_FORM_ID, UINT64_C(0x0c283301d404723a)},
+        .operand_count = 3,
+        .operand_slots = {0, 1, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {64, 64, 32},
+    },
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_vbinary_variants[] = {
+    {.key = {MACHINE_X64_VPADDW_EXACT_FORM_ID, UINT64_C(0xc226488b97c949be)}, .features = machine_x64_avx512bw_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPADDD_EXACT_FORM_ID, UINT64_C(0xa91a25d8b3eabcb3)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPADDQ_EXACT_FORM_ID, UINT64_C(0x0bd74fee16f80704)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPSUBB_EXACT_FORM_ID, UINT64_C(0x46bb97c7e362ab9c)}, .features = machine_x64_avx512bw_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPSUBW_EXACT_FORM_ID, UINT64_C(0xe58ae9721b6de3e6)}, .features = machine_x64_avx512bw_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPSUBD_EXACT_FORM_ID, UINT64_C(0x535e16651bc218c4)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPSUBQ_EXACT_FORM_ID, UINT64_C(0xd390b11ac7f6e1db)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPANDD_EXACT_FORM_ID, UINT64_C(0x4903e85df3a91181)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPORD_EXACT_FORM_ID, UINT64_C(0x72940a7ae71f5658)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+    {.key = {MACHINE_X64_VPXORD_EXACT_FORM_ID, UINT64_C(0x1b33e7cdaa3916be)}, .features = machine_x64_avx512f_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features), .operand_count = 3, .operand_slots = {0, 1, 2},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT},
+     .operand_widths = {512, 512, 512}},
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
     [0] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 0),
-        .key = {MACHINE_X64_MOV_RI_B8_EXACT_FORM_ID, UINT64_C(0x2a2535c90ada7adc)},
-        .alternate_keys = {{MACHINE_X64_MOV_RI_C7_EXACT_FORM_ID, UINT64_C(0x2f91860fef63a638)}},
-        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_MOV_RI_C7},
-        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_MOV_RI,
-        .operand_count = 2, .operand_slots = {0, 0},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED},
-        .operand_widths = {64, 64},
+        .key = {MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID, UINT64_C(0x2a2535c90ada7adc)},
+        .operand_count = 2,
+        .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .operand_widths = {32, 32},
+        .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_mov_ri_variants),
+        .variant_selector = MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE,
+        .variants = machine_x64_mov_ri_variants,
     },
     [1] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 1),
-        .key = {MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_LEA_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD},
         .operand_widths = {64, 64},
     },
     [2] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 2),
-        .key = {MACHINE_X64_ADD_IMM8_EXACT_FORM_ID, UINT64_C(0xc4d75f09ceeb4f69)},
-        .alternate_keys = {{MACHINE_X64_ADD_RSP_EXACT_FORM_ID, UINT64_C(0xcebed63a599832c0)}},
-        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_ADD_RSP},
-        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
-        .operand_count = 2, .operand_slots = {0, 0},
+        .key = {MACHINE_X64_ADD_IMMEDIATE8_EXACT_FORM_ID, UINT64_C(0xc4d75f09ceeb4f69)},
+        .operand_count = 2,
+        .operand_slots = {0, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
         .operand_widths = {64, 8},
+        .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_add_imm_variants),
+        .variant_selector = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
+        .variants = machine_x64_add_imm_variants,
     },
     [3] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 3),
-        .key = {MACHINE_X64_IMUL_IMM8_EXACT_FORM_ID, UINT64_C(0xcc57ef111fd55ec5)},
-        .alternate_keys = {{MACHINE_X64_IMUL_IMM32_EXACT_FORM_ID, UINT64_C(0x0c283301d404723a)}},
-        .alternate_plan_ids = {MACHINE_X64_EXACT_PLAN_IMUL_IMM32},
-        .variant_count = 2, .variant_policy = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
-        .operand_count = 3, .operand_slots = {0, 1, 0},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_GPR,
-                          MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
+        .key = {MACHINE_X64_IMUL_IMMEDIATE8_EXACT_FORM_ID, UINT64_C(0xcc57ef111fd55ec5)},
+        .operand_count = 3,
+        .operand_slots = {0, 1, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD},
         .operand_widths = {64, 64, 8},
+        .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_imul_imm_variants),
+        .variant_selector = MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
+        .variants = machine_x64_imul_imm_variants,
     },
     [4] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 4),
-        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD},
         .operand_widths = {64, 64},
     },
     [5] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 5),
-        .key = {MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_MOV_MEMORY8_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {8, 8},
     },
     [6] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 6),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {16, 16},
     },
     [7] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 7),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {32, 32},
     },
     [8] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 8),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {64, 64},
     },
     [9] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 9),
-        .key = {MACHINE_X64_MOVZX8_MEM_EXACT_FORM_ID, UINT64_C(0x6d04093431c32330)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOVZX_MEMORY8_EXACT_FORM_ID, UINT64_C(0x6d04093431c32330)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
         .operand_widths = {64, 8},
     },
     [10] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 10),
-        .key = {MACHINE_X64_MOVZX16_MEM_EXACT_FORM_ID, UINT64_C(0xa910655fd16f6729)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOVZX_MEMORY16_EXACT_FORM_ID, UINT64_C(0xa910655fd16f6729)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
         .operand_widths = {64, 16},
     },
     [11] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 11),
-        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
         .operand_widths = {32, 32},
     },
     [12] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 12),
-        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO},
         .operand_widths = {64, 64},
     },
     [13] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 13),
-        .key = {MACHINE_X64_MOV_BYTE_MEM_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY8_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {8, 8},
     },
     [14] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 14),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {16, 16},
     },
     [15] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 15),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {32, 32},
     },
     [16] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 16),
-        .key = {MACHINE_X64_MOV_MEM_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
-        .operand_count = 2, .operand_slots = {0, 1},
+        .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
+        .operand_count = 2,
+        .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_GPR},
         .operand_widths = {64, 64},
     },
     [17] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 17),
-        .key = {MACHINE_X64_LEA_OFFSET_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
-        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .key = {MACHINE_X64_LEA_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
+        .operand_count = 2,
+        .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 1},
-        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD},
         .operand_widths = {64, 64},
     },
+    [18] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 18),
+        .key = {MACHINE_X64_PUSH_FRAME_EXACT_FORM_ID, UINT64_C(0x18f2cf99c5297c27)},
+        .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD}, .operand_widths = {64},
+    },
+    [19] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 19),
+        .key = {MACHINE_X64_VMOV_RR_EXACT_FORM_ID, UINT64_C(0xea537c4b94111b09)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [20] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 20),
+        .key = {MACHINE_X64_VLOAD_EXACT_FORM_ID, UINT64_C(0x62bba0430900201e)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT}, .operand_widths = {512, 8},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [21] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 21),
+        .key = {MACHINE_X64_VSTORE_EXACT_FORM_ID, UINT64_C(0xa3f8bbb35dcafc20)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [22] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 22),
+        .key = {MACHINE_X64_VLOAD_EXACT_FORM_ID, UINT64_C(0x62bba0430900201e)}, .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO}, .operand_widths = {512, 8},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [23] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 23),
+        .key = {MACHINE_X64_VSTORE_EXACT_FORM_ID, UINT64_C(0xa3f8bbb35dcafc20)}, .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [24] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 24),
+        .key = {MACHINE_X64_VPSLLD_EXACT_FORM_ID, UINT64_C(0x47cd9f2fa72e4408)}, .operand_count = 3, .operand_slots = {0, 1, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {512, 512, 8},
+        .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+    },
+    [25] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 25),
+        .key = {MACHINE_X64_VPADDB_EXACT_FORM_ID, UINT64_C(0x9fc171a572e6eeae)}, .operand_count = 3, .operand_slots = {0, 1, 2},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512, 512},
+        .variant_count = MACHINE_X64_VBINARY_VARIANT_COUNT, .variant_selector = MACHINE_X64_EXACT_VARIANT_VBINARY, .variants = machine_x64_vbinary_variants,
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [32] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 32), .key = {MACHINE_X64_VSPLATB_EXACT_FORM_ID, UINT64_C(0x5db141a5417ed3f6)},
+        .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {512, 32},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
+    [33] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 33), .key = {MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID, UINT64_C(0x61fc34c1d8f6da45)},
+        .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {512, 512, 512, 8},
+        .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+    },
+    [34] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 34), .key = {MACHINE_X64_XCHG_EXACT_FORM_ID, UINT64_C(0x100612d3d9f27042)},
+        .operand_count = 2, .operand_slots = {0, 1},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
+    },
+    [35] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 35), .key = {MACHINE_X64_CMPXCHG_EXACT_FORM_ID, UINT64_C(0x46a888e2c049f87a)},
+        .operand_count = 2, .operand_slots = {1, 3}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
+    },
+    [46] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 46), .key = {MACHINE_X64_SUB_RSP_EXACT_FORM_ID, UINT64_C(0xb9527cc38accf111)},
+        .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_FIXED_RSP, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {64, 32},
+    },
+};
+
+// Composite descriptors are dense by family index.  Rows not yet carrying a
+// validated metadata vocabulary remain zero and consequently fail closed in
+// the worker lane rather than re-entering the handwritten switch.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cmpxchg_sequence_steps[] = {
+    {
+        .key = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
+        .operand_count = 2, .operand_slots = {0, 2},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {64, 64},
+    },
+    {
+        .key = {MACHINE_X64_CMPXCHG_EXACT_FORM_ID, UINT64_C(0x46a888e2c049f87a)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK,
+        .operand_slots = {1, 3},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
+        .operand_widths = {0, 0},
+    },
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cmpxchg_sequence_variants[] = {
+    {.step_count = 2, .steps = machine_x64_cmpxchg_sequence_steps},
+};
+
+// Scalar floating-point rows retain the canonical two-address scratch
+// convention (XMM0 receives the integer bit pattern, the conversion reads
+// and writes XMM0, and the result is copied back to the allocated GPR).  Each
+// byte-producing step is a durable metadata form; the sequence merely stages
+// the fixed scratch register through the existing exact MOVQ forms.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_f32_f64_sequence_steps[] = {
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {10509u, UINT64_C(0xd0ebceb2f65c639d)}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {128, 128}},
+    {.key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_f64_f32_sequence_steps[] = {
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {10541u, UINT64_C(0x1d8915237e1a0dca)}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {128, 128}},
+    {.key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_i64_f32_sequence_steps[] = {
+    {.key = {10436u, UINT64_C(0x8632f672b995b8ef)}, .features = machine_x64_sse_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_i64_f64_sequence_steps[] = {
+    {.key = {10463u, UINT64_C(0x6b1b449f0ed1e10e)}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_f32_i64_sequence_steps[] = {
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {10440u, UINT64_C(0x443fee16922dd4d2)}, .features = machine_x64_sse_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cvt_f64_i64_sequence_steps[] = {
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features,
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}},
+    {.key = {10467u, UINT64_C(0xdb7e2aa7c56853cf)}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_f32_f64_sequence_variants[] = {{.step_count = 3, .steps = machine_x64_cvt_f32_f64_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_f64_f32_sequence_variants[] = {{.step_count = 3, .steps = machine_x64_cvt_f64_f32_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_i64_f32_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_cvt_i64_f32_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_i64_f64_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_cvt_i64_f64_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_f32_i64_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_cvt_f32_i64_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cvt_f64_i64_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_cvt_f64_i64_sequence_steps}};
+
+// Scalar floating arithmetic uses the same two-address XMM scratch convention
+// as the legacy selector.  The arithmetic forms themselves are canonical
+// metadata tokens; all integer/XMM staging remains in the exact sequence.
+#define MACHINE_X64_FP_MOVQ_TO_STEP(slot_value) \
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features, \
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, slot_value}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}}
+#define MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(slot_value) \
+    {.key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)}, .features = machine_x64_sse2_features, \
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, slot_value}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64}}
+#define MACHINE_X64_FP_ARITH_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .features = machine_x64_sse_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features), .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_XMM_FIXED1}, .operand_widths = {128, 128}}
+#define MACHINE_X64_FP_ARITH_SSE2_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_XMM_FIXED1}, .operand_widths = {128, 128}}
+#define MACHINE_X64_FP_MOVQ_FROM_STEP \
+    {.key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)}, .features = machine_x64_sse2_features, \
+     .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_FIXED0}, .operand_widths = {64, 128}}
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_farith_sequence_steps[8][4] = {
+    [0] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_STEP(10505u, 0xb7548ac43adc345e), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [1] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_STEP(10513u, 0x9444e608b81120dc), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [2] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_STEP(10507u, 0x5cc22ab1a19a6e33), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [3] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_STEP(10517u, 0xa367cc47795a1141), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [4] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_SSE2_STEP(10537u, 0x64c1f66df6f45674), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [5] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_SSE2_STEP(10543u, 0x1b16db007692b16b), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [6] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_SSE2_STEP(10539u, 0xa16076f1418ba607), MACHINE_X64_FP_MOVQ_FROM_STEP},
+    [7] = {MACHINE_X64_FP_MOVQ_TO_STEP(1), MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FP_ARITH_SSE2_STEP(10547u, 0x96856051e8170cbf), MACHINE_X64_FP_MOVQ_FROM_STEP},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_farith_sequence_variants[] = {
+    [0] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[0]},
+    [1] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[1]},
+    [2] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[2]},
+    [3] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[3]},
+    [4] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[4]},
+    [5] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[5]},
+    [6] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[6]},
+    [7] = {.step_count = 4, .steps = machine_x64_farith_sequence_steps[7]},
+};
+
+// FCMP_SET's parity repair is encoded with the exact SETNP/AND pair as the
+// primary token.  For the OR-parity variants the worker swaps those two
+// metadata tokens for SETP/OR; no byte template enters the sequence path.
+#define MACHINE_X64_FCMP_MOVQ_TO_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_STEP(slot_value)
+#define MACHINE_X64_FCMP_MOVQ_TO_XMM1_STEP(slot_value) MACHINE_X64_FP_MOVQ_TO_XMM1_STEP(slot_value)
+#define MACHINE_X64_FCMP_COMI_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features), .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_FIXED0, MACHINE_X64_EXACT_OPERAND_XMM_FIXED1}, .operand_widths = {128, 128}}
+#define MACHINE_X64_FCMP_SETCC_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .operand_count = 1, .operand_slots = {0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, \
+     .operand_widths = {8}}
+#define MACHINE_X64_FCMP_PARITY_SETNP_STEP \
+    {.key = {10649u, UINT64_C(0xd15c6a2ed2b79fc2)}, .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY, .operand_slots = {0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX}, .operand_widths = {8}}
+#define MACHINE_X64_FCMP_PARITY_AND_STEP \
+    {.key = {9672u, UINT64_C(0xcbdfecbe7e216f54)}, .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY | MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_OR, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX}, .operand_widths = {8, 8}}
+#define MACHINE_X64_FCMP_MOVZX_STEP \
+    {.key = {MACHINE_X64_MOVZX8_RR_EXACT_FORM_ID, UINT64_C(0xa9d675ab86fb1641)}, .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, .operand_widths = {64, 8}}
+#define MACHINE_X64_FCMP_STEPS(comi_id, comi_hash, set_id, set_hash) \
+    {MACHINE_X64_FCMP_MOVQ_TO_STEP(1), MACHINE_X64_FCMP_MOVQ_TO_XMM1_STEP(2), MACHINE_X64_FCMP_COMI_STEP(comi_id, comi_hash), \
+     MACHINE_X64_FCMP_SETCC_STEP(set_id, set_hash), MACHINE_X64_FCMP_PARITY_SETNP_STEP, MACHINE_X64_FCMP_PARITY_AND_STEP, MACHINE_X64_FCMP_MOVZX_STEP}
+
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_fcmp_set_sequence_steps[12][7] = {
+    [0] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10265u, 0x261b81212af08017),
+    [1] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10267u, 0x99647caf50cf7fff),
+    [2] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10261u, 0x0bc47fa18ee6a6de),
+    [3] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10269u, 0x73419bd793371f04),
+    [4] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10271u, 0x4c681fe5d1e14b1),
+    [5] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10263u, 0x7022443cd4a81cf5),
+    [6] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10265u, 0x261b81212af08017),
+    [7] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10267u, 0x99647caf50cf7fff),
+    [8] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10261u, 0x0bc47fa18ee6a6de),
+    [9] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10269u, 0x73419bd793371f04),
+    [10] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10271u, 0x4c681fe5d1e14b1),
+    [11] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10263u, 0x7022443cd4a81cf5),
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_fcmp_set_sequence_variants[] = {
+    [0] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[0]},
+    [1] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[1]},
+    [2] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[2]},
+    [3] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[3]},
+    [4] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[4]},
+    [5] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[5]},
+    [6] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[6]},
+    [7] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[7]},
+    [8] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[8]},
+    [9] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[9]},
+    [10] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[10]},
+    [11] = {.step_count = 7, .steps = machine_x64_fcmp_set_sequence_steps[11]},
+};
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken machine_x64_fcmp_setp_token;
+BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken machine_x64_fcmp_or_token;
+BUSTER_GLOBAL_LOCAL bool machine_x64_fcmp_alternate_tokens_valid;
+
+#define MACHINE_X64_SETCC_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .operand_count = 1, .operand_slots = {0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, .operand_widths = {8}}
+#define MACHINE_X64_SETCC_MOVZX_STEP \
+    {.key = {MACHINE_X64_MOVZX8_RR_EXACT_FORM_ID, UINT64_C(0xa9d675ab86fb1641)}, .operand_count = 2, .operand_slots = {0, 0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX}, .operand_widths = {64, 8}}
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_setcc_sequence_steps[16][2] = {
+    [0] = {MACHINE_X64_SETCC_STEP(10257u, 0x31ddc1ed865a5575), MACHINE_X64_SETCC_MOVZX_STEP},
+    [1] = {MACHINE_X64_SETCC_STEP(10259u, 0x81dd033fae75c1c6), MACHINE_X64_SETCC_MOVZX_STEP},
+    [2] = {MACHINE_X64_SETCC_STEP(10261u, 0x0bc47fa18ee6a6de), MACHINE_X64_SETCC_MOVZX_STEP},
+    [3] = {MACHINE_X64_SETCC_STEP(10263u, 0x7022443cd4a81cf5), MACHINE_X64_SETCC_MOVZX_STEP},
+    [4] = {MACHINE_X64_SETCC_STEP(10265u, 0x261b81212af08017), MACHINE_X64_SETCC_MOVZX_STEP},
+    [5] = {MACHINE_X64_SETCC_STEP(10267u, 0x99647caf50cf7fff), MACHINE_X64_SETCC_MOVZX_STEP},
+    [6] = {MACHINE_X64_SETCC_STEP(10269u, 0x73419bd793371f04), MACHINE_X64_SETCC_MOVZX_STEP},
+    [7] = {MACHINE_X64_SETCC_STEP(10271u, 0x4c681fe5d1e14b1), MACHINE_X64_SETCC_MOVZX_STEP},
+    [8] = {MACHINE_X64_SETCC_STEP(10643u, 0x0f501b348d5ad3ab), MACHINE_X64_SETCC_MOVZX_STEP},
+    [9] = {MACHINE_X64_SETCC_STEP(10645u, 0xe718192d18926b3f), MACHINE_X64_SETCC_MOVZX_STEP},
+    [10] = {MACHINE_X64_SETCC_STEP(10647u, 0x65dc8e342334f3cb), MACHINE_X64_SETCC_MOVZX_STEP},
+    [11] = {MACHINE_X64_SETCC_STEP(10649u, 0xd15c6a2ed2b79fc2), MACHINE_X64_SETCC_MOVZX_STEP},
+    [12] = {MACHINE_X64_SETCC_STEP(10651u, 0xb45e8ae6fd038751), MACHINE_X64_SETCC_MOVZX_STEP},
+    [13] = {MACHINE_X64_SETCC_STEP(10653u, 0x4efeb1d47cbd56a0), MACHINE_X64_SETCC_MOVZX_STEP},
+    [14] = {MACHINE_X64_SETCC_STEP(10655u, 0x6e81bfd37e941496), MACHINE_X64_SETCC_MOVZX_STEP},
+    [15] = {MACHINE_X64_SETCC_STEP(10657u, 0xa2843c8dd1c8c547), MACHINE_X64_SETCC_MOVZX_STEP},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_setcc_sequence_variants[] = {
+    [0] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[0]},
+    [1] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[1]},
+    [2] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[2]},
+    [3] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[3]},
+    [4] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[4]},
+    [5] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[5]},
+    [6] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[6]},
+    [7] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[7]},
+    [8] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[8]},
+    [9] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[9]},
+    [10] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[10]},
+    [11] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[11]},
+    [12] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[12]},
+    [13] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[13]},
+    [14] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[14]},
+    [15] = {.step_count = 2, .steps = machine_x64_setcc_sequence_steps[15]},
+};
+
+#define MACHINE_X64_JCC_STEP(form_id, form_hash) \
+    {.key = {form_id, form_hash}, .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP, .operand_slots = {0}, \
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO}, .operand_widths = {32}}
+#define MACHINE_X64_JMP_STEP \
+    {.key = {MACHINE_X64_JMP_EXACT_FORM_ID, UINT64_C(0xab9c4b53fce14f6e)}, .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP, \
+     .operand_slots = {1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO}, .operand_widths = {32}}
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_jcc_sequence_steps[16][2] = {
+    [0] = {MACHINE_X64_JCC_STEP(10240u, 0x663680e7ff926f87), MACHINE_X64_JMP_STEP},
+    [1] = {MACHINE_X64_JCC_STEP(10243u, 0x5b0b1a9540ee71fb), MACHINE_X64_JMP_STEP},
+    [2] = {MACHINE_X64_JCC_STEP(10245u, 0x311d2176cc680771), MACHINE_X64_JMP_STEP},
+    [3] = {MACHINE_X64_JCC_STEP(10247u, 0xb78eb0afc41232dd), MACHINE_X64_JMP_STEP},
+    [4] = {MACHINE_X64_JCC_STEP(10249u, 0x5b6e3cd6eb63b76c), MACHINE_X64_JMP_STEP},
+    [5] = {MACHINE_X64_JCC_STEP(10251u, 0x4d8e220c403f8696), MACHINE_X64_JMP_STEP},
+    [6] = {MACHINE_X64_JCC_STEP(10253u, 0xd3e93216ca69f952), MACHINE_X64_JMP_STEP},
+    [7] = {MACHINE_X64_JCC_STEP(10255u, 0x0da05f55f9ead40a), MACHINE_X64_JMP_STEP},
+    [8] = {MACHINE_X64_JCC_STEP(10627u, 0x1b3720aa4829444c), MACHINE_X64_JMP_STEP},
+    [9] = {MACHINE_X64_JCC_STEP(10629u, 0x744e31783e151c7b), MACHINE_X64_JMP_STEP},
+    [10] = {MACHINE_X64_JCC_STEP(10631u, 0xf3d3864103433402), MACHINE_X64_JMP_STEP},
+    [11] = {MACHINE_X64_JCC_STEP(10633u, 0xf6a6442e85dfa8e4), MACHINE_X64_JMP_STEP},
+    [12] = {MACHINE_X64_JCC_STEP(10635u, 0xad1a1b6b4487b442), MACHINE_X64_JMP_STEP},
+    [13] = {MACHINE_X64_JCC_STEP(10637u, 0xdc02d320fd463c30), MACHINE_X64_JMP_STEP},
+    [14] = {MACHINE_X64_JCC_STEP(10639u, 0xbbb60554e5ce4380), MACHINE_X64_JMP_STEP},
+    [15] = {MACHINE_X64_JCC_STEP(10641u, 0x6c77826ff61644d0), MACHINE_X64_JMP_STEP},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_jcc_sequence_variants[] = {
+    [0] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[0]},
+    [1] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[1]},
+    [2] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[2]},
+    [3] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[3]},
+    [4] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[4]},
+    [5] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[5]},
+    [6] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[6]},
+    [7] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[7]},
+    [8] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[8]},
+    [9] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[9]},
+    [10] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[10]},
+    [11] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[11]},
+    [12] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[12]},
+    [13] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[13]},
+    [14] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[14]},
+    [15] = {.step_count = 2, .steps = machine_x64_jcc_sequence_steps[15]},
+};
+
+#undef MACHINE_X64_JMP_STEP
+#undef MACHINE_X64_JCC_STEP
+#undef MACHINE_X64_SETCC_MOVZX_STEP
+#undef MACHINE_X64_SETCC_STEP
+
+#undef MACHINE_X64_FCMP_STEPS
+#undef MACHINE_X64_FCMP_MOVZX_STEP
+#undef MACHINE_X64_FCMP_PARITY_AND_STEP
+#undef MACHINE_X64_FCMP_PARITY_SETNP_STEP
+#undef MACHINE_X64_FCMP_SETCC_STEP
+#undef MACHINE_X64_FCMP_COMI_STEP
+#undef MACHINE_X64_FCMP_MOVQ_TO_STEP
+#undef MACHINE_X64_FCMP_MOVQ_TO_XMM1_STEP
+#undef MACHINE_X64_FP_MOVQ_FROM_STEP
+#undef MACHINE_X64_FP_ARITH_STEP
+#undef MACHINE_X64_FP_ARITH_SSE2_STEP
+#undef MACHINE_X64_FP_MOVQ_TO_STEP
+#undef MACHINE_X64_FP_MOVQ_TO_XMM1_STEP
+
+// AVX-512 masked rows use k1 as the machine scratch mask.  KMOVQ is itself a
+// metadata form, so staging the incoming general-register mask never falls
+// back to a byte template.  The EVEX forms omit MASK1 from the physical list;
+// the machine-only mask/zeroing attributes supply that decorator exactly.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vload_ptr_masked_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {MACHINE_X64_VLOAD_EXACT_FORM_ID, UINT64_C(0x62bba0430900201e)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO}, .operand_widths = {512, 8}, .mask_register_plus_one = 2, .zeroing = true},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vstore_ptr_masked_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {MACHINE_X64_VSTORE_EXACT_FORM_ID, UINT64_C(0xa3f8bbb35dcafc20)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512}, .mask_register_plus_one = 2},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vcompress_store_ptr_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {8910u, UINT64_C(0x68e38f515bab1a21)}, .features = machine_x64_avx512vbmi2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512vbmi2_features),
+     .operand_count = 2, .operand_slots = {0, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512}, .mask_register_plus_one = 2},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_equal_sequence_steps[] = {
+    {.key = {5883u, UINT64_C(0xb5f8bb7935287038)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 3, .operand_slots = {0, 1, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512, 512}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_less_sequence_steps[] = {
+    {.key = {5927u, UINT64_C(0x328655b53fe636a2)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT}, .operand_widths = {64, 512, 512, 8}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_test_sequence_steps[] = {
+    {.key = {6647u, UINT64_C(0x1c172153a615826b)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 3, .operand_slots = {0, 1, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512, 512}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vload_ptr_masked_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vload_ptr_masked_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vstore_ptr_masked_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vstore_ptr_masked_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vcompress_store_ptr_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vcompress_store_ptr_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpcmp_sequence_variants[] = {
+    {.step_count = 2, .steps = machine_x64_vpcmp_equal_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_less_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_test_sequence_steps},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovb2m_sequence_steps[] = {
+    {.key = {6183u, UINT64_C(0x845181de5363cb8d)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpermt2b_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {7901u, UINT64_C(0xf776ce35d04b2826)}, .features = machine_x64_avx512vbmi_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512vbmi_features),
+     .operand_count = 3, .operand_slots = {0, 2, 3}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512, 512}, .mask_register_plus_one = 2, .zeroing = true},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vcompressb_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {8911u, UINT64_C(0xe4d1b4ecc7503fab)}, .features = machine_x64_avx512vbmi2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512vbmi2_features),
+     .operand_count = 2, .operand_slots = {0, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512}, .mask_register_plus_one = 2, .zeroing = true},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpmovb2m_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vpmovb2m_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpermt2b_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vpermt2b_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vcompressb_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vcompressb_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovzxbd_q0_steps[] = {
+    {.key = {7658u, UINT64_C(0x1646d75ce384e74a)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_XMM_SLOT}, .operand_widths = {512, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovzxbd_q_steps[] = {
+    {.key = {7163u, UINT64_C(0x6d8890c0fa6f8622)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+     .operand_count = 3, .operand_slots = {0, 1, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT}, .operand_widths = {128, 512, 8}},
+    {.key = {7658u, UINT64_C(0x1646d75ce384e74a)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_XMM_SLOT}, .operand_widths = {512, 128}},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpmovzxbd_sequence_variants[] = {
+    {.step_count = 1, .steps = machine_x64_vpmovzxbd_q0_steps},
+    {.step_count = 2, .steps = machine_x64_vpmovzxbd_q_steps},
+    {.step_count = 2, .steps = machine_x64_vpmovzxbd_q_steps},
+    {.step_count = 2, .steps = machine_x64_vpmovzxbd_q_steps},
+};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
+    [26] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 26), .variant_count = 1, .variants = machine_x64_cvt_f32_f64_sequence_variants},
+    [27] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 27), .variant_count = 1, .variants = machine_x64_cvt_f64_f32_sequence_variants},
+    [28] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 28), .variant_count = 1, .variants = machine_x64_cvt_i64_f32_sequence_variants},
+    [29] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 29), .variant_count = 1, .variants = machine_x64_cvt_i64_f64_sequence_variants},
+    [30] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 30), .variant_count = 1, .variants = machine_x64_cvt_f32_i64_sequence_variants},
+    [31] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 31), .variant_count = 1, .variants = machine_x64_cvt_f64_i64_sequence_variants},
+    [36] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 36), .variant_count = 1, .variants = machine_x64_vload_ptr_masked_sequence_variants},
+    [37] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 37), .variant_count = 1, .variants = machine_x64_vstore_ptr_masked_sequence_variants},
+    [38] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 38), .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
+    [39] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 39), .variant_count = 3, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
+    [40] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 40), .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
+    [41] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 41), .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
+    [42] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 42), .variant_count = 1, .variants = machine_x64_vcompressb_sequence_variants},
+    [43] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 43), .variant_count = 4, .variants = machine_x64_vpmovzxbd_sequence_variants},
+    [35] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 35),
+        .variant_count = 1, .variants = machine_x64_cmpxchg_sequence_variants,
+    },
+    [44] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 44), .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
+    [45] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45), .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
+    [47] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 47), .variant_count = 16, .variants = machine_x64_setcc_sequence_variants},
+    [48] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 48), .variant_count = 16, .variants = machine_x64_jcc_sequence_variants},
 };
 
 // DIRECT recipe index -> compact unique exact-plan identity.  Width variants
@@ -5224,26 +5960,58 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_
     [46] = MACHINE_X64_EXACT_PLAN_INT3,
 };
 
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_family_recipe[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
-    [0] = MACHINE_X64_EXACT_PLAN_MOV_RI_B8,
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_family_exact_plan_id_by_recipe[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
+    [0] = MACHINE_X64_EXACT_PLAN_MOV_IMMEDIATE,
     [1] = MACHINE_X64_EXACT_PLAN_LEA_SYMBOL,
-    [2] = MACHINE_X64_EXACT_PLAN_ADD_IMM8,
-    [3] = MACHINE_X64_EXACT_PLAN_IMUL_IMM8,
+    [2] = MACHINE_X64_EXACT_PLAN_ADD_IMMEDIATE8,
+    [3] = MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE8,
     [4] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
-    [5] = MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
-    [6] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    [7] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    [8] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    [9] = MACHINE_X64_EXACT_PLAN_MOVZX8_MEM,
-    [10] = MACHINE_X64_EXACT_PLAN_MOVZX16_MEM,
+    [5] = MACHINE_X64_EXACT_PLAN_STORE8,
+    [6] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    [7] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    [8] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    [9] = MACHINE_X64_EXACT_PLAN_MOVZX8,
+    [10] = MACHINE_X64_EXACT_PLAN_MOVZX16,
     [11] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
     [12] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
-    [13] = MACHINE_X64_EXACT_PLAN_MOV_BYTE_MEM,
-    [14] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    [15] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
-    [16] = MACHINE_X64_EXACT_PLAN_MOV_MEM,
+    [13] = MACHINE_X64_EXACT_PLAN_STORE8,
+    [14] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    [15] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
+    [16] = MACHINE_X64_EXACT_PLAN_STORE_FULL,
     [17] = MACHINE_X64_EXACT_PLAN_LEA_SYMBOL,
+    [18] = MACHINE_X64_EXACT_PLAN_PUSH_FRAME,
+    [19] = MACHINE_X64_EXACT_PLAN_VMOV,
+    [20] = MACHINE_X64_EXACT_PLAN_VLOAD,
+    [21] = MACHINE_X64_EXACT_PLAN_VSTORE,
+    [22] = MACHINE_X64_EXACT_PLAN_VLOAD,
+    [23] = MACHINE_X64_EXACT_PLAN_VSTORE,
+    [24] = MACHINE_X64_EXACT_PLAN_VPSLLD,
+    [25] = MACHINE_X64_EXACT_PLAN_VPADDB,
+    [32] = MACHINE_X64_EXACT_PLAN_VSPLATB,
+    [33] = MACHINE_X64_EXACT_PLAN_VPTERNLOGD,
+    [34] = MACHINE_X64_EXACT_PLAN_XCHG,
+    [35] = MACHINE_X64_EXACT_PLAN_CMPXCHG,
+    [46] = MACHINE_X64_EXACT_PLAN_SUB_RSP,
 };
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_id_for_recipe_variant(MachineEmitRecipeCategory category, u16 recipe_index, u32 variant_index)
+{
+    if (category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT)
+    {
+        return recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_recipe) ? machine_x64_exact_plan_id_by_recipe[recipe_index]
+                                                                                       : MACHINE_X64_EXACT_PLAN_INVALID;
+    }
+    if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY)
+    {
+        if (recipe_index >= BUSTER_ARRAY_LENGTH(machine_x64_family_exact_plan_id_by_recipe)) return MACHINE_X64_EXACT_PLAN_INVALID;
+        if (recipe_index == 0 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_MOV_SIGNED_IMMEDIATE;
+        if (recipe_index == 2 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_ADD_RSP;
+        if (recipe_index == 3 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE32;
+        if (recipe_index == 25 && variant_index <= 10) return (u8)(MACHINE_X64_EXACT_PLAN_VPADDB + variant_index);
+        return machine_x64_family_exact_plan_id_by_recipe[recipe_index];
+    }
+    return MACHINE_X64_EXACT_PLAN_INVALID;
+}
 
 // The encoder's hot row loop sees x86 opcodes as one contiguous ordinal span
 // (MACHINE_X64_MOV_RI .. MACHINE_X64_VBINARY).  Keep the exact projection in
@@ -5255,29 +6023,36 @@ typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
 struct MachineX64PreparedExactOpcode
 {
     MachineX64ExactRecipe const* descriptor;
-    // Tokens are resolved beside the descriptor's feature policy during
-    // serial prewarm and remain opaque to the machine layer. A family row may
-    // have an alternate architectural spelling (imm8 vs imm32), so publish
-    // all variants together with the descriptor.
-    BusterX86MetadataMachineExactToken metadata_tokens[3];
+    MachineX64ExactSequence const* sequence;
+    // Tokens are resolved beside each descriptor variant's feature policy
+    // during serial prewarm and remain opaque to the machine layer.
+    BusterX86MetadataMachineExactToken metadata_tokens[16];
+    BusterX86MetadataMachineExactToken sequence_tokens[MACHINE_X64_EXACT_SEQUENCE_MAX_VARIANTS * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS];
     u8 exact_required;
-    u8 plan_valid;
+    u8 sequence_required;
     u8 variant_count;
-    u8 reserved;
+    u16 variant_valid_mask;
+    u8 plan_valid;
 };
-BUSTER_CT_CHECK(sizeof(MachineX64PreparedExactOpcode) == 24);
 
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_DIRECT(index) (&machine_x64_exact_recipe_table[(index)])
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_FAMILY(index) (&machine_x64_exact_family_recipe_table[(index)])
-#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(category, index) MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##category(index)
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(category, index) MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_##category(index)
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_DIRECT(index) (&machine_x64_exact_recipe_table[(index)])
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_FAMILY(index) (&machine_x64_family_exact_recipe_table[(index)])
+#define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_SEQUENCE(category, index) 0
 #define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW(category, index) 0
 #define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY(category, index) 0
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM 1u
+#define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_SEQUENCE 1u
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW 0u
 #define MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY 0u
+#define MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXACT_FORM 0u
+#define MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXACT_SEQUENCE 1u
+#define MACHINE_X64_EXACT_OPCODE_SEQUENCE_LEGACY_RAW 0u
+#define MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXPANSION_POLICY 0u
 #define MACHINE_X64_EXACT_OPCODE_MAP_ROW(opcode_value, category_value, index_value, status_value) \
     [opcode_value - MACHINE_X64_MOV_RI] = { \
         .descriptor = MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_##status_value(category_value, index_value), \
+        .sequence_required = MACHINE_X64_EXACT_OPCODE_SEQUENCE_##status_value, \
         .exact_required = MACHINE_X64_EXACT_OPCODE_REQUIRED_##status_value, \
     },
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
@@ -5287,14 +6062,213 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[M
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_FORM
+#undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXACT_SEQUENCE
+#undef MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXPANSION_POLICY
+#undef MACHINE_X64_EXACT_OPCODE_SEQUENCE_LEGACY_RAW
+#undef MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXACT_SEQUENCE
+#undef MACHINE_X64_EXACT_OPCODE_SEQUENCE_EXACT_FORM
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXPANSION_POLICY
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_LEGACY_RAW
-#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_FAMILY
-#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_DIRECT
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_FAMILY
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_DIRECT
 #undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM
+#undef MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_SEQUENCE
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
 BUSTER_GLOBAL_LOCAL bool machine_x64_exact_opcode_map_ready;
+
+// Keep the prewarm stages in separate functions.  The self-hosted C compiler
+// accounts MIR capacity per function, and putting key collection, metadata
+// preparation, and row publication in one body makes this otherwise bounded
+// serial operation exceed that limit.  The key/plan helpers write caller-owned
+// scratch storage, while the row helper stages the global map before the
+// ready bit is published by the entry point.
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_collect_plan_keys(BusterX86MetadataFormKey* keys, bool* key_found)
+{
+    for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_recipe_table); recipe_index += 1)
+    {
+        MachineX64ExactRecipe const* recipe = machine_x64_exact_recipe_table + recipe_index;
+        u32 variant_total = recipe->variant_count + 1u;
+        for (u32 variant_index = 0; variant_index < variant_total; variant_index += 1)
+        {
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(recipe, variant_index);
+            u8 plan_id = machine_x64_exact_plan_id_for_recipe_variant(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, (u16)recipe_index, variant_index);
+            if (plan_id >= MACHINE_X64_EXACT_PLAN_COUNT || key_found[plan_id]) continue;
+            keys[plan_id] = variant.key;
+            key_found[plan_id] = true;
+        }
+    }
+    for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_family_exact_recipe_table); recipe_index += 1)
+    {
+        MachineX64ExactRecipe const* recipe = machine_x64_family_exact_recipe_table + recipe_index;
+        if (!recipe->recipe || !recipe->key.stable_hash) continue;
+        u32 variant_total = recipe->variant_count + 1u;
+        for (u32 variant_index = 0; variant_index < variant_total; variant_index += 1)
+        {
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(recipe, variant_index);
+            u8 plan_id = machine_x64_exact_plan_id_for_recipe_variant(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, (u16)recipe_index, variant_index);
+            if (plan_id >= MACHINE_X64_EXACT_PLAN_COUNT || key_found[plan_id]) continue;
+            keys[plan_id] = variant.key;
+            key_found[plan_id] = true;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_plans(BusterX86MetadataFormKey const* keys, bool const* key_found,
+                                                          BusterX86MetadataExactPlan* prepared, bool* plan_valid)
+{
+    for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
+    {
+        plan_valid[plan_id] = key_found[plan_id] &&
+                              buster_x86_metadata_exact_plan_prepare(keys[plan_id], &prepared[plan_id]) &&
+                              prepared[plan_id].form_id == keys[plan_id].form_id &&
+                              prepared[plan_id].stable_hash == keys[plan_id].stable_hash;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fcmp_alternate_tokens(void)
+{
+    // FCMP_SET's OR-parity repair uses two alternate BASE forms.  Prepare
+    // their opaque metadata tokens on the serial prewarm lane; workers only
+    // select among these already validated tokens and never call metadata.
+    machine_x64_fcmp_alternate_tokens_valid = false;
+    BusterX86MetadataExactPlan setp_plan = {0};
+    BusterX86MetadataExactPlan or_plan = {0};
+    bool setp_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){10647u, UINT64_C(0x65dc8e342334f3cb)}, &setp_plan);
+    bool or_prepared = buster_x86_metadata_exact_plan_prepare((BusterX86MetadataFormKey){9631u, UINT64_C(0x89a3abb502bbc55a)}, &or_plan);
+    machine_x64_fcmp_alternate_tokens_valid = setp_prepared && or_prepared &&
+                                               buster_x86_metadata_machine_exact_token_for_plan(setp_plan, (BusterX86MetadataFeatureInput){0}, &machine_x64_fcmp_setp_token) &&
+                                               buster_x86_metadata_machine_exact_token_for_plan(or_plan, (BusterX86MetadataFeatureInput){0}, &machine_x64_fcmp_or_token);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_sequence_entry(MachineX64PreparedExactOpcode* entry,
+                                                                    MachineX64EmitRegistryEntry const* registry_entry)
+{
+    MachineEmitRecipeId sequence_recipe = registry_entry ? registry_entry->recipe : 0;
+    u16 sequence_index = machine_emit_recipe_index(sequence_recipe);
+    MachineX64ExactSequence const* sequence = sequence_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_sequence_table)
+                                                   ? machine_x64_exact_sequence_table[sequence_index].variants ? machine_x64_exact_sequence_table + sequence_index : 0
+                                                   : 0;
+    entry->sequence = sequence;
+    bool sequence_valid = registry_entry && registry_entry->producer_status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE &&
+                          sequence && sequence->recipe == sequence_recipe && sequence->variant_count > 0 &&
+                          sequence->variant_count <= MACHINE_X64_EXACT_SEQUENCE_MAX_VARIANTS;
+    entry->variant_count = (u8)(sequence_valid ? sequence->variant_count : 0);
+    entry->variant_valid_mask = 0;
+    for (u32 variant_index = 0; sequence_valid && variant_index < sequence->variant_count; variant_index += 1)
+    {
+        MachineX64ExactSequenceVariant const* variant = sequence->variants + variant_index;
+        if (!variant->steps || variant->step_count == 0 || variant->step_count > MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS)
+        {
+            sequence_valid = false;
+            break;
+        }
+        for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+        {
+            MachineX64ExactSequenceStep const* step = variant->steps + step_index;
+            BusterX86MetadataExactPlan step_plan = {0};
+            BusterX86MetadataMachineExactToken* token = entry->sequence_tokens +
+                variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
+            bool prepared_step = buster_x86_metadata_exact_plan_prepare(step->key, &step_plan);
+            bool identity_step = prepared_step && step_plan.form_id == step->key.form_id && step_plan.stable_hash == step->key.stable_hash;
+            bool token_step = identity_step && buster_x86_metadata_machine_exact_token_for_plan(
+                                                        step_plan,
+                                                        (BusterX86MetadataFeatureInput){.names = step->features, .count = step->feature_count}, token);
+            if (!token_step)
+            {
+                sequence_valid = false;
+                break;
+            }
+        }
+        if (sequence_valid) entry->variant_valid_mask |= (u16)(1u << variant_index);
+    }
+    entry->plan_valid = sequence_valid && entry->variant_valid_mask == (u16)((1u << entry->variant_count) - 1u);
+    if (!entry->plan_valid)
+    {
+        entry->sequence = 0;
+        entry->variant_count = 0;
+        entry->variant_valid_mask = 0;
+        for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(entry->sequence_tokens); token_index += 1)
+        {
+            entry->sequence_tokens[token_index] = (BusterX86MetadataMachineExactToken){0};
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64PreparedExactOpcode* entry,
+                                                               MachineX64EmitRegistryEntry const* registry_entry,
+                                                               BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
+{
+    MachineX64ExactRecipe const* descriptor = entry->descriptor;
+    MachineEmitRecipeCategory category = descriptor ? machine_emit_recipe_category(descriptor->recipe) : MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
+    bool descriptor_valid = registry_entry && registry_entry->producer_status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM &&
+                            descriptor && descriptor->key.stable_hash != 0 && descriptor->recipe == registry_entry->recipe &&
+                            (category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT || category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY);
+    u16 recipe_index = descriptor_valid ? machine_emit_recipe_index(descriptor->recipe) : 0;
+    u32 variant_total = descriptor_valid ? descriptor->variant_count + 1u : 0;
+    descriptor_valid &= variant_total > 0 && variant_total <= BUSTER_ARRAY_LENGTH(entry->metadata_tokens);
+    entry->variant_count = (u8)(descriptor_valid ? variant_total : 0);
+    entry->variant_valid_mask = 0;
+    for (u32 variant_index = 0; descriptor_valid && variant_index < variant_total; variant_index += 1)
+    {
+        MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
+        u8 plan_id = machine_x64_exact_plan_id_for_recipe_variant(category, recipe_index, variant_index);
+        bool variant_valid = plan_id < MACHINE_X64_EXACT_PLAN_COUNT && plan_valid[plan_id] &&
+                             prepared[plan_id].form_id == variant.key.form_id && prepared[plan_id].stable_hash == variant.key.stable_hash;
+        if (variant_valid)
+        {
+            variant_valid = buster_x86_metadata_machine_exact_token_for_plan(
+                prepared[plan_id],
+                (BusterX86MetadataFeatureInput){.names = variant.features, .count = variant.feature_count},
+                &entry->metadata_tokens[variant_index]);
+        }
+        if (variant_valid) entry->variant_valid_mask |= (u16)(1u << variant_index);
+        else descriptor_valid = false;
+    }
+    if (descriptor_valid && entry->variant_valid_mask == (u16)((1u << variant_total) - 1u))
+    {
+        entry->descriptor = descriptor;
+        entry->plan_valid = true;
+    }
+    else
+    {
+        // Retain exact_required so an invalid exact row is counted and
+        // rejected by the worker lane instead of using the old switch as an
+        // accidental fallback.
+        entry->descriptor = 0;
+        for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(entry->metadata_tokens); token_index += 1)
+        {
+            entry->metadata_tokens[token_index] = (BusterX86MetadataMachineExactToken){0};
+        }
+        entry->variant_count = 0;
+        entry->variant_valid_mask = 0;
+        entry->plan_valid = false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
+{
+    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+    {
+        // The dense map is only observed after the ready bit is published, so
+        // its static rows are safe serial staging storage.  Mutating each row
+        // in place avoids a large aggregate scratch array (and its generated
+        // zeroing/copying MIR) in the self-hosted prewarm function.
+        MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
+        if (entry->exact_required)
+        {
+            MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
+            if (entry->sequence_required)
+            {
+                machine_x64_exact_prepare_sequence_entry(entry, registry_entry);
+            }
+            else
+            {
+                machine_x64_exact_prepare_form_entry(entry, registry_entry, prepared, plan_valid);
+            }
+        }
+    }
+}
 
 // Prepare the immutable metadata plans once on the serial prewarm thread.
 // Width variants and projection variants deliberately share a plan identity;
@@ -5310,121 +6284,81 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
     BusterX86MetadataFormKey keys[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     bool key_found[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     BusterX86MetadataExactPlan prepared[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
-    for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_recipe_table); recipe_index += 1)
-    {
-        u8 plan_id = machine_x64_exact_plan_id_by_recipe[recipe_index];
-        if (plan_id >= MACHINE_X64_EXACT_PLAN_COUNT || key_found[plan_id]) continue;
-        keys[plan_id] = machine_x64_exact_recipe_table[recipe_index].key;
-        key_found[plan_id] = true;
-    }
-    for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_family_recipe_table); recipe_index += 1)
-    {
-        MachineX64ExactRecipe const* descriptor = machine_x64_exact_family_recipe_table + recipe_index;
-        u8 plan_id = machine_x64_exact_plan_id_by_family_recipe[recipe_index];
-        if (plan_id < MACHINE_X64_EXACT_PLAN_COUNT && !key_found[plan_id])
-        {
-            keys[plan_id] = descriptor->key;
-            key_found[plan_id] = true;
-        }
-        u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
-        for (u32 variant = 1; variant < variant_count && variant <= BUSTER_ARRAY_LENGTH(descriptor->alternate_keys); variant += 1)
-        {
-            plan_id = descriptor->alternate_plan_ids[variant - 1];
-            if (plan_id < MACHINE_X64_EXACT_PLAN_COUNT && !key_found[plan_id])
-            {
-                keys[plan_id] = descriptor->alternate_keys[variant - 1];
-                key_found[plan_id] = true;
-            }
-        }
-    }
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
-    for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
-    {
-        plan_valid[plan_id] = key_found[plan_id] &&
-                              buster_x86_metadata_exact_plan_prepare(keys[plan_id], &prepared[plan_id]) &&
-                              prepared[plan_id].form_id == keys[plan_id].form_id &&
-                              prepared[plan_id].stable_hash == keys[plan_id].stable_hash;
-    }
+    machine_x64_exact_collect_plan_keys(keys, key_found);
+    machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
+    machine_x64_exact_prepare_fcmp_alternate_tokens();
+    machine_x64_exact_prepare_opcode_map(prepared, plan_valid);
+    machine_x64_metadata_shape_cache_prewarm();
 
-    MachineX64PreparedExactOpcode prepared_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {0};
-    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+    // Every row was staged serially above.  The ready bit is written last;
+    // codegen_prewarm() completes before any worker lane can observe globals.
+    machine_x64_exact_opcode_map_ready = true;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
+{
+    machine_x86_64_exact_prewarm();
+    MachineX64ExactMapAudit result = {.valid = machine_x64_exact_opcode_map_ready};
+    result.registry_rows = MACHINE_X86_64_EMIT_REGISTRY_COUNT;
+    for (u32 ordinal = 0; ordinal < result.registry_rows; ordinal += 1)
     {
-        MachineX64PreparedExactOpcode entry = machine_x64_exact_opcode_map[ordinal];
-        if (entry.exact_required)
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_map + ordinal;
+        MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
+        bool row_valid = registry_entry != 0;
+        if (!row_valid)
         {
-            MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
-            MachineX64ExactRecipe const* descriptor = entry.descriptor;
-            bool descriptor_valid = registry_entry && registry_entry->producer_status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM &&
-                                    descriptor && descriptor->key.stable_hash != 0 && descriptor->recipe == registry_entry->recipe;
-            MachineEmitRecipeCategory category = descriptor_valid ? machine_emit_recipe_category(descriptor->recipe)
-                                                                    : MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
-            descriptor_valid &= category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT || category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY;
-            u16 recipe_index = descriptor_valid ? machine_emit_recipe_index(descriptor->recipe) : 0;
-            u8 primary_plan_id = MACHINE_X64_EXACT_PLAN_INVALID;
-            if (descriptor_valid)
+            result.valid = false;
+            continue;
+        }
+        MachineX64EmitProducerStatus status = (MachineX64EmitProducerStatus)registry_entry->producer_status;
+        bool is_exact_form = status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM;
+        bool is_exact_sequence = status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE;
+        bool is_expansion = status == MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY;
+        if (is_exact_form || is_exact_sequence)
+        {
+            result.exact_rows += 1;
+            bool variants_in_range = entry->variant_count > 0 && entry->variant_count <= 16;
+            u16 expected_mask = variants_in_range ? (u16)((1u << entry->variant_count) - 1u) : 0;
+            bool variants_valid = variants_in_range && entry->variant_valid_mask == expected_mask;
+            bool exact_row_valid = entry->exact_required && entry->plan_valid && variants_valid;
+            if (is_exact_sequence)
             {
-                if (category == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_recipe))
-                {
-                    primary_plan_id = machine_x64_exact_plan_id_by_recipe[recipe_index];
-                }
-                else if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY && recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_plan_id_by_family_recipe))
-                {
-                    primary_plan_id = machine_x64_exact_plan_id_by_family_recipe[recipe_index];
-                }
-                else
-                {
-                    descriptor_valid = false;
-                }
-            }
-            u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
-            descriptor_valid &= variant_count <= BUSTER_ARRAY_LENGTH(entry.metadata_tokens);
-            for (u32 variant = 0; variant < variant_count; variant += 1)
-            {
-                u8 plan_id = variant == 0 ? primary_plan_id : descriptor->alternate_plan_ids[variant - 1];
-                X64ExactFormKey key = variant == 0 ? descriptor->key : descriptor->alternate_keys[variant - 1];
-                bool variant_valid = descriptor_valid && plan_id < MACHINE_X64_EXACT_PLAN_COUNT && plan_valid[plan_id] &&
-                                     prepared[plan_id].form_id == key.form_id && prepared[plan_id].stable_hash == key.stable_hash;
-                if (variant_valid)
-                {
-                    variant_valid = buster_x86_metadata_machine_exact_token_for_plan(
-                        prepared[plan_id],
-                        (BusterX86MetadataFeatureInput){
-                            .names = descriptor->features,
-                            .count = descriptor->feature_count,
-                        },
-                        entry.metadata_tokens + variant);
-                }
-                descriptor_valid &= variant_valid;
-            }
-            if (descriptor_valid)
-            {
-                entry.descriptor = descriptor;
-                entry.plan_valid = true;
-                entry.variant_count = (u8)variant_count;
+                result.sequence_rows += 1;
+                bool sequence_valid = exact_row_valid && entry->sequence_required && entry->sequence && !entry->descriptor &&
+                                       entry->sequence->variant_count == entry->variant_count;
+                if (sequence_valid) result.sequence_variant_valid_rows += 1;
+                exact_row_valid = sequence_valid;
             }
             else
             {
-                // Retain exact_required so an invalid exact row is counted
-                // and rejected by the worker lane instead of using the old
-                // switch as an accidental fallback.
-                entry.descriptor = 0;
-                entry.metadata_tokens[0] = (BusterX86MetadataMachineExactToken){0};
-                entry.plan_valid = false;
-                entry.variant_count = 0;
+                exact_row_valid = exact_row_valid && !entry->sequence_required && entry->descriptor && !entry->sequence;
             }
+            if (exact_row_valid) result.exact_plan_valid_rows += 1;
+            result.valid &= exact_row_valid;
         }
-        prepared_opcode_map[ordinal] = entry;
+        else if (is_expansion)
+        {
+            result.expansion_rows += 1;
+            bool nonexact = !entry->exact_required && !entry->sequence_required && !entry->plan_valid && !entry->descriptor &&
+                            !entry->sequence && entry->variant_count == 0 && entry->variant_valid_mask == 0;
+            if (nonexact) result.expansion_nonexact_rows += 1;
+            result.valid &= nonexact;
+        }
+        else
+        {
+            result.valid = false;
+        }
     }
-
-    // Publish the complete dense map only after every local entry has been
-    // validated.  The ready bit is written last; codegen_prewarm() completes
-    // before any worker lane can observe these globals.
-    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
-    {
-        machine_x64_exact_opcode_map[ordinal] = prepared_opcode_map[ordinal];
-    }
-    machine_x64_exact_opcode_map_ready = true;
+    result.valid &= result.exact_rows == MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT;
+    result.valid &= result.exact_plan_valid_rows == result.exact_rows;
+    result.valid &= result.sequence_variant_valid_rows == result.sequence_rows;
+    result.valid &= result.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT;
+    result.valid &= result.expansion_nonexact_rows == result.expansion_rows;
+    return result;
 }
+#endif
 
 
 typedef struct MachineX64ExactEmitCounters MachineX64ExactEmitCounters;
@@ -5479,7 +6413,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_immediate
     };
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_immediate_unsigned_operand(u64 value, u16 width)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_unsigned_immediate_operand(u64 value, u16 width)
 {
     return (BusterX86MetadataPhysicalOperand){
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
@@ -5514,7 +6448,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rip_memor
     };
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_memory_operand(u32 base, s64 displacement, u16 width)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_memory_operand(u32 base, u16 width, s64 displacement, bool force_displacement)
 {
     return (BusterX86MetadataPhysicalOperand){
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
@@ -5529,20 +6463,543 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_memory_op
             .address_size = 64,
             .scale = 1,
             .has_base = true,
-            .has_displacement = displacement != 0,
+            .has_displacement = force_displacement || displacement != 0,
         },
     };
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memory_operand(u32 displacement)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memory_operand(s64 displacement, u16 width, bool force_displacement)
 {
-    return machine_x64_exact_memory_operand(MACHINE_X64_RBP, (s64)(s32)displacement, 64);
+    return machine_x64_exact_memory_operand(MACHINE_X64_RBP, width, displacement, force_displacement);
 }
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_zmm_operand(u32 reg, u16 width);
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_immediate_class(BusterX86MetadataPhysicalOperand operand)
+{
+    if (operand.has_unsigned_value) return 5;
+    if (!operand.has_value) return 0;
+    if (operand.value >= INT8_MIN && operand.value <= INT8_MAX) return operand.value < 0 ? 2 : 1;
+    if (operand.value >= INT32_MIN && operand.value <= INT32_MAX) return operand.value < 0 ? 4 : 3;
+    return operand.value < 0 ? 6 : 7;
+}
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_displacement_class(BusterX86MetadataPhysicalOperand operand)
+{
+    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !operand.memory.has_displacement) return 0;
+    if (operand.memory.displacement >= INT8_MIN && operand.memory.displacement <= INT8_MAX) return 1;
+    if (operand.memory.displacement >= INT32_MIN && operand.memory.displacement <= INT32_MAX) return 2;
+    return 3;
+}
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_mnemonic_id(String8 mnemonic)
+{
+    char8 const* p = mnemonic.pointer;
+    u64 n = mnemonic.length;
+#define M3(a, b, c, id) if (n == 3 && p[0] == (a) && p[1] == (b) && p[2] == (c)) return (id)
+#define M2(a, b, id) if (n == 2 && p[0] == (a) && p[1] == (b)) return (id)
+#define M4(a, b, c, d, id) if (n == 4 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d)) return (id)
+#define M5(a, b, c, d, e, id) if (n == 5 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e)) return (id)
+#define M7(a, b, c, d, e, f, g, id) \
+    if (n == 7 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g)) return (id)
+#define M8(a, b, c, d, e, f, g, h, id) \
+    if (n == 8 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g) && p[7] == (h)) return (id)
+#define M9(a, b, c, d, e, f, g, h, i, id) \
+    if (n == 9 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g) && p[7] == (h) && p[8] == (i)) return (id)
+    M2('J', 'B', 7); M2('J', 'Z', 11);
+    M3('A', 'D', 'D', 1); M3('A', 'N', 'D', 2); M3('C', 'D', 'Q', 3); M3('C', 'M', 'P', 4); M3('C', 'Q', 'O', 5);
+    M3('D', 'I', 'V', 6); M3('J', 'M', 'P', 8); M3('J', 'N', 'S', 9); M3('J', 'N', 'Z', 10); M3('L', 'E', 'A', 12);
+    M3('M', 'O', 'V', 13); M2('O', 'R', 14); M3('P', 'O', 'P', 15); M3('R', 'E', 'T', 16); M3('S', 'H', 'R', 17);
+    M3('S', 'U', 'B', 18); M3('U', 'D', '2', 19); M3('X', 'O', 'R', 20);
+    M4('C', 'A', 'L', 'L', 21); M4('I', 'D', 'I', 'V', 23); M4('J', 'N', 'B', 'E', 24); M4('M', 'O', 'V', 'Q', 25);
+    M4('P', 'U', 'S', 'H', 26); M4('T', 'E', 'S', 'T', 33);
+    M5('A', 'D', 'D', 'S', 'D', 27); M5('A', 'D', 'D', 'S', 'S', 28); M5('M', 'O', 'V', 'S', 'D', 29);
+    M5('M', 'O', 'V', 'Z', 'X', 30); M5('S', 'U', 'B', 'S', 'D', 31); M5('S', 'U', 'B', 'S', 'S', 32);
+    M7('C', 'M', 'P', 'X', 'C', 'H', 'G', 34); M7('U', 'C', 'O', 'M', 'I', 'S', 'D', 35); M7('U', 'C', 'O', 'M', 'I', 'S', 'S', 36);
+    M8('C', 'V', 'T', 'S', 'I', '2', 'S', 'D', 37); M8('C', 'V', 'T', 'S', 'I', '2', 'S', 'S', 38);
+    M8('V', 'M', 'O', 'V', 'D', 'Q', 'U', '8', 39);
+    M9('C', 'V', 'T', 'T', 'S', 'D', '2', 'S', 'I', 40); M9('C', 'V', 'T', 'T', 'S', 'S', '2', 'S', 'I', 41);
+#undef M2
+    if (n == 10 && p[0] == 'C' && p[1] == 'M' && p[2] == 'P' && p[3] == 'X' && p[4] == 'C' && p[5] == 'H' && p[6] == 'G' && p[7] == '1' && p[8] == '6' && p[9] == 'B') return 42;
+    if (n == 10 && p[0] == 'V' && p[1] == 'Z' && p[2] == 'E' && p[3] == 'R' && p[4] == 'O' && p[5] == 'U' && p[6] == 'P' && p[7] == 'P' && p[8] == 'E' && p[9] == 'R') return 43;
+#undef M3
+#undef M4
+#undef M5
+#undef M7
+#undef M8
+#undef M9
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_feature_id(BusterX86MetadataFeatureInput features)
+{
+    if (!features.count) return 0;
+    if (features.names == machine_x64_sse_features) return 1;
+    if (features.names == machine_x64_sse2_features) return 2;
+    if (features.names == machine_x64_avx_features) return 3;
+    if (features.names == machine_x64_avx512_features) return 4;
+    if (features.names == machine_x64_cx16_features) return 5;
+    if (features.names == machine_x64_avx512f_features) return 6;
+    return (u8)(0x80u | BUSTER_MIN(features.count, 0x7fu));
+}
+
+BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature_seed(String8 mnemonic,
+                                                                   BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                                   BusterX86MetadataFeatureInput features,
+                                                                   BusterX86MetadataPhysicalAttributes attributes, u64 seed)
+{
+    u64 hash = seed ^ machine_x64_metadata_shape_mnemonic_id(mnemonic) ^ ((u64)operand_count << 8) ^
+               ((u64)machine_x64_metadata_shape_feature_id(features) << 16);
+    u64 attribute_bits = attributes.decorator_flags | ((u64)attributes.apx_flags << 8) | ((u64)attributes.amx_flags << 16) |
+                         ((u64)attributes.mask_register << 24) | ((u64)attributes.broadcast_elements << 32) |
+                         ((u64)attributes.rounding_mode << 40) | ((u64)attributes.has_mask_register << 44) |
+                         ((u64)attributes.zeroing << 45) | ((u64)attributes.sae << 46) | ((u64)attributes.no_flags << 47) |
+                         ((u64)attributes.lock << 48) | ((u64)attributes.rep << 49) | ((u64)attributes.repne << 50) |
+                         ((u64)attributes.implicit_segment << 51) | ((u64)attributes.branch_hint << 55) |
+                         ((u64)attributes.notrack << 58) | ((u64)attributes.dfv << 59) | ((u64)attributes.has_dfv << 60);
+    hash ^= attribute_bits;
+    for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = operands[operand_index];
+        u64 descriptor = operand.kind | ((u64)operand.width << 4);
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        {
+            descriptor |= (u64)operand.reg.physical_class << 14;
+            descriptor |= (u64)operand.reg.width << 18;
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            descriptor |= (u64)operand.memory.base.physical_class << 14;
+            descriptor |= (u64)operand.memory.index.physical_class << 18;
+            descriptor |= (u64)operand.memory.address_size << 22;
+            descriptor |= (u64)operand.memory.scale << 30;
+            descriptor |= (u64)operand.memory.segment << 34;
+            descriptor |= (u64)operand.memory.has_base << 38;
+            descriptor |= (u64)operand.memory.has_index << 39;
+            descriptor |= (u64)operand.memory.rip_relative << 40;
+            descriptor |= (u64)operand.memory.has_segment << 41;
+            descriptor |= (u64)operand.memory.vsib << 42;
+            descriptor |= (u64)machine_x64_metadata_shape_displacement_class(operand) << 43;
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+        {
+            descriptor |= (u64)machine_x64_metadata_shape_immediate_class(operand) << 14;
+        }
+        hash ^= descriptor + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+        hash *= UINT64_C(0x9e3779b97f4a7c15);
+    }
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature(String8 mnemonic,
+                                                              BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                              BusterX86MetadataFeatureInput features,
+                                                              BusterX86MetadataPhysicalAttributes attributes)
+{
+    return machine_x64_metadata_shape_signature_seed(mnemonic, operands, operand_count, features, attributes,
+                                                      UINT64_C(1469598103934665603));
+}
+
+BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_guard(String8 mnemonic,
+                                                          BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                          BusterX86MetadataFeatureInput features,
+                                                          BusterX86MetadataPhysicalAttributes attributes)
+{
+    return machine_x64_metadata_shape_signature_seed(mnemonic, operands, operand_count, features, attributes,
+                                                      UINT64_C(0x6a09e667f3bcc909));
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
+                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                               BusterX86MetadataFeatureInput features,
+                                                               BusterX86MetadataPhysicalAttributes attributes)
+{
+    BusterX86MetadataPhysicalQuery query = {
+        .mnemonic = mnemonic,
+        .operands = operands,
+        .operand_count = operand_count,
+        .features = features,
+        .attributes = attributes,
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = false,
+        .include_not64 = false,
+        .include_implicit = false,
+        .source_semantics = false,
+    };
+    BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(query);
+    if (selected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || selected.form_id == UINT32_MAX || !selected.stable_hash)
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        return false;
+    }
+    BusterX86MetadataFormKey key = {.form_id = selected.form_id, .stable_hash = selected.stable_hash};
+    BusterX86MetadataExactPlan plan = {0};
+    BusterX86MetadataMachineExactToken token = {0};
+    if (!buster_x86_metadata_exact_plan_prepare(key, &plan) ||
+        !buster_x86_metadata_machine_exact_token_for_plan(plan, features, &token))
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        return false;
+    }
+    u64 signature = machine_x64_metadata_shape_signature(mnemonic, operands, operand_count, features, attributes);
+    u64 guard = machine_x64_metadata_shape_guard(mnemonic, operands, operand_count, features, attributes);
+    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
+    {
+        MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + entry_index;
+        if (entry->signature != signature) continue;
+        if (entry->guard != guard || entry->token.slot_plus_one != token.slot_plus_one || entry->token.policy_flags != token.policy_flags ||
+            entry->token.integrity != token.integrity)
+        {
+            machine_x64_metadata_shape_cache_invalid_count += 1;
+            return false;
+        }
+        return true;
+    }
+    if (machine_x64_metadata_shape_cache_count >= MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY)
+    {
+        machine_x64_metadata_shape_cache_invalid_count += 1;
+        return false;
+    }
+    machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count++] = (MachineX64MetadataShapeCacheEntry){
+        .signature = signature,
+        .guard = guard,
+        .token = token,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metadata_shape_cache_find(
+    String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
+{
+    u64 signature = machine_x64_metadata_shape_signature(mnemonic, operands, operand_count, features, attributes);
+    u64 guard = machine_x64_metadata_shape_guard(mnemonic, operands, operand_count, features, attributes);
+    u32 slot = (u32)signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
+    for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
+    {
+        u16 entry_plus_one = machine_x64_metadata_shape_cache_slots[slot];
+        if (!entry_plus_one) return 0;
+        MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
+        if (entry->signature == signature)
+        {
+            return entry->guard == guard ? &entry->token : 0;
+        }
+        slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_publish_slots(void)
+{
+    for (u32 slot = 0; slot < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; slot += 1)
+    {
+        machine_x64_metadata_shape_cache_slots[slot] = 0;
+    }
+    for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
+    {
+        u32 slot = (u32)machine_x64_metadata_shape_cache[entry_index].signature &
+                   (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
+        bool placed = false;
+        for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
+        {
+            if (!machine_x64_metadata_shape_cache_slots[slot])
+            {
+                machine_x64_metadata_shape_cache_slots[slot] = (u16)(entry_index + 1u);
+                placed = true;
+                break;
+            }
+            slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
+        }
+        if (!placed) machine_x64_metadata_shape_cache_invalid_count += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    (void)machine_x64_metadata_shape_cache_add(S8("CDQ"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("VZEROUPPER"), 0, 0,
+                                               (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                               attributes);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    BusterX86MetadataPhysicalOperand operand = machine_x64_exact_gpr_operand(0, 64);
+    (void)machine_x64_metadata_shape_cache_add(S8("PUSH"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("POP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("CALL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    operand.width = operand.reg.width = 32;
+    (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("IDIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    operand.width = operand.reg.width = 64;
+    (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("IDIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    String8 binary_names[] = {S8("MOV"), S8("XOR"), S8("ADD"), S8("SUB"), S8("AND"), S8("OR")};
+    u16 binary_widths[] = {8, 16, 32, 64};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(binary_names); name_index += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(binary_widths); width_index += 1)
+        {
+            u16 width = binary_widths[width_index];
+            BusterX86MetadataPhysicalOperand operands[2] = {
+                machine_x64_exact_gpr_operand(0, width), machine_x64_exact_gpr_operand(1, width),
+            };
+            (void)machine_x64_metadata_shape_cache_add(binary_names[name_index], operands, 2,
+                                                        (BusterX86MetadataFeatureInput){0}, attributes);
+        }
+    }
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(0, 64), machine_x64_exact_gpr_operand(1, 64),
+    };
+    (void)machine_x64_metadata_shape_cache_add(S8("CMP"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("TEST"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_immediates(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    String8 names[] = {S8("MOV"), S8("SUB"), S8("SHR"), S8("AND"), S8("CMP"), S8("ADD")};
+    u16 register_widths[] = {32, 64};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(register_widths); width_index += 1)
+        {
+            u16 register_width = register_widths[width_index];
+            if (string_equal(names[name_index], S8("MOV")) && register_width != 32) continue;
+            if (string_equal(names[name_index], S8("SHR")) && register_width != 64) continue;
+            u16 immediate_widths[] = {8, 32};
+            for (u32 immediate_width_index = 0; immediate_width_index < BUSTER_ARRAY_LENGTH(immediate_widths); immediate_width_index += 1)
+            {
+                u16 immediate_width = immediate_widths[immediate_width_index];
+                if (string_equal(names[name_index], S8("SHR")) && immediate_width != 8) continue;
+                operands[0] = machine_x64_exact_gpr_operand(0, register_width);
+                operands[1] = machine_x64_exact_immediate_operand(immediate_width == 8 ? 1 : 128, immediate_width);
+                (void)machine_x64_metadata_shape_cache_add(names[name_index], operands, 2,
+                                                            (BusterX86MetadataFeatureInput){0}, attributes);
+                // A width-32 immediate that fits the signed eight-bit form
+                // and one that does not are distinct metadata rows.
+                if (immediate_width == 32)
+                {
+                    operands[1] = machine_x64_exact_immediate_operand(1, immediate_width);
+                    (void)machine_x64_metadata_shape_cache_add(names[name_index], operands, 2,
+                                                                (BusterX86MetadataFeatureInput){0}, attributes);
+                    operands[1] = machine_x64_exact_immediate_operand(-1, immediate_width);
+                    (void)machine_x64_metadata_shape_cache_add(names[name_index], operands, 2,
+                                                                (BusterX86MetadataFeatureInput){0}, attributes);
+                    operands[1] = machine_x64_exact_immediate_operand(-129, immediate_width);
+                    (void)machine_x64_metadata_shape_cache_add(names[name_index], operands, 2,
+                                                                (BusterX86MetadataFeatureInput){0}, attributes);
+                }
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_metadata_shape_memory(u32 base, u16 width, s64 displacement,
+                                                                                         bool force_displacement)
+{
+    return machine_x64_exact_memory_operand(base, width, displacement, force_displacement);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_memory(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    u16 widths[] = {8, 16, 32, 64};
+    u32 bases[] = {MACHINE_X64_RAX, MACHINE_X64_RBP};
+    s64 displacements[] = {0, 8, 256};
+    for (u32 base_index = 0; base_index < BUSTER_ARRAY_LENGTH(bases); base_index += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        {
+            u16 width = widths[width_index];
+            for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+            {
+                s64 displacement = displacements[displacement_index];
+                BusterX86MetadataPhysicalOperand operands[2] = {
+                    machine_x64_exact_gpr_operand(0, 64), machine_x64_metadata_shape_memory(bases[base_index], width, displacement, displacement != 0),
+                };
+                if (width >= 32)
+                {
+                    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+                }
+                (void)machine_x64_metadata_shape_cache_add(S8("LEA"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+                if (width == 32)
+                {
+                    operands[0] = machine_x64_exact_gpr_operand(0, 32);
+                    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), operands, 2,
+                                                                (BusterX86MetadataFeatureInput){0}, attributes);
+                    operands[0] = machine_x64_exact_gpr_operand(0, 64);
+                }
+                if (width == 8 || width == 16)
+                {
+                    (void)machine_x64_metadata_shape_cache_add(S8("MOVZX"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+                }
+                operands[0] = operands[1];
+                operands[1] = machine_x64_exact_gpr_operand(0, width);
+                (void)machine_x64_metadata_shape_cache_add(S8("MOV"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+            }
+        }
+    }
+    BusterX86MetadataPhysicalOperand test_operands[2] = {
+        machine_x64_exact_memory_operand(MACHINE_X64_RSP, 8, 0, false), machine_x64_exact_immediate_operand(0, 8),
+    };
+    (void)machine_x64_metadata_shape_cache_add(S8("TEST"), test_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    BusterX86MetadataPhysicalOperand fs_operands[2] = {
+        machine_x64_exact_gpr_operand(0, 64),
+        {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+            .width = 64,
+            .memory = {.displacement = 0, .address_size = 64, .scale = 1, .has_displacement = true,
+                       .segment = BUSTER_X86_METADATA_SEGMENT_FS, .has_segment = true},
+        },
+    };
+    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), fs_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_relative(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    String8 names[] = {S8("CALL"), S8("JMP"), S8("JNS"), S8("JB"), S8("JNBE"), S8("JNZ"), S8("JZ")};
+    u16 widths[] = {8, 32};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+    {
+        for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+        {
+            if (string_equal(names[name_index], S8("CALL")) && widths[width_index] != 32) continue;
+            if (string_equal(names[name_index], S8("JNS")) && widths[width_index] != 8) continue;
+            if (string_equal(names[name_index], S8("JB")) && widths[width_index] != 8) continue;
+            if (string_equal(names[name_index], S8("JNBE")) && widths[width_index] != 32) continue;
+            if (string_equal(names[name_index], S8("JNZ")) && widths[width_index] != 32) continue;
+            if (string_equal(names[name_index], S8("JZ")) && widths[width_index] != 32) continue;
+            BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(0, widths[width_index]);
+            (void)machine_x64_metadata_shape_cache_add(names[name_index], &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_float_vector_atomic(void)
+{
+    BusterX86MetadataPhysicalAttributes attributes = {0};
+    BusterX86MetadataFeatureInput sse = {.names = machine_x64_sse_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features)};
+    BusterX86MetadataFeatureInput sse2 = {.names = machine_x64_sse2_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features)};
+    BusterX86MetadataFeatureInput avx512 = {.names = machine_x64_avx512_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)};
+    BusterX86MetadataFeatureInput cx16 = {.names = machine_x64_cx16_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_cx16_features)};
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_xmm_operand(0, 128), machine_x64_exact_gpr_operand(0, 64),
+    };
+    (void)machine_x64_metadata_shape_cache_add(S8("MOVQ"), operands, 2, sse2, attributes);
+    operands[0] = machine_x64_exact_xmm_operand(0, 64);
+    (void)machine_x64_metadata_shape_cache_add(S8("MOVQ"), operands, 2, sse2, attributes);
+    operands[0] = machine_x64_exact_xmm_operand(0, 32);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTSI2SS"), operands, 2, sse, attributes);
+    operands[0] = machine_x64_exact_xmm_operand(0, 64);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTSI2SD"), operands, 2, sse2, attributes);
+
+    operands[0] = machine_x64_exact_gpr_operand(0, 64);
+    operands[1] = machine_x64_exact_xmm_operand(0, 128);
+    (void)machine_x64_metadata_shape_cache_add(S8("MOVQ"), operands, 2, sse2, attributes);
+    operands[1] = machine_x64_exact_xmm_operand(0, 32);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTTSS2SI"), operands, 2, sse, attributes);
+    operands[1] = machine_x64_exact_xmm_operand(0, 64);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTTSD2SI"), operands, 2, sse2, attributes);
+    operands[1] = machine_x64_exact_xmm_operand(0, 128);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTTSS2SI"), operands, 2, sse, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("CVTTSD2SI"), operands, 2, sse2, attributes);
+
+    String8 scalar_names[] = {S8("ADDSS"), S8("ADDSD"), S8("SUBSS"), S8("SUBSD"), S8("UCOMISS"), S8("UCOMISD")};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(scalar_names); name_index += 1)
+    {
+        bool double_width = string_ends_with_sequence(scalar_names[name_index], S8("SD"));
+        BusterX86MetadataFeatureInput feature = double_width ? sse2 : sse;
+        BusterX86MetadataPhysicalOperand scalar_operands[2] = {
+            machine_x64_exact_xmm_operand(0, double_width ? 64 : 32), machine_x64_exact_xmm_operand(1, double_width ? 64 : 32),
+        };
+        (void)machine_x64_metadata_shape_cache_add(scalar_names[name_index], scalar_operands, 2, feature, attributes);
+    }
+    for (u32 displacement_index = 0; displacement_index < 3; displacement_index += 1)
+    {
+        s64 displacement = displacement_index == 0 ? 0 : displacement_index == 1 ? 8 : 256;
+        BusterX86MetadataPhysicalOperand memory_operand = machine_x64_exact_memory_operand(MACHINE_X64_RBP, 64, displacement, displacement != 0);
+        BusterX86MetadataPhysicalOperand xmm_operand = machine_x64_exact_xmm_operand(0, 64);
+        BusterX86MetadataPhysicalOperand memory_operands[2] = {xmm_operand, memory_operand};
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVSD"), memory_operands, 2, sse2, attributes);
+        memory_operands[0] = memory_operand;
+        memory_operands[1] = xmm_operand;
+        (void)machine_x64_metadata_shape_cache_add(S8("MOVSD"), memory_operands, 2, sse2, attributes);
+        BusterX86MetadataPhysicalOperand zmm_operand = machine_x64_exact_zmm_operand(0, 512);
+        memory_operand.width = 8;
+        BusterX86MetadataPhysicalOperand vector_operands[2] = {zmm_operand, memory_operand};
+        (void)machine_x64_metadata_shape_cache_add(S8("VMOVDQU8"), vector_operands, 2, avx512, attributes);
+        vector_operands[0] = memory_operand;
+        vector_operands[1] = zmm_operand;
+        (void)machine_x64_metadata_shape_cache_add(S8("VMOVDQU8"), vector_operands, 2, avx512, attributes);
+    }
+    BusterX86MetadataPhysicalOperand vector_registers[2] = {
+        machine_x64_exact_zmm_operand(0, 512), machine_x64_exact_zmm_operand(1, 512),
+    };
+    (void)machine_x64_metadata_shape_cache_add(S8("VMOVDQU8"), vector_registers, 2, avx512, attributes);
+
+    attributes.lock = true;
+    for (u32 width_index = 0; width_index < 4; width_index += 1)
+    {
+        u16 width = (u16)(8u << width_index);
+        BusterX86MetadataPhysicalOperand atomic_operands[2] = {
+            machine_x64_exact_memory_operand(MACHINE_X64_RCX, width, 0, false), machine_x64_exact_gpr_operand(0, width),
+        };
+        (void)machine_x64_metadata_shape_cache_add(S8("CMPXCHG"), atomic_operands, 2,
+                                                    (BusterX86MetadataFeatureInput){0}, attributes);
+    }
+    BusterX86MetadataPhysicalOperand cmpxchg16_operand = machine_x64_exact_memory_operand(MACHINE_X64_RCX, 128, 0, false);
+    (void)machine_x64_metadata_shape_cache_add(S8("CMPXCHG16B"), &cmpxchg16_operand, 1, cx16, attributes);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
+{
+    if (machine_x64_metadata_shape_cache_ready) return;
+    machine_x64_metadata_shape_cache_count = 0;
+    machine_x64_metadata_shape_cache_invalid_count = 0;
+    machine_x64_metadata_shape_cache_prepare_zero();
+    machine_x64_metadata_shape_cache_prepare_unary();
+    machine_x64_metadata_shape_cache_prepare_registers();
+    machine_x64_metadata_shape_cache_prepare_immediates();
+    machine_x64_metadata_shape_cache_prepare_memory();
+    machine_x64_metadata_shape_cache_prepare_relative();
+    machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
+    machine_x64_metadata_shape_cache_publish_slots();
+    machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
+{
+    machine_x86_64_exact_prewarm();
+    return (MachineX64MetadataShapeCacheAudit){
+        .prepared_rows = machine_x64_metadata_shape_cache_count,
+        .invalid_rows = machine_x64_metadata_shape_cache_invalid_count,
+        .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
+                 machine_x64_metadata_shape_cache_invalid_count == 0,
+    };
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
                                                      BusterX86MetadataMachineExactToken metadata_token,
                                                      BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
                                                      bool force_disp32,
+                                                     bool force_lock, u8 mask_register_plus_one, bool zeroing,
                                                      MachineX64ExactEmitCounters* counters)
 {
     if (counters) counters->attempts += 1;
@@ -5551,6 +7008,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
         .operands = operands,
         .operand_count = operand_count,
         .force_disp32 = force_disp32,
+        .force_lock = force_lock,
+        .mask_register_plus_one = mask_register_plus_one,
+        .zeroing = zeroing,
         .output = exact_bytes,
         .output_capacity = sizeof(exact_bytes),
         .relocations = 0,
@@ -5559,6 +7019,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
         emitted.byte_count > sizeof(exact_bytes) || encoder->count > encoder->capacity || emitted.byte_count > encoder->capacity - encoder->count)
     {
+        encoder->overflow = true;
         if (counters) counters->fallbacks += 1;
         return false;
     }
@@ -5566,6 +7027,389 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
     encoder->count += emitted.byte_count;
     if (counters) counters->successes += 1;
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_reject(MachineX64Encoder* encoder, MachineX64ExactEmitCounters* counters);
+
+// Expansion rows are architectural sequences rather than one MIR opcode.
+// Keep their individual instructions in the same metadata path as ordinary
+// exact rows: select one durable form from the physical shape, then immediately
+// re-emit that selected form through the exact-form transform.  The selection
+// is deliberately local to the sequence helper (there is no callback or raw
+// byte template hidden behind it); callers only provide the mnemonic and the
+// already-typed physical operands.  Relative/TLS fields are passed as their
+// neutral zero values and remain owned by the fixup/call-site stream.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder* encoder, String8 mnemonic,
+                                                              BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                              BusterX86MetadataFeatureInput features,
+                                                              BusterX86MetadataPhysicalAttributes attributes,
+                                                              MachineX64ExactEmitCounters* counters)
+{
+    // Scalar SSE/SSE2 forms are real feature-gated metadata rows.  Callers
+    // that use the generic mnemonic bridge intentionally omit a feature list;
+    // derive the architectural requirement here so selection cannot silently
+    // reject an otherwise valid exact instruction as a feature-mode miss.
+    if (!features.count)
+    {
+        if (string_equal(mnemonic, S8("CVTSI2SS")) || string_equal(mnemonic, S8("ADDSS")) || string_equal(mnemonic, S8("UCOMISS")) ||
+            string_equal(mnemonic, S8("SUBSS")) || string_equal(mnemonic, S8("CVTTSS2SI")))
+        {
+            features.names = machine_x64_sse_features;
+            features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse_features);
+        }
+        else if (string_equal(mnemonic, S8("CVTSI2SD")) || string_equal(mnemonic, S8("ADDSD")) || string_equal(mnemonic, S8("UCOMISD")) ||
+                 string_equal(mnemonic, S8("SUBSD")) || string_equal(mnemonic, S8("CVTTSD2SI")) || string_equal(mnemonic, S8("MOVQ")) ||
+                 string_equal(mnemonic, S8("MOVSD")))
+        {
+            features.names = machine_x64_sse2_features;
+            features.count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features);
+        }
+    }
+    // Workers never re-enter the generic selector.  The serial prewarm lane
+    // populated one immutable token per finite physical shape; a stale or
+    // unclassified shape fails closed instead of falling back to handwritten
+    // bytes or a checked query lookup.
+    if (!machine_x64_metadata_shape_cache_ready)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    BusterX86MetadataMachineExactToken const* token = machine_x64_metadata_shape_cache_find(mnemonic, operands, operand_count, features, attributes);
+    if (!token)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    return machine_x64_emit_exact_form(encoder, *token, operands, operand_count, false, attributes.lock, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode);
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_reject(MachineX64Encoder* encoder, MachineX64ExactEmitCounters* counters)
+{
+    // These exact wrappers are used by spill/reload and expansion paths whose
+    // callers intentionally ignore the bool result.  Keep a stale or missing
+    // prepared row from silently deleting an instruction.
+    encoder->overflow = true;
+    if (counters)
+    {
+        counters->attempts += 1;
+        counters->fallbacks += 1;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_registers(MachineX64Encoder* encoder, String8 mnemonic, u32 destination, u32 source,
+                                                             u16 width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(destination, width),
+        machine_x64_exact_gpr_operand(source, width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_register(MachineX64Encoder* encoder, String8 mnemonic, u32 reg, u16 width,
+                                                            MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operand = machine_x64_exact_gpr_operand(reg, width);
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, &operand, 1, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_register_immediate(MachineX64Encoder* encoder, String8 mnemonic, u32 destination,
+                                                                      u64 immediate, u16 register_width, u16 immediate_width,
+                                                                      MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(destination, register_width),
+        machine_x64_exact_immediate_operand((s64)immediate, immediate_width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_register_memory(MachineX64Encoder* encoder, String8 mnemonic, u32 destination, u32 base,
+                                                                   s64 displacement, u16 register_width, u16 memory_width,
+                                                                   MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(destination, register_width),
+        machine_x64_exact_memory_operand(base, memory_width, displacement, displacement != 0),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_memory_register(MachineX64Encoder* encoder, String8 mnemonic, u32 base, s64 displacement,
+                                                                   u32 source, u16 memory_width, u16 register_width,
+                                                                   MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_memory_operand(base, memory_width, displacement, displacement != 0),
+        machine_x64_exact_gpr_operand(source, register_width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_atomic_memory_register(MachineX64Encoder* encoder, String8 mnemonic, u32 base, u32 source,
+                                                                         u16 width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_memory_operand(base, width, 0, false),
+        machine_x64_exact_gpr_operand(source, width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){.lock = true}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_atomic_memory(MachineX64Encoder* encoder, String8 mnemonic, u32 base, u16 width,
+                                                                 MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operand = machine_x64_exact_memory_operand(base, width, 0, false);
+    BusterX86MetadataFeatureInput features = {0};
+    if (string_equal(mnemonic, S8("CMPXCHG16B")))
+    {
+        features.names = machine_x64_cx16_features;
+        features.count = BUSTER_ARRAY_LENGTH(machine_x64_cx16_features);
+    }
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, &operand, 1, features,
+                                                 (BusterX86MetadataPhysicalAttributes){.lock = true}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_relative(MachineX64Encoder* encoder, String8 mnemonic, s64 displacement, u16 width,
+                                                            MachineX64ExactEmitCounters* counters)
+{
+    // The metadata snapshot uses one canonical spelling per condition-code
+    // opcode.  JA/JNE are architectural aliases of JNBE/JNZ, respectively;
+    // route those spellings through the canonical metadata rows while the
+    // caller continues to express the branch semantics naturally.
+    String8 metadata_mnemonic = mnemonic;
+    if (string_equal(mnemonic, S8("JA"))) metadata_mnemonic = S8("JNBE");
+    else if (string_equal(mnemonic, S8("JNE"))) metadata_mnemonic = S8("JNZ");
+    BusterX86MetadataPhysicalOperand operand = machine_x64_exact_relative_operand(displacement, width);
+    return machine_x64_emit_metadata_instruction(encoder, metadata_mnemonic, &operand, 1, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_memory_immediate(MachineX64Encoder* encoder, String8 mnemonic, u32 base, s64 displacement,
+                                                                    u64 immediate, u16 memory_width, u16 immediate_width,
+                                                                    MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_memory_operand(base, memory_width, displacement, displacement != 0),
+        machine_x64_exact_immediate_operand((s64)immediate, immediate_width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_zmm_operand(u32 reg, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = width,
+        .reg = {
+            .index = (u16)reg,
+            .width = width,
+            .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM,
+        },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_zmm_registers(MachineX64Encoder* encoder, String8 mnemonic, u32 destination, u32 source,
+                                                                 u16 width, BusterX86MetadataFeatureInput features,
+                                                                 MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_zmm_operand(destination, width),
+        machine_x64_exact_zmm_operand(source, width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, features,
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_zmm_memory(MachineX64Encoder* encoder, String8 mnemonic, u32 zmm, u32 base, s64 displacement,
+                                                              bool store, u16 vector_width, u16 memory_width, BusterX86MetadataFeatureInput features,
+                                                              MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    BusterX86MetadataPhysicalOperand memory = machine_x64_exact_memory_operand(base, memory_width, displacement, displacement != 0);
+    BusterX86MetadataPhysicalOperand vector = machine_x64_exact_zmm_operand(zmm, vector_width);
+    operands[0] = store ? memory : vector;
+    operands[1] = store ? vector : memory;
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, features,
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_xmm_gpr(MachineX64Encoder* encoder, String8 mnemonic, u32 xmm, u32 gpr, u16 xmm_width,
+                                                           u16 gpr_width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_xmm_operand(xmm, xmm_width),
+        machine_x64_exact_gpr_operand(gpr, gpr_width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_gpr_xmm(MachineX64Encoder* encoder, String8 mnemonic, u32 gpr, u32 xmm, u16 gpr_width,
+                                                           u16 xmm_width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(gpr, gpr_width),
+        machine_x64_exact_xmm_operand(xmm, xmm_width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_xmm_registers(MachineX64Encoder* encoder, String8 mnemonic, u32 destination, u32 source,
+                                                                 u16 width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_xmm_operand(destination, width),
+        machine_x64_exact_xmm_operand(source, width),
+    };
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_xmm_memory(MachineX64Encoder* encoder, String8 mnemonic, u32 xmm, u32 base, s64 displacement,
+                                                              bool store, u16 width, MachineX64ExactEmitCounters* counters)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    BusterX86MetadataPhysicalOperand memory = machine_x64_exact_memory_operand(base, width, displacement, displacement != 0);
+    BusterX86MetadataPhysicalOperand vector = machine_x64_exact_xmm_operand(xmm, width);
+    operands[0] = store ? memory : vector;
+    operands[1] = store ? vector : memory;
+    return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                 (BusterX86MetadataPhysicalAttributes){0}, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_opcode_registers(MachineX64Encoder* encoder, u16 opcode, u32 destination, u32 source,
+                                                                 u16 width, MachineX64ExactEmitCounters* counters)
+{
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
+    if (!entry || !entry->descriptor || !entry->plan_valid || !entry->variant_count)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    MachineX64ExactRecipe const* descriptor = entry->descriptor;
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, 0);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(destination, width),
+        machine_x64_exact_gpr_operand(source, width),
+    };
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, false, false, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_opcode_frame(MachineX64Encoder* encoder, u16 opcode, u32 reg, u32 offset, u16 width,
+                                                             bool store, MachineX64ExactEmitCounters* counters)
+{
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
+    if (!entry || !entry->descriptor || !entry->plan_valid || !entry->variant_count)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    if (store)
+    {
+        operands[0] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
+        operands[1] = machine_x64_exact_gpr_operand(reg, width);
+    }
+    else
+    {
+        operands[0] = machine_x64_exact_gpr_operand(reg, width);
+        operands[1] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
+    }
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encoder* encoder, u32 reg, u64 value,
+                                                                MachineX64ExactEmitCounters* counters)
+{
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
+    if (!entry || !entry->descriptor || !entry->plan_valid || entry->variant_count < 3)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    u32 variant_index = value <= UINT32_MAX ? 0 : value >= UINT64_C(0xffffffff80000000) ? 1 : 2;
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(reg, variant.operand_widths[0]),
+        variant.key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID ? machine_x64_exact_unsigned_immediate_operand(value, variant.operand_widths[1])
+                                                                        : machine_x64_exact_immediate_operand((s64)(s32)value, variant.operand_widths[1]),
+    };
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, false, false, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                             MachineX64ExactEmitCounters* counters)
+{
+    u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
+                                                                           : MACHINE_X64_LOAD_FRAME)
+                      : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
+                                                                                                                         : MACHINE_X64_STORE_FRAME64);
+    u16 width = (u16)(chunk * 8u);
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
+    if (!entry || !entry->descriptor || !entry->plan_valid || !entry->variant_count)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    if (load)
+    {
+        operands[0] = machine_x64_exact_gpr_operand(reg, chunk <= 2 ? 64 : width);
+        operands[1] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
+    }
+    else
+    {
+        operands[0] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
+        operands[1] = machine_x64_exact_gpr_operand(reg, width);
+    }
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encoder, u32 reg, u64 value,
+                                                       MachineX64ExactEmitCounters* counters)
+{
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
+    if (!entry || !entry->descriptor || !entry->plan_valid || entry->variant_count < 3)
+    {
+        return machine_x64_exact_reject(encoder, counters);
+    }
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 2);
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        machine_x64_exact_gpr_operand(reg, 64),
+        machine_x64_exact_unsigned_immediate_operand(value, 64),
+    };
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[2], operands, variant.operand_count, false, false, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
+                                                                  MachineX64ExactEmitCounters* counters)
+{
+    u16 width = (u16)(chunk * 8u);
+    if (load)
+    {
+        if (chunk == 1 || chunk == 2)
+        {
+            BusterX86MetadataPhysicalOperand operands[2] = {
+                machine_x64_exact_gpr_operand(reg, 64),
+                machine_x64_exact_memory_operand(base, width, offset, offset != 0),
+            };
+            bool result = machine_x64_emit_metadata_instruction(encoder, S8("MOVZX"), operands, 2, (BusterX86MetadataFeatureInput){0},
+                                                                (BusterX86MetadataPhysicalAttributes){0}, counters);
+            return result;
+        }
+        bool result = machine_x64_emit_metadata_register_memory(encoder, S8("MOV"), reg, base, offset, width, width, counters);
+        return result;
+    }
+    bool result = machine_x64_emit_metadata_memory_register(encoder, S8("MOV"), base, offset, reg, width, width, counters);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode)
@@ -5579,7 +7423,8 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcod
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
-                                                       u8 const* operand_registers, u64 payload,
+                                                       MachineInstruction const* instruction, MachineStackPlacement const* placement,
+                                                       u8 const* operand_registers, u32 payload, u64 immediate_value,
                                                        MachineX64ExactEmitCounters* counters)
 {
     MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
@@ -5589,65 +7434,130 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         if (counters) counters->fallbacks += 1;
         return false;
     }
-    u32 variant_count = descriptor->variant_count ? descriptor->variant_count : 1;
-    u32 variant = 0;
-    if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI)
+    u32 variant_index = 0;
+    if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE)
     {
-        // The legacy mov-immediate producer uses B8 without REX.W for values
-        // that fit unsigned 32 bits, C7/0 for sign-extended 32-bit values,
-        // and B8 with REX.W/imm64 for all other values.
-        variant = payload > UINT32_MAX && payload >= UINT64_C(0xffffffff80000000) ? 1 : 0;
+        variant_index = immediate_value <= UINT32_MAX ? 0 : immediate_value >= UINT64_C(0xffffffff80000000) ? 1 : 2;
     }
-    else if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE)
+    else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE)
     {
-        variant = payload <= INT8_MAX ? 0 : 1;
+        s64 signed_immediate = (s64)immediate_value;
+        variant_index = signed_immediate >= INT8_MIN && signed_immediate <= INT8_MAX ? 0 : 1;
     }
-    if (variant >= variant_count || variant >= BUSTER_ARRAY_LENGTH(entry->metadata_tokens))
+    else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_VBINARY)
+    {
+        switch (payload)
+        {
+        case 0xfcu: variant_index = 0; break;
+        case 0xfdu: variant_index = 1; break;
+        case 0xfeu: variant_index = 2; break;
+        case 0x1d4u: variant_index = 3; break;
+        case 0xf8u: variant_index = 4; break;
+        case 0xf9u: variant_index = 5; break;
+        case 0xfau: variant_index = 6; break;
+        case 0x1fbu: variant_index = 7; break;
+        case 0xdbu: variant_index = 8; break;
+        case 0xebu: variant_index = 9; break;
+        case 0xefu: variant_index = 10; break;
+        default: variant_index = UINT32_MAX; break;
+        }
+    }
+    if (variant_index >= entry->variant_count || !(entry->variant_valid_mask & (u16)(1u << variant_index)))
     {
         if (counters) counters->attempts += 1;
         if (counters) counters->fallbacks += 1;
         return false;
     }
-    if ((descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
-        operand_registers[descriptor->operand_slots[0]] == operand_registers[descriptor->operand_slots[1]])
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
+    if ((variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
+        operand_registers[variant.operand_slots[0]] == operand_registers[variant.operand_slots[1]])
     {
+        if (counters)
+        {
+            counters->attempts += 1;
+            counters->successes += 1;
+        }
         return true;
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
-    BusterX86MetadataPhysicalOperand operands[3];
-    bool force_disp32 = (descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
-    for (u32 operand_index = 0; operand_index < descriptor->operand_count; operand_index += 1)
+    BusterX86MetadataPhysicalOperand operands[4] = {0};
+    bool force_disp32 = (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
+    for (u32 operand_index = 0; operand_index < variant.operand_count; operand_index += 1)
     {
-        u16 width = descriptor->operand_widths[operand_index];
-        if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI)
+        u8 operand_slot = variant.operand_slots[operand_index];
+        u16 width = variant.operand_widths[operand_index];
+        switch ((MachineX64ExactOperandProjection)variant.operand_kinds[operand_index])
         {
-            width = payload <= UINT32_MAX ? 32 : 64;
-            if (operand_index == 1 && variant == 1) width = 32;
-        }
-        else if (descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE && operand_index + 1 == descriptor->operand_count)
-        {
-            width = variant == 0 ? 8 : 32;
-        }
-        switch ((MachineX64ExactOperandProjection)descriptor->operand_kinds[operand_index])
-        {
-            break;
         case MACHINE_X64_EXACT_OPERAND_GPR:
-            operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[descriptor->operand_slots[operand_index]], width);
+            operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[operand_slot], width);
             break;
         case MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_xmm_operand((u32)payload, width);
+            operands[operand_index] = machine_x64_exact_xmm_operand(payload, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX:
+            operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RAX, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX:
+            operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RDX, width);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE:
+        {
+            u32 size = payload & 0xffu;
+            if (size != 1 && size != 2 && size != 4 && size != 8)
+            {
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[operand_slot], (u16)(size * 8u));
+        }
+        break;
+        case MACHINE_X64_EXACT_OPERAND_ZMM_SLOT:
+            if (operand_registers[operand_slot] < MACHINE_X64_ZMM0 || operand_registers[operand_slot] >= MACHINE_X64_ZMM0 + 32)
+            {
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = width,
+                .reg = {.index = (u16)(operand_registers[operand_slot] - MACHINE_X64_ZMM0), .width = width,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM},
+            };
+            break;
+        case MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1:
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 64,
+                .reg = {.index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK},
+            };
             break;
         case MACHINE_X64_EXACT_OPERAND_FIXED_RSP:
             operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RSP, width);
             break;
         case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)(u32)payload, width);
+            // MOV's B8 forms are unsigned (UIMMv), while its C7 form and the
+            // arithmetic immediate forms are signed.  Preserve the complete
+            // u64 payload for the unsigned variants; truncating through s32
+            // would reject values such as 0xffffffff and all movabs bits.
+            if (variant.key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID)
+            {
+                operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(immediate_value, width);
+            }
+            else if (variant.key.form_id == MACHINE_X64_VPSLLD_EXACT_FORM_ID || variant.key.form_id == MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID ||
+                     variant.key.form_id == MACHINE_X64_SUB_RSP_EXACT_FORM_ID)
+            {
+                // These rows carry their immediate directly in the machine
+                // payload rather than through a MACHINE_REF_IMMEDIATE slot.
+                operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)payload, width);
+            }
+            else
+            {
+                operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)immediate_value, width);
+            }
             break;
-        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD_UNSIGNED:
-            operands[operand_index] = descriptor->variant_policy == MACHINE_X64_EXACT_VARIANT_MOV_RI && variant == 1
-                                          ? machine_x64_exact_immediate_operand((s64)(s32)(u32)payload, width)
-                                          : machine_x64_exact_immediate_unsigned_operand(payload, width);
+        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT:
+            operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(payload, width);
             break;
         case MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO:
             operands[operand_index] = machine_x64_exact_relative_operand(0, width);
@@ -5655,19 +7565,49 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         case MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO:
             operands[operand_index] = machine_x64_exact_rip_memory_operand();
             break;
-        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + (u32)payload);
-            break;
         case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
-            operands[operand_index] = machine_x64_exact_memory_operand(
-                operand_registers[descriptor->operand_slots[operand_index]], 0, width);
+            operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], width, 0, false);
             break;
+        case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE:
+        {
+            u32 size = payload & 0xffu;
+            if (size != 1 && size != 2 && size != 4 && size != 8)
+            {
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], (u16)(size * 8u), 0, false);
+        }
+        break;
         case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_memory_operand(
-                operand_registers[descriptor->operand_slots[operand_index]], (s64)(s32)(u32)payload, width);
+            operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], width, (s64)(s32)payload, false);
             break;
-        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_FRAME:
-            operands[operand_index] = machine_x64_exact_memory_operand(MACHINE_X64_RBP, (s64)(s32)(u32)payload, width);
+        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
+            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + payload, width, force_disp32);
+            break;
+        case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
+            if (!instruction || !placement || operand_slot >= 4 || machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)
+            {
+                if (counters) counters->attempts += 1;
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            {
+                u32 offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[operand_slot])] - payload;
+                operands[operand_index] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, force_disp32);
+            }
+            break;
+        case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT:
+            if (!instruction || !placement || operand_slot >= 4 || machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)
+            {
+                if (counters) counters->attempts += 1;
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            {
+                u32 offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[operand_slot])];
+                operands[operand_index] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
+            }
             break;
         default:
             if (counters) counters->attempts += 1;
@@ -5675,7 +7615,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             return false;
         }
     }
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant], operands, descriptor->operand_count, force_disp32, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
@@ -5685,373 +7625,202 @@ struct MachineX64BranchFixup
     u32 block;
 };
 
-BUSTER_GLOBAL_LOCAL void machine_x64_emit8(MachineX64Encoder* encoder, u8 byte)
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
+                                                         MachineInstruction const* instruction, MachineStackPlacement const* placement,
+                                                         u8 const* operand_registers, u32 payload, u64 immediate_value,
+                                                         MachineX64ExactEmitCounters* counters, Arena* arena, MachineBuilderStream* fixups)
 {
-    if (encoder->count >= encoder->capacity)
+    MachineX64ExactSequence const* sequence = entry ? entry->sequence : 0;
+    if (!sequence || !entry->plan_valid || sequence->variant_count == 0 || entry->variant_count != sequence->variant_count ||
+        !entry->variant_valid_mask)
     {
-        encoder->overflow = true;
-        return;
+        if (counters) { counters->attempts += 1; counters->fallbacks += 1; }
+        return false;
     }
-    encoder->bytes[encoder->count] = byte;
-    encoder->count += 1;
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit32(MachineX64Encoder* encoder, u32 value)
-{
-    for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+    // Sequence variants are selected by the family payload where a row has
+    // multiple canonical forms.  The first variant is the fixed/default path;
+    // callers can extend this switch without changing MachineInstruction.
+    u32 variant_index = 0;
+    if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 39))
     {
-        machine_x64_emit8(encoder, (u8)(value >> (byte_index * 8)));
+        variant_index = payload < sequence->variant_count ? payload : UINT32_MAX;
     }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit64(MachineX64Encoder* encoder, u64 value)
-{
-    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 44))
     {
-        machine_x64_emit8(encoder, (u8)(value >> (byte_index * 8)));
+        u32 operation = payload & 0xffu;
+        u32 operation_index = operation == 0x58u ? 0 : operation == 0x5cu ? 1 : operation == 0x59u ? 2 : operation == 0x5eu ? 3 : UINT32_MAX;
+        variant_index = operation_index == UINT32_MAX ? UINT32_MAX : operation_index + ((payload & 0x100u) ? 4u : 0u);
     }
-}
-
-BUSTER_GLOBAL_LOCAL u8 machine_x64_modrm_register(u32 reg, u32 rm)
-{
-    return (u8)(0xc0 | ((reg & 7) << 3) | (rm & 7));
-}
-
-// [rbp + disp32] addressing for frame slots; `offset` is the positive
-// distance below the frame base.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_modrm(MachineX64Encoder* encoder, u32 reg, u32 offset)
-{
-    machine_x64_emit8(encoder, (u8)(0x85 | ((reg & 7) << 3)));
-    machine_x64_emit32(encoder, (u32)(0 - (s32)offset));
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_load(MachineX64Encoder* encoder, u32 reg, u32 offset)
-{
-    machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x04 : 0)));
-    machine_x64_emit8(encoder, 0x8b);
-    machine_x64_emit_frame_modrm(encoder, reg, offset);
-}
-
-// Materializes a constant through the shortest form that reproduces all
-// sixty-four result bits: the zero-extending mov r32 when the value fits
-// unsigned thirty-two, the sign-extended mov r64 when it fits signed
-// thirty-two, the ten-byte movabs otherwise. Every form must leave flags
-// alone — rematerializations land between arbitrary rows, including a
-// compare and its branch — so zero takes the five-byte mov, never xor.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_immediate(MachineX64Encoder* encoder, u32 reg, u64 value)
-{
-    if (value <= UINT32_MAX)
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45))
     {
-        if (reg >= 8)
+        u32 condition = payload & 0xfu;
+        u32 condition_index = condition == 4 ? 0 : condition == 5 ? 1 : condition == 2 ? 2 : condition == 6 ? 3 : condition == 7 ? 4 : condition == 3 ? 5 : UINT32_MAX;
+        variant_index = condition_index == UINT32_MAX ? UINT32_MAX : condition_index + ((payload & 0x100u) ? 6u : 0u);
+    }
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 43))
+    {
+        u32 quarter = payload & 0xffu;
+        variant_index = quarter < sequence->variant_count ? quarter : UINT32_MAX;
+    }
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 47) ||
+             sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 48))
+    {
+        variant_index = (payload & 0xfu) < sequence->variant_count ? payload & 0xfu : UINT32_MAX;
+    }
+    if (variant_index >= sequence->variant_count || !(entry->variant_valid_mask & (u16)(1u << variant_index)))
+    {
+        if (counters) { counters->attempts += 1; counters->fallbacks += 1; }
+        return false;
+    }
+    MachineX64ExactSequenceVariant const* variant = sequence->variants + variant_index;
+    u32 sequence_start = encoder->count;
+    u32 parity_mode = (payload >> 9) & 0x3u;
+    for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+    {
+        MachineX64ExactSequenceStep const* step = variant->steps + step_index;
+        if ((step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY) && parity_mode == 0)
         {
-            machine_x64_emit8(encoder, 0x41);
+            continue;
         }
-        machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
-        machine_x64_emit32(encoder, (u32)value);
-    }
-    else if (value >= UINT64_C(0xffffffff80000000))
-    {
-        machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
-        machine_x64_emit8(encoder, 0xc7);
-        machine_x64_emit8(encoder, (u8)(0xc0 | (reg & 7)));
-        machine_x64_emit32(encoder, (u32)value);
-    }
-    else
-    {
-        machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
-        machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
-        machine_x64_emit64(encoder, value);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder, u32 reg, u32 offset)
-{
-    machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x04 : 0)));
-    machine_x64_emit8(encoder, 0x89);
-    machine_x64_emit_frame_modrm(encoder, reg, offset);
-}
-
-// EVEX prefix for the 512-bit vector rows. Unlike the canonical vocabulary's
-// fixed low scratches, allocated rows reach the whole ZMM0-31 file, so every
-// inverted extension bit is computed from the register numbers: R/R' carry
-// the reg field's bits 3 and 4, B carries the rm-or-base bit 3, X doubles as
-// the rm bit 4 in register-direct forms — memory bases are general registers
-// and never reach 16, so the same expression leaves X high for them — and
-// V' carries the vvvv bit 4. All forms are L'L=10; `wide` sets EVEX.W for
-// the forms the SDM defines as W1 only (vpaddq/vpsubq), whose W0 encodings
-// raise #UD on real hardware.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 vvvv, u32 mask, bool zeroing,
-                                               bool wide, u32 rm_or_base)
-{
-    machine_x64_emit8(encoder, 0x62);
-    machine_x64_emit8(encoder, (u8)(((reg & 8) ? 0 : 0x80) | ((rm_or_base & 16) ? 0 : 0x40) | ((rm_or_base & 8) ? 0 : 0x20) | ((reg & 16) ? 0 : 0x10) | map));
-    machine_x64_emit8(encoder, (u8)((wide ? 0x80 : 0) | ((~vvvv & 0xf) << 3) | 0x04 | simd_prefix));
-    machine_x64_emit8(encoder, (u8)((zeroing ? 0x80 : 0) | 0x40 | ((vvvv & 16) ? 0 : 0x08) | mask));
-    machine_x64_emit8(encoder, opcode);
-}
-
-// Frame slots take mod=10/disp32: EVEX disp8 is compressed by the operand
-// size, and mod=00 with an RBP base means RIP-relative.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_frame(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 mask, bool zeroing, u32 offset)
-{
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, false, 0);
-    machine_x64_emit8(encoder, (u8)(0x85 | ((reg & 7) << 3)));
-    machine_x64_emit32(encoder, (u32)(0 - (s32)offset));
-}
-
-// [base] with the RSP/R12 SIB and RBP/R13 displacement detours; the
-// displacement-carrying form is disp32 for the compression reason above.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_indirect(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 mask, bool zeroing,
-                                                        u32 base)
-{
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, false, base);
-    u32 base_low = base & 7;
-    if (base_low == 4)
-    {
-        machine_x64_emit8(encoder, (u8)(((reg & 7) << 3) | 4));
-        machine_x64_emit8(encoder, 0x24);
-    }
-    else if (base_low == 5)
-    {
-        machine_x64_emit8(encoder, (u8)(0x80 | ((reg & 7) << 3) | 5));
-        machine_x64_emit32(encoder, 0);
-    }
-    else
-    {
-        machine_x64_emit8(encoder, (u8)(((reg & 7) << 3) | base_low));
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_register(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 vvvv, u32 mask,
-                                                        bool zeroing, bool wide, u32 rm)
-{
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, vvvv, mask, zeroing, wide, rm);
-    machine_x64_emit8(encoder, (u8)(0xc0 | ((reg & 7) << 3) | (rm & 7)));
-}
-
-// KMOVQ between the k staging register and a general register:
-// VEX.L0.F2.0F.W1 92 (from general) / 93 (to general). The k file is
-// invisible to every allocator, so k1 is always free to stage through.
-#define MACHINE_X64_STAGE_MASK 1u
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_kmovq_from_general(MachineX64Encoder* encoder, u32 mask_register, u32 general)
-{
-    machine_x64_emit8(encoder, 0xc4);
-    machine_x64_emit8(encoder, (u8)(0xc1 | ((general & 8) ? 0 : 0x20)));
-    machine_x64_emit8(encoder, 0xfb);
-    machine_x64_emit8(encoder, 0x92);
-    machine_x64_emit8(encoder, (u8)(0xc0 | ((mask_register & 7) << 3) | (general & 7)));
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_kmovq_to_general(MachineX64Encoder* encoder, u32 general, u32 mask_register)
-{
-    machine_x64_emit8(encoder, 0xc4);
-    machine_x64_emit8(encoder, (u8)(0x61 | ((general & 8) ? 0 : 0x80)));
-    machine_x64_emit8(encoder, 0xfb);
-    machine_x64_emit8(encoder, 0x93);
-    machine_x64_emit8(encoder, (u8)(0xc0 | ((general & 7) << 3) | (mask_register & 7)));
-}
-
-// The unaligned 64-byte moves the whole vector subset travels through,
-// mirroring the canonical vmovdqu8 forms. `zmm` is the ZMM number, already
-// rebased out of the unified register file.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_vector_frame(MachineX64Encoder* encoder, u32 zmm, bool store, u32 offset)
-{
-    machine_x64_emit_evex_frame(encoder, 1, 3, store ? 0x7f : 0x6f, zmm, 0, false, offset);
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_vector_copy(MachineX64Encoder* encoder, u32 destination_zmm, u32 source_zmm)
-{
-    machine_x64_emit_evex_register(encoder, 1, 3, 0x6f, destination_zmm, 0, 0, false, false, source_zmm);
-}
-
-// [base + disp] addressing for allocated bases. The RSP/R12 encodings
-// demand a SIB byte and the RBP/R13 encodings have no displacement-free
-// form, so those low codes take the SIB and disp8 detours.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_memory_modrm(MachineX64Encoder* encoder, u32 reg, u32 base, u32 displacement)
-{
-    u32 base_low = base & 7;
-    u32 mod = displacement                                    ? displacement <= INT8_MAX ? 0x40u : 0x80u
-              : base_low == 5                                 ? 0x40u
-                                                              : 0x00u;
-    machine_x64_emit8(encoder, (u8)(mod | ((reg & 7) << 3) | base_low));
-    if (base_low == 4)
-    {
-        machine_x64_emit8(encoder, 0x24);
-    }
-    if (mod == 0x40)
-    {
-        machine_x64_emit8(encoder, (u8)displacement);
-    }
-    else if (mod == 0x80)
-    {
-        machine_x64_emit32(encoder, displacement);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_memory_load_sized(MachineX64Encoder* encoder, u32 destination, u32 base, u32 displacement, u32 size)
-{
-    u8 rex = (u8)(0x40 | (destination >= 8 ? 0x04 : 0) | (base >= 8 ? 0x01 : 0));
-    if (size == 1 || size == 2)
-    {
-        if (size == 2)
+        BusterX86MetadataPhysicalOperand operands[4] = {0};
+        bool force_disp32 = (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
+        bool step_valid = true;
+        for (u32 operand_index = 0; operand_index < step->operand_count; operand_index += 1)
         {
-            machine_x64_emit8(encoder, 0x66);
+            u8 operand_slot = step->operand_slots[operand_index];
+            u16 width = step->operand_widths[operand_index];
+            switch ((MachineX64ExactOperandProjection)step->operand_kinds[operand_index])
+            {
+            case MACHINE_X64_EXACT_OPERAND_GPR:
+                operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[operand_slot], width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD:
+                operands[operand_index] = machine_x64_exact_xmm_operand(payload, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_XMM_FIXED0:
+                operands[operand_index] = machine_x64_exact_xmm_operand(0, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_XMM_FIXED1:
+                operands[operand_index] = machine_x64_exact_xmm_operand(1, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_XMM_SLOT:
+                step_valid = operand_registers[operand_slot] >= MACHINE_X64_ZMM0 && operand_registers[operand_slot] < MACHINE_X64_ZMM0 + 32;
+                if (step_valid) operands[operand_index] = machine_x64_exact_xmm_operand(operand_registers[operand_slot] - MACHINE_X64_ZMM0, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX:
+                operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RAX, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX:
+                operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RDX, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE:
+            {
+                u32 size = payload & 0xffu;
+                step_valid = size == 1 || size == 2 || size == 4 || size == 8;
+                if (step_valid) operands[operand_index] = machine_x64_exact_gpr_operand(operand_registers[operand_slot], (u16)(size * 8u));
+            }
+            break;
+            case MACHINE_X64_EXACT_OPERAND_ZMM_SLOT:
+                step_valid = operand_registers[operand_slot] >= MACHINE_X64_ZMM0 && operand_registers[operand_slot] < MACHINE_X64_ZMM0 + 32;
+                if (step_valid)
+                {
+                    operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = width,
+                        .reg = {.index = (u16)(operand_registers[operand_slot] - MACHINE_X64_ZMM0), .width = width,
+                                .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM}};
+                }
+                break;
+            case MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1:
+                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                    .reg = {.index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK}};
+                break;
+            case MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K0:
+                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                    .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK}};
+                break;
+            case MACHINE_X64_EXACT_OPERAND_FIXED_RSP:
+                operands[operand_index] = machine_x64_exact_gpr_operand(MACHINE_X64_RSP, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
+                operands[operand_index] = machine_x64_exact_immediate_operand((s64)(s32)payload, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT:
+                operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(payload, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO:
+                operands[operand_index] = machine_x64_exact_relative_operand(0, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
+                operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], width, 0, false);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE:
+            {
+                u32 size = payload & 0xffu;
+                step_valid = size == 1 || size == 2 || size == 4 || size == 8;
+                if (step_valid) operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], (u16)(size * 8u), 0, false);
+            }
+            break;
+            case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD:
+                operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], width, (s64)(s32)payload, false);
+                break;
+            default:
+                step_valid = false;
+                break;
+            }
+            if (!step_valid) break;
         }
-        if (rex != 0x40)
+        BusterX86MetadataMachineExactToken step_token =
+            entry->sequence_tokens[variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index];
+        if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45) &&
+            (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY) && parity_mode != 1)
         {
-            machine_x64_emit8(encoder, rex);
+            step_valid = step_valid && machine_x64_fcmp_alternate_tokens_valid;
+            if (step_valid)
+            {
+                step_token = (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_OR) ? machine_x64_fcmp_or_token : machine_x64_fcmp_setp_token;
+            }
         }
-        machine_x64_emit8(encoder, 0x0f);
-        machine_x64_emit8(encoder, size == 1 ? 0xb6 : 0xb7);
-    }
-    else
-    {
-        if (size == 8)
+        u32 step_start = encoder->count;
+        if (!step_valid || !machine_x64_emit_exact_form(
+                               encoder,
+                               step_token,
+                               operands, step->operand_count, force_disp32,
+                               (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK) != 0,
+                               step->mask_register_plus_one, step->zeroing, counters))
         {
-            rex |= 0x08;
+            encoder->count = sequence_start;
+            if (counters && step_valid == false) counters->fallbacks += 1;
+            return false;
         }
-        if (rex != 0x40)
+        if (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP)
         {
-            machine_x64_emit8(encoder, rex);
+            u8 branch_slot = step->operand_slots[0];
+            if (!instruction || branch_slot >= 4 || machine_ref_kind(instruction->operands[branch_slot]) != MACHINE_REF_BLOCK)
+            {
+                encoder->count = sequence_start;
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, fixups);
+            *fixup = (MachineX64BranchFixup){
+                .patch_offset = step_start + (step->key.form_id == MACHINE_X64_JMP_EXACT_FORM_ID ? 1u : 2u),
+                .block = machine_ref_payload(instruction->operands[branch_slot]),
+            };
         }
-        machine_x64_emit8(encoder, 0x8b);
     }
-    machine_x64_emit_memory_modrm(encoder, destination, base, displacement);
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_memory_store_sized(MachineX64Encoder* encoder, u32 source, u32 base, u32 displacement, u32 size)
-{
-    u8 rex = (u8)(0x40 | (source >= 8 ? 0x04 : 0) | (base >= 8 ? 0x01 : 0) | (size == 8 ? 0x08 : 0));
-    if (size == 2)
-    {
-        machine_x64_emit8(encoder, 0x66);
-    }
-    // AH/BH/CH/DH are not usable with a REX prefix; all constrained VA
-    // scratch registers are the low-byte-safe RAX/RCX/RDX/R8+ family.
-    if (rex != 0x40 || (size == 1 && (source == MACHINE_X64_RSI || source == MACHINE_X64_RDI)))
-    {
-        machine_x64_emit8(encoder, rex);
-    }
-    machine_x64_emit8(encoder, size == 1 ? 0x88 : 0x89);
-    machine_x64_emit_memory_modrm(encoder, source, base, displacement);
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store_sized(MachineX64Encoder* encoder, u32 source, u32 offset, u32 size)
-{
-    u8 rex = (u8)(0x40 | (source >= 8 ? 0x04 : 0) | (size == 8 ? 0x08 : 0));
-    if (size == 2)
-    {
-        machine_x64_emit8(encoder, 0x66);
-    }
-    if (rex != 0x40 || (size == 1 && (source == MACHINE_X64_RSI || source == MACHINE_X64_RDI)))
-    {
-        machine_x64_emit8(encoder, rex);
-    }
-    machine_x64_emit8(encoder, size == 1 ? 0x88 : 0x89);
-    machine_x64_emit_frame_modrm(encoder, source, offset);
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_add_immediate_sized(MachineX64Encoder* encoder, u32 reg, u32 value, bool wide)
-{
-    u8 rex = (u8)(0x40 | (wide ? 0x08 : 0) | (reg >= 8 ? 0x01 : 0));
-    machine_x64_emit8(encoder, rex);
-    machine_x64_emit8(encoder, value <= INT8_MAX ? 0x83 : 0x81);
-    machine_x64_emit8(encoder, (u8)(0xc0 | (reg & 7)));
-    if (value <= INT8_MAX)
-    {
-        machine_x64_emit8(encoder, (u8)value);
-    }
-    else
-    {
-        machine_x64_emit32(encoder, value);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_compare_immediate32(MachineX64Encoder* encoder, u32 reg, u32 value)
-{
-    if (reg >= 8)
-    {
-        machine_x64_emit8(encoder, 0x41);
-    }
-    machine_x64_emit8(encoder, 0x81);
-    machine_x64_emit8(encoder, (u8)(0xf8 | (reg & 7)));
-    machine_x64_emit32(encoder, value);
+    (void)placement;
+    (void)immediate_value;
+    return true;
 }
 
 // Sized chunk moves shared by the aggregate copy loops, chunked 8/4/2/1
 // exactly like the canonical copy code: narrow loads zero-extend through
 // movzx, narrow stores write their exact width.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_chunk_load_prefix(MachineX64Encoder* encoder, u32 chunk)
-{
-    if (chunk == 8)
-    {
-        machine_x64_emit8(encoder, 0x48);
-    }
-    if (chunk <= 2)
-    {
-        machine_x64_emit8(encoder, 0x0f);
-        machine_x64_emit8(encoder, chunk == 1 ? 0xb6 : 0xb7);
-    }
-    else
-    {
-        machine_x64_emit8(encoder, 0x8b);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_chunk_store_prefix(MachineX64Encoder* encoder, u32 chunk)
-{
-    if (chunk == 8)
-    {
-        machine_x64_emit8(encoder, 0x48);
-    }
-    else if (chunk == 2)
-    {
-        machine_x64_emit8(encoder, 0x66);
-    }
-    machine_x64_emit8(encoder, chunk == 1 ? 0x88 : 0x89);
-}
-
 BUSTER_GLOBAL_LOCAL u32 machine_x64_copy_chunk(u64 remaining)
 {
     return remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-}
-
-// Bit-exact 64-bit moves between the low XMM registers and general
-// registers, used by the float rows whose values travel as bit patterns.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_movq_to_xmm(MachineX64Encoder* encoder, u32 xmm, u32 general)
-{
-    machine_x64_emit8(encoder, 0x66);
-    machine_x64_emit8(encoder, (u8)(0x48 | (general >= 8 ? 0x01 : 0)));
-    machine_x64_emit8(encoder, 0x0f);
-    machine_x64_emit8(encoder, 0x6e);
-    machine_x64_emit8(encoder, machine_x64_modrm_register(xmm, general));
-}
-
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_movq_from_xmm(MachineX64Encoder* encoder, u32 xmm, u32 general)
-{
-    machine_x64_emit8(encoder, 0x66);
-    machine_x64_emit8(encoder, (u8)(0x48 | (general >= 8 ? 0x01 : 0)));
-    machine_x64_emit8(encoder, 0x0f);
-    machine_x64_emit8(encoder, 0x7e);
-    machine_x64_emit8(encoder, machine_x64_modrm_register(xmm, general));
-}
-
-// Two-operand register form with an explicit REX policy: `wide` forces
-// REX.W, and extended registers add REX.R/REX.B as required.
-BUSTER_GLOBAL_LOCAL void machine_x64_emit_rr(MachineX64Encoder* encoder, bool wide, bool two_byte, u8 opcode, u32 reg, u32 rm)
-{
-    u8 rex = (u8)((wide ? 0x48 : 0x40) | (reg >= 8 ? 0x04 : 0) | (rm >= 8 ? 0x01 : 0));
-    if (rex != 0x40)
-    {
-        machine_x64_emit8(encoder, rex);
-    }
-    if (two_byte)
-    {
-        machine_x64_emit8(encoder, 0x0f);
-    }
-    machine_x64_emit8(encoder, opcode);
-    machine_x64_emit8(encoder, machine_x64_modrm_register(reg, rm));
 }
 
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
@@ -6107,6 +7876,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             capacity64 += 24;
         }
     }
+    // The fixed frame is reserved in the prologue, independently of any
+    // MIR STACK_ALLOCATE row.  Each touched page emits a SUB plus a probe, so
+    // account for that bounded prefix even for small functions with a large
+    // spill frame; otherwise a valid placement can truncate before its first
+    // machine row.
+    u64 frame_probe_chunks = ((u64)placement->frame_size + 4095u) / 4096u;
+    capacity64 += frame_probe_chunks * 24u;
     // Vector spill and reload edits are ten bytes (EVEX plus disp32).
     capacity64 += (u64)placement->edit_count * 12;
     if (capacity64 > UINT32_MAX)
@@ -6141,33 +7917,27 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // Prologue: the frame base is RBP, matching the canonical path, and
     // the placement's callee-saved registers push right after it in fixed
     // RBX, R14, R15 order so the unwind actions can name exact offsets.
-    machine_x64_emit8(&encoder, 0x55);
-    machine_x64_emit8(&encoder, 0x48);
-    machine_x64_emit8(&encoder, 0x89);
-    machine_x64_emit8(&encoder, 0xe5);
+    (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_RBP, 64, 0);
+    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
     if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
     {
-        machine_x64_emit8(&encoder, 0x53);
+        (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_RBX, 64, 0);
     }
     if (placement->callee_saved_mask & (1u << MACHINE_X64_R12))
     {
-        machine_x64_emit8(&encoder, 0x41);
-        machine_x64_emit8(&encoder, 0x54);
+        (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_R12, 64, 0);
     }
     if (placement->callee_saved_mask & (1u << MACHINE_X64_R13))
     {
-        machine_x64_emit8(&encoder, 0x41);
-        machine_x64_emit8(&encoder, 0x55);
+        (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_R13, 64, 0);
     }
     if (placement->callee_saved_mask & (1u << MACHINE_X64_R14))
     {
-        machine_x64_emit8(&encoder, 0x41);
-        machine_x64_emit8(&encoder, 0x56);
+        (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_R14, 64, 0);
     }
     if (placement->callee_saved_mask & (1u << MACHINE_X64_R15))
     {
-        machine_x64_emit8(&encoder, 0x41);
-        machine_x64_emit8(&encoder, 0x57);
+        (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_R15, 64, 0);
     }
     // The stack allocation mirrors the canonical chunked form: at most a
     // page per subtract with a probe touch after each, so a frame larger
@@ -6176,21 +7946,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     while (frame_remaining)
     {
         u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
-        machine_x64_emit8(&encoder, 0x48);
-        machine_x64_emit8(&encoder, frame_chunk <= INT8_MAX ? 0x83 : 0x81);
-        machine_x64_emit8(&encoder, 0xec);
-        if (frame_chunk <= INT8_MAX)
-        {
-            machine_x64_emit8(&encoder, (u8)frame_chunk);
-        }
-        else
-        {
-            machine_x64_emit32(&encoder, frame_chunk);
-        }
-        machine_x64_emit8(&encoder, 0xf6);
-        machine_x64_emit8(&encoder, 0x04);
-        machine_x64_emit8(&encoder, 0x24);
-        machine_x64_emit8(&encoder, 0);
+        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, frame_chunk, 64,
+                                                           frame_chunk <= INT8_MAX ? 8 : 32, 0);
+        (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
         frame_remaining -= frame_chunk;
     }
     u32 edit_cursor = 0;
@@ -6216,35 +7974,49 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 {
                     if (edit->location >= MACHINE_X64_ZMM0)
                     {
-                        machine_x64_emit_vector_frame(&encoder, edit->location - MACHINE_X64_ZMM0, true, placement->virtual_register_offsets[edit->subject]);
+                        (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
+                                                                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], true, 512, 8,
+                                                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                    0);
                     }
                     else
                     {
-                        machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                        (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_STORE_FRAME64, edit->location,
+                                                                  placement->virtual_register_offsets[edit->subject], 64, true, 0);
                     }
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
                     if (edit->location >= MACHINE_X64_ZMM0)
                     {
-                        machine_x64_emit_vector_copy(&encoder, edit->location - MACHINE_X64_ZMM0, edit->subject - MACHINE_X64_ZMM0);
+                        (void)machine_x64_emit_metadata_zmm_registers(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0,
+                                                                       edit->subject - MACHINE_X64_ZMM0, 512,
+                                                                       (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                                      .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                       0);
                     }
                     else
                     {
-                        machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
+                        (void)machine_x64_emit_exact_opcode_registers(&encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
                     }
                 }
                 else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
                 {
-                    machine_x64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
+                    (void)machine_x64_emit_exact_immediate_value(&encoder, edit->location, function->immediates[edit->subject], 0);
                 }
                 else if (edit->location >= MACHINE_X64_ZMM0)
                 {
-                    machine_x64_emit_vector_frame(&encoder, edit->location - MACHINE_X64_ZMM0, false, placement->virtual_register_offsets[edit->subject]);
+                    (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
+                                                                -(s64)(s32)placement->virtual_register_offsets[edit->subject], false, 512, 8,
+                                                                (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                               .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                0);
                 }
                 else
                 {
-                    machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                    (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_LOAD_FRAME, edit->location,
+                                                              placement->virtual_register_offsets[edit->subject], 64, false, 0);
                 }
                 edit_cursor += 1;
             }
@@ -6253,63 +8025,41 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             if (exact_required)
             {
                 u32 exact_start = encoder.count;
-                // Family rows keep their hot MachineInstruction shape, while
-                // the cold side tables and frame placement supply the actual
-                // immediate/displacement value required by the metadata
-                // projection. Direct rows continue to use the inline payload
-                // unchanged.
-                u64 exact_payload = instruction->payload;
-                switch (instruction->opcode)
+                u64 exact_immediate = 0;
+                bool exact_immediate_valid = true;
+                if (instruction->opcode == MACHINE_X64_MOV_RI || instruction->opcode == MACHINE_X64_ADD64_IMM || instruction->opcode == MACHINE_X64_IMUL64_RRI)
                 {
-                break;
-                case MACHINE_X64_MOV_RI:
-                case MACHINE_X64_ADD64_IMM:
-                    if (machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE &&
-                        machine_ref_payload(instruction->operands[1]) < function->immediate_count)
+                    u32 immediate_operand = instruction->opcode == MACHINE_X64_IMUL64_RRI ? 2u : 1u;
+                    if (machine_ref_kind(instruction->operands[immediate_operand]) == MACHINE_REF_IMMEDIATE &&
+                        machine_ref_payload(instruction->operands[immediate_operand]) < function->immediate_count)
                     {
-                        exact_payload = function->immediates[machine_ref_payload(instruction->operands[1])];
+                        exact_immediate = function->immediates[machine_ref_payload(instruction->operands[immediate_operand])];
                     }
                     else
                     {
-                        exact_payload = UINT64_MAX;
-                    }
-                    break;
-                case MACHINE_X64_IMUL64_RRI:
-                    if (machine_ref_kind(instruction->operands[2]) == MACHINE_REF_IMMEDIATE &&
-                        machine_ref_payload(instruction->operands[2]) < function->immediate_count)
-                    {
-                        exact_payload = function->immediates[machine_ref_payload(instruction->operands[2])];
-                    }
-                    else
-                    {
-                        exact_payload = UINT64_MAX;
-                    }
-                    break;
-                case MACHINE_X64_LOAD_FRAME:
-                case MACHINE_X64_STORE_FRAME8:
-                case MACHINE_X64_STORE_FRAME16:
-                case MACHINE_X64_STORE_FRAME32:
-                case MACHINE_X64_STORE_FRAME64:
-                case MACHINE_X64_LEA_FRAME:
-                {
-                    u32 slot_operand = instruction->opcode == MACHINE_X64_LOAD_FRAME || instruction->opcode == MACHINE_X64_LEA_FRAME ? 1 : 0;
-                    MachineRef slot_ref = instruction->operands[slot_operand];
-                    u32 slot = machine_ref_payload(slot_ref);
-                    if (machine_ref_kind(slot_ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count)
-                    {
-                        u32 stack_offset = placement->stack_slot_offsets[slot] - instruction->payload;
-                        exact_payload = (u32)(0u - stack_offset);
-                    }
-                    else
-                    {
-                        exact_payload = UINT64_MAX;
+                        exact_immediate_valid = false;
                     }
                 }
-                break;
-                default:
-                    break;
+                else if (instruction->opcode == MACHINE_X64_ADD_RSP)
+                {
+                    // ADD_RSP carries its immediate directly in the row
+                    // payload (there is no MACHINE_REF_IMMEDIATE operand).
+                    exact_immediate = instruction->payload;
                 }
-                bool exact_emitted = machine_x64_emit_exact_recipe(&encoder, exact_entry, operand_registers, exact_payload, &exact_counters);
+                bool exact_emitted = false;
+                if (!exact_immediate_valid)
+                {
+                    exact_counters.attempts += 1;
+                    exact_counters.fallbacks += 1;
+                }
+                else
+                {
+                    exact_emitted = exact_entry->sequence_required
+                                         ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
+                                                                           instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
+                                         : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
+                                                                         instruction->payload, exact_immediate, &exact_counters);
+                }
                 if (!exact_entry)
                 {
                     // A registry row marked EXACT_FORM is itself an exact
@@ -6378,68 +8128,18 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                  instruction->opcode == MACHINE_X64_UREM32 || instruction->opcode == MACHINE_X64_UREM64;
                 if (is_signed)
                 {
-                    if (wide)
-                    {
-                        machine_x64_emit8(&encoder, 0x48);
-                    }
-                    machine_x64_emit8(&encoder, 0x99);
+                    (void)machine_x64_emit_metadata_instruction(&encoder, wide ? S8("CQO") : S8("CDQ"), 0, 0,
+                                                                 (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
                 }
                 else
                 {
-                    if (wide)
-                    {
-                        machine_x64_emit8(&encoder, 0x48);
-                    }
-                    machine_x64_emit8(&encoder, 0x31);
-                    machine_x64_emit8(&encoder, 0xd2);
+                    (void)machine_x64_emit_metadata_registers(&encoder, S8("XOR"), MACHINE_X64_RDX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
                 }
-                if (wide)
-                {
-                    machine_x64_emit8(&encoder, 0x48);
-                }
-                machine_x64_emit8(&encoder, 0xf7);
-                machine_x64_emit8(&encoder, (u8)(is_signed ? 0xf9 : 0xf1));
+                (void)machine_x64_emit_metadata_register(&encoder, is_signed ? S8("IDIV") : S8("DIV"), MACHINE_X64_RCX, wide ? 64 : 32, 0);
                 if (remainder)
                 {
-                    if (wide)
-                    {
-                        machine_x64_emit8(&encoder, 0x48);
-                    }
-                    machine_x64_emit8(&encoder, 0x89);
-                    machine_x64_emit8(&encoder, 0xd0);
+                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
                 }
-            }
-            break;
-            case MACHINE_X64_SETCC:
-            {
-                // The stage-2 placement pins SETCC's destination to RAX so
-                // the low-byte encoding never touches the legacy AH family.
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, (u8)(0x90 | (instruction->payload & 0xf)));
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0xb6);
-                machine_x64_emit8(&encoder, 0xc0);
-            }
-            break;
-            case MACHINE_X64_JCC:
-            {
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, (u8)(0x80 | (instruction->payload & 0xf)));
-                MachineX64BranchFixup* taken = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
-                *taken = (MachineX64BranchFixup){
-                    .patch_offset = encoder.count,
-                    .block = machine_ref_payload(instruction->operands[0]),
-                };
-                machine_x64_emit32(&encoder, 0);
-                machine_x64_emit8(&encoder, 0xe9);
-                MachineX64BranchFixup* fallthrough = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
-                *fallthrough = (MachineX64BranchFixup){
-                    .patch_offset = encoder.count,
-                    .block = machine_ref_payload(instruction->operands[1]),
-                };
-                machine_x64_emit32(&encoder, 0);
             }
             break;
             case MACHINE_X64_RET:
@@ -6448,9 +8148,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // bits 128+ of the ZMM0 the caller is about to read.
                 if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
                 {
-                    machine_x64_emit8(&encoder, 0xc5);
-                    machine_x64_emit8(&encoder, 0xf8);
-                    machine_x64_emit8(&encoder, 0x77);
+                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
                 }
                 if (placement->callee_saved_mask)
                 {
@@ -6461,43 +8162,36 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     {
                         push_count += (placement->callee_saved_mask >> push_register) & 1u;
                     }
-                    machine_x64_emit8(&encoder, 0x48);
-                    machine_x64_emit8(&encoder, 0x8d);
-                    machine_x64_emit8(&encoder, 0x65);
-                    machine_x64_emit8(&encoder, (u8)(0x100u - 8u * push_count));
+                    (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP,
+                                                                     -(s64)(8u * push_count), 64, 64, 0);
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_R15))
                     {
-                        machine_x64_emit8(&encoder, 0x41);
-                        machine_x64_emit8(&encoder, 0x5f);
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_R15, 64, 0);
                     }
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_R14))
                     {
-                        machine_x64_emit8(&encoder, 0x41);
-                        machine_x64_emit8(&encoder, 0x5e);
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_R14, 64, 0);
                     }
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_R13))
                     {
-                        machine_x64_emit8(&encoder, 0x41);
-                        machine_x64_emit8(&encoder, 0x5d);
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_R13, 64, 0);
                     }
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_R12))
                     {
-                        machine_x64_emit8(&encoder, 0x41);
-                        machine_x64_emit8(&encoder, 0x5c);
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_R12, 64, 0);
                     }
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
                     {
-                        machine_x64_emit8(&encoder, 0x5b);
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_RBX, 64, 0);
                     }
                 }
                 else
                 {
-                    machine_x64_emit8(&encoder, 0x48);
-                    machine_x64_emit8(&encoder, 0x89);
-                    machine_x64_emit8(&encoder, 0xec);
+                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
                 }
-                machine_x64_emit8(&encoder, 0x5d);
-                machine_x64_emit8(&encoder, 0xc3);
+                (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_RBP, 64, 0);
+                (void)machine_x64_emit_metadata_instruction(&encoder, S8("RET"), 0, 0,
+                                                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
             }
             break;
             case MACHINE_X64_CALL_DIRECT:
@@ -6507,45 +8201,42 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // vzeroupper fires before its call staging rather than after.
                 if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
                 {
-                    machine_x64_emit8(&encoder, 0xc5);
-                    machine_x64_emit8(&encoder, 0xf8);
-                    machine_x64_emit8(&encoder, 0x77);
+                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
                 }
                 if (instruction->flags & 1)
                 {
                     // Variadic System V call: AL carries the count of XMM
                     // registers holding arguments.
-                    machine_x64_emit8(&encoder, 0xb8);
-                    machine_x64_emit32(&encoder, (u32)(instruction->flags >> 1));
+                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
+                                                                       instruction->flags >> 1, 32, 32, 0);
                 }
-                machine_x64_emit8(&encoder, 0xe8);
+                u32 call_start = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("CALL"), 0, 32, 0);
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                 *site = (MachineCallSite){
-                    .code_offset = encoder.count,
+                    .code_offset = call_start + 1,
                     .target = instruction->payload,
                 };
-                machine_x64_emit32(&encoder, 0);
             }
             break;
             case MACHINE_X64_CALL_INDIRECT:
             {
                 if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
                 {
-                    machine_x64_emit8(&encoder, 0xc5);
-                    machine_x64_emit8(&encoder, 0xf8);
-                    machine_x64_emit8(&encoder, 0x77);
+                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
                 }
                 if (instruction->flags & 1)
                 {
-                    machine_x64_emit8(&encoder, 0xb8);
-                    machine_x64_emit32(&encoder, (u32)(instruction->flags >> 1));
+                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
+                                                                       instruction->flags >> 1, 32, 32, 0);
                 }
-                if (operand_registers[0] >= 8)
-                {
-                    machine_x64_emit8(&encoder, 0x41);
-                }
-                machine_x64_emit8(&encoder, 0xff);
-                machine_x64_emit8(&encoder, (u8)(0xd0 | (operand_registers[0] & 7)));
+                (void)machine_x64_emit_metadata_register(&encoder, S8("CALL"), operand_registers[0], 64, 0);
             }
             break;
             case MACHINE_X64_LEA_TLS:
@@ -6554,26 +8245,39 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // lea dest, [dest + tpoff] with the displacement patched
                 // thread-locally, byte-for-byte the canonical sequence.
                 u32 destination = operand_registers[0];
-                machine_x64_emit8(&encoder, 0x64);
-                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0)));
-                machine_x64_emit8(&encoder, 0x8b);
-                machine_x64_emit8(&encoder, (u8)(0x04 | ((destination & 7) << 3)));
-                machine_x64_emit8(&encoder, 0x25);
-                machine_x64_emit32(&encoder, 0);
-                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x05 : 0)));
-                machine_x64_emit8(&encoder, 0x8d);
-                machine_x64_emit8(&encoder, (u8)(0x80 | ((destination & 7) << 3) | (destination & 7)));
-                if ((destination & 7) == 4)
+                BusterX86MetadataPhysicalOperand fs_operands[2] = {
+                    machine_x64_exact_gpr_operand(destination, 64),
+                    {
+                        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                        .width = 64,
+                        .memory = {
+                            .displacement = 0,
+                            .address_size = 64,
+                            .scale = 1,
+                            .segment = BUSTER_X86_METADATA_SEGMENT_FS,
+                            .has_displacement = true,
+                            .has_segment = true,
+                        },
+                    },
+                };
+                (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), fs_operands, 2,
+                                                             (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                MachineX64PreparedExactOpcode const* lea_entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+                BusterX86MetadataPhysicalOperand lea_operands[2] = {
+                    machine_x64_exact_gpr_operand(destination, 64),
+                    machine_x64_exact_memory_operand(destination, 64, 0, true),
+                };
+                if (!lea_entry || !lea_entry->descriptor || !lea_entry->plan_valid ||
+                    !machine_x64_emit_exact_form(&encoder, lea_entry->metadata_tokens[0], lea_operands, 2, true, false, 0, false, 0))
                 {
-                    machine_x64_emit8(&encoder, 0x24);
+                    encoder.overflow = true;
                 }
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                 *site = (MachineCallSite){
-                    .code_offset = encoder.count,
+                    .code_offset = encoder.count - 4,
                     .target = instruction->payload,
                     .is_thread_local = 1,
                 };
-                machine_x64_emit32(&encoder, 0);
             }
             break;
             case MACHINE_X64_COPY_FRAME_FROM_FRAME:
@@ -6584,10 +8288,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 while (copied < instruction->payload)
                 {
                     u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    machine_x64_emit_chunk_load_prefix(&encoder, chunk);
-                    machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RAX, source_offset - copied);
-                    machine_x64_emit_chunk_store_prefix(&encoder, chunk);
-                    machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RAX, destination_offset - copied);
+                    (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, source_offset - copied, chunk, 0);
+                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
                     copied += chunk;
                 }
             }
@@ -6600,22 +8302,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 while (copied < instruction->payload)
                 {
                     u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    if (source_register >= 8)
-                    {
-                        machine_x64_emit8(&encoder, (u8)(chunk == 8 ? 0x49 : 0x41));
-                        machine_x64_emit8(&encoder, chunk <= 2 ? 0x0f : 0x8b);
-                        if (chunk <= 2)
-                        {
-                            machine_x64_emit8(&encoder, chunk == 1 ? 0xb6 : 0xb7);
-                        }
-                    }
-                    else
-                    {
-                        machine_x64_emit_chunk_load_prefix(&encoder, chunk);
-                    }
-                    machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RAX, source_register, copied);
-                    machine_x64_emit_chunk_store_prefix(&encoder, chunk);
-                    machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RAX, destination_offset - copied);
+                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, source_register, copied, chunk, 0);
+                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
                     copied += chunk;
                 }
             }
@@ -6628,88 +8316,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 while (copied < instruction->payload)
                 {
                     u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    machine_x64_emit_chunk_load_prefix(&encoder, chunk);
-                    machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RDX, source_offset - copied);
-                    if (destination_register >= 8)
-                    {
-                        if (chunk == 2)
-                        {
-                            machine_x64_emit8(&encoder, 0x66);
-                        }
-                        machine_x64_emit8(&encoder, (u8)(chunk == 8 ? 0x49 : 0x41));
-                        machine_x64_emit8(&encoder, chunk == 1 ? 0x88 : 0x89);
-                    }
-                    else
-                    {
-                        machine_x64_emit_chunk_store_prefix(&encoder, chunk);
-                    }
-                    machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RDX, destination_register, copied);
+                    (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, source_offset - copied, chunk, 0);
+                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, destination_register, copied, chunk, 0);
                     copied += chunk;
                 }
-            }
-            break;
-            case MACHINE_X64_FARITH:
-            {
-                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
-                machine_x64_emit_movq_to_xmm(&encoder, 1, operand_registers[2]);
-                machine_x64_emit8(&encoder, (instruction->payload & 0x100) ? 0xf2 : 0xf3);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, (u8)instruction->payload);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
-            }
-            break;
-            case MACHINE_X64_FCMP_SET:
-            {
-                // comis + setcc with the canonical NaN-parity fixups; the
-                // destination is pinned to RAX so AL/DL stay legal.
-                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
-                machine_x64_emit_movq_to_xmm(&encoder, 1, operand_registers[2]);
-                if (instruction->payload & 0x100)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2e);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, (u8)(0x90 | (instruction->payload & 0xf)));
-                machine_x64_emit8(&encoder, 0xc0);
-                u32 parity_mode = (instruction->payload >> 9) & 0x3;
-                if (parity_mode)
-                {
-                    machine_x64_emit8(&encoder, 0x0f);
-                    machine_x64_emit8(&encoder, parity_mode == 1 ? 0x9b : 0x9a);
-                    machine_x64_emit8(&encoder, 0xc2);
-                    machine_x64_emit8(&encoder, parity_mode == 1 ? 0x20 : 0x08);
-                    machine_x64_emit8(&encoder, 0xd0);
-                }
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0xb6);
-                machine_x64_emit8(&encoder, 0xc0);
-            }
-            break;
-            case MACHINE_X64_CVT_F32_TO_F64:
-            case MACHINE_X64_CVT_F64_TO_F32:
-            {
-                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
-                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_F32_TO_F64 ? 0xf3 : 0xf2);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x5a);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
-            }
-            break;
-            case MACHINE_X64_CVT_I64_TO_F32:
-            case MACHINE_X64_CVT_I64_TO_F64:
-            {
-                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_I64_TO_F32 ? 0xf3 : 0xf2);
-                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[1] >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2a);
-                machine_x64_emit8(&encoder, machine_x64_modrm_register(0, operand_registers[1]));
-                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
             }
             break;
             case MACHINE_X64_CVT_U64_TO_F32:
@@ -6717,51 +8327,34 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 // Canonical branchy form: non-negative converts directly;
                 // a set sign bit halves with a sticky rounding bit, then
-                // doubles the float. Value in RAX, RCX is the scratch, the
-                // f32/f64 bit pattern lands back in RAX.
+                // doubles the float.  The selector leaves the two operands
+                // unconstrained; RCX is the row's declared integer scratch,
+                // while the destination carries the resulting float bits.
                 bool to_f64 = instruction->opcode == MACHINE_X64_CVT_U64_TO_F64;
-                u8 cvt_prefix = to_f64 ? 0xf2 : 0xf3;
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x89);
-                machine_x64_emit8(&encoder, 0xc8);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x85);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, 0x79);
-                machine_x64_emit8(&encoder, 0x17);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x89);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0xd1);
-                machine_x64_emit8(&encoder, 0xe8);
-                machine_x64_emit8(&encoder, 0x83);
-                machine_x64_emit8(&encoder, 0xe1);
-                machine_x64_emit8(&encoder, 0x01);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x09);
-                machine_x64_emit8(&encoder, 0xc8);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2a);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x58);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, 0xeb);
-                machine_x64_emit8(&encoder, 0x05);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2a);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, 0x66);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x7e);
-                machine_x64_emit8(&encoder, 0xc0);
+                u32 source = operand_registers[1];
+                u32 destination = operand_registers[0];
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, source, 64, 0);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("TEST"), source, source, 64, 0);
+                u32 non_negative_branch = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JNS"), 0, 8, 0);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), destination, source, 64, 0);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SHR"), destination, 1, 64, 8, 0);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX, 1, 32, 8, 0);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
+                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, destination,
+                                                         to_f64 ? 64 : 32, 64, 0);
+                (void)machine_x64_emit_metadata_xmm_registers(&encoder, to_f64 ? S8("ADDSD") : S8("ADDSS"), 0, 0,
+                                                               to_f64 ? 64 : 32, 0);
+                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
+                u32 end_branch = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
+                u32 direct_conversion = encoder.count;
+                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, source,
+                                                         to_f64 ? 64 : 32, 64, 0);
+                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
+                u32 conversion_end = encoder.count;
+                encoder.bytes[non_negative_branch + 1] = (u8)(direct_conversion - (non_negative_branch + 2));
+                encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
             }
             break;
             case MACHINE_X64_CVT_F32_TO_U64:
@@ -6769,75 +8362,44 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 // Canonical threshold form: values below 2^63 convert
                 // directly, larger ones subtract the threshold first and
-                // set the top bit after. Pattern arrives in RCX, RCX is
-                // also the constant scratch, the integer lands in RAX.
+                // set the top bit after.  The row's operands are free to use
+                // any allocatable GPR; RCX is reserved as the final scratch.
                 bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_U64;
-                u8 cvt_prefix = from_f64 ? 0xf2 : 0xf3;
-                machine_x64_emit8(&encoder, 0x66);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x6e);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0xb8);
-                if (from_f64)
-                {
-                    machine_x64_emit32(&encoder, 0);
-                    machine_x64_emit32(&encoder, 0x43e00000u);
-                }
-                else
-                {
-                    machine_x64_emit32(&encoder, 0x5f000000u);
-                    machine_x64_emit32(&encoder, 0);
-                }
-                machine_x64_emit8(&encoder, 0x66);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x6e);
-                machine_x64_emit8(&encoder, 0xc8);
-                if (from_f64)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2e);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit8(&encoder, 0x72);
-                machine_x64_emit8(&encoder, 0x18);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x5c);
-                machine_x64_emit8(&encoder, 0xc1);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2c);
-                machine_x64_emit8(&encoder, 0xc0);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0xb9);
-                machine_x64_emit32(&encoder, 0);
-                machine_x64_emit32(&encoder, 0x80000000u);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x09);
-                machine_x64_emit8(&encoder, 0xc8);
-                machine_x64_emit8(&encoder, 0xeb);
-                machine_x64_emit8(&encoder, 0x05);
-                machine_x64_emit8(&encoder, cvt_prefix);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2c);
-                machine_x64_emit8(&encoder, 0xc0);
+                u32 source = operand_registers[1];
+                u32 destination = operand_registers[0];
+                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
+                (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
+                                                              from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x4f000000), 0);
+                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
+                (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
+                                                              from_f64 ? 64 : 32, 0);
+                u32 direct_branch = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
+                (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("SUBSD") : S8("SUBSS"), 0, 1,
+                                                              from_f64 ? 64 : 32, 0);
+                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
+                                                        from_f64 ? 64 : 32, 0);
+                // The threshold path already converted x-2^63 to a signed
+                // 64-bit result; restore the unsigned high bit, not merely
+                // bit 31 (the latter is only the f32 result width).
+                (void)machine_x64_emit_exact_immediate_value(&encoder, MACHINE_X64_RCX, UINT64_C(0x8000000000000000), 0);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
+                u32 end_branch = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
+                u32 direct_conversion = encoder.count;
+                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
+                                                        from_f64 ? 64 : 32, 0);
+                u32 conversion_end = encoder.count;
+                encoder.bytes[direct_branch + 1] = (u8)(direct_conversion - (direct_branch + 2));
+                encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
             }
             break;
             case MACHINE_X64_CVT_F32_TO_I64:
             case MACHINE_X64_CVT_F64_TO_I64:
             {
-                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
-                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_F32_TO_I64 ? 0xf3 : 0xf2);
-                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x2c);
-                machine_x64_emit8(&encoder, machine_x64_modrm_register(operand_registers[0], 0));
+                bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_I64;
+                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, operand_registers[1], 64, 64, 0);
+                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), operand_registers[0], 0, 64, 128, 0);
             }
             break;
             case MACHINE_X64_VA_SAVE:
@@ -6849,18 +8411,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 for (u32 gp_index = 0; gp_index < BUSTER_ARRAY_LENGTH(gp_registers); gp_index += 1)
                 {
                     u32 save_displacement = save_offset - gp_index * 8u;
-                    machine_x64_emit8(&encoder, 0x48 | (gp_registers[gp_index] >= 8 ? 0x04 : 0));
-                    machine_x64_emit8(&encoder, 0x89);
-                    machine_x64_emit_frame_modrm(&encoder, gp_registers[gp_index], save_displacement);
+                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, gp_registers[gp_index], save_displacement, 8, 0);
                 }
                 for (u32 float_index = 0; float_index < 8; float_index += 1)
                 {
                     u32 xmm = float_index;
                     u32 save_displacement = save_offset - 48u - float_index * 16u;
-                    machine_x64_emit8(&encoder, 0xf2);
-                    machine_x64_emit8(&encoder, (u8)(0x0f));
-                    machine_x64_emit8(&encoder, 0x11);
-                    machine_x64_emit_frame_modrm(&encoder, xmm, save_displacement);
+                    (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm, MACHINE_X64_RBP,
+                                                                -(s64)(s32)save_displacement, true, 64, 0);
                 }
             }
             break;
@@ -6890,77 +8448,81 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 {
                     if (integer_parts)
                     {
-                        machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_RDX, list, 0, 4);
-                        machine_x64_emit_compare_immediate32(&encoder, MACHINE_X64_RDX, 48u - integer_parts * 8u);
-                        machine_x64_emit8(&encoder, 0x0f);
-                        machine_x64_emit8(&encoder, 0x87); // ja overflow
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 0, 4, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RDX,
+                                                                            48u - integer_parts * 8u, 32, 32, 0);
+                        u32 branch_start = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
                         if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
                         {
-                            overflow_patches[overflow_patch_count++] = encoder.count;
+                            overflow_patches[overflow_patch_count++] = branch_start + 2;
                         }
-                        machine_x64_emit32(&encoder, 0);
                     }
                     if (float_parts)
                     {
-                        machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_R9, list, 4, 4);
-                        machine_x64_emit_compare_immediate32(&encoder, MACHINE_X64_R9, 176u - float_parts * 16u);
-                        machine_x64_emit8(&encoder, 0x0f);
-                        machine_x64_emit8(&encoder, 0x87);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R9, list, 4, 4, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_R9,
+                                                                            176u - float_parts * 16u, 32, 32, 0);
+                        u32 branch_start = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
                         if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
                         {
-                            overflow_patches[overflow_patch_count++] = encoder.count;
+                            overflow_patches[overflow_patch_count++] = branch_start + 2;
                         }
-                        machine_x64_emit32(&encoder, 0);
                     }
-                    machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_R8, list, 16, 8);
+                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R8, list, 16, 8, 0);
                     for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
                     {
                         MachineVaArgPart* part = metadata->parts + part_index;
                         u32 offset_register = part->is_float ? MACHINE_X64_R9 : MACHINE_X64_RDX;
-                        // Keep R8 as the immutable reg_save_area base.  The
-                        // previous form accumulated each class cursor into
-                        // R8, so a second eightbyte (especially a mixed
-                        // GP/FP value) addressed from the first part's
-                        // cursor instead of the save-area base.
-                        machine_x64_emit_rr(&encoder, true, false, 0x89, MACHINE_X64_R8, MACHINE_X64_R11);
-                        machine_x64_emit_rr(&encoder, true, false, 0x01, offset_register, MACHINE_X64_R11);
-                        machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_R10, MACHINE_X64_R11, part->save_offset,
-                                                           part->size >= 8 ? 8 : part->size);
+                        // Keep R8 as the immutable reg_save_area base.  Build
+                        // each part address in the scratch R11 register so
+                        // mixed GP/FP values do not accumulate one class's
+                        // cursor into the save-area base.
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R11, MACHINE_X64_R8, 64, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("ADD"), MACHINE_X64_R11, offset_register, 64, 0);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_R11, part->save_offset,
+                                                                      part->size >= 8 ? 8 : part->size, 0);
                         if (metadata->result_is_frame)
                         {
-                            machine_x64_emit_frame_store_sized(&encoder, MACHINE_X64_R10, result_offset - part->value_offset,
-                                                               part->size >= 8 ? 8 : part->size);
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - part->value_offset,
+                                                                      part->size >= 8 ? 8 : part->size, 0);
                         }
                         else
                         {
                             // Scalar VA_ARG values are one part and the
                             // constrained result register is RCX.
-                            machine_x64_emit_rr(&encoder, part->size >= 8, false, 0x89, MACHINE_X64_R10, result_register);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), result_register, MACHINE_X64_R10,
+                                                                       part->size >= 8 ? 64 : 32, 0);
                         }
                     }
                     if (integer_parts)
                     {
-                        machine_x64_emit_add_immediate_sized(&encoder, MACHINE_X64_RDX, integer_parts * 8u, false);
-                        machine_x64_emit_memory_store_sized(&encoder, MACHINE_X64_RDX, list, 0, 4);
+                        u32 amount = integer_parts * 8u;
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, amount, 32,
+                                                                          amount <= INT8_MAX ? 8 : 32, 0);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 0, 4, 0);
                     }
                     if (float_parts)
                     {
-                        machine_x64_emit_add_immediate_sized(&encoder, MACHINE_X64_R9, float_parts * 16u, false);
-                        machine_x64_emit_memory_store_sized(&encoder, MACHINE_X64_R9, list, 4, 4);
+                        u32 amount = float_parts * 16u;
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_R9, amount, 32,
+                                                                          amount <= INT8_MAX ? 8 : 32, 0);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_R9, list, 4, 4, 0);
                     }
-                    machine_x64_emit8(&encoder, 0xe9);
-                    end_patch = encoder.count;
-                    machine_x64_emit32(&encoder, 0);
+                    u32 end_branch_start = encoder.count;
+                    (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
+                    end_patch = end_branch_start + 1;
                 }
                 u32 overflow_start = encoder.count;
-                machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_RDX, list, 8, 8);
+                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 8, 8, 0);
                 if (metadata->alignment > 8)
                 {
-                    machine_x64_emit_add_immediate_sized(&encoder, MACHINE_X64_RDX, metadata->alignment - 1, true);
-                    machine_x64_emit8(&encoder, 0x48 | (MACHINE_X64_RDX >= 8 ? 0x01 : 0));
-                    machine_x64_emit8(&encoder, 0x81);
-                    machine_x64_emit8(&encoder, 0xe2);
-                    machine_x64_emit32(&encoder, 0 - metadata->alignment);
+                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->alignment - 1,
+                                                                        64, (metadata->alignment - 1) <= INT8_MAX ? 8 : 32, 0);
+                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RDX,
+                                                                        (u64)(-(s64)metadata->alignment),
+                                                                        64, 32, 0);
                 }
                 if (metadata->result_is_frame)
                 {
@@ -6968,17 +8530,19 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     while (copied < metadata->size)
                     {
                         u32 chunk = machine_x64_copy_chunk(metadata->size - copied);
-                        machine_x64_emit_memory_load_sized(&encoder, MACHINE_X64_R10, MACHINE_X64_RDX, copied, chunk);
-                        machine_x64_emit_frame_store_sized(&encoder, MACHINE_X64_R10, result_offset - copied, chunk);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_RDX, copied, chunk, 0);
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - copied, chunk, 0);
                         copied += chunk;
                     }
                 }
                 else
                 {
-                    machine_x64_emit_memory_load_sized(&encoder, result_register, MACHINE_X64_RDX, 0, metadata->scalar_size >= 8 ? 8 : metadata->scalar_size);
+                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, result_register, MACHINE_X64_RDX, 0,
+                                                                  metadata->scalar_size >= 8 ? 8 : metadata->scalar_size, 0);
                 }
-                machine_x64_emit_add_immediate_sized(&encoder, MACHINE_X64_RDX, metadata->stack_size, true);
-                machine_x64_emit_memory_store_sized(&encoder, MACHINE_X64_RDX, list, 8, 8);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->stack_size,
+                                                                    64, metadata->stack_size <= INT8_MAX ? 8 : 32, 0);
+                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 8, 8, 0);
                 u32 end = encoder.count;
                 for (u32 patch_index = 0; patch_index < overflow_patch_count; patch_index += 1)
                 {
@@ -6999,21 +8563,6 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
             }
             break;
-            case MACHINE_X64_PUSH_FRAME:
-            {
-                machine_x64_emit8(&encoder, 0xff);
-                machine_x64_emit_frame_modrm(&encoder, 6, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] -
-                                                             instruction->payload);
-            }
-            break;
-            case MACHINE_X64_SUB_RSP:
-            {
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xec);
-                machine_x64_emit32(&encoder, instruction->payload);
-            }
-            break;
             case MACHINE_X64_STACK_ALLOCATE:
             {
                 // The constrained row places the runtime byte count in RCX
@@ -7022,66 +8571,25 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // and touch every page before the final residual subtract so
                 // guard-page stacks cannot be skipped.
                 u32 stack_alignment = instruction->payload;
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xc1); // add rcx, alignment - 1
-                machine_x64_emit32(&encoder, stack_alignment - 1);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xe1); // and rcx, -alignment
-                machine_x64_emit32(&encoder, 0 - stack_alignment);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RCX, stack_alignment - 1, 64, 32, 0);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX,
+                                                                    (u64)(-(s64)stack_alignment), 64, 32, 0);
 
                 u32 compare_offset = encoder.count;
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xf9); // cmp rcx, 4096
-                machine_x64_emit32(&encoder, 4096);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RCX, 4096, 64, 32, 0);
                 u32 short_exit = encoder.count;
-                machine_x64_emit8(&encoder, 0x72); // jb final residual subtract
-                machine_x64_emit8(&encoder, 0);
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xec); // sub rsp, 4096
-                machine_x64_emit32(&encoder, 4096);
-                machine_x64_emit8(&encoder, 0xf6);
-                machine_x64_emit8(&encoder, 0x04);
-                machine_x64_emit8(&encoder, 0x24);
-                machine_x64_emit8(&encoder, 0); // test byte [rsp], 0
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x81);
-                machine_x64_emit8(&encoder, 0xe9); // sub rcx, 4096
-                machine_x64_emit32(&encoder, 4096);
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
+                (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
+                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RCX, 4096, 64, 32, 0);
                 u32 loop_back = encoder.count;
-                machine_x64_emit8(&encoder, 0xeb);
-                machine_x64_emit8(&encoder, 0);
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
                 u32 residual = encoder.count;
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x29);
-                machine_x64_emit8(&encoder, 0xcc); // sub rsp, rcx
-                machine_x64_emit8(&encoder, 0xf6);
-                machine_x64_emit8(&encoder, 0x04);
-                machine_x64_emit8(&encoder, 0x24);
-                machine_x64_emit8(&encoder, 0); // test byte [rsp], 0
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x89);
-                machine_x64_emit8(&encoder, 0xe0); // mov rax, rsp
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("SUB"), MACHINE_X64_RSP, MACHINE_X64_RCX, 64, 0);
+                (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RSP, 64, 0);
                 encoder.bytes[short_exit + 1] = (u8)(residual - (short_exit + 2));
                 encoder.bytes[loop_back + 1] = (u8)(compare_offset - (loop_back + 2));
-            }
-            break;
-            case MACHINE_X64_ATOMIC_STORE_XCHG:
-            {
-                u32 size = instruction->payload & 0xff;
-                if (size == 2)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                if (size == 8)
-                {
-                    machine_x64_emit8(&encoder, 0x48);
-                }
-                machine_x64_emit8(&encoder, size == 1 ? 0x86 : 0x87);
-                machine_x64_emit8(&encoder, 0x08);
             }
             break;
             case MACHINE_X64_ATOMIC_RMW:
@@ -7090,72 +8598,39 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // the proposed value, mirroring the canonical sequence.
                 u32 size = instruction->payload & 0xff;
                 u32 atomic_operation = instruction->payload >> 8;
-                machine_x64_emit_chunk_load_prefix(&encoder, size);
-                machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RAX, MACHINE_X64_RCX, 0);
+                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, MACHINE_X64_RCX, 0, size, 0);
                 u32 retry_offset = encoder.count;
-                if (size == 2)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                machine_x64_emit8(&encoder, size == 8 ? 0x49 : 0x41);
-                machine_x64_emit8(&encoder, size == 1 ? 0x88 : 0x89);
-                machine_x64_emit8(&encoder, 0xc0);
-                if (size == 2)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                machine_x64_emit8(&encoder, size == 8 ? 0x49 : 0x41);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RAX, (u16)(size * 8u), 0);
                 if (atomic_operation == IR_ATOMIC_EXCHANGE)
                 {
-                    machine_x64_emit8(&encoder, size == 1 ? 0x88 : 0x89);
+                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
                 }
                 else
                 {
-                    u8 operation_opcode = atomic_operation == IR_ATOMIC_ADD           ? (size == 1 ? 0x00 : 0x01)
-                                          : atomic_operation == IR_ATOMIC_SUBTRACT    ? (size == 1 ? 0x28 : 0x29)
-                                          : atomic_operation == IR_ATOMIC_BITWISE_AND ? (size == 1 ? 0x20 : 0x21)
-                                          : atomic_operation == IR_ATOMIC_BITWISE_OR  ? (size == 1 ? 0x08 : 0x09)
-                                                                                      : (size == 1 ? 0x30 : 0x31);
-                    machine_x64_emit8(&encoder, operation_opcode);
+                    String8 operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
+                                        : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
+                                        : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                                        : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
+                                                                                   : S8("XOR");
+                    (void)machine_x64_emit_metadata_registers(&encoder, operation, MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
                 }
-                machine_x64_emit8(&encoder, 0xd0);
-                if (size == 2)
+                (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_R8,
+                                                                        (u16)(size * 8u), 0);
+                u32 retry_branch = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JNE"), 0, 32, 0);
+                u32 displacement = retry_offset - (retry_branch + 6);
+                for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
                 {
-                    machine_x64_emit8(&encoder, 0x66);
+                    encoder.bytes[retry_branch + 2 + byte_index] = (u8)(displacement >> (byte_index * 8));
                 }
-                machine_x64_emit8(&encoder, 0xf0);
-                machine_x64_emit8(&encoder, size == 8 ? 0x4c : 0x44);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, size == 1 ? 0xb0 : 0xb1);
-                machine_x64_emit8(&encoder, 0x01);
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x85);
-                machine_x64_emit32(&encoder, retry_offset - (encoder.count + 4));
             }
             break;
             case MACHINE_X64_ATOMIC_CMPXCHG:
             {
                 u32 size = instruction->payload & 0xff;
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x89);
-                machine_x64_emit8(&encoder, 0xd0);
-                if (size == 2)
-                {
-                    machine_x64_emit8(&encoder, 0x66);
-                }
-                machine_x64_emit8(&encoder, 0xf0);
-                if (size == 8)
-                {
-                    machine_x64_emit8(&encoder, 0x48);
-                }
-                else if (size == 1)
-                {
-                    // SIL needs a plain REX prefix.
-                    machine_x64_emit8(&encoder, 0x40);
-                }
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, size == 1 ? 0xb0 : 0xb1);
-                machine_x64_emit8(&encoder, 0x31);
+                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, 64, 0);
+                (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_RSI,
+                                                                        (u16)(size * 8u), 0);
             }
             break;
             case MACHINE_X64_ATOMIC_CMPXCHG16:
@@ -7171,138 +8646,20 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // and RBX:RCX (desired). The result stores happen after the
                 // instruction, preserving the old memory image on both the
                 // success and failure paths.
-                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RAX, expected_offset);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, expected_offset, 8, 0);
                 // Frame slots grow toward lower addresses: aggregate byte
                 // offset 8 is represented by the slot offset minus eight.
-                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RDX, expected_offset - 8);
-                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RBX, desired_offset);
-                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RCX, desired_offset - 8);
-                machine_x64_emit8(&encoder, 0xf0);
-                machine_x64_emit8(&encoder, (u8)(0x48 | (address >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0xc7);
-                machine_x64_emit_memory_modrm(&encoder, 1, address, 0);
-                machine_x64_emit_frame_store(&encoder, MACHINE_X64_RAX, result_offset);
-                machine_x64_emit_frame_store(&encoder, MACHINE_X64_RDX, result_offset - 8);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, expected_offset - 8, 8, 0);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RBX, desired_offset, 8, 0);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RCX, desired_offset - 8, 8, 0);
+                (void)machine_x64_emit_metadata_atomic_memory(&encoder, S8("CMPXCHG16B"), address, 128, 0);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, result_offset, 8, 0);
+                (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RDX, result_offset - 8, 8, 0);
             }
             break;
             case MACHINE_X64_UD2:
-                machine_x64_emit8(&encoder, 0x0f);
-                machine_x64_emit8(&encoder, 0x0b);
-                break;
-            case MACHINE_X64_VMOV_RR:
-                // A full-width self-copy is the coalesced form and encodes
-                // to nothing, exactly like the scalar MOV_RR.
-                if (operand_registers[0] != operand_registers[1])
-                {
-                    machine_x64_emit_vector_copy(&encoder, operand_registers[0] - MACHINE_X64_ZMM0, operand_registers[1] - MACHINE_X64_ZMM0);
-                }
-                break;
-            case MACHINE_X64_VLOAD_FRAME:
-                machine_x64_emit_vector_frame(&encoder, operand_registers[0] - MACHINE_X64_ZMM0, false,
-                                              placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])]);
-                break;
-            case MACHINE_X64_VSTORE_FRAME:
-                machine_x64_emit_vector_frame(&encoder, operand_registers[1] - MACHINE_X64_ZMM0, true,
-                                              placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])]);
-                break;
-            case MACHINE_X64_VLOAD_PTR:
-                machine_x64_emit_evex_indirect(&encoder, 1, 3, 0x6f, operand_registers[0] - MACHINE_X64_ZMM0, 0, false, operand_registers[1]);
-                break;
-            case MACHINE_X64_VSTORE_PTR:
-                machine_x64_emit_evex_indirect(&encoder, 1, 3, 0x7f, operand_registers[1] - MACHINE_X64_ZMM0, 0, false, operand_registers[0]);
-                break;
-            case MACHINE_X64_VLOAD_PTR_MASKED:
-                machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[2]);
-                machine_x64_emit_evex_indirect(&encoder, 1, 3, 0x6f, operand_registers[0] - MACHINE_X64_ZMM0, MACHINE_X64_STAGE_MASK, true,
-                                               operand_registers[1]);
-                break;
-            case MACHINE_X64_VSTORE_PTR_MASKED:
-                machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
-                machine_x64_emit_evex_indirect(&encoder, 1, 3, 0x7f, operand_registers[2] - MACHINE_X64_ZMM0, MACHINE_X64_STAGE_MASK, false,
-                                               operand_registers[0]);
-                break;
-            case MACHINE_X64_VCOMPRESS_STORE_PTR:
-                // vpcompressb writes its destination through the rm operand,
-                // so the compressing store shares the plain store's shape.
-                machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
-                machine_x64_emit_evex_indirect(&encoder, 2, 1, 0x63, operand_registers[2] - MACHINE_X64_ZMM0, MACHINE_X64_STAGE_MASK, false,
-                                               operand_registers[0]);
-                break;
-            case MACHINE_X64_VSPLATB:
-                // vpbroadcastb zmm, r32.
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x7a, operand_registers[0] - MACHINE_X64_ZMM0, 0, 0, false, false, operand_registers[1]);
-                break;
-            case MACHINE_X64_VPCMP_MASK:
-            {
-                u32 compare_left = operand_registers[1] - MACHINE_X64_ZMM0;
-                u32 compare_right = operand_registers[2] - MACHINE_X64_ZMM0;
-                if (instruction->payload == 0)
-                {
-                    machine_x64_emit_evex_register(&encoder, 1, 1, 0x74, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
-                }
-                else if (instruction->payload == 1)
-                {
-                    // vpcmpub with predicate 1: unsigned less-than.
-                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x3e, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
-                    machine_x64_emit8(&encoder, 1);
-                }
-                else
-                {
-                    machine_x64_emit_evex_register(&encoder, 2, 1, 0x26, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
-                }
-                machine_x64_emit_kmovq_to_general(&encoder, operand_registers[0], MACHINE_X64_STAGE_MASK);
-            }
-            break;
-            case MACHINE_X64_VPMOVB2M:
-                // vpmovb2m has no memory form and its source is the rm.
-                machine_x64_emit_evex_register(&encoder, 2, 2, 0x29, MACHINE_X64_STAGE_MASK, 0, 0, false, false, operand_registers[1] - MACHINE_X64_ZMM0);
-                machine_x64_emit_kmovq_to_general(&encoder, operand_registers[0], MACHINE_X64_STAGE_MASK);
-                break;
-            case MACHINE_X64_VPERMT2B:
-                machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x7d, operand_registers[0] - MACHINE_X64_ZMM0, operand_registers[2] - MACHINE_X64_ZMM0,
-                                               MACHINE_X64_STAGE_MASK, true, false, operand_registers[3] - MACHINE_X64_ZMM0);
-                break;
-            case MACHINE_X64_VCOMPRESSB:
-                // Register form: rm is the destination and reg the source.
-                machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x63, operand_registers[2] - MACHINE_X64_ZMM0, 0, MACHINE_X64_STAGE_MASK, true, false,
-                                               operand_registers[0] - MACHINE_X64_ZMM0);
-                break;
-            case MACHINE_X64_VPMOVZXBD:
-            {
-                u32 widen_destination = operand_registers[0] - MACHINE_X64_ZMM0;
-                u32 widen_source = operand_registers[1] - MACHINE_X64_ZMM0;
-                if (instruction->payload)
-                {
-                    // vextracti32x4 xmm, zmm, quarter names its destination
-                    // in rm, so the destination doubles as the scratch and
-                    // no extra register is needed.
-                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x39, widen_source, 0, 0, false, false, widen_destination);
-                    machine_x64_emit8(&encoder, (u8)instruction->payload);
-                    widen_source = widen_destination;
-                }
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x31, widen_destination, 0, 0, false, false, widen_source);
-            }
-            break;
-            case MACHINE_X64_VPSLLD_RI:
-                // vpslld with an immediate: /6, destination in vvvv.
-                machine_x64_emit_evex_register(&encoder, 1, 1, 0x72, 6, operand_registers[0] - MACHINE_X64_ZMM0, 0, false, false,
-                                               operand_registers[1] - MACHINE_X64_ZMM0);
-                machine_x64_emit8(&encoder, (u8)instruction->payload);
-                break;
-            case MACHINE_X64_VPTERNLOGD:
-                machine_x64_emit_evex_register(&encoder, 3, 1, 0x25, operand_registers[0] - MACHINE_X64_ZMM0, operand_registers[1] - MACHINE_X64_ZMM0, 0,
-                                               false, false, operand_registers[2] - MACHINE_X64_ZMM0);
-                machine_x64_emit8(&encoder, (u8)instruction->payload);
-                break;
-            case MACHINE_X64_VBINARY:
-                // Payload bit 8 marks the EVEX.W1 forms (vpaddq/vpsubq), the
-                // same wide-bit convention FARITH uses for its double forms.
-                machine_x64_emit_evex_register(&encoder, 1, 1, (u8)instruction->payload, operand_registers[0] - MACHINE_X64_ZMM0,
-                                               operand_registers[1] - MACHINE_X64_ZMM0, 0, false, (instruction->payload & 0x100) != 0,
-                                               operand_registers[2] - MACHINE_X64_ZMM0);
+                (void)machine_x64_emit_metadata_instruction(&encoder, S8("UD2"), 0, 0,
+                                                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
                 break;
             case MACHINE_X64_SWITCH:
             {
@@ -7311,29 +8668,31 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 // RCX, equality jumps to the case block, and the tail jump
                 // takes the default edge.
                 u32 condition = operand_registers[0];
+                // A switch row has no explicit scratch operand.  RCX is the
+                // normal constant carrier, but the allocator may place the
+                // condition there; use RAX in that case so materializing a
+                // case value never destroys the value being compared.
+                u32 compare_register = condition == MACHINE_X64_RCX ? MACHINE_X64_RAX : MACHINE_X64_RCX;
                 for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
                 {
                     MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
-                    machine_x64_emit8(&encoder, 0x48);
-                    machine_x64_emit8(&encoder, 0xb9);
-                    machine_x64_emit64(&encoder, case_row->value);
-                    machine_x64_emit_rr(&encoder, true, false, 0x39, MACHINE_X64_RCX, condition);
-                    machine_x64_emit8(&encoder, 0x0f);
-                    machine_x64_emit8(&encoder, 0x84);
+                    (void)machine_x64_emit_exact_movabs(&encoder, compare_register, case_row->value, 0);
+                    (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 64, 0);
+                    u32 branch_start = encoder.count;
+                    (void)machine_x64_emit_metadata_relative(&encoder, S8("JZ"), 0, 32, 0);
                     MachineX64BranchFixup* case_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
                     *case_fixup = (MachineX64BranchFixup){
-                        .patch_offset = encoder.count,
+                        .patch_offset = branch_start + 2,
                         .block = case_row->target_block,
                     };
-                    machine_x64_emit32(&encoder, 0);
                 }
-                machine_x64_emit8(&encoder, 0xe9);
+                u32 default_branch_start = encoder.count;
+                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
                 MachineX64BranchFixup* default_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
                 *default_fixup = (MachineX64BranchFixup){
-                    .patch_offset = encoder.count,
+                    .patch_offset = default_branch_start + 1,
                     .block = machine_ref_payload(instruction->operands[1]),
                 };
-                machine_x64_emit32(&encoder, 0);
             }
             break;
             default:
@@ -7349,35 +8708,49 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 {
                     if (edit->location >= MACHINE_X64_ZMM0)
                     {
-                        machine_x64_emit_vector_frame(&encoder, edit->location - MACHINE_X64_ZMM0, false, placement->virtual_register_offsets[edit->subject]);
+                        (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
+                                                                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], false, 512, 8,
+                                                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                    0);
                     }
                     else
                     {
-                        machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                        (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_LOAD_FRAME, edit->location,
+                                                                  placement->virtual_register_offsets[edit->subject], 64, false, 0);
                     }
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
                     if (edit->location >= MACHINE_X64_ZMM0)
                     {
-                        machine_x64_emit_vector_copy(&encoder, edit->location - MACHINE_X64_ZMM0, edit->subject - MACHINE_X64_ZMM0);
+                        (void)machine_x64_emit_metadata_zmm_registers(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0,
+                                                                       edit->subject - MACHINE_X64_ZMM0, 512,
+                                                                       (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                                      .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                       0);
                     }
                     else
                     {
-                        machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
+                        (void)machine_x64_emit_exact_opcode_registers(&encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
                     }
                 }
                 else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
                 {
-                    machine_x64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
+                    (void)machine_x64_emit_exact_immediate_value(&encoder, edit->location, function->immediates[edit->subject], 0);
                 }
                 else if (edit->location >= MACHINE_X64_ZMM0)
                 {
-                    machine_x64_emit_vector_frame(&encoder, edit->location - MACHINE_X64_ZMM0, true, placement->virtual_register_offsets[edit->subject]);
+                    (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
+                                                                -(s64)(s32)placement->virtual_register_offsets[edit->subject], true, 512, 8,
+                                                                (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                                                               .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                                                                0);
                 }
                 else
                 {
-                    machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                    (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_STORE_FRAME64, edit->location,
+                                                              placement->virtual_register_offsets[edit->subject], 64, true, 0);
                 }
                 edit_cursor += 1;
             }

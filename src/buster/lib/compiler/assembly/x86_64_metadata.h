@@ -886,11 +886,14 @@ struct BusterX86MetadataMachineExactQuery
     // disp8 relaxation.  The checked/prevalidated exact APIs do not expose
     // this policy and retain their ordinary relaxation rules.
     bool force_disp32;
-    // Atomic machine recipes use this typed policy bit for the optional
-    // LOCK prefix.  The metadata token must prove that its durable form is
-    // one of the checked lockable atomic aliases before this is honored.
+    // Emit the architectural LOCK prefix through the narrow machine alias
+    // policy.  The metadata transform accepts this only for a lock-control
+    // row or one of the explicitly proven CMPXCHG memory aliases.
     bool force_lock;
-    u8 reserved[2];
+    // Machine-only EVEX writemask policy.  Zero leaves the mask operand
+    // absent; values 1..8 select k0..k7.  zeroing is valid only with a mask.
+    u8 mask_register_plus_one;
+    bool zeroing;
     u8* output;
     u32 output_capacity;
     BusterX86MetadataRelocation* relocations;
@@ -1198,4 +1201,6 @@ bool buster_x86_metadata_test_feature_available(u32 form_id, String8 const* name
 // exposes parsed pattern controls without making the private pattern schema a
 // production API or keying any behavior to a form identity.
 bool buster_x86_metadata_test_standalone_sae_pattern(u32 form_id);
+bool buster_x86_metadata_test_machine_fast_plan(u32 form_id);
+u32 buster_x86_metadata_test_exact_plan_count(void);
 #endif

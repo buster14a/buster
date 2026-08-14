@@ -787,7 +787,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress(u32 r
             .reg = {.index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
         },
     };
-    if (!buster_x86_metadata_exact_plan_for_key(key, &plan)) return false;
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan) || !buster_x86_metadata_test_machine_fast_plan(key.form_id)) return false;
     BusterX86MetadataMachineExactToken token = {0};
     if (!buster_x86_metadata_machine_exact_token_for_plan(
             plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)}, &token))
@@ -820,6 +820,58 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress(u32 r
         .token = token,
         .operands = operands,
         .operand_count = BUSTER_ARRAY_LENGTH(operands),
+        .expected_byte_count = checked.byte_count,
+        .expected_status = checked.status,
+    };
+    memcpy(state.expected_bytes, checked_bytes, checked.byte_count);
+    OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
+    u32 thread_count = 0;
+    bool created = true;
+    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    for (u32 index = 0; index < requested_thread_count; index += 1)
+    {
+        threads[index] = os_thread_create((ThreadCreateOptions){
+            .callback = &x86_64_metadata_test_concurrent_exact_emit,
+            .argument = &state,
+        });
+        if (!threads[index])
+        {
+            created = false;
+            break;
+        }
+        thread_count += 1;
+    }
+    atomic_u64_increment(&state.start);
+    for (u32 index = 0; index < thread_count; index += 1) created &= os_thread_join(threads[index]);
+    return created && thread_count == requested_thread_count && !atomic_u64_add(&state.failed, 0);
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress_case(
+    u32 requested_thread_count, BusterX86MetadataFormKey key, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
+{
+    String8 wildcard_features[1] = {S8("*")};
+    BusterX86MetadataExactPlan plan = {0};
+    BusterX86MetadataMachineExactToken token = {0};
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan) || !buster_x86_metadata_test_machine_fast_plan(key.form_id) ||
+        !buster_x86_metadata_machine_exact_token_for_plan(
+            plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)}, &token))
+        return false;
+    u8 checked_bytes[16] = {0};
+    BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+        .key = key,
+        .operands = operands,
+        .operand_count = operand_count,
+        .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .output = checked_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+    });
+    if (checked.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || checked.byte_count > BUSTER_ARRAY_LENGTH(checked_bytes)) return false;
+    X86_64MetadataConcurrentExactState state = {
+        .token = token,
+        .operands = operands,
+        .operand_count = operand_count,
         .expected_byte_count = checked.byte_count,
         .expected_status = checked.status,
     };
@@ -1266,6 +1318,105 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_missing_feature(BusterX
     BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query(checked_query);
     BusterX86MetadataEmitResult fast = buster_x86_metadata_emit_exact_prevalidated(plan, fast_query);
     return x86_64_metadata_test_emit_result_equal(checked, fast);
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_machine_fast_scalar_case(
+    BusterX86MetadataFormKey key, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count, bool force_disp32)
+{
+    String8 wildcard_features[1] = {S8("*")};
+    BusterX86MetadataExactPlan plan = {0};
+    BusterX86MetadataMachineExactToken token = {0};
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan) ||
+        !buster_x86_metadata_test_machine_fast_plan(key.form_id) ||
+        !buster_x86_metadata_machine_exact_token_for_plan(
+            plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)}, &token))
+        return false;
+
+    u8 checked_bytes[32] = {0};
+    u8 machine_bytes[32] = {0};
+    BusterX86MetadataRelocation checked_relocations[8] = {0};
+    BusterX86MetadataRelocation machine_relocations[8] = {0};
+    BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+        .key = key,
+        .operands = operands,
+        .operand_count = operand_count,
+        .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .output = checked_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+        .relocations = checked_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(checked_relocations),
+    });
+    BusterX86MetadataEmitResult machine = buster_x86_metadata_emit_exact_machine(
+        token, (BusterX86MetadataMachineExactQuery){
+                   .operands = operands,
+                   .operand_count = operand_count,
+                   .force_disp32 = force_disp32,
+                   .output = machine_bytes,
+                   .output_capacity = BUSTER_ARRAY_LENGTH(machine_bytes),
+                   .relocations = machine_relocations,
+                   .relocation_capacity = BUSTER_ARRAY_LENGTH(machine_relocations),
+               });
+    bool equal = x86_64_metadata_test_emit_result_equal(checked, machine) &&
+                 x86_64_metadata_test_bytes_equal(checked_bytes, checked.byte_count, machine_bytes, machine.byte_count) &&
+                 checked.relocation_count == machine.relocation_count &&
+                 (!checked.relocation_count ||
+                  memcmp(checked_relocations, machine_relocations, checked.relocation_count * sizeof(*checked_relocations)) == 0);
+    BusterX86MetadataExactQuery checked_capacity_query = {
+        .key = key,
+        .operands = operands,
+        .operand_count = operand_count,
+        .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .output = checked_bytes,
+        .output_capacity = 0,
+    };
+    BusterX86MetadataEmitResult checked_capacity = buster_x86_metadata_emit_exact_query(checked_capacity_query);
+    BusterX86MetadataEmitResult machine_capacity = buster_x86_metadata_emit_exact_machine(
+        token, (BusterX86MetadataMachineExactQuery){
+                   .operands = operands,
+                   .operand_count = operand_count,
+                   .force_disp32 = force_disp32,
+                   .output = machine_bytes,
+                   .output_capacity = 0,
+               });
+    return equal && x86_64_metadata_test_emit_result_equal(checked_capacity, machine_capacity);
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_machine_fast_expected_bytes(
+    BusterX86MetadataFormKey key, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    u8 const* expected, u32 expected_count)
+{
+    String8 wildcard_features[1] = {S8("*")};
+    BusterX86MetadataExactPlan plan = {0};
+    BusterX86MetadataMachineExactToken token = {0};
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan) ||
+        !buster_x86_metadata_machine_exact_token_for_plan(
+            plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)}, &token))
+        return false;
+    u8 checked_bytes[32] = {0};
+    u8 machine_bytes[32] = {0};
+    BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+        .key = key,
+        .operands = operands,
+        .operand_count = operand_count,
+        .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .output = checked_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+    });
+    BusterX86MetadataEmitResult machine = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+        .operands = operands,
+        .operand_count = operand_count,
+        .output = machine_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(machine_bytes),
+    });
+    return checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && machine.status == checked.status &&
+           checked.byte_count == expected_count && machine.byte_count == expected_count &&
+           memcmp(checked_bytes, expected, expected_count) == 0 && memcmp(machine_bytes, expected, expected_count) == 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mem128_forms(void)
@@ -2876,6 +3027,239 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
 
     {
+        // The generated snapshot keeps lock-prefixed spellings as separate
+        // rows, but the three ordinary memory aliases below are also valid
+        // source identities for a checked `lock` query.  Verify that the
+        // alias emits exactly the architectural lock row, while its adjacent
+        // register form remains rejected.
+        typedef struct X86_64MetadataLockAliasCase X86_64MetadataLockAliasCase;
+        struct X86_64MetadataLockAliasCase
+        {
+            u32 alias_form_id;
+            u32 lock_form_id;
+            u8 byte_count;
+            u8 bytes[5];
+        };
+        static X86_64MetadataLockAliasCase const lock_alias_cases[] = {
+            {9530, 9529, 5, {0xf0, 0x48, 0x0f, 0xc7, 0x08}},
+            {10278, 10277, 4, {0xf0, 0x0f, 0xb0, 0x00, 0x00}},
+            {10281, 10280, 5, {0xf0, 0x48, 0x0f, 0xb1, 0x00}},
+        };
+        bool lock_aliases_valid = true;
+        String8 wildcard_features[1] = {S8("*")};
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(lock_alias_cases); case_index += 1)
+        {
+            X86_64MetadataLockAliasCase test_case = lock_alias_cases[case_index];
+            BusterX86MetadataFormKey alias_key = {0};
+            BusterX86MetadataFormKey lock_key = {0};
+            BusterX86MetadataPhysicalOperand alias_operands[16] = {0};
+            BusterX86MetadataPhysicalOperand lock_operands[16] = {0};
+            String8 alias_features[1] = {0};
+            String8 lock_features[1] = {0};
+            char8 alias_mnemonic[128] = {0};
+            char8 lock_mnemonic[128] = {0};
+            BusterX86MetadataPhysicalQuery alias_query = {0};
+            BusterX86MetadataPhysicalQuery lock_query = {0};
+            bool forms_ready = buster_x86_metadata_form_key(test_case.alias_form_id, &alias_key) &&
+                                buster_x86_metadata_form_key(test_case.lock_form_id, &lock_key) &&
+                                buster_x86_metadata_test_canonical_query(test_case.alias_form_id, &alias_query, alias_operands,
+                                                                          alias_features, alias_mnemonic) &&
+                                buster_x86_metadata_test_canonical_query(test_case.lock_form_id, &lock_query, lock_operands,
+                                                                          lock_features, lock_mnemonic);
+            lock_aliases_valid &= forms_ready;
+            if (!forms_ready) continue;
+            alias_query.features.names = wildcard_features;
+            alias_query.features.count = BUSTER_ARRAY_LENGTH(wildcard_features);
+            alias_query.attributes.lock = true;
+            lock_query.features.names = wildcard_features;
+            lock_query.features.count = BUSTER_ARRAY_LENGTH(wildcard_features);
+            lock_query.attributes.lock = true;
+            u8 alias_bytes[16] = {0};
+            u8 checked_bytes[16] = {0};
+            u8 lock_bytes[16] = {0};
+            BusterX86MetadataEmitResult alias_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = alias_query,
+                .form_id = test_case.alias_form_id,
+                .output = alias_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(alias_bytes),
+            });
+            BusterX86MetadataEmitResult checked_result = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+                .key = alias_key,
+                .operands = alias_operands,
+                .operand_count = alias_query.operand_count,
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .attributes = {.lock = true},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                .output = checked_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+            });
+            BusterX86MetadataEmitResult lock_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = lock_query,
+                .form_id = test_case.lock_form_id,
+                .output = lock_bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(lock_bytes),
+            });
+            lock_aliases_valid &= alias_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                  checked_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                  lock_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                  alias_result.byte_count == test_case.byte_count &&
+                                  checked_result.byte_count == test_case.byte_count &&
+                                  lock_result.byte_count == test_case.byte_count &&
+                                  memcmp(alias_bytes, test_case.bytes, test_case.byte_count) == 0 &&
+                                  memcmp(checked_bytes, test_case.bytes, test_case.byte_count) == 0 &&
+                                  memcmp(lock_bytes, test_case.bytes, test_case.byte_count) == 0;
+        }
+        BUSTER_TEST(arguments, lock_aliases_valid);
+
+        // Register-only CMPXCHG rows are not lockable memory atomics.  Keep
+        // both checked entry points fail-closed and leave caller output alone.
+        bool register_lock_rejected = true;
+        static u32 const register_form_ids[] = {10279, 10282};
+        for (u32 form_index = 0; form_index < BUSTER_ARRAY_LENGTH(register_form_ids); form_index += 1)
+        {
+            u32 form_id = register_form_ids[form_index];
+            BusterX86MetadataFormKey key = {0};
+            BusterX86MetadataPhysicalOperand operands[16] = {0};
+            String8 features[1] = {0};
+            char8 mnemonic[128] = {0};
+            BusterX86MetadataPhysicalQuery physical = {0};
+            bool ready = buster_x86_metadata_form_key(form_id, &key) &&
+                         buster_x86_metadata_test_canonical_query(form_id, &physical, operands, features, mnemonic);
+            register_lock_rejected &= ready;
+            if (!ready) continue;
+            u8 direct_output = 0xa5;
+            physical.features.names = wildcard_features;
+            physical.features.count = BUSTER_ARRAY_LENGTH(wildcard_features);
+            physical.attributes.lock = true;
+            BusterX86MetadataEmitResult direct_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = physical, .form_id = form_id, .output = &direct_output, .output_capacity = 1});
+            u8 checked_output = 0x5a;
+            BusterX86MetadataEmitResult checked_result = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+                .key = key,
+                .operands = operands,
+                .operand_count = physical.operand_count,
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .attributes = {.lock = true},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                .output = &checked_output,
+                .output_capacity = 1,
+            });
+            register_lock_rejected &= direct_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                      checked_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                      direct_output == 0xa5 && checked_output == 0x5a;
+        }
+        BUSTER_TEST(arguments, register_lock_rejected);
+
+        // Exercise the machine-token bridge's dynamic force-lock policy on a
+        // prepared non-lockable form.  The positive alias token cases are
+        // installed by the atomic machine migration, while this rejection
+        // proves the bridge cannot manufacture F0 for ordinary MOV rows.
+        BusterX86MetadataFormKey mov_key = {0};
+        BusterX86MetadataExactPlan mov_plan = {0};
+        BusterX86MetadataPhysicalOperand mov_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64),
+        };
+        BusterX86MetadataMachineExactToken mov_token = {0};
+        bool machine_ready = buster_x86_metadata_form_key(9842, &mov_key) &&
+                             buster_x86_metadata_exact_plan_for_key(mov_key, &mov_plan) &&
+                             buster_x86_metadata_machine_exact_token_for_plan(
+                                 mov_plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = 1}, &mov_token);
+        u8 machine_output = 0xc3;
+        BusterX86MetadataEmitResult machine_result = machine_ready
+                                                          ? buster_x86_metadata_emit_exact_machine(
+                                                                mov_token, (BusterX86MetadataMachineExactQuery){
+                                                                               .operands = mov_operands,
+                                                                               .operand_count = BUSTER_ARRAY_LENGTH(mov_operands),
+                                                                               .force_lock = true,
+                                                                               .output = &machine_output,
+                                                                               .output_capacity = 1})
+                                                          : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+        BUSTER_TEST(arguments, machine_ready && machine_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   machine_output == 0xc3);
+        u8 invalid_mask_output = 0xc4;
+        BusterX86MetadataEmitResult invalid_mask_result = machine_ready
+                                                              ? buster_x86_metadata_emit_exact_machine(
+                                                                    mov_token, (BusterX86MetadataMachineExactQuery){
+                                                                                   .operands = mov_operands,
+                                                                                   .operand_count = BUSTER_ARRAY_LENGTH(mov_operands),
+                                                                                   .mask_register_plus_one = 9,
+                                                                                   .output = &invalid_mask_output,
+                                                                                   .output_capacity = 1})
+                                                              : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+        u8 invalid_zeroing_output = 0xc5;
+        BusterX86MetadataEmitResult invalid_zeroing_result = machine_ready
+                                                                 ? buster_x86_metadata_emit_exact_machine(
+                                                                       mov_token, (BusterX86MetadataMachineExactQuery){
+                                                                                      .operands = mov_operands,
+                                                                                      .operand_count = BUSTER_ARRAY_LENGTH(mov_operands),
+                                                                                      .zeroing = true,
+                                                                                      .output = &invalid_zeroing_output,
+                                                                                      .output_capacity = 1})
+                                                                 : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+        BUSTER_TEST(arguments, machine_ready && invalid_mask_result.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   invalid_mask_output == 0xc4 &&
+                                   invalid_zeroing_result.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   invalid_zeroing_output == 0xc5);
+    }
+
+    {
+        // Public checked EVEX queries retain their full decorator ABI.  Keep
+        // these cases separate from the machine bridge so worker lanes never
+        // prepare a new exact plan; the machine-token positive fixture is
+        // installed by the atomic family migration.
+        typedef struct X86_64MetadataCheckedMaskCase X86_64MetadataCheckedMaskCase;
+        struct X86_64MetadataCheckedMaskCase
+        {
+            BusterX86MetadataPhysicalAttributes attributes;
+            BusterX86MetadataEncodeStatus status;
+            u8 byte_count;
+            u8 bytes[6];
+        };
+        static X86_64MetadataCheckedMaskCase const checked_mask_cases[] = {
+            {{0}, BUSTER_X86_METADATA_ENCODE_SUCCESS, 6, {0x62, 0xf1, 0x7d, 0x08, 0x6f, 0xc1}},
+            {{.decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK, .has_mask_register = true, .mask_register = 1},
+             BUSTER_X86_METADATA_ENCODE_SUCCESS, 6, {0x62, 0xf1, 0x7d, 0x09, 0x6f, 0xc1}},
+            {{.decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK | BUSTER_X86_METADATA_DECORATOR_ZEROING,
+              .has_mask_register = true,
+              .mask_register = 1,
+              .zeroing = true},
+             BUSTER_X86_METADATA_ENCODE_SUCCESS, 6, {0x62, 0xf1, 0x7d, 0x89, 0x6f, 0xc1}},
+            {{.decorator_flags = BUSTER_X86_METADATA_DECORATOR_ZEROING, .zeroing = true},
+             BUSTER_X86_METADATA_ENCODE_INVALID_INPUT, 0, {0}},
+            {{.decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK, .has_mask_register = true, .mask_register = 8},
+             BUSTER_X86_METADATA_ENCODE_INVALID_INPUT, 0, {0}},
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataFormKey evex_key = {0};
+        BusterX86MetadataPhysicalOperand evex_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 1, 128),
+        };
+        bool checked_mask_cases_valid = buster_x86_metadata_form_key(5583, &evex_key);
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(checked_mask_cases); case_index += 1)
+        {
+            X86_64MetadataCheckedMaskCase test_case = checked_mask_cases[case_index];
+            u8 output[16];
+            memset(output, 0xa7, sizeof(output));
+            BusterX86MetadataEmitResult checked_result = checked_mask_cases_valid
+                                                              ? x86_64_metadata_test_emit_exact_query(
+                                                                    evex_key, evex_operands, BUSTER_ARRAY_LENGTH(evex_operands),
+                                                                    test_case.attributes, wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features),
+                                                                    output, BUSTER_ARRAY_LENGTH(output), 0, 0)
+                                                              : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+            bool bytes_match = test_case.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                               checked_result.byte_count == test_case.byte_count &&
+                               memcmp(output, test_case.bytes, test_case.byte_count) == 0;
+            bool invalid_untouched = test_case.status != BUSTER_X86_METADATA_ENCODE_SUCCESS && output[0] == 0xa7;
+            checked_mask_cases_valid &= checked_result.status == test_case.status && (bytes_match || invalid_untouched);
+        }
+        BUSTER_TEST(arguments, checked_mask_cases_valid);
+    }
+
+    {
         // The sparse plan table is populated by the serial prewarm contract;
         // each representative migrated shape must remain byte/result
         // equivalent to the checked exact query.
@@ -2906,6 +3290,27 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                buster_x86_metadata_form_key(10060, &jmp_plan_key) &&
                                buster_x86_metadata_form_key(9849, &lea_plan_key);
         BUSTER_TEST(arguments, plan_keys_ready);
+        // Composite conversion families add their own durable sequence-step
+        // forms.  They must remain addressable after direct rows, family
+        // variants, and earlier sequence steps have occupied the sparse plan
+        // table; an implementation storage cap must not silently drop these
+        // valid keys during serial prewarm.  These are the current conversion
+        // steps used by the machine-family registry (not retired prototype
+        // rows from the earlier scalar expansion).
+        static BusterX86MetadataFormKey const conversion_plan_keys[] = {
+            {10436u, UINT64_C(0x8632f672b995b8ef)},
+            {10463u, UINT64_C(0x6b1b449f0ed1e10e)},
+            {10440u, UINT64_C(0x443fee16922dd4d2)},
+            {10467u, UINT64_C(0xdb7e2aa7c56853cf)},
+        };
+        bool conversion_plans_ready = true;
+        for (u32 conversion_index = 0; conversion_index < BUSTER_ARRAY_LENGTH(conversion_plan_keys); conversion_index += 1)
+        {
+            BusterX86MetadataExactPlan conversion_plan = {0};
+            conversion_plans_ready &= buster_x86_metadata_exact_plan_for_key(conversion_plan_keys[conversion_index], &conversion_plan);
+        }
+        BUSTER_TEST(arguments, conversion_plans_ready);
+        BUSTER_TEST(arguments, buster_x86_metadata_test_exact_plan_count() > 64);
         if (plan_keys_ready)
         {
             BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
@@ -2930,6 +3335,257 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                        (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
                                        BUSTER_ARRAY_LENGTH(wildcard_features)));
             BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_missing_feature(mfence_plan_key));
+
+            // VZEROALL and VZEROUPPER are direct machine zero-operand rows,
+            // but are not yet selected by a registry recipe.  Keep their
+            // durable identities checked while exercising the public checked
+            // transform directly; exact-plan preparation belongs exclusively
+            // to the serial machine prewarm path.
+            BusterX86MetadataFormKey vzeroall_key = {0};
+            BusterX86MetadataFormKey vzeroupper_key = {0};
+            bool vzero_keys_ready =
+                buster_x86_metadata_form_key(3202u, &vzeroall_key) &&
+                buster_x86_metadata_form_key(3203u, &vzeroupper_key) &&
+                vzeroall_key.stable_hash == UINT64_C(0xbf8c4d3212ddd41d) &&
+                vzeroupper_key.stable_hash == UINT64_C(0xca45be9dfde7d0ad);
+            BUSTER_TEST(arguments, vzero_keys_ready);
+            static u8 const vzeroall_bytes[] = {0xc5, 0xfc, 0x77};
+            static u8 const vzeroupper_bytes[] = {0xc5, 0xf8, 0x77};
+            if (vzero_keys_ready)
+            {
+                BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                           S8("VZEROALL"), vzeroall_key.form_id, 0, 0,
+                                           (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features), vzeroall_bytes,
+                                           BUSTER_ARRAY_LENGTH(vzeroall_bytes)));
+                BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                           S8("VZEROUPPER"), vzeroupper_key.form_id, 0, 0,
+                                           (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features), vzeroupper_bytes,
+                                           BUSTER_ARRAY_LENGTH(vzeroupper_bytes)));
+            }
+
+            // The prepared machine projection covers the scalar layouts that
+            // dominate the direct/FAMILY bridge: register-register,
+            // immediate, and base-only memory forms.  Keep a displacement
+            // that naturally selects disp32 so the force-disp32 machine
+            // policy is checked against the same generic bytes as well.
+            BusterX86MetadataFormKey add_imm8_key = {9316u, UINT64_C(0xc4d75f09ceeb4f69)};
+            BusterX86MetadataFormKey mov_memory_key = {9845u, UINT64_C(0xca30e68cfa1406bc)};
+            BusterX86MetadataFormKey mov_memory8_key = {9840u, UINT64_C(0xe7a77cae08617d2d)};
+            BusterX86MetadataPhysicalOperand add_imm8_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+                x86_64_metadata_test_physical_imm(7, 8),
+            };
+            BusterX86MetadataPhysicalOperand mov_memory_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+                x86_64_metadata_test_physical_mem_base(3, 64, 128),
+            };
+            BusterX86MetadataPhysicalOperand mov_memory8_operands[2] = {
+                x86_64_metadata_test_physical_mem_base(3, 8, 128),
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 8),
+            };
+            BusterX86MetadataPhysicalOperand mov_rsp_zero_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 10, 64),
+                x86_64_metadata_test_physical_mem_base(4, 64, 0),
+            };
+            BusterX86MetadataPhysicalOperand mov_rsp_disp8_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 10, 64),
+                x86_64_metadata_test_physical_mem_base(4, 64, 16),
+            };
+            BusterX86MetadataPhysicalOperand mov_rsp_disp32_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 10, 64),
+                x86_64_metadata_test_physical_mem_base(4, 64, 128),
+            };
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       add_imm8_key, add_imm8_operands, BUSTER_ARRAY_LENGTH(add_imm8_operands), false));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       mov_memory_key, mov_memory_operands, BUSTER_ARRAY_LENGTH(mov_memory_operands), true));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       mov_memory8_key, mov_memory8_operands, BUSTER_ARRAY_LENGTH(mov_memory8_operands), true));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       mov_memory_key, mov_rsp_zero_operands, BUSTER_ARRAY_LENGTH(mov_rsp_zero_operands), false));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       mov_memory_key, mov_rsp_disp8_operands, BUSTER_ARRAY_LENGTH(mov_rsp_disp8_operands), false));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                       mov_memory_key, mov_rsp_disp32_operands, BUSTER_ARRAY_LENGTH(mov_rsp_disp32_operands), false));
+            static u8 const mov_rsp_zero_bytes[] = {0x4c, 0x8b, 0x14, 0x24};
+            static u8 const mov_rsp_disp8_bytes[] = {0x4c, 0x8b, 0x54, 0x24, 0x10};
+            static u8 const mov_rsp_disp32_bytes[] = {0x4c, 0x8b, 0x94, 0x24, 0x80, 0x00, 0x00, 0x00};
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_expected_bytes(
+                                       mov_memory_key, mov_rsp_zero_operands, BUSTER_ARRAY_LENGTH(mov_rsp_zero_operands),
+                                       mov_rsp_zero_bytes, BUSTER_ARRAY_LENGTH(mov_rsp_zero_bytes)));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_expected_bytes(
+                                       mov_memory_key, mov_rsp_disp8_operands, BUSTER_ARRAY_LENGTH(mov_rsp_disp8_operands),
+                                       mov_rsp_disp8_bytes, BUSTER_ARRAY_LENGTH(mov_rsp_disp8_bytes)));
+            BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_expected_bytes(
+                                       mov_memory_key, mov_rsp_disp32_operands, BUSTER_ARRAY_LENGTH(mov_rsp_disp32_operands),
+                                       mov_rsp_disp32_bytes, BUSTER_ARRAY_LENGTH(mov_rsp_disp32_bytes)));
+
+            // DIV/IDIV register rows carry implicit RAX/RDX operands in the
+            // metadata schema.  The scalar projection binds only the visible
+            // GPR while retaining those hidden fixed registers in the
+            // metadata-generated ModRM proof.  Exercise low/high registers
+            // at both widths against the checked machine bridge.
+            BusterX86MetadataFormKey div_register_key = {0};
+            BusterX86MetadataFormKey idiv_register_key = {0};
+            bool div_register_keys_ready = buster_x86_metadata_form_key(9468u, &div_register_key) &&
+                                           buster_x86_metadata_form_key(9470u, &idiv_register_key) &&
+                                           buster_x86_metadata_test_machine_fast_plan(div_register_key.form_id) &&
+                                           buster_x86_metadata_test_machine_fast_plan(idiv_register_key.form_id);
+            BUSTER_TEST(arguments, div_register_keys_ready);
+            if (div_register_keys_ready)
+            {
+                BusterX86MetadataPhysicalOperand div32_low =
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+                BusterX86MetadataPhysicalOperand div32_high =
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 15, 32);
+                BusterX86MetadataPhysicalOperand div64_low =
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+                BusterX86MetadataPhysicalOperand div64_high =
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 15, 64);
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           div_register_key, &div32_low, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           div_register_key, &div32_high, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           div_register_key, &div64_low, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           div_register_key, &div64_high, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           idiv_register_key, &div32_low, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           idiv_register_key, &div32_high, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           idiv_register_key, &div64_low, 1, false));
+                BUSTER_TEST(arguments, x86_64_metadata_test_machine_fast_scalar_case(
+                                           idiv_register_key, &div64_high, 1, false));
+            }
+            BUSTER_TEST(arguments, buster_x86_metadata_test_machine_fast_plan(jmp_plan_key.form_id));
+
+            // Zero-operand and fixed-width relative rows use the prepared
+            // metadata template projection.  Resolve the same rows through
+            // metadata selection, then compare checked/prevalidated/machine
+            // output so the worker shortcut remains byte-identical without a
+            // second opcode authority.
+            BusterX86MetadataPhysicalOperand template_jmp_operand = x86_64_metadata_test_physical_relative(-7, 32);
+            BusterX86MetadataPhysicalQuery template_jmp_query = {
+                .mnemonic = S8("JMP"),
+                .operands = &template_jmp_operand,
+                .operand_count = 1,
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            };
+            BusterX86MetadataSelectResult template_jmp_selected = buster_x86_metadata_select_form(template_jmp_query);
+            BusterX86MetadataFormKey template_jmp_key = {0};
+            bool template_jmp_ready = template_jmp_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                      buster_x86_metadata_form_key(template_jmp_selected.form_id, &template_jmp_key) &&
+                                      buster_x86_metadata_test_machine_fast_plan(template_jmp_key.form_id);
+            BUSTER_TEST(arguments, template_jmp_ready);
+            if (template_jmp_ready)
+            {
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jmp_key, &template_jmp_operand, 1, (BusterX86MetadataPhysicalAttributes){0},
+                                           wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features)));
+                template_jmp_operand.value = INT32_MIN;
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jmp_key, &template_jmp_operand, 1, (BusterX86MetadataPhysicalAttributes){0},
+                                           wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features)));
+                template_jmp_operand.value = INT32_MAX;
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jmp_key, &template_jmp_operand, 1, (BusterX86MetadataPhysicalAttributes){0},
+                                           wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features)));
+            }
+
+            BusterX86MetadataPhysicalQuery template_ret_query = {
+                .mnemonic = S8("RET"),
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            };
+            BusterX86MetadataSelectResult template_ret_selected = buster_x86_metadata_select_form(template_ret_query);
+            BusterX86MetadataFormKey template_ret_key = {0};
+            bool template_ret_ready = template_ret_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                      buster_x86_metadata_form_key(template_ret_selected.form_id, &template_ret_key) &&
+                                      buster_x86_metadata_test_machine_fast_plan(template_ret_key.form_id);
+            BUSTER_TEST(arguments, template_ret_ready);
+            if (template_ret_ready)
+            {
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_ret_key, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features)));
+            }
+
+            // Conditional short branches exercise both signed displacement
+            // boundaries.  The shared exact-plan helper also checks zero
+            // output capacity, so these cases cover range and capacity
+            // parity for the prepared template path.
+            BusterX86MetadataPhysicalOperand template_jcc_operand = x86_64_metadata_test_physical_relative(-128, 8);
+            BusterX86MetadataPhysicalQuery template_jcc_query = {
+                .mnemonic = S8("JNS"),
+                .operands = &template_jcc_operand,
+                .operand_count = 1,
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            };
+            BusterX86MetadataSelectResult template_jcc_selected = buster_x86_metadata_select_form(template_jcc_query);
+            BusterX86MetadataFormKey template_jcc_key = {0};
+            bool template_jcc_ready = template_jcc_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                      buster_x86_metadata_form_key(template_jcc_selected.form_id, &template_jcc_key) &&
+                                      buster_x86_metadata_test_machine_fast_plan(template_jcc_key.form_id);
+            BUSTER_TEST(arguments, template_jcc_ready);
+            if (template_jcc_ready)
+            {
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jcc_key, &template_jcc_operand, 1, (BusterX86MetadataPhysicalAttributes){0},
+                                           wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features)));
+                template_jcc_operand.value = 127;
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jcc_key, &template_jcc_operand, 1, (BusterX86MetadataPhysicalAttributes){0},
+                                           wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features)));
+            }
+
+            BusterX86MetadataPhysicalOperand template_jcc_near_operand = x86_64_metadata_test_physical_relative(INT32_MIN, 32);
+            BusterX86MetadataPhysicalQuery template_jcc_near_query = {
+                .mnemonic = S8("JNZ"),
+                .operands = &template_jcc_near_operand,
+                .operand_count = 1,
+                .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            };
+            BusterX86MetadataSelectResult template_jcc_near_selected = buster_x86_metadata_select_form(template_jcc_near_query);
+            BusterX86MetadataFormKey template_jcc_near_key = {0};
+            bool template_jcc_near_ready = template_jcc_near_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                           buster_x86_metadata_form_key(template_jcc_near_selected.form_id, &template_jcc_near_key) &&
+                                           buster_x86_metadata_test_machine_fast_plan(template_jcc_near_key.form_id);
+            BUSTER_TEST(arguments, template_jcc_near_ready);
+            if (template_jcc_near_ready)
+            {
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jcc_near_key, &template_jcc_near_operand, 1,
+                                           (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features)));
+                template_jcc_near_operand.value = INT32_MAX;
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           template_jcc_near_key, &template_jcc_near_operand, 1,
+                                           (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features)));
+            }
+
+            // VZEROUPPER is a fixed AVX byte row selected by the machine
+            // shape cache.  Keep a checked-vs-machine comparison here so the
+            // zero template remains tied to metadata emission rather than a
+            // duplicated opcode spelling.
+            if (vzero_keys_ready)
+            {
+                BUSTER_TEST(arguments, buster_x86_metadata_test_machine_fast_plan(vzeroupper_key.form_id));
+                BUSTER_TEST(arguments, x86_64_metadata_test_exact_plan_case(
+                                           vzeroupper_key, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                           BUSTER_ARRAY_LENGTH(wildcard_features)));
+            }
 
             BusterX86MetadataExactPlan mfence_plan = {0};
             BusterX86MetadataMachineExactToken mfence_token = {0};
@@ -4013,6 +4669,14 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     u64 metadata_worker_count = buster_test_worker_count(X86_64_METADATA_TEST_MAX_THREAD_COUNT);
     BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_lookup_stress((u32)metadata_worker_count));
     BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_exact_emit_stress((u32)metadata_worker_count));
+    BusterX86MetadataPhysicalOperand concurrent_memory_operands[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+        x86_64_metadata_test_physical_mem_base(3, 64, 0),
+    };
+    BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_exact_emit_stress_case(
+                               (u32)metadata_worker_count,
+                               (BusterX86MetadataFormKey){9845u, UINT64_C(0xca30e68cfa1406bc)}, concurrent_memory_operands,
+                               BUSTER_ARRAY_LENGTH(concurrent_memory_operands)));
 #endif
 
     BusterX86MetadataCandidateRange mov = buster_x86_metadata_lookup_mnemonic(S8("MOV"));

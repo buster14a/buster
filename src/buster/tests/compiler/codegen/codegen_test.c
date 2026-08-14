@@ -771,8 +771,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     // The optimized canonical path must carry exact-form telemetry from the
     // C frontend all the way through machine emission.  This source contains
     // exactly one MFENCE-producing seq_cst fence and one INT3-producing debug
-    // trap. As more scalar setup rows migrate, FAST may report additional
-    // exact attempts; every attempt must still succeed without fallback.
+    // trap, plus the scalar FAMILY rematerialization rows now migrated to the
+    // exact bridge, so FAST reports four exact attempts with no fallback.
     String8 exact_encoder_stats_source = S8(
         "void exact_encoder_stats(void) {\n"
         "    __c11_atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
@@ -800,8 +800,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
             });
         BUSTER_TEST(arguments, exact_encoder_stats_module.error == CODEGEN_ERROR_NONE);
-        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_attempts >= 2);
-        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == exact_encoder_stats_module.statistics.exact_attempts);
+        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_attempts == 4);
+        BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == 4);
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_failures == 0);
     }
     String8 canonical_windows_c_source = S8(

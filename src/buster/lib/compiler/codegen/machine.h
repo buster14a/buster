@@ -547,15 +547,18 @@ typedef enum MachineOpcode
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
 #define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 49u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 26u
-#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT 65u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 77u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT 19u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 26u
-#define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 31u
+#define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
 #define MACHINE_X86_64_RAW_PRODUCER_SITE_COUNT 12u
 
 typedef enum MachineX64EmitProducerStatus
 {
     MACHINE_X64_EMIT_PRODUCER_STATUS_LEGACY_RAW,
     MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_FORM,
+    MACHINE_X64_EMIT_PRODUCER_STATUS_EXACT_SEQUENCE,
     MACHINE_X64_EMIT_PRODUCER_STATUS_EXPANSION_POLICY,
     MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT,
 } MachineX64EmitProducerStatus;
@@ -1442,4 +1445,27 @@ struct MachineA64TestSparseFixup
 };
 BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
                                                  u32* final_code_size);
+typedef struct MachineX64ExactMapAudit MachineX64ExactMapAudit;
+struct MachineX64ExactMapAudit
+{
+    u32 registry_rows;
+    u32 exact_rows;
+    u32 exact_plan_valid_rows;
+    u32 sequence_rows;
+    u32 sequence_variant_valid_rows;
+    u32 expansion_rows;
+    u32 expansion_nonexact_rows;
+    bool valid;
+    u8 reserved[3];
+};
+BUSTER_F_DECL MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void);
+typedef struct MachineX64MetadataShapeCacheAudit MachineX64MetadataShapeCacheAudit;
+struct MachineX64MetadataShapeCacheAudit
+{
+    u32 prepared_rows;
+    u32 invalid_rows;
+    bool valid;
+    u8 reserved[3];
+};
+BUSTER_F_DECL MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void);
 #endif
