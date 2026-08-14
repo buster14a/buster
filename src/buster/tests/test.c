@@ -231,59 +231,117 @@ BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTi
                     record.result.test_count, status);
 }
 
-BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
-    {S8_INITIALIZER("arena_tests"), &arena_tests},
-    {S8_INITIALIZER("hash_tests"), &hash_tests},
-    {S8_INITIALIZER("simd_tests"), &simd_tests},
-    {S8_INITIALIZER("string_tests"), &string_tests},
-    {S8_INITIALIZER("os_tests"), &os_tests, true},
-    {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
-    {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
-    {S8_INITIALIZER("window_tests"), &window_tests},
-    {S8_INITIALIZER("rendering_tests"), &rendering_tests},
-    {S8_INITIALIZER("ui_tests"), &ui_tests},
-    {S8_INITIALIZER("target_tests"), &target_tests},
-    {S8_INITIALIZER("parser_tokenizer_tests"), &parser_tokenizer_tests},
-    {S8_INITIALIZER("parser_expression_tests"), &parser_expression_tests},
-    {S8_INITIALIZER("parser_result_tests"), &parser_result_tests},
-    {S8_INITIALIZER("parser_file_tests"), &parser_file_tests},
-    {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
-    {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
-    {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
-    {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},
-    {S8_INITIALIZER("aarch64_system_registers_tests"), &aarch64_system_registers_tests},
-    {S8_INITIALIZER("aarch64_semantics_tests"), &aarch64_semantics_tests},
-    {S8_INITIALIZER("aarch64_system_semantics_tests"), &aarch64_system_semantics_tests},
-    {S8_INITIALIZER("aarch64_syntax_tests"), &aarch64_syntax_tests},
-    {S8_INITIALIZER("aarch64_semantic_vm_tests"), &aarch64_semantic_vm_tests},
-    {S8_INITIALIZER("aarch64_direct_simd_tests"), &aarch64_direct_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_DIRECT_SIMD},
-    {S8_INITIALIZER("aarch64_complex_simd_tests"), &aarch64_complex_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_COMPLEX_SIMD},
-    {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS},
-    {S8_INITIALIZER("aarch64_alias_projection_tests"), &aarch64_alias_projection_tests},
-    {S8_INITIALIZER("assembly_tests"), &assembly_tests},
-    {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
+typedef enum TestId
+{
+    TEST_ID_ARENA,
+    TEST_ID_HASH,
+    TEST_ID_SIMD,
+    TEST_ID_STRING,
+    TEST_ID_OS,
+    TEST_ID_FILE,
+    TEST_ID_IDE_DOCUMENT,
+    TEST_ID_WINDOW,
+    TEST_ID_RENDERING,
+    TEST_ID_UI,
+    TEST_ID_TARGET,
+    TEST_ID_PARSER_TOKENIZER,
+    TEST_ID_PARSER_EXPRESSION,
+    TEST_ID_PARSER_RESULT,
+    TEST_ID_PARSER_FILE,
+    TEST_ID_C_FRONTEND,
+    TEST_ID_AARCH64_ENCODING,
+    TEST_ID_AARCH64_EXACT_BRIDGE,
+    TEST_ID_AARCH64_CONTROL_SEMANTICS,
+    TEST_ID_AARCH64_SYSTEM_REGISTERS,
+    TEST_ID_AARCH64_SEMANTICS,
+    TEST_ID_AARCH64_SYSTEM_SEMANTICS,
+    TEST_ID_AARCH64_SYNTAX,
+    TEST_ID_AARCH64_SEMANTIC_VM,
+    TEST_ID_AARCH64_DIRECT_SIMD,
+    TEST_ID_AARCH64_COMPLEX_SIMD,
+    TEST_ID_AARCH64_MEMORY_SEMANTICS,
+    TEST_ID_AARCH64_ALIAS_PROJECTION,
+    TEST_ID_ASSEMBLY,
+    TEST_ID_X86_64_METADATA,
 #if BUSTER_CPU_ARCH_X86_64
-    {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
+    TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
-    {S8_INITIALIZER("analysis_tests"), &analysis_tests},
-    {S8_INITIALIZER("ir_tests"), &ir_tests},
-    {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},
-    {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
-    {S8_INITIALIZER("machine_tests"), &machine_tests},
-    {S8_INITIALIZER("codegen_tests"), &codegen_tests},
-    {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
-    {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
-    {S8_INITIALIZER("codeview_tests"), &codeview_tests},
-    {S8_INITIALIZER("pdb_tests"), &pdb_tests, !BUSTER_IOS},
-    {S8_INITIALIZER("object_tests"), &object_tests},
-    {S8_INITIALIZER("jit_tests"), &jit_tests},
-    {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
-    {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
-    {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
+    TEST_ID_ANALYSIS,
+    TEST_ID_IR,
+    TEST_ID_IR_INTERPRETER,
+    TEST_ID_MACHINE_SELECTION,
+    TEST_ID_MACHINE,
+    TEST_ID_CODEGEN,
+    TEST_ID_DEBUG_MODEL,
+    TEST_ID_DWARF,
+    TEST_ID_CODEVIEW,
+    TEST_ID_PDB,
+    TEST_ID_OBJECT,
+    TEST_ID_JIT,
+    TEST_ID_LINK,
+    TEST_ID_GPU_PIPELINE,
+    TEST_ID_COMPILER_DRIVER,
 #if BUSTER_CPU_ARCH_X86_64
-    {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
+    TEST_ID_X86_64,
+#endif
+    TEST_ID_COUNT,
+} TestId;
+
+BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
+    [TEST_ID_ARENA] = {S8_INITIALIZER("arena_tests"), &arena_tests},
+    [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
+    [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},
+    [TEST_ID_STRING] = {S8_INITIALIZER("string_tests"), &string_tests},
+    [TEST_ID_OS] = {S8_INITIALIZER("os_tests"), &os_tests, true},
+    [TEST_ID_FILE] = {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    [TEST_ID_IDE_DOCUMENT] = {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    [TEST_ID_WINDOW] = {S8_INITIALIZER("window_tests"), &window_tests},
+    [TEST_ID_RENDERING] = {S8_INITIALIZER("rendering_tests"), &rendering_tests},
+    [TEST_ID_UI] = {S8_INITIALIZER("ui_tests"), &ui_tests},
+    [TEST_ID_TARGET] = {S8_INITIALIZER("target_tests"), &target_tests},
+    [TEST_ID_PARSER_TOKENIZER] = {S8_INITIALIZER("parser_tokenizer_tests"), &parser_tokenizer_tests},
+    [TEST_ID_PARSER_EXPRESSION] = {S8_INITIALIZER("parser_expression_tests"), &parser_expression_tests},
+    [TEST_ID_PARSER_RESULT] = {S8_INITIALIZER("parser_result_tests"), &parser_result_tests},
+    [TEST_ID_PARSER_FILE] = {S8_INITIALIZER("parser_file_tests"), &parser_file_tests},
+    [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
+    [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
+    [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
+    [TEST_ID_AARCH64_CONTROL_SEMANTICS] = {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},
+    [TEST_ID_AARCH64_SYSTEM_REGISTERS] = {S8_INITIALIZER("aarch64_system_registers_tests"), &aarch64_system_registers_tests},
+    [TEST_ID_AARCH64_SEMANTICS] = {S8_INITIALIZER("aarch64_semantics_tests"), &aarch64_semantics_tests},
+    [TEST_ID_AARCH64_SYSTEM_SEMANTICS] = {S8_INITIALIZER("aarch64_system_semantics_tests"), &aarch64_system_semantics_tests},
+    [TEST_ID_AARCH64_SYNTAX] = {S8_INITIALIZER("aarch64_syntax_tests"), &aarch64_syntax_tests},
+    [TEST_ID_AARCH64_SEMANTIC_VM] = {S8_INITIALIZER("aarch64_semantic_vm_tests"), &aarch64_semantic_vm_tests},
+    [TEST_ID_AARCH64_DIRECT_SIMD] = {S8_INITIALIZER("aarch64_direct_simd_tests"), &aarch64_direct_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_DIRECT_SIMD},
+    [TEST_ID_AARCH64_COMPLEX_SIMD] = {S8_INITIALIZER("aarch64_complex_simd_tests"), &aarch64_complex_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_COMPLEX_SIMD},
+    [TEST_ID_AARCH64_MEMORY_SEMANTICS] = {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS},
+    [TEST_ID_AARCH64_ALIAS_PROJECTION] = {S8_INITIALIZER("aarch64_alias_projection_tests"), &aarch64_alias_projection_tests},
+    [TEST_ID_ASSEMBLY] = {S8_INITIALIZER("assembly_tests"), &assembly_tests},
+    [TEST_ID_X86_64_METADATA] = {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
+#if BUSTER_CPU_ARCH_X86_64
+    [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
+#endif
+    [TEST_ID_ANALYSIS] = {S8_INITIALIZER("analysis_tests"), &analysis_tests},
+    [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
+    [TEST_ID_IR_INTERPRETER] = {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},
+    [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
+    [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
+    [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},
+    [TEST_ID_DEBUG_MODEL] = {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
+    [TEST_ID_DWARF] = {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
+    [TEST_ID_CODEVIEW] = {S8_INITIALIZER("codeview_tests"), &codeview_tests},
+    [TEST_ID_PDB] = {S8_INITIALIZER("pdb_tests"), &pdb_tests, !BUSTER_IOS},
+    [TEST_ID_OBJECT] = {S8_INITIALIZER("object_tests"), &object_tests},
+    [TEST_ID_JIT] = {S8_INITIALIZER("jit_tests"), &jit_tests},
+    [TEST_ID_LINK] = {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    [TEST_ID_GPU_PIPELINE] = {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
+    [TEST_ID_COMPILER_DRIVER] = {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
+#if BUSTER_CPU_ARCH_X86_64
+    [TEST_ID_X86_64] = {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
 #endif
 };
+
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == TEST_ID_COUNT);
 
 typedef struct TestParallelRecord TestParallelRecord;
 struct TestParallelRecord
@@ -366,11 +424,6 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
     }
 }
 
-#if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 47);
-#else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 45);
-#endif
 #endif
 
 bool unit_test_succeeded(UnitTestResult result)
