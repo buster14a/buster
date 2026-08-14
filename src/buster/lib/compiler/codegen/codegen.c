@@ -3304,7 +3304,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureInput codegen_canonical_x64_evex_fea
     // established these capabilities.  Supplying the complete vocabulary to
     // metadata keeps the bridge fail-closed while allowing each row to check
     // its own required subset (for example VBMI2 for VPCOMPRESSB).
-    static String8 features[] = {S8("avx512f"), S8("avx512bw"), S8("avx512vbmi"), S8("avx512vbmi2")};
+    static String8 features[] = {S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw"), S8_INITIALIZER("avx512vbmi"), S8_INITIALIZER("avx512vbmi2")};
     return (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)};
 }
 
@@ -4096,7 +4096,7 @@ BUSTER_GLOBAL_LOCAL s32 codegen_canonical_x64_rebase_frame_displacement(CodegenB
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureInput codegen_canonical_x64_simd_features(void)
 {
-    static String8 const names[] = {S8("avx512f"), S8("avx512bw"), S8("avx512vbmi"), S8("avx512vbmi2")};
+    static String8 const names[] = {S8_INITIALIZER("avx512f"), S8_INITIALIZER("avx512bw"), S8_INITIALIZER("avx512vbmi"), S8_INITIALIZER("avx512vbmi2")};
     return (BusterX86MetadataFeatureInput){.names = names, .count = BUSTER_ARRAY_LENGTH(names)};
 }
 
