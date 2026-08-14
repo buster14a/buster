@@ -9890,7 +9890,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                           field_displacement),
                                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(field_type->layout.size * 8)),
                                 };
-                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), bitfield_store_operands,
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), bitfield_store_operands,
                                                                            BUSTER_ARRAY_LENGTH(bitfield_store_operands)))
                                 {
                                     result.error = buffer.error;
