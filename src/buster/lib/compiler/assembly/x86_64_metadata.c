@@ -2925,10 +2925,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operan
     // the architectural CL identity; an omitted CL remains the ordinary
     // implicit form.
     bool explicit_cl = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_CL"));
+    // FNSTSW's register spelling exposes the architectural AX destination in
+    // source syntax even though XED stores it as a fixed implicit operand.
+    // Consume that one fixed AX when callers query `fnstsw ax`; memory forms
+    // and ordinary hidden accumulators remain implicit.
+    bool explicit_fnstsw_ax = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FNSTSW")) &&
+                              buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_AX"));
     return !query.include_implicit && !metadata.visible &&
            (!query.source_semantics || form.operand_count > 1) &&
            metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && actual_index < query.operand_count &&
-           (explicit_bsr0 || explicit_cl) &&
+           (explicit_bsr0 || explicit_cl || explicit_fnstsw_ax) &&
            buster_x86_metadata_emit_fixed_register_matches(metadata, query.operands[actual_index]);
 }
 
@@ -5365,7 +5371,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // In a MODE16 row the default operand size is already 16 bits.  Do not
     // synthesize a 66 byte for the no66 spelling; MODE32 retains the normal
     // 32-bit default and therefore keeps the existing width-derived rule.
-    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 &&
+    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_form &&
                                  pattern.mode_control != BUSTER_X86_METADATA_PATTERN_MODE_16 &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
@@ -6407,7 +6413,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     else if (rm_binding && rm_binding->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) has_b = (rm_binding->reg.index & 8) != 0;
     bool needs_rex = rex_w || has_r || has_b || needs_low_byte_rex;
     u8 mandatory_prefix = plan->pattern->mandatory_prefix ? plan->pattern->mandatory_prefix : form.mandatory_prefix;
-    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 &&
+    bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
+    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_form &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
 
     u8 bytes[16] = {0};
@@ -7072,7 +7079,9 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         // available for provenance and machine plans.
         BusterX86MetadataPatternSemantics filter_pattern = {0};
         if (!buster_x86_metadata_emit_parse_pattern(form, &filter_pattern)) continue;
-        if (buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED")) ||
+        bool x87_free_pop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FFREEP"));
+        if ((!x87_free_pop && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) ||
             buster_x86_metadata_is_undocumented_shift_alias(form, filter_pattern))
             continue;
         BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form_id);
@@ -9431,9 +9440,23 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataCandidateRange buster_x86_metadata_lookup_t
     return result;
 }
 
+// Intel and AT&T spellings retain the historical x87 wait/no-wait aliases,
+// while the generated snapshot publishes only the FNST*/FNSAVE forms.  Keep
+// aliases at the metadata lookup boundary so every selector/emitter path
+// shares one canonical form and byte sequence.
+BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_mnemonic_alias_target(String8 mnemonic)
+{
+    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTCW"))) return S8("FNSTCW");
+    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTENV"))) return S8("FNSTENV");
+    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSAVE"))) return S8("FNSAVE");
+    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTSW"))) return S8("FNSTSW");
+    return mnemonic;
+}
+
 BusterX86MetadataCandidateRange buster_x86_metadata_lookup_mnemonic(String8 mnemonic)
 {
-    return buster_x86_metadata_lookup_text(BUSTER_X86_METADATA_INDEX_MNEMONIC, mnemonic);
+    return buster_x86_metadata_lookup_text(BUSTER_X86_METADATA_INDEX_MNEMONIC,
+                                           buster_x86_metadata_mnemonic_alias_target(mnemonic));
 }
 
 BusterX86MetadataCandidateRange buster_x86_metadata_lookup_iclass(String8 iclass)

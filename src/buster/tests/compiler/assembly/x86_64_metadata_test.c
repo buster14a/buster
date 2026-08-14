@@ -4155,6 +4155,97 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
+        // X87 control rows use their distinct opcodes for the data element;
+        // a generic 16-bit operand-size prefix would change the instruction.
+        // The source aliases below all resolve through the same FNST*/FNSAVE
+        // metadata rows and therefore must retain identical canonical bytes.
+        String8 x87_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand x87_mem16 = x86_64_metadata_test_physical_mem_base(0, 16, 0);
+        BusterX86MetadataPhysicalOperand x87_mem14 = x86_64_metadata_test_physical_mem_base(0, 112, 0);
+        BusterX86MetadataPhysicalOperand x87_mem94 = x86_64_metadata_test_physical_mem_base(0, 752, 0);
+        BusterX86MetadataPhysicalOperand x87_st4 = {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = 80,
+            .reg = {.index = 4, .width = 80, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL},
+        };
+        BusterX86MetadataPhysicalOperand x87_ax =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 16);
+        BusterX86MetadataPhysicalQuery fldcw_query = x86_64_metadata_test_physical_query(
+            S8("FLDCW"), &x87_mem16, 1, (BusterX86MetadataPhysicalAttributes){0}, x87_features,
+            BUSTER_ARRAY_LENGTH(x87_features));
+        BusterX86MetadataPhysicalQuery fnstcw_query = fldcw_query;
+        fnstcw_query.mnemonic = S8("FNSTCW");
+        BusterX86MetadataPhysicalQuery fstcw_query = fnstcw_query;
+        fstcw_query.mnemonic = S8("FSTCW");
+        BusterX86MetadataPhysicalQuery fnstsw_mem_query = fnstcw_query;
+        fnstsw_mem_query.mnemonic = S8("FNSTSW");
+        BusterX86MetadataPhysicalQuery fstsw_mem_query = fnstsw_mem_query;
+        fstsw_mem_query.mnemonic = S8("FSTSW");
+        BusterX86MetadataPhysicalQuery fnstsw_ax_query = fnstsw_mem_query;
+        fnstsw_ax_query.mnemonic = S8("FNSTSW");
+        fnstsw_ax_query.operands = &x87_ax;
+        BusterX86MetadataPhysicalQuery fstsw_ax_query = fnstsw_ax_query;
+        fstsw_ax_query.mnemonic = S8("FSTSW");
+        BusterX86MetadataPhysicalQuery fstenv_query = fnstcw_query;
+        fstenv_query.mnemonic = S8("FSTENV");
+        fstenv_query.operands = &x87_mem14;
+        BusterX86MetadataPhysicalQuery fsave_query = fnstcw_query;
+        fsave_query.mnemonic = S8("FSAVE");
+        fsave_query.operands = &x87_mem94;
+        BusterX86MetadataPhysicalQuery ffreep_query = fnstcw_query;
+        ffreep_query.mnemonic = S8("FFREEP");
+        ffreep_query.operands = &x87_st4;
+        u8 fldcw_bytes[8] = {0};
+        u8 fnstcw_bytes[8] = {0};
+        u8 fstcw_bytes[8] = {0};
+        u8 fnstsw_mem_bytes[8] = {0};
+        u8 fstsw_mem_bytes[8] = {0};
+        u8 fnstsw_ax_bytes[8] = {0};
+        u8 fstsw_ax_bytes[8] = {0};
+        u8 fstenv_bytes[8] = {0};
+        u8 fsave_bytes[8] = {0};
+        u8 ffreep_bytes[8] = {0};
+        BusterX86MetadataEmitResult fldcw = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fldcw_query, .output = fldcw_bytes, .output_capacity = sizeof(fldcw_bytes)});
+        BusterX86MetadataEmitResult fnstcw = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fnstcw_query, .output = fnstcw_bytes, .output_capacity = sizeof(fnstcw_bytes)});
+        BusterX86MetadataEmitResult fstcw = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fstcw_query, .output = fstcw_bytes, .output_capacity = sizeof(fstcw_bytes)});
+        BusterX86MetadataEmitResult fnstsw_mem = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fnstsw_mem_query, .output = fnstsw_mem_bytes, .output_capacity = sizeof(fnstsw_mem_bytes)});
+        BusterX86MetadataEmitResult fstsw_mem = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fstsw_mem_query, .output = fstsw_mem_bytes, .output_capacity = sizeof(fstsw_mem_bytes)});
+        BusterX86MetadataEmitResult fnstsw_ax = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fnstsw_ax_query, .output = fnstsw_ax_bytes, .output_capacity = sizeof(fnstsw_ax_bytes)});
+        BusterX86MetadataEmitResult fstsw_ax = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fstsw_ax_query, .output = fstsw_ax_bytes, .output_capacity = sizeof(fstsw_ax_bytes)});
+        BusterX86MetadataEmitResult fstenv = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fstenv_query, .output = fstenv_bytes, .output_capacity = sizeof(fstenv_bytes)});
+        BusterX86MetadataEmitResult fsave = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fsave_query, .output = fsave_bytes, .output_capacity = sizeof(fsave_bytes)});
+        BusterX86MetadataEmitResult ffreep = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = ffreep_query, .output = ffreep_bytes, .output_capacity = sizeof(ffreep_bytes)});
+        BUSTER_TEST(arguments, fldcw.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fldcw.byte_count == 2 && fldcw.form_id == 9113 &&
+                                   fldcw_bytes[0] == 0xd9 && fldcw_bytes[1] == 0x28);
+        BUSTER_TEST(arguments, fnstcw.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fnstcw.byte_count == 2 && fnstcw.form_id == 9121 &&
+                                   fnstcw_bytes[0] == 0xd9 && fnstcw_bytes[1] == 0x38 && fstcw.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   fstcw.byte_count == 2 && fstcw.form_id == 9121 && fstcw_bytes[0] == 0xd9 && fstcw_bytes[1] == 0x38);
+        BUSTER_TEST(arguments, fnstsw_mem.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fnstsw_mem.byte_count == 2 &&
+                                   fnstsw_mem.form_id == 9213 && fstsw_mem.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   fstsw_mem.byte_count == 2 && fstsw_mem.form_id == 9213 && fnstsw_mem_bytes[0] == 0xdd &&
+                                   fnstsw_mem_bytes[1] == 0x38 && fstsw_mem_bytes[0] == 0xdd && fstsw_mem_bytes[1] == 0x38);
+        BUSTER_TEST(arguments, fnstsw_ax.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fnstsw_ax.byte_count == 2 &&
+                                   fnstsw_ax.form_id == 9242 && fstsw_ax.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   fstsw_ax.byte_count == 2 && fstsw_ax.form_id == 9242 && fnstsw_ax_bytes[0] == 0xdf &&
+                                   fnstsw_ax_bytes[1] == 0xe0 && fstsw_ax_bytes[0] == 0xdf && fstsw_ax_bytes[1] == 0xe0);
+        BUSTER_TEST(arguments, fstenv.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fstenv.byte_count == 2 && fstenv.form_id == 9120 &&
+                                   fsave.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fsave.byte_count == 2 && fsave.form_id == 9212 &&
+                                   fstenv_bytes[0] == 0xd9 && fstenv_bytes[1] == 0x30 && fsave_bytes[0] == 0xdd && fsave_bytes[1] == 0x30 &&
+                                   ffreep.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ffreep.byte_count == 2 && ffreep.form_id == 9241 &&
+                                   ffreep_bytes[0] == 0xdf && ffreep_bytes[1] == 0xc4);
+    }
+
+    {
         // This is the complete normalized residual cohort: the sixteen X87
         // environment rows followed by the thirty-two BASE legacy rows.
         // LLVM/GNU probes agree on the opcode and 66-byte choices for the
