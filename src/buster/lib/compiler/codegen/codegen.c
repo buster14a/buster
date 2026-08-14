@@ -10047,32 +10047,52 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
                     {
-                        codegen_emit_u8(&buffer, 0xe9);
+                        BusterX86MetadataPhysicalOperand branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                        u32 branch_offset = (u32)buffer.count;
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &branch_operand, 1))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                         C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
-                            .offset = (u32)buffer.count,
+                            .offset = branch_offset + 1,
                         });
-                        codegen_emit_u32(&buffer, 0);
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
                     {
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x85);
-                        codegen_emit_u8(&buffer, 0xc0);
-                        codegen_emit_u8(&buffer, 0x0f);
-                        codegen_emit_u8(&buffer, 0x85);
+                        BusterX86MetadataPhysicalOperand test_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                        };
+                        BusterX86MetadataPhysicalOperand branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                        if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("TEST"), test_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(test_operands)))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
+                        u32 conditional_branch_offset = (u32)buffer.count;
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNZ"), &branch_operand, 1))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                         C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
-                            .offset = (u32)buffer.count,
+                            .offset = conditional_branch_offset + 2,
                         });
-                        codegen_emit_u32(&buffer, 0);
-                        codegen_emit_u8(&buffer, 0xe9);
+                        u32 fallthrough_branch_offset = (u32)buffer.count;
+                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &branch_operand, 1))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                         C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[1],
-                            .offset = (u32)buffer.count,
+                            .offset = fallthrough_branch_offset + 1,
                         });
-                        codegen_emit_u32(&buffer, 0);
                     }
                     else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
                     {
@@ -10082,8 +10102,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             return result;
                         }
                         C_X64_LOAD(0x85, instruction->operands[0]);
-                        codegen_emit_u8(&buffer, 0xff);
-                        codegen_emit_u8(&buffer, 0xe0);
+                        BusterX86MetadataPhysicalOperand branch_operand = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
+                        if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &branch_operand, 1))
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
                     {
