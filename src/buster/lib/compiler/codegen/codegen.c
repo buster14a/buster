@@ -896,6 +896,23 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_segment_memory(
+    BusterX86MetadataPhysicalSegment segment, u16 width, s64 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = width,
+        .memory = {
+            .address_size = 64,
+            .scale = 1,
+            .segment = (u8)segment,
+            .displacement = displacement,
+            .has_displacement = true,
+            .has_segment = true,
+        },
+    };
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_rip_relative(u16 width, s64 displacement)
 {
     return (BusterX86MetadataPhysicalOperand){
@@ -980,6 +997,86 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit(CodegenBuffer* buff
                                                               BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
 {
     return codegen_canonical_x64_metadata_emit_features(buffer, mnemonic, operands, operand_count, (BusterX86MetadataFeatureInput){0});
+}
+
+// Emit one symbol-bearing instruction through the checked metadata bridge.
+// Canonical codegen keeps module relocations in its own format, while the
+// metadata encoder owns the instruction shape and the exact displacement
+// field.  Give the physical query a private non-empty symbol solely to force
+// metadata to materialize its relocation record; callers translate the
+// returned field offset into their CodegenModuleRelocation entry.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_relocation(CodegenBuffer* buffer, String8 mnemonic,
+                                                                         BusterX86MetadataPhysicalOperand const* operands,
+                                                                         u32 operand_count, u32* relocation_offset)
+{
+    if (!buffer || (operand_count && !operands) || buffer->error || buffer->count > buffer->capacity || operand_count > 16)
+    {
+        if (buffer && !buffer->error)
+        {
+            buffer->error = buffer->count > buffer->capacity ? CODEGEN_ERROR_CAPACITY : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        }
+        return false;
+    }
+    BusterX86MetadataPhysicalOperand relocated_operands[16] = {0};
+    if (operand_count)
+    {
+        memcpy(relocated_operands, operands, operand_count * sizeof(*operands));
+    }
+    String8 relocation_symbol = S8("__buster_x86_codegen_relocation");
+    bool symbolized = false;
+    for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand* operand = relocated_operands + operand_index;
+        if (operand->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || operand->memory.has_symbol)
+        {
+            continue;
+        }
+        operand->memory.symbol = relocation_symbol;
+        operand->memory.has_symbol = true;
+        symbolized = true;
+    }
+    if (!symbolized)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
+    BusterX86MetadataPhysicalQuery physical = {
+        .mnemonic = mnemonic,
+        .operands = relocated_operands,
+        .operand_count = operand_count,
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+    };
+    u64 remaining = buffer->capacity - buffer->count;
+    u32 output_capacity = remaining > UINT32_MAX ? UINT32_MAX : (u32)remaining;
+    BusterX86MetadataRelocation metadata_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = physical,
+        .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
+        .output_capacity = output_capacity,
+        .relocations = metadata_relocations,
+        .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
+    });
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 1 || emitted.byte_count > output_capacity ||
+        metadata_relocations[0].width != 4)
+    {
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY || emitted.byte_count > output_capacity)
+        {
+            codegen_buffer_report_exhausted(buffer);
+        }
+        else
+        {
+            buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        }
+        return false;
+    }
+    u32 instruction_offset = (u32)buffer->count;
+    buffer->count += emitted.byte_count;
+    if (relocation_offset)
+    {
+        *relocation_offset = instruction_offset + metadata_relocations[0].offset;
+    }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_load(CodegenBuffer* buffer, X64Register target, X64Register base, u32 displacement, u32 width)
@@ -7026,51 +7123,95 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             if (target.os == OPERATING_SYSTEM_WINDOWS)
                             {
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x05);
-                                u32 index_offset = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0x65);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x14);
-                                codegen_emit_u8(&buffer, 0x25);
-                                codegen_emit_u32(&buffer, 0x58);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x04);
-                                codegen_emit_u8(&buffer, 0xc2);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8d);
-                                codegen_emit_u8(&buffer, 0x80);
-                                u32 value_offset = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
+                                BusterX86MetadataPhysicalOperand index_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                    codegen_canonical_x64_metadata_rip_relative(32, 0),
+                                };
+                                u32 index_relocation_offset = 0;
+                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("MOV"), index_load_operands,
+                                                                                     BUSTER_ARRAY_LENGTH(index_load_operands),
+                                                                                     &index_relocation_offset))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand tls_index_memory =
+                                    codegen_canonical_x64_metadata_segment_memory(BUSTER_X86_METADATA_SEGMENT_FS, 64, 0x58);
+                                BusterX86MetadataPhysicalOperand tls_index_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                    tls_index_memory,
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), tls_index_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(tls_index_load_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand tls_slot_memory =
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, 64, 0);
+                                tls_slot_memory.memory.has_index = true;
+                                tls_slot_memory.memory.index = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64).reg;
+                                tls_slot_memory.memory.scale = 8;
+                                BusterX86MetadataPhysicalOperand tls_slot_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    tls_slot_memory,
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), tls_slot_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(tls_slot_load_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand tls_value_address_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 0),
+                                };
+                                u32 value_relocation_offset = 0;
+                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("LEA"), tls_value_address_operands,
+                                                                                     BUSTER_ARRAY_LENGTH(tls_value_address_operands),
+                                                                                     &value_relocation_offset))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
-                                    .offset = index_offset,
+                                    .offset = index_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
                                     .is_thread_local = true,
                                     .thread_local_index = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
-                                    .offset = value_offset,
+                                    .offset = value_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32,
                                     .is_thread_local = true,
                                 };
                             }
                             else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x3d);
-                                u32 descriptor_offset = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0xff);
-                                codegen_emit_u8(&buffer, 0x17);
+                                BusterX86MetadataPhysicalOperand descriptor_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDI, 64),
+                                    codegen_canonical_x64_metadata_rip_relative(64, 0),
+                                };
+                                u32 descriptor_relocation_offset = 0;
+                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("MOV"), descriptor_load_operands,
+                                                                                     BUSTER_ARRAY_LENGTH(descriptor_load_operands),
+                                                                                     &descriptor_relocation_offset))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand descriptor_call_operand =
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDI, 64, 0);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("CALL"), &descriptor_call_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
-                                    .offset = descriptor_offset,
+                                    .offset = descriptor_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32,
                                     .is_thread_local = true,
                                 };
@@ -7082,20 +7223,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                codegen_emit_u8(&buffer, 0x64);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x04);
-                                codegen_emit_u8(&buffer, 0x25);
-                                codegen_emit_u32(&buffer, 0);
-                                codegen_emit_u8(&buffer, 0x48);
-                                codegen_emit_u8(&buffer, 0x8d);
-                                codegen_emit_u8(&buffer, 0x80);
-                                u32 offset = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
+                                BusterX86MetadataPhysicalOperand thread_pointer_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_segment_memory(BUSTER_X86_METADATA_SEGMENT_FS, 64, 0),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), thread_pointer_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(thread_pointer_load_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand tls_value_address_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 0),
+                                };
+                                u32 tls_relocation_offset = 0;
+                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("LEA"), tls_value_address_operands,
+                                                                                     BUSTER_ARRAY_LENGTH(tls_value_address_operands),
+                                                                                     &tls_relocation_offset))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
-                                    .offset = offset,
+                                    .offset = tls_relocation_offset,
                                     .kind = CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
                                     .is_thread_local = true,
                                 };
@@ -7103,14 +7255,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8d);
-                            codegen_emit_u8(&buffer, 0x05);
-                            u32 offset = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, 0);
+                            BusterX86MetadataPhysicalOperand address_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_rip_relative(64, 0),
+                            };
+                            u32 address_relocation_offset = 0;
+                            if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("LEA"), address_operands,
+                                                                                 BUSTER_ARRAY_LENGTH(address_operands),
+                                                                                 &address_relocation_offset))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
-                                .offset = offset,
+                                .offset = address_relocation_offset,
                                 .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
                             };
                         }
@@ -8649,9 +8808,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             immediate = 0 - immediate;
                         }
                         u16 constant_width = codegen_canonical_register_is_64_bit(program, instruction->canonical_type) ? 64 : 32;
+                        BusterX86MetadataPhysicalOperand constant_value =
+                            constant_width == 32 && immediate > UINT32_MAX
+                                ? codegen_canonical_x64_metadata_immediate((s64)(s32)(u32)immediate, constant_width)
+                                : codegen_canonical_x64_metadata_unsigned_immediate(immediate, constant_width);
                         BusterX86MetadataPhysicalOperand constant_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, constant_width),
-                            codegen_canonical_x64_metadata_unsigned_immediate(immediate, constant_width),
+                            constant_value,
                         };
                         if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), constant_operands,
                                                                    BUSTER_ARRAY_LENGTH(constant_operands)))
@@ -9874,11 +10037,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 if (field->bit_offset)
                                 {
+                                    BusterX86MetadataPhysicalOperand shift_count_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
+                                        codegen_canonical_x64_metadata_unsigned_immediate(field->bit_offset, 32),
+                                    };
                                     BusterX86MetadataPhysicalOperand shift_operands[2] = {
                                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                                        codegen_canonical_x64_metadata_immediate(field->bit_offset, 8),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 8),
                                     };
-                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_operands,
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), shift_count_load_operands,
+                                                                               BUSTER_ARRAY_LENGTH(shift_count_load_operands)) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_operands,
                                                                                BUSTER_ARRAY_LENGTH(shift_operands)))
                                     {
                                         result.error = buffer.error;
