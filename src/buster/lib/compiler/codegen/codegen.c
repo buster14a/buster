@@ -6327,26 +6327,36 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         if (indirect_place)                                                                                                                                    \
         {                                                                                                                                                      \
             C_X64_LOAD(0x85, place_id);                                                                                                                        \
-            codegen_emit_u8(&buffer, 0x49);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0x89);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0xc2);                                                                                                                    \
+            BusterX86MetadataPhysicalOperand c_x64_atomic_move_operands[2] = {                                                                               \
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),                                                                                     \
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),                                                                                     \
+            };                                                                                                                                                 \
+            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), c_x64_atomic_move_operands,                                                       \
+                                                       BUSTER_ARRAY_LENGTH(c_x64_atomic_move_operands));                                                       \
         }                                                                                                                                                      \
         else                                                                                                                                                   \
         {                                                                                                                                                      \
-            codegen_emit_u8(&buffer, 0x4c);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0x8d);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0x95);                                                                                                                    \
-            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[(place_id).value]));                                                        \
+            s32 c_x64_atomic_address_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[(place_id).value]);                                               \
+            BusterX86MetadataPhysicalOperand c_x64_atomic_address_operands[2] = {                                                                            \
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),                                                                                     \
+                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, c_x64_atomic_address_displacement),                                              \
+            };                                                                                                                                                 \
+            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), c_x64_atomic_address_operands,                                                    \
+                                                       BUSTER_ARRAY_LENGTH(c_x64_atomic_address_operands));                                                   \
         }                                                                                                                                                      \
     } while (0)
 #define C_X64_LOAD_FLOAT(register_index, value_id, width)                                                                                                      \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
-        codegen_emit_u8(&buffer, (width) == 32 ? 0xf3 : 0xf2);                                                                                                 \
-        codegen_emit_u8(&buffer, 0x0f);                                                                                                                        \
-        codegen_emit_u8(&buffer, 0x10);                                                                                                                        \
-        codegen_emit_u8(&buffer, (u8)(0x85 | ((register_index) << 3)));                                                                                        \
-        codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]));                                                            \
+        s32 c_x64_float_load_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]);                                                        \
+        BusterX86MetadataPhysicalOperand c_x64_float_load_operands[2] = {                                                                                    \
+            codegen_canonical_x64_metadata_vector(register_index, (u16)(width)),                                                                             \
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)(width), c_x64_float_load_displacement),                                            \
+        };                                                                                                                                                    \
+        String8 c_x64_float_load_features[] = {(width) == 32 ? S8("sse") : S8("sse2")};                                                                     \
+        (void)codegen_canonical_x64_metadata_emit_features(                                                                                                   \
+            &buffer, (width) == 32 ? S8("MOVSS") : S8("MOVSD"), c_x64_float_load_operands, BUSTER_ARRAY_LENGTH(c_x64_float_load_operands),                 \
+            (BusterX86MetadataFeatureInput){.names = c_x64_float_load_features, .count = BUSTER_ARRAY_LENGTH(c_x64_float_load_features)});                  \
     } while (0)
 #define C_X64_RECORD_FLOAT_STORE(width)                                                                                                                        \
     do                                                                                                                                                         \
@@ -6358,11 +6368,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     {                                                                                                                                                          \
         if (x64_save_rbx)                                                                                                                                      \
         {                                                                                                                                                      \
-            codegen_emit_u8(&buffer, 0x48);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0x8b);                                                                                                                    \
-            codegen_emit_u8(&buffer, 0x9d);                                                                                                                    \
-            codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(&buffer, -(s64)x64_rbx_save_offset,                  \
-                                                                                              canonical_x64_frame_base_offset));                          \
+            s32 c_x64_restore_rbx_displacement =                                                                                                               \
+                codegen_canonical_x64_rebase_frame_displacement(&buffer, -(s64)x64_rbx_save_offset, canonical_x64_frame_base_offset);                         \
+            BusterX86MetadataPhysicalOperand c_x64_restore_rbx_operands[2] = {                                                                                \
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),                                                                                     \
+                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, c_x64_restore_rbx_displacement),                                                 \
+            };                                                                                                                                                 \
+            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), c_x64_restore_rbx_operands,                                                       \
+                                                       BUSTER_ARRAY_LENGTH(c_x64_restore_rbx_operands));                                                       \
         }                                                                                                                                                      \
     } while (0)
                     if (instruction->opcode == IR_OPCODE_LOCAL)
