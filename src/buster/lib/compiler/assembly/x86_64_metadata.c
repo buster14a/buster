@@ -5299,9 +5299,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         // would turn VMOVAPD's canonical VEX.W=0 prefix into W=1.
         bool scalar_memory_width_rex_w = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
                                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
-        if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
+        u16 schema_widths = bindings[index].metadata.physical_width_flags;
+        bool variable_scalar_memory_width = (schema_widths & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32) &&
+                                            (schema_widths & BUSTER_X86_METADATA_PHYSICAL_WIDTH_64);
+        if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
+            (pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w &&
-            !has_mmx_operand && !has_xmm_operand && !x87_form && !mpx_form && !moffs_form && scalar_memory_width_rex_w)
+            !has_mmx_operand && !has_xmm_operand && !x87_form && !mpx_form && !moffs_form && scalar_memory_width_rex_w &&
+            variable_scalar_memory_width)
         {
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
