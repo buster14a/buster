@@ -666,6 +666,20 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                              intel_atom_future || intel_phi || model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool intel_state_xsaves = (model >= CPU_MODEL_INTEL_SKYLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                               intel_atom_future || model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_clflushopt = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_clflushopt = (model >= CPU_MODEL_INTEL_SKYLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                            (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_TREMONT) ||
+                            (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                            model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_clwb = model >= CPU_MODEL_AMD_ZEN_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_clwb = model == CPU_MODEL_INTEL_SKYLAKE_AVX512 ||
+                      (model >= CPU_MODEL_INTEL_COOPERLAKE && model <= CPU_MODEL_INTEL_CASCADELAKE) ||
+                      (model >= CPU_MODEL_INTEL_TIGERLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                      (model >= CPU_MODEL_INTEL_TREMONT && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                      model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_wbnoinvd = model >= CPU_MODEL_AMD_ZEN_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_wbnoinvd = (model >= CPU_MODEL_INTEL_ICELAKE_SERVER && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                          model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     if (amd_ssse3 || intel_ssse3)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
@@ -726,6 +740,18 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (amd_state_xsaves || intel_state_xsaves)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVES);
+    }
+    if (amd_clflushopt || intel_clflushopt)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_CLFLUSHOPT);
+    }
+    if (amd_clwb || intel_clwb)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_CLWB);
+    }
+    if (amd_wbnoinvd || intel_wbnoinvd)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_WBNOINVD);
     }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
     if (amd_family_10_or_newer)
