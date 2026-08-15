@@ -177,6 +177,19 @@ and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
 Clang static analysis runs only against unsanitized Release. Every matrix
 configuration runs `test_all`; platform packages use their native test runner.
+The one carve-out inside `test_all` is a **whole-table audit**: a module whose
+result is a function of the generated metadata tables and the repository's
+source text alone, so no compiler, configuration or optimization level can
+change its answer. Those modules run on the same single canonical tree per
+platform that already owns `clang_analyze` — unsanitized optimized Clang —
+because re-deriving one identical answer in eight to ten configurations cost
+more than any other single thing in CI. Mark such a module with
+`table_audit` in the `test_descriptors` table of `src/buster/tests/test.c`;
+`x86_64_completion_census_tests` is the current one. The superbuild opts a
+tree out with `BUSTER_TEST_TABLE_AUDITS=0`, and **the default is on**, so a
+bare `ide test`, a single-tree build, or any runner that does not set the
+variable keeps full coverage. Never mark a module whose result depends on
+generated code, the host, or the sanitizer.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`** for public workflows; `build` rejects them with an explicit

@@ -141,7 +141,23 @@ struct TestDescriptor
     TestFunction* function;
     bool requires_temporary_root;
     TestDescriptorParallelKind parallel_kind;
+    // A whole-table audit: its answer is a function of the generated
+    // metadata tables and the source text alone, so it cannot differ between
+    // compilers, configurations or optimization levels. The matrix runs it on
+    // one canonical tree per platform rather than in all eight to ten, the
+    // same carve-out clang_analyze already has. Off means "some other tree in
+    // this matrix runs it", never "nobody does".
+    bool table_audit;
 };
+
+// Table audits run unless the superbuild explicitly says another tree owns
+// them. Defaulting to *on* keeps a bare `ide test`, a single-tree build and
+// any future runner at full coverage; only the matrix opts a tree out.
+BUSTER_GLOBAL_LOCAL bool buster_test_table_audits_enabled(void)
+{
+    String8 value = os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS"));
+    return !value.length || !string_equal(value, S8("0"));
+}
 
 typedef struct TestTimingRecord TestTimingRecord;
 struct TestTimingRecord
@@ -290,7 +306,8 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_ASSEMBLY] = {S8_INITIALIZER("assembly_tests"), &assembly_tests},
     [TEST_ID_X86_64_METADATA] = {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
 #if BUSTER_CPU_ARCH_X86_64
-    [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
+    [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests, false,
+                                          TEST_DESCRIPTOR_PARALLEL_NONE, true},
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
     [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
@@ -680,6 +697,11 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         TestDescriptor descriptor = descriptors[i];
         BatchTestResult result_before_descriptor = result;
 
+        // Another tree in this matrix owns the whole-table audits. Skip
+        // without a timing row so the module's per-runner timing series stays
+        // a series of real runs rather than one salted with zeroes.
+        if (descriptor.table_audit && !buster_test_table_audits_enabled()) continue;
+
         // A descriptor that can create an artifact must not enter its body
         // until the root has been created and probed. Otherwise a setup
         // failure would turn the empty path returned by the accessor into
@@ -732,7 +754,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     u64 eligible_count = 0;
     for (u64 index = 0; index < descriptor_count; index += 1)
     {
-        eligible_count += descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE;
+        eligible_count += descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE &&
+                          (!descriptors[index].table_audit || buster_test_table_audits_enabled());
     }
     if (!eligible_count)
     {
@@ -746,7 +769,8 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     u64 eligible_index = 0;
     for (u64 index = 0; index < descriptor_count; index += 1)
     {
-        if (descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE)
+        if (descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE &&
+            (!descriptors[index].table_audit || buster_test_table_audits_enabled()))
         {
             eligible_indices[eligible_index++] = index;
         }
@@ -907,7 +931,15 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 
     u64 timing_record_count = 0;
     result = buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
-    BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
+    // Every descriptor that ran must have reported a timing row. Audits this
+    // tree does not own report nothing at all rather than a zero row, so they
+    // come out of the expected count instead of out of the invariant.
+    u64 expected_timing_records = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_descriptors); index += 1)
+    {
+        expected_timing_records += !test_descriptors[index].table_audit || buster_test_table_audits_enabled();
+    }
+    BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == expected_timing_records);
 
     bool temporary_root_succeeded = true;
     if (buster_test_temporary_root.length)

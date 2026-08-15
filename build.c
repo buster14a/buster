@@ -9579,6 +9579,13 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
+        // Whole-table audits ride on the same canonical tree that already
+        // owns clang_analyze: unsanitized optimized Clang, exactly one tree
+        // per platform. They read only generated metadata tables and source
+        // text, so a second compiler or configuration re-derives the same
+        // answer at full cost -- see the note in AGENTS.md.
+        string8_list_push(arena, &lines,
+                          string_format(arena, S8("set({S8}_TABLE_AUDITS {u32})\n"), prefix, analyze_config.length ? 1u : 0u));
     }
 
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);

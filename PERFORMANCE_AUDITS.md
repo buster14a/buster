@@ -78,13 +78,35 @@ modules. Both changes are test-only, so the self-hosting fixed point is
 untouched — `BUSTER_INCLUDE_TESTS=0` compiles neither file. aarch64 and
 Windows verdicts come from remote CI.
 
-**Left untaken deliberately.** Restricting these two modules to fewer matrix
-configurations was considered and rejected *after* the fixes: both test
-compiler-independent properties and run in all 8-10 configurations, which was
-worth ~750 s of Windows CPU beforehand and is worth ~100 s now — no longer a
-fair price for the coverage or for a carve-out in the "every configuration
-runs `test_all`" rule. The remaining structural lever is the trailing
-sanitized step itself, which still runs alone on an idle runner.
+**The census then moved to one tree per platform.** It is a whole-table audit
+— its answer is a function of the generated metadata tables alone, so no
+compiler or configuration can change it — and it was re-derived in all 8-10
+of them. It now runs on the same single canonical tree that already owns
+`clang_analyze` (unsanitized optimized Clang), through a `table_audit` flag on
+the test descriptor and a `BUSTER_TEST_TABLE_AUDITS` env the superbuild sets
+per tree. The default is *on*, so a bare `ide test` or any runner that does
+not set it keeps full coverage; only the matrix opts a tree out. Verified on
+the local matrix: census ran once instead of eight times, seven trees report
+38/38 modules and one reports 39/39.
+
+**Why that was worth more than its CPU number.** Counted as CPU it is only
+~75 s of 542 s (Linux) — but only three modules are lane-eligible
+(`test_parallel_lane` dispatches the two aarch64 SIMD suites and the memory
+semantics suite; everything else runs serially), so the census's 41.8 s in the
+sanitized Debug tree was **serial time on the critical path**. That tree is
+129.3 s of serial modules plus a gang whose wall time is its slowest member,
+78.4 s. Removing the census takes the serial part to 87.5 s.
+
+**What is left in the tail, and it is not scheduling.** The trailing sanitized
+step was 49% of the Linux job before this audit and 33% after; the earlier
+reading that it was a scheduling problem was wrong. Trees are already declared
+longest-first, and the tree's own floor is ~166 s: ~87 s of serial modules it
+cannot overlap plus the 78.4 s slowest lane. Going below that needs either a
+wider lane-eligible set — today the eligible descriptors must be *contiguous*
+in `test_descriptors` and hand-listed in `TestDescriptorParallelKind`, and
+`os_tests` must never overlap the gang — or fewer generated cases in the
+aarch64 trio, which is 61% of the config and is combinatorial coverage rather
+than waste. Neither is a free win; do not go looking for a scheduling bug.
 
 `2026-08-15i` (Linux x86_64, Zen 4 7940HS; the form-selection candidate loop
 stops re-deriving loop-invariant work, based on `91eba52e`). Stage 1
