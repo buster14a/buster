@@ -215,6 +215,73 @@ BUSTER_GLOBAL_LOCAL bool link_x86_emit_zero(LinkX86InstructionBuilder* builder, 
     return link_x86_emit(builder, mnemonic, 0, 0);
 }
 
+// ELF PLT entries reserve a five-byte PUSH for the import index.  The generic
+// physical selector intentionally shortens numeric immediates when they fit
+// (for example, PUSH 0 -> 6a 00), which is correct for ordinary instructions
+// but changes the fixed 16-byte PLT entry layout.  Enumerate the PUSH metadata
+// candidates locally and exact-emit the candidate whose schema carries an
+// imm32 field; no form ID or raw instruction bytes are part of this adapter.
+BUSTER_GLOBAL_LOCAL bool link_x86_emit_push_imm32(LinkX86InstructionBuilder* builder,
+                                                  BusterX86MetadataPhysicalOperand const* immediate)
+{
+    if (!builder || builder->count > builder->capacity || !immediate || immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE ||
+        immediate->width != 32 || builder->capacity - builder->count < 5)
+    {
+        return false;
+    }
+    BusterX86MetadataPhysicalQuery physical = {
+        .mnemonic = S8("PUSH"),
+        .operands = immediate,
+        .operand_count = 1,
+        .features = {.names = 0, .count = 0},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .include_privileged = true,
+        .include_not64 = false,
+        .include_implicit = false,
+        .source_semantics = false,
+    };
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(S8("PUSH"));
+    BusterX86MetadataCandidateIterator iterator = buster_x86_metadata_filter(candidates, (BusterX86MetadataFilter){
+                                                                                              .require_64_bit = true,
+                                                                                              .exclude_not64 = true,
+                                                                                          });
+    u32 form_id = UINT32_MAX;
+    while (buster_x86_metadata_candidate_next(&iterator, &form_id))
+    {
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(form_id, &form) || form.immediate_width != 4) continue;
+        bool has_imm32_operand = false;
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataOperand operand = {0};
+            if (!buster_x86_metadata_operand(form_id, operand_index, &operand))
+            {
+                has_imm32_operand = false;
+                break;
+            }
+            if (operand.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE &&
+                (operand.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32))
+            {
+                has_imm32_operand = true;
+            }
+        }
+        if (!has_imm32_operand) continue;
+        u8 encoded[16] = {0};
+        BusterX86MetadataEmitResult result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = physical,
+            .form_id = form_id,
+            .output = encoded,
+            .output_capacity = BUSTER_ARRAY_LENGTH(encoded),
+        });
+        if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || result.byte_count != 5) continue;
+        memcpy(builder->bytes + builder->count, encoded, result.byte_count);
+        builder->count += result.byte_count;
+        return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_count, u32* call_displacement_offset)
 {
     LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
@@ -2102,7 +2169,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BusterX86MetadataPhysicalOperand import_immediate = link_x86_immediate(import_index, 32);
         BusterX86MetadataPhysicalOperand plt_relative = link_x86_relative(0, 32);
         if (!link_x86_emit(&plt_entry, S8("JMP"), &slot_memory, 1) ||
-            !link_x86_emit(&plt_entry, S8("PUSH"), &import_immediate, 1) ||
+            !link_x86_emit_push_imm32(&plt_entry, &import_immediate) ||
             !link_x86_emit(&plt_entry, S8("JMP"), &plt_relative, 1) ||
             plt_entry.count != ELF_PLT_ENTRY_SIZE)
         {
