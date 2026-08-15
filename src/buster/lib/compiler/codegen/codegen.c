@@ -968,16 +968,30 @@ struct CodegenX64MetadataCacheEntry
 // The table is sized from the module rather than fixed, because its useful
 // size is the number of distinct instruction spellings the module emits and
 // that scales with the module.  A fixed constant either starves a large
-// translation unit or makes a ten-function one pay for a large one: measured
-// on the self-host unit, stage-1 instructions fall monotonically from 25.94 G
-// at 4096 entries to 16.27 G at 524288.  Wall time is flat across that whole
-// range, so the ceiling is chosen on memory rather than on the instruction
-// curve: entries are 32 bytes, so 65536 is 2 MiB per lane and 32 MiB across a
-// sixteen-lane gang, which is proportionate to what a unit of this size
-// already costs elsewhere.  Raising it further keeps paying in instructions
-// (-36% at 262144) but costs 128 MiB for no measured wall improvement.
+// translation unit or makes a ten-function one pay for a large one, and the
+// operand values are part of this key, so the distinct-key count is large by
+// construction - every stack slot at a different displacement is its own key.
+// Stage-1 instructions therefore keep falling with capacity.
+//
+// The ceiling is chosen on peak resident memory, which is what constrains the
+// host.  Only the slots a key actually lands on are ever touched, and the
+// probe window below bounds that, so a larger table costs address space
+// rather than pages until it outgrows the codegen arena's own high-water
+// mark.  Measured on the self-host unit, single-lane, with peak RSS sampled
+// from `VmHWM`:
+//
+//   entries   per lane   stage-1 instructions   peak RSS
+//     65536      2 MiB       17,728,627,486     1,338,940 kB
+//    262144      8 MiB       15,900,614,196     1,338,848 kB
+//    524288     16 MiB       15,568,244,627     1,393,996 kB
+//
+// 262144 is the largest capacity that is free in resident memory; 524288 buys
+// a further 2.1% of instructions for 55 MB and was not taken.  The earlier
+// 65536 ceiling was chosen against a 64-slot probe that never replaced an
+// entry, where a larger table helped mainly by staying unsaturated; see the
+// probe window below for why that trade-off no longer holds.
 #define CODEGEN_X64_TEMPLATE_CACHE_MINIMUM 4096u
-#define CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM 65536u
+#define CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM 262144u
 typedef struct CodegenX64TemplateCacheEntry CodegenX64TemplateCacheEntry;
 struct CodegenX64TemplateCacheEntry
 {
@@ -991,7 +1005,8 @@ BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM & (CODEGEN_X64_TEMPLATE_CACH
 
 // Entries per function, from the same measurement: the self-host unit's 3,517
 // functions reach the ceiling, and smaller units scale down from there so a
-// ten-function translation unit does not pay for a large one.
+// ten-function translation unit does not pay for a large one.  Unchanged when
+// the ceiling moved to 262144, which 3,517 functions still reach.
 #define CODEGEN_X64_TEMPLATE_ENTRIES_PER_FUNCTION 64u
 
 BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_template_capacity(u64 function_count)
@@ -1226,13 +1241,38 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_query_has_symbol(BusterX86Metadat
     return false;
 }
 
+// The byte table is a cache, not a dictionary, and is probed as one: a short
+// window from the home slot, and a claimed victim inside that window when the
+// window is full.  It used to probe 64 slots and give up, which cost twice
+// over once the table filled.  A lookup that could not succeed still walked
+// every one of the 64, and an insertion that found no empty slot did nothing,
+// so a full table froze on whatever the module emitted first and never took
+// another entry.  Measured on the self-host unit at capacity 65536: the table
+// reached 100% occupancy, 32.8% of 4.92 M lookups were futile full walks, and
+// the average lookup cost 22.15 probe steps.  Bounding the window puts a
+// ceiling on the miss, and claiming a victim keeps the table tracking the
+// working set instead of the module's first few thousand distinct spellings.
+//
+// A key therefore always lives within `home .. home + window - 1`, which is
+// the invariant the lookup relies on and the insertion maintains.
+//
+// The window is narrow because probe steps are paid on every emission while
+// the extra associativity only buys hits.  Swept on the self-host unit at the
+// then-current 65536 ceiling, single-lane stage-1 instructions were 17.86 G at
+// a window of 1, 17.73 G at 2, 17.74 G at 4, 17.83 G at 8 and 18.07 G at 16:
+// one slot loses too many hits, and past two the walk costs more than it wins.
+#define CODEGEN_X64_TEMPLATE_PROBE_WINDOW 2u
+BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_PROBE_WINDOW & (CODEGEN_X64_TEMPLATE_PROBE_WINDOW - 1u)) == 0);
+BUSTER_CT_CHECK(CODEGEN_X64_TEMPLATE_PROBE_WINDOW <= CODEGEN_X64_TEMPLATE_CACHE_MINIMUM);
+
 BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template_entry(CodegenX64MetadataCache* cache,
                                                                                         u64 signature, u64 guard, bool insertion)
 {
     if (!cache) return 0;
     if (!cache->templates) return 0;
-    u32 slot = (u32)signature & cache->template_mask;
-    for (u32 probe = 0; probe < 64u; probe += 1)
+    u32 home = (u32)signature & cache->template_mask;
+    u32 slot = home;
+    for (u32 probe = 0; probe < CODEGEN_X64_TEMPLATE_PROBE_WINDOW; probe += 1)
     {
         CodegenX64TemplateCacheEntry* entry = cache->templates + slot;
         if (!entry->signature)
@@ -1246,7 +1286,19 @@ BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template
         if (entry->signature == signature && entry->guard == guard) return entry;
         slot = (slot + 1u) & cache->template_mask;
     }
-    return 0;
+    if (!insertion) return 0;
+    // Every slot in the window belongs to another key, so one of them is
+    // replaced.  The victim is picked from the guard rather than fixed at the
+    // home slot: the two halves of the key are independent hashes, so this
+    // spreads eviction across the window instead of letting one slot absorb
+    // every conflict, and it stays a pure function of the key, which the
+    // byte-identical fixed point requires at any lane count.
+    u32 victim = (home + (u32)(guard & (CODEGEN_X64_TEMPLATE_PROBE_WINDOW - 1u))) & cache->template_mask;
+    CodegenX64TemplateCacheEntry* entry = cache->templates + victim;
+    entry->signature = signature;
+    entry->guard = guard;
+    entry->length = 0;
+    return entry;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenBuffer* buffer, String8 mnemonic,

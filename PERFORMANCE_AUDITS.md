@@ -18,6 +18,88 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15h` (Linux x86_64, Zen 4 7940HS; the byte-template table is probed as
+a cache instead of a dictionary, based on `37d59296`). Stage 1
+`18,150,530,759` -> `15,900,336,190` instructions (**-12.4%**) measured
+single-lane, and `test_self_host` stage-1 wall 1.795 s. Cumulative across the
+2026-08-15 audits: stage 1 `63,683,992,612` -> `15,900,336,190`, **-75.0%**.
+
+The dominant find was the probe loop, not the hash and not the transform.
+`codegen_canonical_x64_template_entry` walked up to **64** slots and inserted
+only into an empty one. Both halves of that are wrong once the table fills,
+and it filled: instrumented on one stage-1 self-compile at the then-current
+65536 ceiling, the table reached **100% occupancy** (65,536 of 65,536), took
+its last insertion at that point and never took another, **32.8%** of
+4,920,459 lookups walked all 64 slots to return nothing, and the average
+lookup cost **22.15 probe steps** for 109,010,573 steps in total. A third of
+the lookups were futile by construction and the table had frozen on whatever
+the module emitted first.
+
+It is now a bounded window with replacement: probe two slots from home, and
+when both belong to other keys, claim one of them. A key therefore always
+lives within `home .. home + 1`, which is the invariant the lookup relies on
+and the insertion maintains. The same instrumentation after: **1.34** steps
+per lookup (6,193,886 for 4,614,842 lookups, a **17.6x** reduction) and the
+hit rate up from 64.6% to **75.5%**, with 322,049 evictions showing the table
+now tracks the working set.
+
+The victim is picked from the guard rather than fixed at the home slot, so
+eviction spreads across the window instead of one slot absorbing every
+conflict. It stays a pure function of the key, which matters: cache contents
+now depend on how work is split across lanes, so the emitted bytes must not.
+Verified directly — the same unit compiled at 1, 2, 3, 5, 8 and 16 lanes
+produces six byte-identical executables.
+
+**The window is narrow, and that is measured, not assumed.** Probe steps are
+paid on every emission while associativity only buys hits. Swept at the 65536
+ceiling: 17.86 G instructions at a window of 1, **17.73 G at 2**, 17.74 G at
+4, 17.83 G at 8, 18.07 G at 16. One slot loses too many hits; past two the
+walk costs more than it wins.
+
+**Bounding the probe also overturns `2026-08-15e`'s capacity ceiling, which
+should now be read as a consequence of the old probe.** That entry chose 65536
+because a larger table cost memory "for no measured wall improvement" — but
+under a 64-slot never-replacing probe, a larger table helped mainly by staying
+unsaturated. With the window bounded, only the slots a key actually lands on
+are ever touched, so capacity costs address space rather than pages until it
+outgrows the codegen arena's own high-water mark. Re-swept with peak RSS taken
+from `VmHWM`:
+
+```
+entries   per lane   stage-1 instructions   peak RSS
+  65536      2 MiB       17,728,627,486     1,338,940 kB
+ 262144      8 MiB       15,900,614,196     1,338,848 kB
+ 524288     16 MiB       15,568,244,627     1,393,996 kB
+```
+
+262144 is the largest capacity that is **free** in resident memory, and the
+ceiling moved there; `2026-08-15e` had rejected it at an assumed 128 MiB cost.
+524288 buys a further 2.1% for 55 MB and was not taken. The instrument is
+known to respond: 1048576 entries reads 1,394,468 kB, so the flat middle row
+is a real result rather than a measurement that never moves. `_ENTRIES_PER_FUNCTION` stays
+64; the unit's 3,517 functions reach the new ceiling too.
+
+Two smaller things. `c_parse_label_address_prefix` and its `_with_typedef`
+sibling now take `CPreprocessResult` by const pointer. The struct is **688
+bytes** and both are called once per identifier token, `c_ir_unsupported_gnu_
+construct` calling the first once per token of every function body. Worth
+**-0.14%**, which is far less than the by-value signature suggests and is
+recorded so the next reader does not re-derive it: the win is real but the
+copies were mostly already elided.
+
+And a **negative result — do not repeat it**. Computing the value key early
+and issuing a `BUSTER_PREFETCH` for its template slot before the form table's
+probe, so the two independent misses overlap, measured **+0.38%** instructions
+with no clock improvement. The branch on the form entry is predictable, so the
+out-of-order window was already running both loads concurrently; all the
+prefetch added was the value hash on the 16.5% of rows that return before
+needing it.
+
+Validation: byte-identical stage-1/stage-2 fixed point, 304,452 Release
+assertions across 39 modules, lane-count byte-identity as above, and a full
+local `test_all_combinations_ci`. That matrix is Linux-only, so the aarch64 and
+Windows verdicts come from remote CI.
+
 `2026-08-15g` (Linux x86_64, Zen 4 7940HS; selection stops re-deriving each
 candidate's operand count, based on `2aa6930f`). Stage 1 `19,082,380,558` ->
 `18,150,283,024` instructions (**-4.9%**) measured single-lane.
