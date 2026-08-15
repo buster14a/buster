@@ -60,9 +60,31 @@ capture — but the guard now sits next to the key instead of resting on that,
 at a measured cost of 0.13%. The same reasoning that pins the bytes in
 `2026-08-15c` otherwise carries over unchanged.
 
-Validation as in `2026-08-15c`: byte-identical stage-1/stage-2 fixed point
-(`SELF_HOST deterministic bytes=45533984`), 302,625 Release assertions across
-38 modules, and a full local `test_all_combinations_ci`.
+The value hashes then stopped walking the key words a second time. The shape
+hashes already summarize every word, so folding the operand values into those
+gives the same separation for half the work: `26,495,655,699` ->
+`25,935,567,890` instructions, a further **-2.1%**, for the stage-1 total
+above.
+
+**A local `test_all_combinations_ci` is not sufficient for a change that alters
+a shared structure's size, and this audit is the proof.** The matrix is
+Linux-only; aarch64 and Windows exist only in remote CI. The value-keyed table
+took `CodegenX64MetadataCache` past 64 KiB, and the macOS self-host then failed
+to compile `codegen_canonical_parallel_lane` for aarch64 with *"C code
+generation failed with error 4 ... opcode 22, operation 73"* — buster could no
+longer compile itself. Reduced to a fixture, **the AArch64 backend cannot lower
+a variable index into an array whose element stride reaches 2^16**: 65,520
+bytes compiles, 65,536 fails. That is a pre-existing backend gap that any array
+of >=64 KiB structs indexed by a variable will hit, recorded here because this
+is where it surfaced; it is not fixed by this audit. The cache array became one
+pointer per lane, each cache its own allocation, so the indexed stride is 8
+bytes whatever the cache grows to. That costs nothing measurable
+(`25,935,803,166` against `25,935,567,890`).
+
+Validation: byte-identical stage-1/stage-2 fixed point, 302,625 Release
+assertions across 38 modules, and a full local `test_all_combinations_ci` —
+with the caveat above that the aarch64 and Windows verdicts come only from
+remote CI, and must be waited for.
 
 `2026-08-15c` (Linux x86_64, Zen 4 7940HS; value-free emissions are memoized as
 byte templates, based on `879d3e00`). Stage 1 `32,738,139,154` ->
