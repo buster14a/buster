@@ -14,6 +14,12 @@ struct Mixed
     int count;
 };
 
+struct ReverseMixed
+{
+    int count;
+    double value;
+};
+
 struct FloatPair
 {
     double left;
@@ -31,6 +37,11 @@ typedef void* va_list;
 static struct Mixed make_mixed(double value, int count)
 {
     return (struct Mixed){value, count};
+}
+
+static struct ReverseMixed make_reverse_mixed(int count, double value)
+{
+    return (struct ReverseMixed){count, value};
 }
 
 static int mixed_is_expected(struct Mixed value)
@@ -122,6 +133,11 @@ int main(void)
     if (!mixed_is_expected(make_mixed(2.25, 3)))
     {
         return 4;
+    }
+    struct ReverseMixed reverse_mixed = make_reverse_mixed(3, 2.25);
+    if (reverse_mixed.count != 3 || reverse_mixed.value != 2.25)
+    {
+        return 13;
     }
     if (sum_mixed(make_mixed(2.25, 3)) != 5.25)
     {

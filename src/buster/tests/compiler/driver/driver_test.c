@@ -1133,6 +1133,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
     BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
+    BUSTER_TEST(arguments, invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+
+    String8 register_allocator_default_command_line[] = {S8("source.c")};
+    CompilerDriverInvocation register_allocator_default = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_default_command_line));
+    BUSTER_TEST(arguments, register_allocator_default.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, register_allocator_default.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+    BUSTER_TEST(arguments, !register_allocator_default.register_allocator_explicit);
+
+    String8 register_allocator_o0_command_line[] = {S8("-O0"), S8("source.c")};
+    CompilerDriverInvocation register_allocator_o0 = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_o0_command_line));
+    BUSTER_TEST(arguments, register_allocator_o0.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, register_allocator_o0.optimization_level == 0);
+    BUSTER_TEST(arguments, register_allocator_o0.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+
+    String8 register_allocator_disabled_command_line[] = {S8("-O2"), S8("-fno-register-allocator"), S8("source.c")};
+    CompilerDriverInvocation register_allocator_disabled = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_disabled_command_line));
+    BUSTER_TEST(arguments, register_allocator_disabled.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, register_allocator_disabled.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE);
+    BUSTER_TEST(arguments, register_allocator_disabled.register_allocator_explicit);
+
+    // Driver options follow the usual last-option-wins rule, so a later -O
+    // restores the default allocator after an explicit opt-out.
+    String8 register_allocator_reenabled_command_line[] = {S8("-fno-register-allocator"), S8("-O1"), S8("source.c")};
+    CompilerDriverInvocation register_allocator_reenabled = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_reenabled_command_line));
+    BUSTER_TEST(arguments, register_allocator_reenabled.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, register_allocator_reenabled.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+
+    String8 register_allocator_quality_command_line[] = {S8("-O3"), S8("-fregister-allocator=quality"), S8("source.c")};
+    CompilerDriverInvocation register_allocator_quality = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_quality_command_line));
+    BUSTER_TEST(arguments, register_allocator_quality.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, register_allocator_quality.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY);
+    BUSTER_TEST(arguments, register_allocator_quality.register_allocator_explicit);
+
     String8 uefi_command_line[] = {
         S8("--target=x86_64-unknown-uefi"), S8("--entry=FirmwareEntry"), S8("-isystem"), S8("firmware/include"), S8("source.c"),
     };

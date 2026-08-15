@@ -305,6 +305,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
         .debug_info = true,
+        // Native machine code needs register placement even when source-level
+        // optimization is disabled. Match LLVM's -O0 policy by using the
+        // low-latency allocator unless the caller explicitly opts out.
+        .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
     };
     if (!arena)
     {
@@ -738,19 +742,16 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.source_metrics_path = value;
             continue;
         }
-        // Optimization intent selects the register allocator, which is the
-        // only budget this compiler currently spends. -O0 keeps the
-        // canonical stack emitter; -O1 and above take FAST, which the
-        // self-host soak holds byte-identical and which emits about a
-        // third fewer instructions. QUALITY stays out of the mapping on
-        // purpose: it does not yet beat FAST on a measured corpus (see the
-        // 2026-08-09ai audit entry), so it is reachable only by naming it.
+        // Register allocation is independent of source-level optimization:
+        // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
+        // out of the optimization-level mapping because it does not yet beat
+        // FAST on a measured corpus; callers can still name it explicitly.
         if (string_starts_with_sequence(argument, S8("-O")))
         {
             String8 level = string_slice(argument, 2, argument.length);
             if (!level.length || string_equal(level, S8("0")))
             {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
                 invocation.optimization_level = 0;
                 continue;
             }
@@ -763,6 +764,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
             return invocation;
+        }
+        if (string_equal(argument, S8("-fno-register-allocator")))
+        {
+            invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+            invocation.register_allocator_explicit = true;
+            continue;
         }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)

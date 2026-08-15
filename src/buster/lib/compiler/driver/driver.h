@@ -122,7 +122,9 @@ struct CompilerDriverInvocation
     bool verbose;
     bool no_standard_includes;
     bool debug_info;
-    // A CodegenRegisterAllocatorMode value from -fregister-allocator=.
+    // A CodegenRegisterAllocatorMode value. FAST is the driver default;
+    // -fregister-allocator= selects another mode and
+    // -fno-register-allocator selects NONE.
     u8 register_allocator;
     u8 optimization_level;
     bool has_gpu_target;

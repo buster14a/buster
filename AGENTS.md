@@ -203,6 +203,12 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+Native x86-64 and AArch64 compilation uses the FAST register allocator at
+every optimization level, including the default and `-O0`, while
+`-fno-register-allocator` selects the canonical stack emitter. Advanced and
+diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
+`-fregister-allocator=<mode>`; when several allocator-affecting options are
+present, the last one wins.
 `-emit-llvm` emits binary LLVM bitcode directly from canonical typed IR for C
 inputs. It writes `<input>.bc` by default, accepts `-o` for a single
 input, and rejects native objects, archives, libraries, frameworks, linker

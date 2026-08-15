@@ -7049,6 +7049,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         if (machine_function_emitted)
         {
+            // Canonical emission accounts for SIMD operations while lowering
+            // each row. The machine path bypasses that code, so preserve the
+            // same source-IR statistic once its encoded function is kept.
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                result.statistics.simd_operation_count += function->instructions[instruction_index].opcode == IR_OPCODE_SIMD;
+            }
             continue;
         }
         result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;

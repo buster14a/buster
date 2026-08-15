@@ -365,14 +365,14 @@ struct CodegenExecutable
     CodegenError error;
 };
 
-// Register-allocation strategy for the machine-IR backend path. `NONE` is
-// the existing canonical direct emitter and stays the production default
-// during migration. `MIR_STACK` places every eligible value in a stack
-// location through the machine selector/encoder for differential testing.
-// `FAST` minimizes allocation latency; `QUALITY` maximizes generated-code
-// performance under a compile-time budget. Until the machine selector
-// lands, every non-NONE mode falls back to the canonical path per function
-// and the fallback is counted in CodegenStatistics.
+// Register-allocation strategy for the machine-IR backend path. `NONE` uses
+// the canonical direct emitter and is the explicit compatibility/diagnostic
+// escape hatch. `MIR_STACK` places every eligible value in a stack location
+// through the machine selector/encoder for differential testing. `FAST` is
+// the driver default and minimizes allocation latency; `QUALITY` maximizes
+// generated-code performance under a compile-time budget. Every non-NONE
+// mode falls back to the canonical path per unsupported function, and the
+// fallback is counted in CodegenStatistics.
 typedef enum CodegenRegisterAllocatorMode
 {
     CODEGEN_REGISTER_ALLOCATOR_NONE,

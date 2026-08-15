@@ -3149,12 +3149,34 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 {
                     return false;
                 }
+                // Capture integer results before floating results: the
+                // MOVQ_FROM_XMM bridge uses RAX as its fixed scratch, which
+                // would otherwise destroy an integer-class return part that
+                // still has to be copied from RAX.
                 u32 return_integer_index = 0;
                 u32 return_float_index = 0;
-                for (u32 part_index = 0; part_index < callee_return_shape.part_count; part_index += 1)
+                for (u32 capture_pass = 0; capture_pass < 2; capture_pass += 1)
                 {
-                    if (callee_return_shape.part_is_float[part_index])
+                    bool float_pass = capture_pass == 1;
+                    for (u32 part_index = 0; part_index < callee_return_shape.part_count; part_index += 1)
                     {
+                        bool part_float = callee_return_shape.part_is_float[part_index] != 0;
+                        if (part_float != float_pass)
+                        {
+                            continue;
+                        }
+                        if (!part_float)
+                        {
+                            machine_x64_select_row(selector, (MachineInstruction){
+                                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                              machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                               return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX)},
+                                                                 .payload = callee_return_shape.part_offsets[part_index],
+                                                                 .opcode = MACHINE_X64_STORE_FRAME64,
+                                                             });
+                            return_integer_index += 1;
+                            continue;
+                        }
                         u32 bounce_register = machine_x64_synthesize_register(selector);
                         machine_x64_select_row(selector, (MachineInstruction){
                                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
@@ -3168,16 +3190,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                              .opcode = MACHINE_X64_STORE_FRAME64,
                                                          });
                         return_float_index += 1;
-                        continue;
                     }
-                    machine_x64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                                      machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                       return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX)},
-                                                         .payload = callee_return_shape.part_offsets[part_index],
-                                                         .opcode = MACHINE_X64_STORE_FRAME64,
-                                                     });
-                    return_integer_index += 1;
                 }
                 return true;
             }
@@ -3484,12 +3497,33 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 {
                     return false;
                 }
+                // Populate floating return registers first: MOVQ_TO_XMM uses
+                // RAX as its bridge, so integer-class parts must be loaded
+                // into RAX/RDX only after every float part has crossed.
                 u32 return_integer_index = 0;
                 u32 return_float_index = 0;
-                for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
+                for (u32 populate_pass = 0; populate_pass < 2; populate_pass += 1)
                 {
-                    if (selector->return_shape.part_is_float[part_index])
+                    bool float_pass = populate_pass == 0;
+                    for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
                     {
+                        bool part_float = selector->return_shape.part_is_float[part_index] != 0;
+                        if (part_float != float_pass)
+                        {
+                            continue;
+                        }
+                        if (!part_float)
+                        {
+                            machine_x64_select_row(selector, (MachineInstruction){
+                                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                               return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
+                                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                                 .payload = selector->return_shape.part_offsets[part_index],
+                                                                 .opcode = MACHINE_X64_LOAD_FRAME,
+                                                             });
+                            return_integer_index += 1;
+                            continue;
+                        }
                         u32 bounce_register = machine_x64_synthesize_register(selector);
                         machine_x64_select_row(selector, (MachineInstruction){
                                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
@@ -3503,16 +3537,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                              .opcode = MACHINE_X64_MOVQ_TO_XMM,
                                                          });
                         return_float_index += 1;
-                        continue;
                     }
-                    machine_x64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                       return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
-                                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                         .payload = selector->return_shape.part_offsets[part_index],
-                                                         .opcode = MACHINE_X64_LOAD_FRAME,
-                                                     });
-                    return_integer_index += 1;
                 }
             }
             else if (selector->return_shape.vector)
