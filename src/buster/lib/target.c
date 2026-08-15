@@ -693,6 +693,24 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                        model == CPU_MODEL_INTEL_GRANDRIDGE ||
                        model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
                        model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_shstk = model == CPU_MODEL_AMD_ZEN_4 || model == CPU_MODEL_AMD_ZEN_5;
+    bool intel_shstk = model == CPU_MODEL_INTEL_TIGERLAKE ||
+                       model == CPU_MODEL_INTEL_ALDERLAKE ||
+                       model == CPU_MODEL_INTEL_RAPTORLAKE ||
+                       model == CPU_MODEL_INTEL_METEORLAKE ||
+                       model == CPU_MODEL_INTEL_GRACEMONT ||
+                       model == CPU_MODEL_INTEL_ARROWLAKE ||
+                       model == CPU_MODEL_INTEL_ARROWLAKE_S ||
+                       model == CPU_MODEL_INTEL_LUNARLAKE ||
+                       model == CPU_MODEL_INTEL_PANTHERLAKE ||
+                       model == CPU_MODEL_INTEL_EMERALD_RAPIDS ||
+                       model == CPU_MODEL_INTEL_SAPPHIRE_RAPIDS ||
+                       model == CPU_MODEL_INTEL_GRANITE_RAPIDS ||
+                       model == CPU_MODEL_INTEL_GRANITE_RAPIDS_D ||
+                       model == CPU_MODEL_INTEL_SIERRAFOREST ||
+                       model == CPU_MODEL_INTEL_GRANDRIDGE ||
+                       model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
+                       model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool amd_state_fsgsbase = model >= CPU_MODEL_AMD_BD_3 && model <= CPU_MODEL_AMD_ZEN_5;
     bool amd_state_xsave = model >= CPU_MODEL_AMD_BT_2 && model <= CPU_MODEL_AMD_ZEN_5;
     bool amd_state_xsaves = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
@@ -782,6 +800,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (intel_uintr)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_UINTR);
+    }
+    if (amd_shstk || intel_shstk)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHSTK);
     }
     if (intel_sha512_sm3_sm4)
     {
