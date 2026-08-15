@@ -167,6 +167,12 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_shstk
 BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_ptwrite_forms[] = {
     {8827, UINT64_C(0x263769210dc3d35f)}, {8828, UINT64_C(0x4371a45c4965fbc3)},
 };
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_movdir64b_forms[] = {
+    {1886, UINT64_C(0xcfdf1526a8946534)},
+    {8762, UINT64_C(0x4f195bc17d9178e7)},
+    {8763, UINT64_C(0xd4b2dade382c430e)},
+};
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -1067,6 +1073,242 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = ptwrite_disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         BUSTER_TEST(arguments, ptwrite_disabled.diagnostic_count != 0);
     }
+    // The block-transfer inventory has one normalized APX form, one
+    // normalized legacy64 form, and one non-64 control.  With the full
+    // Diamond Rapids target, Intel source selects the APX encoding while the
+    // AT&T projection and the legacy row remain byte-mismatch controls.  The
+    // non-64 form remains outside the x86-64 source partition.
+    u8 movdir64b_inventory_text[3 * 64] = {0};
+    u32 movdir64b_inventory_length = 0;
+    for (u32 movdir64b_index = 0;
+         movdir64b_index < BUSTER_ARRAY_LENGTH(x86_completion_census_movdir64b_forms);
+         movdir64b_index += 1)
+    {
+        X86CompletionCensusFormKey const* expected = &x86_completion_census_movdir64b_forms[movdir64b_index];
+        BusterX86MetadataForm form = {0};
+        BusterX86MetadataFormKey key = {0};
+        bool form_ok = buster_x86_metadata_form(expected->form_id, &form) &&
+                       buster_x86_metadata_form_key(expected->form_id, &key);
+        BUSTER_TEST(arguments, form_ok && key.stable_hash == expected->stable_hash &&
+                                 ((expected->form_id == 1886 &&
+                                   string_equal(buster_x86_metadata_string_span(form.isa_set), S8("APX_F_MOVDIR64B"))) ||
+                                  (expected->form_id != 1886 &&
+                                   string_equal(buster_x86_metadata_string_span(form.isa_set), S8("MOVDIR64B")))) &&
+                                 buster_x86_metadata_string_span(form.cpl).length == 1 &&
+                                 buster_x86_metadata_string_byte(form.cpl, 0) == '3');
+        if (expected->form_id == 8762)
+            BUSTER_TEST(arguments, form_ok && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64);
+        else
+            BUSTER_TEST(arguments, form_ok && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED);
+        String8 line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                      expected->form_id, expected->stable_hash);
+        bool fits = movdir64b_inventory_length + line.length <= sizeof(movdir64b_inventory_text);
+        BUSTER_TEST(arguments, fits);
+        if (fits)
+        {
+            memcpy(movdir64b_inventory_text + movdir64b_inventory_length, line.pointer, line.length);
+            movdir64b_inventory_length += (u32)line.length;
+        }
+    }
+    BUSTER_TEST(arguments, movdir64b_inventory_length == 66);
+    // Exhaustively apply the production topology predicate to every
+    // generated form with a matching unsized GPR64 + ordinary-memory query.
+    // Exactly two normalized block-transfer forms satisfy the semantic shape:
+    // APX1886 and legacy8763.  Both accept the architectural zmmword
+    // aggregate qualifier; every other explicit width is rejected before a
+    // shadow candidate can be selected.
+    BusterX86MetadataPhysicalOperand block_memory_topology_operands[2] = {
+        {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+         .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+        {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 0,
+         .memory = {.base = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                    .address_size = 64, .has_base = true}},
+    };
+    BusterX86MetadataPhysicalQuery block_memory_topology_query = {
+        .operands = block_memory_topology_operands, .operand_count = 2, .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .include_privileged = true,
+        .source_semantics = true,
+    };
+    u8 block_memory_topology_text[64] = {0};
+    u32 block_memory_topology_length = 0;
+    u32 block_memory_topology_count = 0;
+    u32 block_memory_topology_form_ids[2] = {0};
+    u64 block_memory_topology_hashes[2] = {0};
+    for (u32 block_memory_form_id = 0; block_memory_form_id < form_count; block_memory_form_id += 1)
+    {
+        BusterX86MetadataForm block_memory_form = {0};
+        if (!buster_x86_metadata_form(block_memory_form_id, &block_memory_form)) continue;
+        if (!buster_x86_metadata_block_memory_source_topology(block_memory_form, block_memory_topology_query)) continue;
+        block_memory_topology_count += 1;
+        if (block_memory_topology_count <= BUSTER_ARRAY_LENGTH(block_memory_topology_form_ids))
+        {
+            block_memory_topology_form_ids[block_memory_topology_count - 1] = block_memory_form_id;
+            block_memory_topology_hashes[block_memory_topology_count - 1] = block_memory_form.stable_hash;
+        }
+        String8 block_memory_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                                   block_memory_form_id, block_memory_form.stable_hash);
+        bool block_memory_fits = block_memory_topology_length + block_memory_line.length <= sizeof(block_memory_topology_text);
+        BUSTER_TEST(arguments, block_memory_fits);
+        if (block_memory_fits)
+        {
+            memcpy(block_memory_topology_text + block_memory_topology_length,
+                   block_memory_line.pointer, block_memory_line.length);
+            block_memory_topology_length += (u32)block_memory_line.length;
+        }
+    }
+    u8 block_memory_topology_digest[32] = {0};
+    static u8 const expected_block_memory_topology_digest[32] = {
+        0xd0, 0x43, 0x4e, 0x20, 0xd0, 0x5e, 0x17, 0x30,
+        0x70, 0x8d, 0x02, 0x49, 0xb6, 0x18, 0x4a, 0x87,
+        0x5a, 0x96, 0xad, 0x87, 0xab, 0x2a, 0x94, 0xb6,
+        0xc9, 0x3c, 0x33, 0x3b, 0x0d, 0x39, 0x4c, 0x4b,
+    };
+    link_sha256(arguments->arena, block_memory_topology_text, block_memory_topology_length,
+                block_memory_topology_digest);
+    BUSTER_TEST(arguments, block_memory_topology_count == 2 && block_memory_topology_form_ids[0] == 1886 &&
+                             block_memory_topology_hashes[0] == UINT64_C(0xcfdf1526a8946534) &&
+                             block_memory_topology_form_ids[1] == 8763 &&
+                             block_memory_topology_hashes[1] == UINT64_C(0xd4b2dade382c430e) &&
+                             block_memory_topology_length == 44 &&
+                             memcmp(block_memory_topology_digest, expected_block_memory_topology_digest,
+                                    sizeof(expected_block_memory_topology_digest)) == 0);
+    block_memory_topology_operands[1].memory.source_width = 512;
+    BusterX86MetadataForm legacy_memory_form = {0};
+    BusterX86MetadataForm apx_memory_form = {0};
+    BUSTER_TEST(arguments, buster_x86_metadata_form(1886, &apx_memory_form));
+    BUSTER_TEST(arguments, buster_x86_metadata_form(8763, &legacy_memory_form));
+    BUSTER_TEST(arguments, buster_x86_metadata_block_memory_source_authoritative(apx_memory_form,
+                                                                                  block_memory_topology_query));
+    BUSTER_TEST(arguments, buster_x86_metadata_block_memory_source_authoritative(legacy_memory_form,
+                                                                                  block_memory_topology_query));
+    block_memory_topology_operands[1].memory.source_width = 32;
+    BUSTER_TEST(arguments, !buster_x86_metadata_block_memory_source_authoritative(apx_memory_form,
+                                                                                   block_memory_topology_query));
+    BUSTER_TEST(arguments, !buster_x86_metadata_block_memory_source_authoritative(legacy_memory_form,
+                                                                                   block_memory_topology_query));
+    block_memory_topology_operands[1].memory.source_width = 512;
+    BusterX86CompletionCensusRecord* movdir64b_baseline_records =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
+    Target movdir64b_baseline_target = census_target;
+    movdir64b_baseline_target.cpu_features = target_cpu_features_remove(
+        movdir64b_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_MOVDIR64B);
+    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
+        .arena = arguments->arena, .target = movdir64b_baseline_target,
+        .records = movdir64b_baseline_records, .record_capacity = form_count,
+        .run_intel = true, .run_att = true,
+    });
+    u32 movdir64b_changed_count = 0;
+    for (u32 movdir64b_compare_form_id = 0; movdir64b_compare_form_id < form_count;
+         movdir64b_compare_form_id += 1)
+    {
+        BusterX86CompletionCensusRecord const* before = &movdir64b_baseline_records[movdir64b_compare_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[movdir64b_compare_form_id];
+        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                       before->intel_source_reason != after->intel_source_reason ||
+                       before->att_source_reason != after->att_source_reason ||
+                       before->intel_byte_count != after->intel_byte_count ||
+                       before->att_byte_count != after->att_byte_count ||
+                       before->metadata_byte_count != after->metadata_byte_count;
+        if (!changed) continue;
+        movdir64b_changed_count += 1;
+        bool selected = false;
+        for (u32 movdir64b_index = 0;
+             movdir64b_index < BUSTER_ARRAY_LENGTH(x86_completion_census_movdir64b_forms);
+             movdir64b_index += 1)
+            selected |= movdir64b_compare_form_id == x86_completion_census_movdir64b_forms[movdir64b_index].form_id;
+        BUSTER_TEST(arguments, selected);
+    }
+    BUSTER_TEST(arguments, movdir64b_changed_count == 2);
+    {
+        BusterX86CompletionCensusRecord const* before_apx = &movdir64b_baseline_records[1886];
+        BusterX86CompletionCensusRecord const* after_apx = &records[1886];
+        BusterX86CompletionCensusRecord const* before_non64 = &movdir64b_baseline_records[8762];
+        BusterX86CompletionCensusRecord const* after_non64 = &records[8762];
+        BusterX86CompletionCensusRecord const* before_legacy = &movdir64b_baseline_records[8763];
+        BusterX86CompletionCensusRecord const* after_legacy = &records[8763];
+        BUSTER_TEST(arguments, before_apx->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_apx->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_apx->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before_apx->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after_apx->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after_apx->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_apx->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after_apx->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+        BUSTER_TEST(arguments, before_legacy->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_legacy->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_legacy->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before_legacy->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after_legacy->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after_legacy->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after_legacy->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_legacy->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+        BUSTER_TEST(arguments, before_non64->intel_class == after_non64->intel_class &&
+                                 before_non64->att_class == after_non64->att_class &&
+                                 before_non64->intel_source_reason == after_non64->intel_source_reason &&
+                                 before_non64->att_source_reason == after_non64->att_source_reason &&
+                                 before_non64->intel_byte_count == after_non64->intel_byte_count &&
+                                 before_non64->att_byte_count == after_non64->att_byte_count &&
+                                 before_non64->metadata_byte_count == after_non64->metadata_byte_count);
+    }
+    {
+        static u8 const expected_movdir64b_bytes[] = {0x66, 0x0f, 0x38, 0xf8, 0x01};
+        static u8 const expected_movdir64b_boundary_bytes[] = {0x66, 0x45, 0x0f, 0x38, 0xf8, 0x7f, 0x40};
+        Target movdir64b_legacy_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = CPU_MODEL_BASELINE,
+            .os = OPERATING_SYSTEM_LINUX,
+            .cpu_features_explicit = true,
+            .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MOVDIR64B}, 2),
+        };
+        AssemblyEncodeResult intel_rcx = assembly_encode(
+            arguments->arena, S8("movdir64b rax, [rcx]\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult intel_zmm_rcx = assembly_encode(
+            arguments->arena, S8("movdir64b rax, zmmword ptr [rcx]\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult intel_dword_rcx = assembly_encode(
+            arguments->arena, S8("movdir64b rax, dword ptr [rcx]\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult intel_dword_full = assembly_encode(
+            arguments->arena, S8("movdir64b rax, dword ptr [rcx]\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult att_rcx = assembly_encode(
+            arguments->arena, S8("movdir64b (%rcx), %rax\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult intel_boundary = assembly_encode(
+            arguments->arena, S8("movdir64b r15, [r15+0x40]\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult att_boundary = assembly_encode(
+            arguments->arena, S8("movdir64b 0x40(%r15), %r15\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_legacy_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, intel_rcx.diagnostic_count == 0 && intel_zmm_rcx.diagnostic_count == 0 &&
+                                 intel_dword_rcx.diagnostic_count != 0 && intel_dword_full.diagnostic_count != 0 &&
+                                 att_rcx.diagnostic_count == 0 &&
+                                 intel_rcx.bytes.length == sizeof(expected_movdir64b_bytes) &&
+                                 intel_zmm_rcx.bytes.length == sizeof(expected_movdir64b_bytes) &&
+                                 att_rcx.bytes.length == sizeof(expected_movdir64b_bytes) &&
+                                 memcmp(intel_rcx.bytes.pointer, expected_movdir64b_bytes, sizeof(expected_movdir64b_bytes)) == 0 &&
+                                 memcmp(intel_zmm_rcx.bytes.pointer, expected_movdir64b_bytes, sizeof(expected_movdir64b_bytes)) == 0 &&
+                                 memcmp(att_rcx.bytes.pointer, expected_movdir64b_bytes, sizeof(expected_movdir64b_bytes)) == 0);
+        BUSTER_TEST(arguments, intel_boundary.diagnostic_count == 0 && att_boundary.diagnostic_count == 0 &&
+                                 intel_boundary.bytes.length == sizeof(expected_movdir64b_boundary_bytes) &&
+                                 att_boundary.bytes.length == sizeof(expected_movdir64b_boundary_bytes) &&
+                                 memcmp(intel_boundary.bytes.pointer, expected_movdir64b_boundary_bytes,
+                                        sizeof(expected_movdir64b_boundary_bytes)) == 0 &&
+                                 memcmp(att_boundary.bytes.pointer, expected_movdir64b_boundary_bytes,
+                                        sizeof(expected_movdir64b_boundary_bytes)) == 0);
+        Target movdir64b_disabled_target = movdir64b_legacy_target;
+        movdir64b_disabled_target.cpu_features = target_cpu_features_remove(
+            movdir64b_disabled_target.cpu_features, TARGET_CPU_FEATURE_X86_MOVDIR64B);
+        AssemblyEncodeResult disabled_intel = assembly_encode(
+            arguments->arena, S8("movdir64b rax, [rcx]\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult disabled_att = assembly_encode(
+            arguments->arena, S8("movdir64b (%rcx), %rax\n"),
+            (AssemblyEncodeOptions){.target = movdir64b_disabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, disabled_intel.diagnostic_count != 0 && disabled_att.diagnostic_count != 0);
+    }
     for (u32 crypto_shadow_index = 0;
          crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
          crypto_shadow_index += 1)
@@ -1917,33 +2159,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5621 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 225 && source.intel_unresolved_count == 3966 &&
-                             source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 550 && source.intel_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.intel_exact_count == 5622 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 225 && source.intel_unresolved_count == 3964 &&
+                             source.intel_byte_mismatch_count == 768 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_policy_rejected_count == 548 && source.intel_different_encoding_count == 17);
     BUSTER_TEST(arguments, source.att_exact_count == 5710 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3779 &&
-                             source.att_byte_mismatch_count == 1046 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 559 && source.att_different_encoding_count == 17);
+                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3777 &&
+                             source.att_byte_mismatch_count == 1048 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 557 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6658 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6660 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3263 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 550);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6845 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 548);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6847 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1187 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 559);
-
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 557);
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
     // is a proof of source reachability under an enabled target, not a change

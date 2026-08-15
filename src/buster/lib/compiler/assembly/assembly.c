@@ -12619,7 +12619,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                     .source_semantics = true,
                 };
                 metadata_source_authoritative = assembly_x86_metadata_typed_decorator_authoritative(metadata_form, metadata_query) ||
-                                                buster_x86_metadata_legacy_xmm_memory_authoritative(metadata_form, metadata_query);
+                                                buster_x86_metadata_legacy_xmm_memory_authoritative(metadata_form, metadata_query) ||
+                                                buster_x86_metadata_block_memory_source_authoritative(metadata_form, metadata_query);
             }
         }
         if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !metadata_source_authoritative) ||

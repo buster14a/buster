@@ -1087,6 +1087,17 @@ BUSTER_F_DECL bool buster_x86_metadata_typed_decorator_authoritative(BusterX86Me
 // form ID, stable hash, and generated ISA spelling.
 BUSTER_F_DECL bool buster_x86_metadata_legacy_xmm_memory_authoritative(BusterX86MetadataForm form,
                                                                         BusterX86MetadataPhysicalQuery query);
+// A normalized ModRM block-transfer form (legacy or APX) with one visible read
+// memory and one suppressed write-memory binding is source-authoritative when
+// the physical query supplies the corresponding register and ordinary memory.
+// The same metadata topology supplies an unambiguous scalar element width for
+// an unsized source memory operand and accepts only the architecturally
+// matching 512-bit aggregate qualifier; no mnemonic, form ID, hash, or ISA
+// spelling participates in either decision.
+BUSTER_F_DECL bool buster_x86_metadata_block_memory_source_topology(BusterX86MetadataForm form,
+                                                                     BusterX86MetadataPhysicalQuery query);
+BUSTER_F_DECL bool buster_x86_metadata_block_memory_source_authoritative(BusterX86MetadataForm form,
+                                                                          BusterX86MetadataPhysicalQuery query);
 // Returns the metadata-derived fixed-round, maskless SAE capability used by
 // the source adapters.  The predicate is intentionally semantic: it parses
 // the normalized pattern and never keys behavior to a form ID, hash, or

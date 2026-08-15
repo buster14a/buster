@@ -955,6 +955,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool mask_decorator = false;
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
+    bool block_source_topology = buster_x86_metadata_block_memory_source_topology(form, query);
     if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);
@@ -1054,6 +1055,16 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
             operand.reg.index == query.attributes.mask_register)
             continue;
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && block_source_topology)
+        {
+            // The generated block-transfer schema describes the encoded
+            // scalar element, while public Intel syntax uses an unsized or
+            // zmmword aggregate memory operand.  Project that qualifier only
+            // for this metadata-proven topology; ordinary scalar memory keeps
+            // its existing width spelling.
+            operand.width = 0;
+            operand.memory.source_width = 512;
+        }
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
