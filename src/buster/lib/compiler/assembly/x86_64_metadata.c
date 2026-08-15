@@ -10407,7 +10407,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("pbndkb"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PCONFIG")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("pconfig"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SGX")))
+    // The generated SGX_ENCLV ISA family is the same public SGX feature.
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SGX")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("SGX_ENCLV")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("sgx"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SNP")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("snp"), S8(""), S8(""), S8(""));

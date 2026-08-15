@@ -655,6 +655,16 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                                 model == CPU_MODEL_INTEL_PANTHERLAKE ||
                                 model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
                                 model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_invpcid = model >= CPU_MODEL_AMD_ZEN_3 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_invpcid = (model >= CPU_MODEL_INTEL_HASWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                         intel_future_server || intel_phi;
+    bool amd_pku = amd_invpcid;
+    bool intel_pku = (model >= CPU_MODEL_INTEL_SKYLAKE_AVX512 && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                     intel_future_server;
+    bool intel_sgx = model == CPU_MODEL_INTEL_SKYLAKE ||
+                     (model >= CPU_MODEL_INTEL_CANNONLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                     (model >= CPU_MODEL_INTEL_GOLDMONT_PLUS && model <= CPU_MODEL_INTEL_TREMONT) ||
+                     intel_future_server;
     bool amd_state_fsgsbase = model >= CPU_MODEL_AMD_BD_3 && model <= CPU_MODEL_AMD_ZEN_5;
     bool amd_state_xsave = model >= CPU_MODEL_AMD_BT_2 && model <= CPU_MODEL_AMD_ZEN_5;
     bool amd_state_xsaves = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
@@ -723,6 +733,18 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (amd_sha || intel_sha)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHA);
+    }
+    if (amd_invpcid || intel_invpcid)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_INVPCID);
+    }
+    if (amd_pku || intel_pku)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PKU);
+    }
+    if (intel_sgx)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SGX);
     }
     if (intel_sha512_sm3_sm4)
     {

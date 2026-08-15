@@ -4452,6 +4452,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         {8818, 1, {S8("msr-imm")}},
         {8822, 1, {S8("pbndkb")}},
         {8824, 1, {S8("pconfig")}},
+        {8842, 1, {S8("sgx")}},
         {8844, 1, {S8("sgx")}},
         {8888, 1, {S8("smap")}},
         {433, 1, {S8("snp")}},
