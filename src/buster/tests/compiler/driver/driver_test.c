@@ -1198,6 +1198,63 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sha_dependency_command_line));
     BUSTER_TEST(arguments, sha_dependency_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, sha_dependency_invocation.diagnostic, S8("invalid target feature combination: sha"));
+    String8 sha512_sm3_sm4_ordered_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"),
+        S8("-mattr=+avx,+avx2,+sha512,+sm3,+sm4,-sm4,+sm4,-sha512,+sha512,-sm3,+sm3"), S8("source.c"),
+    };
+    CompilerDriverInvocation sha512_sm3_sm4_ordered = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sha512_sm3_sm4_ordered_command_line));
+    BUSTER_TEST(arguments, sha512_sm3_sm4_ordered.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(sha512_sm3_sm4_ordered.target, TARGET_CPU_FEATURE_X86_SHA512));
+    BUSTER_TEST(arguments, target_cpu_feature_has(sha512_sm3_sm4_ordered.target, TARGET_CPU_FEATURE_X86_SM3));
+    BUSTER_TEST(arguments, target_cpu_feature_has(sha512_sm3_sm4_ordered.target, TARGET_CPU_FEATURE_X86_SM4));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, sha512_sm3_sm4_ordered.target),
+                       S8("avx,avx2,sha512,sm3,sm4,sse2"));
+    String8 invalid_sha512_without_avx2_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sha512"), S8("source.c"),
+    };
+    CompilerDriverInvocation invalid_sha512_without_avx2 = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sha512_without_avx2_command_line));
+    BUSTER_TEST(arguments, invalid_sha512_without_avx2.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_sha512_without_avx2.diagnostic,
+                       S8("invalid target feature combination: avx,sha512,sse2"));
+    String8 invalid_sm4_without_avx2_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sm4"), S8("source.c"),
+    };
+    CompilerDriverInvocation invalid_sm4_without_avx2 = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sm4_without_avx2_command_line));
+    BUSTER_TEST(arguments, invalid_sm4_without_avx2.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_sm4_without_avx2.diagnostic,
+                       S8("invalid target feature combination: avx,sm4,sse2"));
+    String8 invalid_sm3_without_avx_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+sm3"), S8("source.c"),
+    };
+    CompilerDriverInvocation invalid_sm3_without_avx = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sm3_without_avx_command_line));
+    BUSTER_TEST(arguments, invalid_sm3_without_avx.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_sm3_without_avx.diagnostic,
+                       S8("invalid target feature combination: sm3,sse2"));
+    String8 valid_sm3_with_avx_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sm3"), S8("source.c"),
+    };
+    CompilerDriverInvocation valid_sm3_with_avx = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_sm3_with_avx_command_line));
+    BUSTER_TEST(arguments, valid_sm3_with_avx.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(valid_sm3_with_avx.target, TARGET_CPU_FEATURE_X86_SM3));
+    String8 valid_sha512_with_avx2_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+avx2,+sha512"), S8("source.c"),
+    };
+    CompilerDriverInvocation valid_sha512_with_avx2 = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_sha512_with_avx2_command_line));
+    BUSTER_TEST(arguments, valid_sha512_with_avx2.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(valid_sha512_with_avx2.target, TARGET_CPU_FEATURE_X86_SHA512));
+    String8 valid_sm4_with_avx2_command_line[] = {
+        S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+avx2,+sm4"), S8("source.c"),
+    };
+    CompilerDriverInvocation valid_sm4_with_avx2 = compiler_driver_parse_arguments(
+        arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid_sm4_with_avx2_command_line));
+    BUSTER_TEST(arguments, valid_sm4_with_avx2.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(valid_sm4_with_avx2.target, TARGET_CPU_FEATURE_X86_SM4));
     String8 ace_feature_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-march=haswell"),

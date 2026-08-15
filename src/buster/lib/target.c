@@ -647,6 +647,14 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                      (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_TREMONT) ||
                      (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
                      model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    // LLVM's X86.td model table exposes all three vector crypto extensions on
+    // this exact audited set. Keep the membership explicit: the intervening
+    // Arrow Lake and Granite Rapids profiles do not advertise the same trio.
+    bool intel_sha512_sm3_sm4 = model == CPU_MODEL_INTEL_ARROWLAKE_S ||
+                                model == CPU_MODEL_INTEL_LUNARLAKE ||
+                                model == CPU_MODEL_INTEL_PANTHERLAKE ||
+                                model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
+                                model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     if (amd_ssse3 || intel_ssse3)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
@@ -690,6 +698,11 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (amd_sha || intel_sha)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHA);
+    }
+    if (intel_sha512_sm3_sm4)
+    {
+        result = target_cpu_features_union(result, target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4}, 3));
     }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
     if (amd_family_10_or_newer)
@@ -1059,7 +1072,8 @@ bool target_cpu_features_are_valid(Target target)
         TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSSE3,
         TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
         TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND,
-        TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
+        TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_SHA512,
+        TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
         TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
         TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
         TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1,
@@ -1105,9 +1119,16 @@ bool target_cpu_features_are_valid(Target target)
         return false;
     }
     TargetCpuFeatures avx_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA}, 2);
+        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SM3}, 3);
     if (target_cpu_features_any(target_cpu_features_intersection(features, avx_dependent_features)) &&
         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
+    {
+        return false;
+    }
+    TargetCpuFeatures crypto_avx2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM4}, 2);
+    if (target_cpu_features_any(target_cpu_features_intersection(features, crypto_avx2_dependent_features)) &&
+        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2))
     {
         return false;
     }
@@ -1377,7 +1398,10 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("sha"), .feature = TARGET_CPU_FEATURE_X86_SHA, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sha2"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA2, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("sha3"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA3, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("sha512"), .feature = TARGET_CPU_FEATURE_X86_SHA512, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("shstk"), .feature = TARGET_CPU_FEATURE_X86_SHSTK, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sm3"), .feature = TARGET_CPU_FEATURE_X86_SM3, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sm4"), .feature = TARGET_CPU_FEATURE_X86_SM4, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("smap"), .feature = TARGET_CPU_FEATURE_X86_SMAP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sme"), .feature = TARGET_CPU_FEATURE_AARCH64_SME, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("snp"), .feature = TARGET_CPU_FEATURE_X86_SNP, .arch = CPU_ARCH_X86_64},

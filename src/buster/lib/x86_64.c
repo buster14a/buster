@@ -345,6 +345,20 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_AVX2);
         avx2_usable = true;
     }
+    // CPUID.07H:1.EAX[0:2] advertise SHA512, SM3, and SM4. These are vector
+    // extensions, so report them only when their AVX/AVX2 state is usable.
+    if (has_leaf_7_1 && avx2_usable && (leaf_7_1.eax & (UINT32_C(0x1))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHA512);
+    }
+    if (has_leaf_7_1 && avx_usable && (leaf_7_1.eax & (UINT32_C(0x2))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SM3);
+    }
+    if (has_leaf_7_1 && avx2_usable && (leaf_7_1.eax & (UINT32_C(0x4))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SM4);
+    }
     if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x8))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_BMI1);
