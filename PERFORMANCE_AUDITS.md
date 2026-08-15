@@ -18,6 +18,52 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15d` (Linux x86_64, Zen 4 7940HS; a second, value-keyed byte-template
+table, based on `ec884958`). Stage 1 `30,171,862,831` -> `26,751,605,860`
+instructions (**-11.3%**) and stage 2 `429,417,305,821` -> `389,039,815,381`.
+A single-lane stage-1 compile measured 3,255 ms -> 2,721 ms of task-clock
+(-16.4%). Cumulative across the four 2026-08-15 audits: stage 1
+`63,683,992,612` -> `26,751,605,860`, **-58.0%**, and `test_self_host` stage-1
+wall 2.679 s -> 1.858 s, **-30.6%**.
+
+**This replaces the one-patch-slot design `2026-08-15b` proposed; do not build
+that.** A hit census settled it. Over 4,864,621 canonical emissions in one
+stage-1 self-compile, the existing value-free key hits `4,838,212` times
+(**99.46%**) but only 16.5% of emissions are value-free and therefore
+templatable under `2026-08-15c`. Hashing the same key *plus* the operand values
+matches **60.9%**. So rather than teaching a patch slot to re-derive the
+computed displacement inside the byte-authority module, the values simply go in
+a key — and then the byte string is fully determined and a hit has nothing to
+patch at all.
+
+The two tables answer different questions and are sized for it. The existing
+one answers *which form is this*, which operand values do not change, so it
+stays value-free and keeps its 99.46% hit rate feeding
+`buster_x86_metadata_emit_form_selected`. The new one answers *what are the
+bytes*, which values do change; it is keyed by shape plus every operand payload
+that can reach the bytes without changing the shape (signed and unsigned
+immediates, the memory displacement, and both addends). One key build serves
+both. A template miss falls through to the form table, so this cannot make
+emission worse than not having it. Capacity is 4096 entries of 32 bytes per
+lane; the fragment-arena reservation already scales with
+`sizeof(CodegenX64MetadataCache)` and needed no change.
+
+Value-free rows keep their template on the form entry rather than moving to the
+value table, because the shape alone pins them and nothing there can evict
+them.
+
+One correctness gap is closed explicitly rather than by inference. A **symbol**
+is the one operand payload the key cannot carry: two different symbol names
+give the same shape and the same values. Such a row also needs a relocation and
+this path offers no relocation capacity, so it fails before reaching the
+capture — but the guard now sits next to the key instead of resting on that,
+at a measured cost of 0.13%. The same reasoning that pins the bytes in
+`2026-08-15c` otherwise carries over unchanged.
+
+Validation as in `2026-08-15c`: byte-identical stage-1/stage-2 fixed point
+(`SELF_HOST deterministic bytes=45533984`), 302,625 Release assertions across
+38 modules, and a full local `test_all_combinations_ci`.
+
 `2026-08-15c` (Linux x86_64, Zen 4 7940HS; value-free emissions are memoized as
 byte templates, based on `879d3e00`). Stage 1 `32,738,139,154` ->
 `30,171,862,831` instructions (**-7.9%**) and stage 2 `466,777,002,988` ->
@@ -160,6 +206,11 @@ re-running that derivation, which is its own 1.54% of the stage. A template
 that skips everything except `emit_address` is still the right target, but it
 is a narrower win than "skip emission", and anyone sizing this work should
 start from these numbers rather than from the sentence above.
+**[Superseded by `2026-08-15d`: do not build the patch slot. Putting the
+operand values in a second key removes the need to patch anything, covers 60.9%
+rather than the 17.1% above, and needs no value re-derivation inside the byte
+authority. The census numbers in this paragraph stand; the design conclusion
+drawn from them does not.]**
 
 `2026-08-15a` (Linux x86_64, Zen 4 7940HS; canonical x86-64 emission stops
 re-deriving per-form metadata on every instruction, based on `134b96b0`).

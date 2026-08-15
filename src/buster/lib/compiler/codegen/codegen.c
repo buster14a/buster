@@ -929,6 +929,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
 }
 
 #define CODEGEN_X64_METADATA_CACHE_CAPACITY 512u
+// The architectural maximum x86-64 instruction length.
+#define CODEGEN_X64_TEMPLATE_BYTE_CAPACITY 15u
 typedef struct CodegenX64MetadataCacheEntry CodegenX64MetadataCacheEntry;
 struct CodegenX64MetadataCacheEntry
 {
@@ -950,12 +952,35 @@ struct CodegenX64MetadataCacheEntry
     // the case for every row that writes a displacement, immediate, relative
     // or absolute field from an operand.
     u8 template_length;
-    u8 template_bytes[15];
+    u8 template_bytes[CODEGEN_X64_TEMPLATE_BYTE_CAPACITY];
 };
+// A second table keyed by the operand *values* as well as their shape.  The
+// table above answers "which form is this", which the values do not change, so
+// it stays value-free and keeps its very high hit rate.  This one answers
+// "what are the bytes", which the values do change: with them in the key the
+// byte string is fully determined, so a hit is a copy with nothing to patch
+// and no restriction to value-free rows.  A miss simply falls through to the
+// form table, so this can never make emission worse than not having it.
+//
+// Sized from a census of one stage-1 self-compile: the value-free table hits
+// 99.46% of 4.86 M emissions but only 16.5% of them are value-free and so
+// templatable, while a value-inclusive key matches 60.9%.
+#define CODEGEN_X64_TEMPLATE_CACHE_CAPACITY 4096u
+typedef struct CodegenX64TemplateCacheEntry CodegenX64TemplateCacheEntry;
+struct CodegenX64TemplateCacheEntry
+{
+    u64 signature;
+    u64 guard;
+    u8 length;
+    u8 bytes[CODEGEN_X64_TEMPLATE_BYTE_CAPACITY];
+};
+BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_CACHE_CAPACITY & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u)) == 0);
+
 typedef struct CodegenX64MetadataCache CodegenX64MetadataCache;
 struct CodegenX64MetadataCache
 {
     CodegenX64MetadataCacheEntry entries[CODEGEN_X64_METADATA_CACHE_CAPACITY];
+    CodegenX64TemplateCacheEntry templates[CODEGEN_X64_TEMPLATE_CACHE_CAPACITY];
 };
 BUSTER_CT_CHECK((CODEGEN_X64_METADATA_CACHE_CAPACITY & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u)) == 0);
 
@@ -1095,15 +1120,9 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_key_hashes(u64 const* wo
 }
 
 BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata_cache_entry(
-    CodegenX64MetadataCache* cache, BusterX86MetadataPhysicalQuery physical, bool insertion)
+    CodegenX64MetadataCache* cache, u64 signature, u64 guard, bool insertion)
 {
     if (!cache) return 0;
-    u64 words[CODEGEN_X64_METADATA_KEY_WORD_CAPACITY];
-    u32 word_count = codegen_canonical_x64_metadata_query_key(physical, words);
-    if (!word_count) return 0;
-    u64 signature = 0;
-    u64 guard = 0;
-    codegen_canonical_x64_metadata_key_hashes(words, word_count, &signature, &guard);
     u32 slot = (u32)signature & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
     for (u32 probe = 0; probe < CODEGEN_X64_METADATA_CACHE_CAPACITY; probe += 1)
     {
@@ -1117,6 +1136,85 @@ BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata
         }
         if (entry->signature == signature && entry->guard == guard) return entry;
         slot = (slot + 1u) & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
+    }
+    return 0;
+}
+
+// Fold the operand values into an already-built shape key.  Every field that
+// can reach the bytes without changing the shape goes in: the signed and
+// unsigned immediate payloads, the memory displacement, and both addends.
+// Symbolic operands are excluded at the call site because they emit a
+// relocation, and a relocation-bearing row is never templated.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_value_hashes(u64 const* words, u32 count,
+                                                                      BusterX86MetadataPhysicalQuery physical,
+                                                                      u64* signature, u64* guard)
+{
+    u64 first = UINT64_C(0x243f6a8885a308d3);
+    u64 second = UINT64_C(0x13198a2e03707344);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u64 word = words[index];
+        first = (first ^ word) * UINT64_C(1099511628211);
+        second = (second ^ word) * UINT64_C(0x9e3779b97f4a7c15);
+    }
+    for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
+        u64 values[5] = {
+            (u64)operand.value, operand.unsigned_value, (u64)operand.addend,
+            (u64)operand.memory.displacement, (u64)operand.memory.addend,
+        };
+        for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+        {
+            first = (first ^ values[value_index]) * UINT64_C(1099511628211);
+            second = (second ^ values[value_index]) * UINT64_C(0x9e3779b97f4a7c15);
+        }
+    }
+    first ^= first >> 32;
+    first *= UINT64_C(0xd6e8feb86659fd93);
+    first ^= first >> 32;
+    second ^= second >> 32;
+    second *= UINT64_C(0xd6e8feb86659fd93);
+    second ^= second >> 32;
+    // Zero is the empty-slot marker, so keep it out of the value space.
+    *signature = first ? first : 1;
+    *guard = second;
+}
+
+// A symbol is the one operand payload the key cannot carry: two different
+// symbol names produce the same shape and the same values, so their bytes must
+// never share a template.  In practice such a row also needs a relocation and
+// this path offers no relocation capacity, so it fails before reaching the
+// capture - but the invariant belongs here, next to the key, rather than
+// resting on that.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_query_has_symbol(BusterX86MetadataPhysicalQuery physical)
+{
+    for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
+        if (operand.has_symbol || operand.symbol.length || operand.memory.has_symbol || operand.memory.symbol.length) return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template_entry(CodegenX64MetadataCache* cache,
+                                                                                        u64 signature, u64 guard, bool insertion)
+{
+    if (!cache) return 0;
+    u32 slot = (u32)signature & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u);
+    for (u32 probe = 0; probe < 64u; probe += 1)
+    {
+        CodegenX64TemplateCacheEntry* entry = cache->templates + slot;
+        if (!entry->signature)
+        {
+            if (!insertion) return 0;
+            entry->signature = signature;
+            entry->guard = guard;
+            entry->length = 0;
+            return entry;
+        }
+        if (entry->signature == signature && entry->guard == guard) return entry;
+        slot = (slot + 1u) & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u);
     }
     return 0;
 }
@@ -1155,10 +1253,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     u64 remaining = buffer->capacity - buffer->count;
     u32 output_capacity = remaining > UINT32_MAX ? UINT32_MAX : (u32)remaining;
     CodegenX64MetadataCache* cache = (CodegenX64MetadataCache*)buffer->x64_metadata_cache;
-    CodegenX64MetadataCacheEntry* cached = codegen_canonical_x64_metadata_cache_entry(cache, physical, false);
+    // One key build serves both tables: the shape words alone key the form
+    // table, and the same words plus the operand values key the byte table.
+    u64 words[CODEGEN_X64_METADATA_KEY_WORD_CAPACITY];
+    u32 word_count = cache ? codegen_canonical_x64_metadata_query_key(physical, words) : 0;
+    u64 signature = 0;
+    u64 guard = 0;
+    if (word_count) codegen_canonical_x64_metadata_key_hashes(words, word_count, &signature, &guard);
+    CodegenX64MetadataCacheEntry* cached = word_count ? codegen_canonical_x64_metadata_cache_entry(cache, signature, guard, false) : 0;
     BusterX86MetadataEmitResult emitted = {0};
-    // A templated entry needs no transform at all: its bytes are already the
-    // answer for every query that reaches this key.
+    // A value-free row's bytes are already pinned by the shape alone, so its
+    // template hangs off the form entry and never needs the value key.
     if (cached && cached->template_length)
     {
         if (output_capacity < cached->template_length)
@@ -1169,6 +1274,26 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
         if (buffer->bytes) memcpy(buffer->bytes + buffer->count, cached->template_bytes, cached->template_length);
         buffer->count += cached->template_length;
         return true;
+    }
+    // Otherwise the values decide the bytes, so consult the value-keyed table.
+    u64 value_signature = 0;
+    u64 value_guard = 0;
+    CodegenX64TemplateCacheEntry* templated = 0;
+    if (word_count)
+    {
+        codegen_canonical_x64_metadata_value_hashes(words, word_count, physical, &value_signature, &value_guard);
+        templated = codegen_canonical_x64_template_entry(cache, value_signature, value_guard, false);
+        if (templated && templated->length)
+        {
+            if (output_capacity < templated->length)
+            {
+                codegen_buffer_report_exhausted(buffer);
+                return false;
+            }
+            if (buffer->bytes) memcpy(buffer->bytes + buffer->count, templated->bytes, templated->length);
+            buffer->count += templated->length;
+            return true;
+        }
     }
     if (cached)
     {
@@ -1196,7 +1321,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
         // through it, and a row without a stable hash cannot be identified.
         if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.form_id != UINT32_MAX && emitted.stable_hash)
         {
-            CodegenX64MetadataCacheEntry* insertion = codegen_canonical_x64_metadata_cache_entry(cache, physical, true);
+            CodegenX64MetadataCacheEntry* insertion =
+                word_count ? codegen_canonical_x64_metadata_cache_entry(cache, signature, guard, true) : 0;
             if (insertion && !insertion->form_id)
             {
                 insertion->stable_hash = emitted.stable_hash;
@@ -1218,14 +1344,29 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
         }
         return false;
     }
-    // Retain the bytes when they cannot depend on anything outside the key.
-    // This runs on the miss that filled the entry and on any later untemplated
-    // hit, so a first pass with no output buffer does not lose the chance.
-    if (cached && !cached->template_length && !emitted.value_field_count && !emitted.relocation_count && buffer->bytes &&
-        emitted.byte_count && emitted.byte_count <= BUSTER_ARRAY_LENGTH(cached->template_bytes))
+    // Retain the bytes.  A value-free row goes on the form entry, where the
+    // shape alone pins it and nothing can evict it.  Every other
+    // relocation-free row goes in the value-keyed table, where the values in
+    // the key pin it just as firmly.  Both run on the miss that filled the
+    // entry and on any later untemplated hit, so a first pass with no output
+    // buffer does not lose the chance.
+    if (buffer->bytes && !emitted.relocation_count && emitted.byte_count &&
+        emitted.byte_count <= CODEGEN_X64_TEMPLATE_BYTE_CAPACITY)
     {
-        memcpy(cached->template_bytes, buffer->bytes + buffer->count, emitted.byte_count);
-        cached->template_length = (u8)emitted.byte_count;
+        if (cached && !cached->template_length && !emitted.value_field_count)
+        {
+            memcpy(cached->template_bytes, buffer->bytes + buffer->count, emitted.byte_count);
+            cached->template_length = (u8)emitted.byte_count;
+        }
+        else if (word_count && emitted.value_field_count && !codegen_canonical_x64_query_has_symbol(physical))
+        {
+            if (!templated) templated = codegen_canonical_x64_template_entry(cache, value_signature, value_guard, true);
+            if (templated && !templated->length)
+            {
+                memcpy(templated->bytes, buffer->bytes + buffer->count, emitted.byte_count);
+                templated->length = (u8)emitted.byte_count;
+            }
+        }
     }
     buffer->count += emitted.byte_count;
     return true;
