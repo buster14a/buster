@@ -65,6 +65,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #include <buster/tests/compiler/codeview/codeview_test.h>
@@ -108,6 +109,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
+#include <buster/tests/compiler/codegen/aarch64_stride_test.c>
 #include <buster/tests/compiler/debug/debug_test.c>
 #include <buster/tests/compiler/dwarf/dwarf_test.c>
 #include <buster/tests/compiler/codeview/codeview_test.c>
@@ -248,6 +250,7 @@ typedef enum TestId
     TEST_ID_MACHINE_SELECTION,
     TEST_ID_MACHINE,
     TEST_ID_CODEGEN,
+    TEST_ID_AARCH64_STRIDE,
     TEST_ID_DEBUG_MODEL,
     TEST_ID_DWARF,
     TEST_ID_CODEVIEW,
@@ -294,6 +297,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},
+    [TEST_ID_AARCH64_STRIDE] = {S8_INITIALIZER("aarch64_stride_tests"), &aarch64_stride_tests},
     [TEST_ID_DEBUG_MODEL] = {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     [TEST_ID_DWARF] = {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
     [TEST_ID_CODEVIEW] = {S8_INITIALIZER("codeview_tests"), &codeview_tests},

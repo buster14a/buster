@@ -2521,6 +2521,29 @@ BUSTER_GLOBAL_LOCAL void a64_emit_constant(CodegenBuffer* buffer, u32 target, u6
     }
 }
 
+// The same materialization without the fixed four-word cost: movz on the
+// lowest halfword that carries a bit, movk on each higher halfword that
+// does. A value below 2^16 therefore still costs exactly the one movz that
+// the callers used to emit inline, so widening a caller past that boundary
+// changes no byte of any program that already compiled.
+BUSTER_GLOBAL_LOCAL void a64_emit_constant_compact(CodegenBuffer* buffer, u32 target, u64 value)
+{
+    u32 shift = 0;
+    while (shift < 48 && (value >> shift) && !((value >> shift) & 0xffff))
+    {
+        shift += 16;
+    }
+    a64_emit_instruction_word(buffer, 0xd2800000 | ((shift / 16) << 21) | ((u32)((value >> shift) & 0xffff) << 5) | target);
+    for (shift += 16; shift < 64; shift += 16)
+    {
+        u32 halfword = (u32)((value >> shift) & 0xffff);
+        if (halfword)
+        {
+            a64_emit_instruction_word(buffer, 0xf2800000 | ((shift / 16) << 21) | (halfword << 5) | target);
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool a64_emit_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
                                                              CodegenFunctionDescriptor* descriptor, u32 action_capacity)
 {
@@ -13707,7 +13730,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         C_A64_LOAD(10, instruction->operands[1]);
                         IrType* index_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
                         IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
-                        if (!index_type || index_type->kind != IR_TYPE_INTEGER || !element || element->layout.size > UINT16_MAX)
+                        if (!index_type || index_type->kind != IR_TYPE_INTEGER || !element || !element->layout.resolved)
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
@@ -13725,7 +13748,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             codegen_emit_u32(&buffer, sign_extend);
                         }
-                        codegen_emit_u32(&buffer, 0xd280000b | ((u32)element->layout.size << 5));
+                        // The stride is an arbitrary 64-bit constant, not a movz
+                        // immediate: an element of 64 KiB or more needs the movk
+                        // continuation, and used to be rejected outright.
+                        a64_emit_constant_compact(&buffer, 11, element->layout.size);
                         codegen_emit_u32(&buffer, 0x9b0b7d4a);
                         codegen_emit_u32(&buffer, 0x8b0a0129);
                         C_A64_STORE(9);
@@ -15625,9 +15651,10 @@ struct CodegenCanonicalParallelState
     IrModule* module;
     CodegenCanonicalFragment* fragments;
     // One pointer per lane rather than one strided block.  The cache is larger
-    // than 64 KiB and the AArch64 backend cannot currently index an array whose
-    // element stride exceeds a 16-bit immediate, so keep the indexed array at
-    // pointer stride and let each lane's cache be its own allocation.
+    // than 64 KiB, which is where the AArch64 backend used to stop being able
+    // to index an array; it now materializes an arbitrary stride, so this is
+    // no longer forced.  Keep it anyway: it costs nothing measurable and the
+    // indexed stride stays eight bytes however far the cache grows.
     CodegenX64MetadataCache** x64_metadata_caches;
     AtomicU64 take_index;
     AtomicU64 worker_arena_failures;

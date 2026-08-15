@@ -895,6 +895,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/codegen/machine_select_test.c
     src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
+    src/buster/tests/compiler/codegen/aarch64_stride_test.c
     src/buster/tests/compiler/debug/debug_test.c
     src/buster/tests/compiler/dwarf/dwarf_test.c
     src/buster/tests/compiler/codeview/codeview_test.c
@@ -936,6 +937,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
+    src/buster/tests/compiler/codegen/aarch64_stride_test.h
     src/buster/tests/compiler/debug/debug_test.h
     src/buster/tests/compiler/dwarf/dwarf_test.h
     src/buster/tests/compiler/codeview/codeview_test.h
