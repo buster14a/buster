@@ -5413,10 +5413,17 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (pattern.mandatory_prefix) mandatory_prefix = (u8)pattern.mandatory_prefix;
     u8 pp = buster_x86_metadata_emit_mandatory_pp(mandatory_prefix);
     u16 data_width = buster_x86_metadata_emit_data_operand_width(bindings, binding_count);
+    // FISTTP's m16 form belongs to the SSE3 ISA set, but its DF encoding
+    // still uses the architectural 16-bit field without an operand-size
+    // override.  Treat it like the other x87 fixed-width rows when deriving
+    // a generic 0x66 prefix from the physical memory width.
+    bool x87_no_operand_size_override = x87_form ||
+                                        (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FISTTP")) &&
+                                         data_width == 16);
     // In a MODE16 row the default operand size is already 16 bits.  Do not
     // synthesize a 66 byte for the no66 spelling; MODE32 retains the normal
     // 32-bit default and therefore keeps the existing width-derived rule.
-    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_form &&
+    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_no_operand_size_override &&
                                  pattern.mode_control != BUSTER_X86_METADATA_PATTERN_MODE_16 &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
@@ -6457,6 +6464,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
         }
     }
     bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
+    bool x87_no_operand_size_override = x87_form ||
+                                        (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FISTTP")) &&
+                                         data_width == 16);
     bool rex_w = plan->pattern->w != 0;
     bool needs_low_byte_rex = false;
     bool has_r = false;
@@ -6478,7 +6488,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     else if (rm_binding && rm_binding->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) has_b = (rm_binding->reg.index & 8) != 0;
     bool needs_rex = rex_w || has_r || has_b || needs_low_byte_rex;
     u8 mandatory_prefix = plan->pattern->mandatory_prefix ? plan->pattern->mandatory_prefix : form.mandatory_prefix;
-    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_form &&
+    bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_no_operand_size_override &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
 
     u8 bytes[16] = {0};

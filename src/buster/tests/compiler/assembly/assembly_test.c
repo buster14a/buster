@@ -2829,7 +2829,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                     .syntax = ASSEMBLY_SYNTAX_INTEL,
                                                 });
     u8 expected_x86[] = {
-        0x90, 0xe8, 0x00, 0x00, 0x00, 0x00, 0xe9, 0xf5, 0xff, 0xff, 0xff, 0xc3,
+        0x90, 0xe8, 0x00, 0x00, 0x00, 0x00, 0xeb, 0xf8, 0xc3,
     };
     BUSTER_TEST(arguments, x86.diagnostic_count == 0);
     BUSTER_TEST(arguments, x86.bytes.length == sizeof(expected_x86) && memcmp(x86.bytes.pointer, expected_x86, sizeof(expected_x86)) == 0);

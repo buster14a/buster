@@ -9783,22 +9783,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             instruction.operands[0] = destination;
         }
     }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2 &&
-        instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_X87 &&
-        instruction.operands[0].reg.index != 0)
-    {
-        // The historical AT&T x87 register spellings reverse the non-commutative
-        // opcode names as well as the operand order for a non-top destination.
-        instruction.opcode = instruction.opcode == ASSEMBLY_OPCODE_X86_FSUB ? ASSEMBLY_OPCODE_X86_FSUBR
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBR ? ASSEMBLY_OPCODE_X86_FSUB
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIV ? ASSEMBLY_OPCODE_X86_FDIVR
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVR ? ASSEMBLY_OPCODE_X86_FDIV
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBP ? ASSEMBLY_OPCODE_X86_FSUBRP
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FSUBRP ? ASSEMBLY_OPCODE_X86_FSUBP
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVP ? ASSEMBLY_OPCODE_X86_FDIVRP
-                             : instruction.opcode == ASSEMBLY_OPCODE_X86_FDIVRP ? ASSEMBLY_OPCODE_X86_FDIVP
-                                                                                : instruction.opcode;
-    }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         if (syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 4 && !info.amd_form)
@@ -11065,25 +11049,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             x87_alias_mnemonic = assembly_word_equal(first_word, S8("fadd"))   ? S8("faddp")
                                  : assembly_word_equal(first_word, S8("fmul")) ? S8("fmulp")
-                                 : assembly_word_equal(first_word, S8("fsub"))
-                                     ? (x87_alias_att ? S8("fsubrp") : S8("fsubp"))
-                                 : assembly_word_equal(first_word, S8("fsubr"))
-                                     ? (x87_alias_att ? S8("fsubp") : S8("fsubrp"))
-                                 : assembly_word_equal(first_word, S8("fdiv"))
-                                     ? (x87_alias_att ? S8("fdivrp") : S8("fdivp"))
-                                     : (x87_alias_att ? S8("fdivp") : S8("fdivrp"));
+                                 : assembly_word_equal(first_word, S8("fsub")) ? S8("fsubp")
+                                 : assembly_word_equal(first_word, S8("fsubr")) ? S8("fsubrp")
+                                 : assembly_word_equal(first_word, S8("fdiv")) ? S8("fdivp")
+                                                                                 : S8("fdivrp");
             x87_alias_rewrite = true;
         }
         else if (x87_pop_arithmetic)
         {
-            if (x87_alias_att)
-            {
-                x87_alias_mnemonic = assembly_word_equal(first_word, S8("fsubp"))  ? S8("fsubrp")
-                                     : assembly_word_equal(first_word, S8("fsubrp")) ? S8("fsubp")
-                                     : assembly_word_equal(first_word, S8("fdivp"))  ? S8("fdivrp")
-                                     : assembly_word_equal(first_word, S8("fdivrp")) ? S8("fdivp")
-                                                                                       : first_word;
-            }
+            x87_alias_mnemonic = first_word;
             x87_alias_rewrite = true;
         }
         else if (x87_omitted_register)
@@ -11103,14 +11077,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     else if (x87_one_register_source && (x87_arithmetic || x87_pop_arithmetic))
     {
-        if (x87_pop_arithmetic && x87_alias_att)
-        {
-            x87_alias_mnemonic = assembly_word_equal(first_word, S8("fsubp"))  ? S8("fsubrp")
-                                 : assembly_word_equal(first_word, S8("fsubrp")) ? S8("fsubp")
-                                 : assembly_word_equal(first_word, S8("fdivp"))  ? S8("fdivrp")
-                                 : assembly_word_equal(first_word, S8("fdivrp")) ? S8("fdivp")
-                                                                                   : first_word;
-        }
+        x87_alias_mnemonic = first_word;
         x87_alias_rewrite = true;
         x87_alias_operands = x87_alias_att ? string_format(builder->arena, S8("{S8}, %st"), x87_one_operand)
                                            : string_format(builder->arena, S8("st(0), {S8}"), x87_one_operand);
@@ -11409,6 +11376,24 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operands[left] = operands[right];
             operands[right] = temporary;
         }
+    }
+    if (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 2 &&
+        operands[0].kind == ASSEMBLY_OPERAND_REGISTER && operands[0].reg.class == ASSEMBLY_REGISTER_X87 &&
+        operands[0].reg.index != 0)
+    {
+        // Metadata rows retain the architectural x87 opcode direction after
+        // AT&T's source/destination reversal.  Non-commutative mnemonics
+        // therefore swap to their reverse spelling only when the reversed
+        // destination is a non-top stack register.
+        mnemonic = assembly_word_equal(mnemonic, S8("fsub")) ? S8("fsubr")
+                 : assembly_word_equal(mnemonic, S8("fsubr")) ? S8("fsub")
+                 : assembly_word_equal(mnemonic, S8("fdiv")) ? S8("fdivr")
+                 : assembly_word_equal(mnemonic, S8("fdivr")) ? S8("fdiv")
+                 : assembly_word_equal(mnemonic, S8("fsubp")) ? S8("fsubrp")
+                 : assembly_word_equal(mnemonic, S8("fsubrp")) ? S8("fsubp")
+                 : assembly_word_equal(mnemonic, S8("fdivp")) ? S8("fdivrp")
+                 : assembly_word_equal(mnemonic, S8("fdivrp")) ? S8("fdivp")
+                                                                  : mnemonic;
     }
     // AMD four-operand vector forms use Intel's source spelling for the
     // selector register and memory operand, while metadata rows expose the
