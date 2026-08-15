@@ -1,7 +1,27 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
+#include <buster/tests/compiler/link/link_test.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/string.h>
 #if BUSTER_INCLUDE_TESTS
+
+#if BUSTER_CPU_ARCH_X86_64
+typedef struct X86_64MetadataShaInventoryCase X86_64MetadataShaInventoryCase;
+struct X86_64MetadataShaInventoryCase
+{
+    u32 form_id;
+    u64 stable_hash;
+};
+
+BUSTER_GLOBAL_LOCAL X86_64MetadataShaInventoryCase const x86_64_metadata_sha_inventory[] = {
+    {8845, UINT64_C(0xee97de2b222473f0)}, {8846, UINT64_C(0x162cc7cd02282552)},
+    {8847, UINT64_C(0xcccd57c10c8a3ebe)}, {8848, UINT64_C(0x447901e09888d774)},
+    {8849, UINT64_C(0xa246c74e160d72be)}, {8850, UINT64_C(0x4b96b86a50fe74b4)},
+    {8851, UINT64_C(0xfe0a75e19c857d33)}, {8852, UINT64_C(0xacf8ab20ea69dfd9)},
+    {8853, UINT64_C(0xda318bc38fc8830c)}, {8854, UINT64_C(0xdce6b464e6d7e6fd)},
+    {8855, UINT64_C(0x2dcf6f8ac01bf425)}, {8856, UINT64_C(0xec4e803f801b861e)},
+    {8857, UINT64_C(0xf5b0cda333e330b9)}, {8858, UINT64_C(0x3ea943b7a373cef2)},
+};
+#endif
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataString first, String8 second)
 {
@@ -3025,6 +3045,52 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+#if BUSTER_CPU_ARCH_X86_64
+    // SHA is a first-class canonical ISA set, with both register and memory
+    // forms. Keep the complete generated inventory pinned by id/hash so a
+    // future metadata refresh cannot silently drop one of the 14 rows.
+    char8 sha_inventory_text[1024] = {0};
+    u32 sha_inventory_text_length = 0;
+    bool sha_inventory_valid = BUSTER_ARRAY_LENGTH(x86_64_metadata_sha_inventory) == 14;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_64_metadata_sha_inventory); index += 1)
+    {
+        X86_64MetadataShaInventoryCase expected = x86_64_metadata_sha_inventory[index];
+        BusterX86MetadataForm form = {0};
+        bool form_valid = buster_x86_metadata_form(expected.form_id, &form) &&
+                          form.id == expected.form_id && form.stable_hash == expected.stable_hash &&
+                          x86_64_metadata_test_string_equal(form.isa_set, S8("SHA"));
+        sha_inventory_valid &= form_valid;
+        String8 line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"), expected.form_id,
+                                     expected.stable_hash);
+        bool line_fits = sha_inventory_text_length + line.length <= sizeof(sha_inventory_text);
+        sha_inventory_valid &= line_fits;
+        if (line_fits)
+        {
+            memcpy(sha_inventory_text + sha_inventory_text_length, line.pointer, line.length);
+            sha_inventory_text_length += (u32)line.length;
+        }
+    }
+    u8 sha_inventory_digest[32] = {0};
+    link_sha256(arguments->arena, (u8 const*)sha_inventory_text, sha_inventory_text_length, sha_inventory_digest);
+    static u8 const expected_sha_inventory_digest[32] = {
+        0xcf, 0x0c, 0x39, 0xef, 0x0e, 0x44, 0x53, 0x9a,
+        0x8e, 0x3a, 0xfa, 0x8d, 0xb3, 0x05, 0x0d, 0x99,
+        0xed, 0x6c, 0x18, 0x08, 0x18, 0x62, 0xae, 0x07,
+        0xe2, 0x0d, 0x95, 0x19, 0x4f, 0x6a, 0xc3, 0xee,
+    };
+    BUSTER_TEST(arguments, sha_inventory_valid && sha_inventory_text_length == 308);
+    BUSTER_TEST(arguments, memcmp(sha_inventory_digest, expected_sha_inventory_digest,
+                                  sizeof(sha_inventory_digest)) == 0);
+    String8 sha_features[] = {S8("sha")};
+    String8 no_sha_features[] = {S8("sse2")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_64_metadata_sha_inventory); index += 1)
+    {
+        u32 form_id = x86_64_metadata_sha_inventory[index].form_id;
+        BUSTER_TEST(arguments, buster_x86_metadata_test_feature_available(form_id, sha_features, BUSTER_ARRAY_LENGTH(sha_features)));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_feature_available(form_id, no_sha_features, BUSTER_ARRAY_LENGTH(no_sha_features)));
+    }
+#endif
 
     {
         // The generated snapshot keeps lock-prefixed spellings as separate

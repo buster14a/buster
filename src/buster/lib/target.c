@@ -611,8 +611,8 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     // Keep the ten-feature legacy/scalar closure expressed as generation
     // ranges rather than repeating the same feature additions in every model
     // case.  The ranges mirror the architectural feature families represented
-    // by the target model table; SHA is intentionally left for its own
-    // feature-plumbing change.
+    // by the target model table; SHA is handled by the separately audited
+    // predicate immediately below.
     bool amd_ssse3 = model >= CPU_MODEL_AMD_BT_1 && model <= CPU_MODEL_AMD_ZEN_5;
     bool intel_ssse3 = model >= CPU_MODEL_INTEL_CORE_2 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool amd_sse4_1 = model >= CPU_MODEL_AMD_BT_2 && model <= CPU_MODEL_AMD_ZEN_5;
@@ -640,6 +640,13 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     bool amd_rdseed = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
     bool intel_rdseed = (model >= CPU_MODEL_INTEL_BROADWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                         (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    bool amd_sha = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_sha = model == CPU_MODEL_INTEL_ROCKETLAKE ||
+                     model == CPU_MODEL_INTEL_CANNONLAKE ||
+                     (model >= CPU_MODEL_INTEL_ICELAKE_CLIENT && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                     (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_TREMONT) ||
+                     (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                     model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     if (amd_ssse3 || intel_ssse3)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
@@ -679,6 +686,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (amd_rdseed || intel_rdseed)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDSEED);
+    }
+    if (amd_sha || intel_sha)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHA);
     }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
     if (amd_family_10_or_newer)
@@ -1048,7 +1059,7 @@ bool target_cpu_features_are_valid(Target target)
         TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSSE3,
         TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
         TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND,
-        TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
+        TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
         TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
         TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
         TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1,
@@ -1086,7 +1097,8 @@ bool target_cpu_features_are_valid(Target target)
         return false;
     }
     TargetCpuFeatures sse2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2}, 3);
+        TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2,
+        TARGET_CPU_FEATURE_X86_SHA}, 4);
     if (target_cpu_features_any(target_cpu_features_intersection(features, sse2_dependent_features)) &&
         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
     {
@@ -1362,6 +1374,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("sb"), .feature = TARGET_CPU_FEATURE_AARCH64_SB, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("serialize"), .feature = TARGET_CPU_FEATURE_X86_SERIALIZE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sgx"), .feature = TARGET_CPU_FEATURE_X86_SGX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sha"), .feature = TARGET_CPU_FEATURE_X86_SHA, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sha2"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA2, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("sha3"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA3, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("shstk"), .feature = TARGET_CPU_FEATURE_X86_SHSTK, .arch = CPU_ARCH_X86_64},

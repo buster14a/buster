@@ -11,6 +11,13 @@ struct TargetTestX86ModelClosureCase
     u16 expected_present_mask;
 };
 
+typedef struct TargetTestX86ShaModelCase TargetTestX86ShaModelCase;
+struct TargetTestX86ShaModelCase
+{
+    CpuModel model;
+    bool expected_present;
+};
+
 BUSTER_GLOBAL_LOCAL TargetCpuFeature target_test_x86_model_feature(u32 index)
 {
     static TargetCpuFeature const features[] = {
@@ -89,6 +96,30 @@ BUSTER_GLOBAL_LOCAL TargetTestX86ModelClosureCase const target_test_x86_model_cl
     {CPU_MODEL_INTEL_KNL, 1023},
     {CPU_MODEL_INTEL_KNM, 1023},
     {CPU_MODEL_INTEL_DIAMOND_RAPIDS, 1023},
+};
+
+BUSTER_GLOBAL_LOCAL TargetTestX86ShaModelCase const target_test_x86_sha_model_cases[] = {
+    {CPU_MODEL_AMD_K6, false}, {CPU_MODEL_AMD_K6_2, false}, {CPU_MODEL_AMD_K6_3, false},
+    {CPU_MODEL_AMD_GEODE, false}, {CPU_MODEL_AMD_ATHLON, false}, {CPU_MODEL_AMD_ATHLON_XP, false},
+    {CPU_MODEL_AMD_K8, false}, {CPU_MODEL_AMD_K8_SSE3, false}, {CPU_MODEL_AMD_AMD_FAMILY_10, false},
+    {CPU_MODEL_AMD_BT_1, false}, {CPU_MODEL_AMD_BT_2, false}, {CPU_MODEL_AMD_BD_1, false},
+    {CPU_MODEL_AMD_BD_2, false}, {CPU_MODEL_AMD_BD_3, false}, {CPU_MODEL_AMD_BD_4, false},
+    {CPU_MODEL_AMD_ZEN_1, true}, {CPU_MODEL_AMD_ZEN_2, true}, {CPU_MODEL_AMD_ZEN_3, true},
+    {CPU_MODEL_AMD_ZEN_4, true}, {CPU_MODEL_AMD_ZEN_5, true},
+    {CPU_MODEL_INTEL_CORE_2, false}, {CPU_MODEL_INTEL_PENRYN, false}, {CPU_MODEL_INTEL_NEHALEM, false},
+    {CPU_MODEL_INTEL_WESTMERE, false}, {CPU_MODEL_INTEL_SANDY_BRIDGE, false}, {CPU_MODEL_INTEL_IVY_BRIDGE, false},
+    {CPU_MODEL_INTEL_HASWELL, false}, {CPU_MODEL_INTEL_BROADWELL, false}, {CPU_MODEL_INTEL_SKYLAKE, false},
+    {CPU_MODEL_INTEL_SKYLAKE_AVX512, false}, {CPU_MODEL_INTEL_ROCKETLAKE, true}, {CPU_MODEL_INTEL_COOPERLAKE, false},
+    {CPU_MODEL_INTEL_CASCADELAKE, false}, {CPU_MODEL_INTEL_CANNONLAKE, true}, {CPU_MODEL_INTEL_ICELAKE_CLIENT, true},
+    {CPU_MODEL_INTEL_TIGERLAKE, true}, {CPU_MODEL_INTEL_ALDERLAKE, true}, {CPU_MODEL_INTEL_RAPTORLAKE, true},
+    {CPU_MODEL_INTEL_METEORLAKE, true}, {CPU_MODEL_INTEL_GRACEMONT, true}, {CPU_MODEL_INTEL_ARROWLAKE, true},
+    {CPU_MODEL_INTEL_ARROWLAKE_S, true}, {CPU_MODEL_INTEL_LUNARLAKE, true}, {CPU_MODEL_INTEL_PANTHERLAKE, true},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, true}, {CPU_MODEL_INTEL_EMERALD_RAPIDS, true}, {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, true},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS, true}, {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, true},
+    {CPU_MODEL_INTEL_BONNELL, false}, {CPU_MODEL_INTEL_SILVERMONT, false}, {CPU_MODEL_INTEL_GOLDMONT, true},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, true}, {CPU_MODEL_INTEL_TREMONT, true}, {CPU_MODEL_INTEL_SIERRAFOREST, true},
+    {CPU_MODEL_INTEL_GRANDRIDGE, true}, {CPU_MODEL_INTEL_CLEARWATERFOREST, true}, {CPU_MODEL_INTEL_KNL, false},
+    {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
 };
 #endif
 
@@ -737,6 +768,13 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                                                                                   TARGET_CPU_FEATURE_X86_ACE_1}, 2),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_ace_feature));
+    Target valid_sha_feature = valid_avx512;
+    valid_sha_feature.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                               TARGET_CPU_FEATURE_X86_SHA}, 2);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sha_feature));
+    Target invalid_sha_without_sse2 = valid_sha_feature;
+    invalid_sha_without_sse2.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SHA);
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sha_without_sse2));
     Target invalid_xsaves_without_xsave = valid_metadata_features;
     invalid_xsaves_without_xsave.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
         TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_XSAVES}, 2);
@@ -824,6 +862,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         {S8("serialize"), TARGET_CPU_FEATURE_X86_SERIALIZE},
         {S8("smap"), TARGET_CPU_FEATURE_X86_SMAP},
         {S8("sgx"), TARGET_CPU_FEATURE_X86_SGX},
+        {S8("sha"), TARGET_CPU_FEATURE_X86_SHA},
         {S8("shstk"), TARGET_CPU_FEATURE_X86_SHSTK},
         {S8("snp"), TARGET_CPU_FEATURE_X86_SNP},
         {S8("sse4a"), TARGET_CPU_FEATURE_X86_SSE4A},
@@ -892,6 +931,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_CX16), S8("cx16"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_SSE4A), S8("sse4a"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_ACE_1), S8("ace-1"));
+    BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_SHA), S8("sha"));
 
     struct
     {
@@ -1026,7 +1066,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             {
                 .eax = 1,
                 .ebx = (UINT32_C(0x1)) | (UINT32_C(0x100)) | (UINT32_C(0x800)) | (UINT32_C(0x40000)) | (UINT32_C(0x80000)) |
-                       (UINT32_C(0x800000)) | (UINT32_C(0x1000000)) | (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x400)) | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x200000)) |
+                       (UINT32_C(0x800000)) | (UINT32_C(0x1000000)) | (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x400)) | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x200000)) | (UINT32_C(0x20000000)) |
                        (UINT32_C(0x100000)) |
                        (UINT32_C(0x4000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000)) | (UINT32_C(0x40000000)) | (UINT32_C(0x80000000)),
                 .ecx = (UINT32_C(0x1)) | (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x2)) | (UINT32_C(0x40)) | (UINT32_C(0x80)) | (UINT32_C(0x100)) | (UINT32_C(0x200)) | (UINT32_C(0x400)) |
@@ -1058,10 +1098,15 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     TargetCpuFeatures full_expected = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_SSE4A, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND, TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU, TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT, TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM, TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8, TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_MONITOR, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_SGX, TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_SMAP, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_ENQCMD, TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_LKGS, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_INVLPGB, TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_SNP}, 101);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_VMX);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SVM);
+    full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SHA);
     BUSTER_TEST(arguments, target_cpu_features_equal(full_features, full_expected));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_VMX));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SVM));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_MOVDIR64B));
+    BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SHA));
+    X86_64CpuFeatureInput no_sha_hardware = full_cpuid;
+    no_sha_hardware.leaf_7_0.ebx &= ~UINT32_C(0x20000000);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_sha_hardware), TARGET_CPU_FEATURE_X86_SHA));
     TargetCpuFeatures new_cpuid_features = target_cpu_features_from_array((TargetCpuFeature const[]){
         TARGET_CPU_FEATURE_X86_MONITOR, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_XSAVES,
         TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_SMAP, TARGET_CPU_FEATURE_X86_SGX,
@@ -1076,6 +1121,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
         TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
         TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1}, 39);
+    new_cpuid_features = target_cpu_features_add(new_cpuid_features, TARGET_CPU_FEATURE_X86_SHA);
     BUSTER_TEST(arguments, target_cpu_features_subset(new_cpuid_features, full_features));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_IBT));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SHSTK));
@@ -1085,7 +1131,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                                 UINT32_C(0x400000) | UINT32_C(0x20000000) | UINT32_C(0x40000000));
     no_new_cpuid.leaf_d_1.eax &= ~UINT32_C(0x8);
     no_new_cpuid.leaf_7_0.ebx &= ~(UINT32_C(0x1) | UINT32_C(0x100) | UINT32_C(0x800) | UINT32_C(0x40000) | UINT32_C(0x80000) |
-                                   UINT32_C(0x800000) | UINT32_C(0x1000000) | UINT32_C(0x4) | UINT32_C(0x400) | UINT32_C(0x100000));
+                                   UINT32_C(0x800000) | UINT32_C(0x1000000) | UINT32_C(0x4) | UINT32_C(0x400) | UINT32_C(0x100000) |
+                                   UINT32_C(0x20000000));
     no_new_cpuid.leaf_7_0.ecx &= ~(UINT32_C(0x1) | UINT32_C(0x8) | UINT32_C(0x20) | UINT32_C(0x800000) | UINT32_C(0x10000000) | UINT32_C(0x20000000));
     no_new_cpuid.leaf_7_0.edx &= ~(UINT32_C(0x20) | UINT32_C(0x4000) | UINT32_C(0x10000) | UINT32_C(0x40000));
     no_new_cpuid.leaf_14_0.ebx &= ~UINT32_C(0x10);
@@ -1392,6 +1439,52 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_model_closure_length == 929);
     BUSTER_TEST(arguments, memcmp(x86_model_closure_digest, expected_x86_model_closure_digest,
                                   sizeof(x86_model_closure_digest)) == 0);
+
+    // SHA support is pinned independently from the ten-feature legacy/scalar
+    // closure above. These expectations come from the local Clang model
+    // matrix and remain guarded with the x86-only test helpers.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_sha_model_cases) == 60);
+    char8 x86_sha_model_text[2048] = {0};
+    u32 x86_sha_model_length = 0;
+    u32 x86_sha_model_present_count = 0;
+    for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_sha_model_cases); model_index += 1)
+    {
+        TargetTestX86ShaModelCase const* model_case = &target_test_x86_sha_model_cases[model_index];
+        String8 model_name = cpu_model_to_string_os(model_case->model);
+        String8 line = string_format(arguments->arena, S8("{S8} 0x{u32:x,no_prefix}\n"), model_name,
+                                     (u32)model_case->expected_present);
+        bool line_fits = x86_sha_model_length + line.length <= sizeof(x86_sha_model_text);
+        BUSTER_TEST(arguments, line_fits);
+        if (!line_fits) continue;
+        memcpy(x86_sha_model_text + x86_sha_model_length, line.pointer, line.length);
+        x86_sha_model_length += (u32)line.length;
+        x86_sha_model_present_count += model_case->expected_present;
+        BUSTER_TEST(arguments, cpu_model_from_string(model_name) == model_case->model);
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SHA) == model_case->expected_present);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid((Target){
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = model_case->model,
+            .os = OPERATING_SYSTEM_LINUX,
+        }));
+    }
+    u8 x86_sha_model_digest[32] = {0};
+    link_sha256(arguments->arena, (u8 const*)x86_sha_model_text, x86_sha_model_length, x86_sha_model_digest);
+    static u8 const expected_x86_sha_model_digest[32] = {
+        0x10, 0xa9, 0xfe, 0x39, 0x20, 0x92, 0x05, 0xfb,
+        0xcf, 0x1a, 0xfa, 0xf6, 0x65, 0xfe, 0x3a, 0xf5,
+        0xfd, 0xd7, 0x50, 0x74, 0xa5, 0xec, 0x79, 0xbe,
+        0xb9, 0x06, 0xd4, 0x73, 0xfc, 0x1c, 0x4b, 0xa4,
+    };
+    BUSTER_TEST(arguments, x86_sha_model_length == 809 && x86_sha_model_present_count == 29);
+    BUSTER_TEST(arguments, memcmp(x86_sha_model_digest, expected_x86_sha_model_digest,
+                                  sizeof(x86_sha_model_digest)) == 0);
+    BUSTER_TEST(arguments, target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
+                                                        TARGET_CPU_FEATURE_X86_SHA));
+    BUSTER_TEST(arguments, target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS_D),
+                                                        TARGET_CPU_FEATURE_X86_SHA));
+    BUSTER_TEST(arguments, target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_1),
+                                                        TARGET_CPU_FEATURE_X86_SHA));
     Target diamond_rapids_target = {
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,

@@ -221,6 +221,11 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDSEED);
     }
+    // CPUID.07H:0.EBX[29] advertises the Intel/AMD SHA instruction set.
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x20000000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SHA);
+    }
     if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x80000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ADX);

@@ -9422,6 +9422,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("rdrand"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDSEED")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("rdseed"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SHA")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("sha"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("WAITPKG")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("waitpkg"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PKU")))

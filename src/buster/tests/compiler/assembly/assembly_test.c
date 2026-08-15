@@ -2672,6 +2672,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, sse42_without_feature.diagnostic_count == 1 &&
                                sse42_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
                                sse42_with_feature.diagnostic_count == 0);
+#if BUSTER_CPU_ARCH_X86_64
+    Target sha_target = x86_target;
+    sha_target.cpu_model = CPU_MODEL_BASELINE;
+    sha_target.cpu_features_explicit = true;
+    sha_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SHA}, 2);
+    AssemblyEncodeResult sha1msg1_intel = assembly_encode(
+        arguments->arena, S8("sha1msg1 xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult sha1msg1_att = assembly_encode(
+        arguments->arena, S8("sha1msg1 %xmm1, %xmm0\n"),
+        (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult sha256msg2_intel = assembly_encode(
+        arguments->arena, S8("sha256msg2 xmm15, xmmword ptr [r15-16]\n"),
+        (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult sha256msg2_att = assembly_encode(
+        arguments->arena, S8("sha256msg2 -16(%r15), %xmm15\n"),
+        (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult sha_without_feature = assembly_encode(
+        arguments->arena, S8("sha1msg1 xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult sha_wrong_register_class = assembly_encode(
+        arguments->arena, S8("sha1msg1 ymm0, ymm1\n"),
+        (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_sha1msg1[] = {0x0f, 0x38, 0xc9, 0xc1};
+    u8 expected_sha256msg2[] = {0x45, 0x0f, 0x38, 0xcd, 0x7f, 0xf0};
+    BUSTER_TEST(arguments, sha1msg1_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(sha1msg1_intel.bytes, expected_sha1msg1,
+                                                         BUSTER_ARRAY_LENGTH(expected_sha1msg1)));
+    BUSTER_TEST(arguments, sha1msg1_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(sha1msg1_att.bytes, expected_sha1msg1,
+                                                         BUSTER_ARRAY_LENGTH(expected_sha1msg1)));
+    BUSTER_TEST(arguments, sha256msg2_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(sha256msg2_intel.bytes, expected_sha256msg2,
+                                                         BUSTER_ARRAY_LENGTH(expected_sha256msg2)));
+    BUSTER_TEST(arguments, sha256msg2_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(sha256msg2_att.bytes, expected_sha256msg2,
+                                                         BUSTER_ARRAY_LENGTH(expected_sha256msg2)));
+    BUSTER_TEST(arguments, sha_without_feature.diagnostic_count == 1 &&
+                               sha_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, sha_wrong_register_class.diagnostic_count == 1 &&
+                               sha_wrong_register_class.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+#endif
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;
