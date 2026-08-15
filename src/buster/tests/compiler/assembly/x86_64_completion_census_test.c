@@ -178,6 +178,10 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_enqcm
     {1749, UINT64_C(0xde770d6c9669345e)}, {1750, UINT64_C(0xa97e8fa2c0259e4e)},
     {8013, UINT64_C(0x9ca0bd82dff5ab9c)}, {8014, UINT64_C(0x313df55a468d4c4e)},
 };
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_hreset_forms[] = {
+    {8099, UINT64_C(0xefd1dddbe29380f1)},
+};
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -837,6 +841,95 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, security_changed_count == 4);
+
+    // HRESET is a single privileged/system form.  It is intentionally kept
+    // out of the normalized source partition: enabling the model default (or
+    // explicitly adding the feature) must not claim CPL3 source authority.
+    u8 hreset_inventory_text[32] = {0};
+    u32 hreset_inventory_length = 0;
+    for (u32 hreset_index = 0; hreset_index < BUSTER_ARRAY_LENGTH(x86_completion_census_hreset_forms); hreset_index += 1)
+    {
+        X86CompletionCensusFormKey const* expected = &x86_completion_census_hreset_forms[hreset_index];
+        BusterX86MetadataForm hreset_form = {0};
+        BusterX86MetadataFormKey hreset_key = {0};
+        bool hreset_form_ok = buster_x86_metadata_form(expected->form_id, &hreset_form) &&
+                              buster_x86_metadata_form_key(expected->form_id, &hreset_key);
+        BUSTER_TEST(arguments, hreset_form_ok && hreset_key.stable_hash == expected->stable_hash &&
+                                 string_equal(buster_x86_metadata_string_span(hreset_form.isa_set), S8("HRESET")) &&
+                                 buster_x86_metadata_string_span(hreset_form.cpl).length == 1 &&
+                                 buster_x86_metadata_string_byte(hreset_form.cpl, 0) == '0' &&
+                                 hreset_form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED &&
+                                 hreset_form.encoder_family == BUSTER_X86_METADATA_ENCODER_SYSTEM);
+        String8 hreset_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                             expected->form_id, expected->stable_hash);
+        BUSTER_TEST(arguments, hreset_inventory_length + hreset_line.length <= sizeof(hreset_inventory_text));
+        if (hreset_inventory_length + hreset_line.length <= sizeof(hreset_inventory_text))
+        {
+            memcpy(hreset_inventory_text + hreset_inventory_length, hreset_line.pointer, hreset_line.length);
+            hreset_inventory_length += (u32)hreset_line.length;
+        }
+        BusterX86CompletionCensusRecord const* hreset_record = &records[expected->form_id];
+        BUSTER_TEST(arguments, hreset_record->structural_class == BUSTER_X86_COMPLETION_CENSUS_POLICY_EXCLUDED &&
+                                 hreset_record->policy_excluded &&
+                                 hreset_record->intel_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                 hreset_record->att_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                 hreset_record->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 hreset_record->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+    }
+    u8 hreset_inventory_digest[32] = {0};
+    static u8 const expected_hreset_inventory_digest[32] = {
+        0xaf, 0x3b, 0x0c, 0x5e, 0x36, 0x99, 0x4a, 0xb7,
+        0xf1, 0xd8, 0x5f, 0xce, 0xcc, 0x2d, 0x7d, 0x36,
+        0xfc, 0x67, 0xac, 0xaf, 0x92, 0x4e, 0x70, 0x35,
+        0x5c, 0xa0, 0x33, 0x0d, 0x1f, 0xcc, 0xa3, 0x24,
+    };
+    link_sha256(arguments->arena, hreset_inventory_text, hreset_inventory_length, hreset_inventory_digest);
+    BUSTER_TEST(arguments, hreset_inventory_length == 22 &&
+                             memcmp(hreset_inventory_digest, expected_hreset_inventory_digest,
+                                    sizeof(expected_hreset_inventory_digest)) == 0);
+
+    // HRESET is CPL0 and therefore remains outside the source census, but its
+    // immediate encoding is still independently pinned in both public
+    // dialects on a model that carries the HRESET feature by default.
+    {
+        static u8 const expected_hreset_zero_bytes[] = {0xf3, 0x0f, 0x3a, 0xf0, 0xc0, 0x00};
+        static u8 const expected_hreset_max_bytes[] = {0xf3, 0x0f, 0x3a, 0xf0, 0xc0, 0xff};
+        Target hreset_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = CPU_MODEL_INTEL_ALDERLAKE,
+            .os = OPERATING_SYSTEM_LINUX,
+            .cpu_features_explicit = true,
+            .cpu_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ALDERLAKE),
+        };
+        AssemblyEncodeResult hreset_intel_zero = assembly_encode(
+            arguments->arena, S8("hreset 0\n"),
+            (AssemblyEncodeOptions){.target = hreset_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult hreset_att_zero = assembly_encode(
+            arguments->arena, S8("hreset $0\n"),
+            (AssemblyEncodeOptions){.target = hreset_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult hreset_intel_max = assembly_encode(
+            arguments->arena, S8("hreset 255\n"),
+            (AssemblyEncodeOptions){.target = hreset_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult hreset_att_max = assembly_encode(
+            arguments->arena, S8("hreset $255\n"),
+            (AssemblyEncodeOptions){.target = hreset_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, hreset_intel_zero.diagnostic_count == 0 &&
+                                 hreset_att_zero.diagnostic_count == 0 &&
+                                 hreset_intel_max.diagnostic_count == 0 &&
+                                 hreset_att_max.diagnostic_count == 0 &&
+                                 hreset_intel_zero.bytes.length == sizeof(expected_hreset_zero_bytes) &&
+                                 hreset_att_zero.bytes.length == sizeof(expected_hreset_zero_bytes) &&
+                                 hreset_intel_max.bytes.length == sizeof(expected_hreset_max_bytes) &&
+                                 hreset_att_max.bytes.length == sizeof(expected_hreset_max_bytes) &&
+                                 memcmp(hreset_intel_zero.bytes.pointer, expected_hreset_zero_bytes,
+                                        sizeof(expected_hreset_zero_bytes)) == 0 &&
+                                 memcmp(hreset_att_zero.bytes.pointer, expected_hreset_zero_bytes,
+                                        sizeof(expected_hreset_zero_bytes)) == 0 &&
+                                 memcmp(hreset_intel_max.bytes.pointer, expected_hreset_max_bytes,
+                                        sizeof(expected_hreset_max_bytes)) == 0 &&
+                                 memcmp(hreset_att_max.bytes.pointer, expected_hreset_max_bytes,
+                                        sizeof(expected_hreset_max_bytes)) == 0);
+    }
 
     // SHSTK/CET source reachability is pinned to the eight public CET rows
     // plus the two APX WRSS aliases.  ENDBR is IBT-only, while the ring-0

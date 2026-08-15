@@ -665,6 +665,17 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                      (model >= CPU_MODEL_INTEL_CANNONLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                      (model >= CPU_MODEL_INTEL_GOLDMONT_PLUS && model <= CPU_MODEL_INTEL_TREMONT) ||
                      intel_future_server;
+    bool intel_hreset = model == CPU_MODEL_INTEL_ALDERLAKE ||
+                        model == CPU_MODEL_INTEL_RAPTORLAKE ||
+                        model == CPU_MODEL_INTEL_METEORLAKE ||
+                        model == CPU_MODEL_INTEL_GRACEMONT ||
+                        model == CPU_MODEL_INTEL_ARROWLAKE ||
+                        model == CPU_MODEL_INTEL_ARROWLAKE_S ||
+                        model == CPU_MODEL_INTEL_LUNARLAKE ||
+                        model == CPU_MODEL_INTEL_PANTHERLAKE ||
+                        model == CPU_MODEL_INTEL_SIERRAFOREST ||
+                        model == CPU_MODEL_INTEL_GRANDRIDGE ||
+                        model == CPU_MODEL_INTEL_CLEARWATERFOREST;
     bool intel_serialize_waitpkg = model == CPU_MODEL_INTEL_ALDERLAKE ||
                                    model == CPU_MODEL_INTEL_RAPTORLAKE ||
                                    model == CPU_MODEL_INTEL_METEORLAKE ||
@@ -831,6 +842,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (intel_sgx)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SGX);
+    }
+    if (intel_hreset)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_HRESET);
     }
     if (intel_serialize_waitpkg)
     {
