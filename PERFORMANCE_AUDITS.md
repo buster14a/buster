@@ -18,6 +18,86 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15b` (Linux x86_64, Zen 4 7940HS; the canonical x86-64 path takes the
+prepared binding route, based on `01758505`). This is the lever `2026-08-15a`
+identified and left untaken, plus what profiling it exposed underneath.
+
+Stage 1 falls from `41,169,326,171` to `32,738,139,154` instructions and from
+2.679 s to 1.917 s; stage 2 from `550,581,511,720` to `466,777,002,988`.
+Measured against the pre-audit base of `2026-08-15a`, the two audits together
+are **-48.6% stage-1 instructions and -28.4% stage-1 wall**. Every step below
+reached a byte-identical stage-1/stage-2 fixed point, and the Release suite
+passed 301,723 assertions across 38 modules.
+
+| change | stage 1 | delta |
+|---|---|---|
+| base `01758505` | 41,169,326,171 | — |
+| prepared binding shape from the facts table | 42,745,188,367* | -7.6% |
+| binding-field indices in the facts table | 42,173,920,620 | -1.3% |
+| cache hit skips the re-derived ISA gate | 40,835,168,833 | -3.2% |
+| **normalized operand-view cache** | 33,483,566,251 | **-18.0%** |
+| borrow the form row instead of copying it | 33,172,440,226 | -0.9% |
+| borrow the parsed pattern | 32,643,825,328 | -1.6% |
+| borrow the form into binding | 32,507,449,877 | -0.4% |
+
+*measured against the preceding single-lane figure of 46,279,216,101; the
+column is the direct `BUSTER_TEST_JOBS=1` measurement, which runs slightly
+below the `test_self_host` number in the prose.
+
+The dominant find was not the planned one. **`buster_x86_metadata_operand()`
+had no cache at all**, despite the prewarm's comment claiming it filled an
+operand-view cache: every call rebuilt the normalized view, and resolving an
+imported width token is several string comparisons. Binding asks for every
+operand of a row on every emitted instruction, so this one omission was worth
+more than every other change here combined. Views are now keyed by generated
+operand record (32,813 of them, ~790 KB) with the owning form recorded beside
+each entry, because nothing in the snapshot guarantees a record range belongs
+to exactly one form; a mismatch simply recomputes.
+
+The planned lever worked as predicted but smaller: the facts table gained each
+row's per-operand flags, the simple-binding shape bit, and which operand fills
+each encoding field, all derived exactly as `exact_plan_prepare` derives them
+so a prepared plan and the table cannot disagree. Binding now returns before
+the generic hidden-operand walk and emission skips five linear binding scans.
+**Preparing real exact plans for the canonical backend was not needed and
+should not be attempted** — the 1024-entry plan capacity never came into it,
+because the facts table is form-indexed and already covers all 11,013 rows.
+
+`buster_x86_metadata_emit_form_selected` is a new public entry for a caller
+that memoizes a checked selection under a key covering the mnemonic, operands,
+attributes and target features; it skips the coverage/execution-mode/feature
+re-derivation that selection already performed, and retains every structural
+check. This is the same reasoning that removed the mnemonic lookup in
+`2026-08-15a`.
+
+**Correcting `2026-08-15a` on struct copies.** That entry ruled out
+pass-by-pointer for the ~256-byte `BusterX86MetadataForm` at "~0.4%". That
+number was extrapolated from a profile in which other costs dominated, and it
+was wrong once they were removed: `perf annotate` later attributed **63.5% of
+`emit_form_exact_policy` to three `vmovups %zmm` struct copies**. Borrowing the
+form and the parsed pattern through `emit_form_with_form` and `emit_bind_form`
+cut that function from 9.47% to 4.50% of the stage. The instruction-count gain
+is small (-2.9% across the three borrow steps) because a 64-byte move is one
+instruction; the win is in cycles and wall time. Read that as a reminder that
+this profile's cycle shares and instruction shares diverge sharply — the same
+divergence `2026-08-15a` recorded for the pool-string helpers, in the opposite
+direction.
+
+Where the remaining time sits: the metadata emitter plus canonical codegen is
+now **52.7% of the stage, down from about 75%**, and frontend/IR work
+(`c_ir_lower_frame_fallback`, `ir_validate_canonical_module`, `c_preprocess`)
+is visible again. `emit_form_to_scratch` is still the single largest entry at
+18.76%, and what is left there is the encoding logic itself — prefix, REX,
+ModRM/SIB, displacement and immediate construction with its validity checks —
+not argument passing or re-derivation. Cutting it further means giving the
+canonical cache the byte-template mechanism the MIR path already has
+(`machine_fast_kind` SCALAR/TEMPLATE: prepared bytes plus the offset and width
+of the fields to patch). That is a real design increment, not a cleanup: the
+codegen cache key captures displacement and immediate only as *classes*, so a
+template must carry patch descriptors rather than finished bytes. Stage 1 is
+still about 3.6x the 9.02 G pre-routing baseline, and that mechanism is where
+the rest of it is.
+
 `2026-08-15a` (Linux x86_64, Zen 4 7940HS; canonical x86-64 emission stops
 re-deriving per-form metadata on every instruction, based on `134b96b0`).
 
@@ -101,7 +181,11 @@ this profile as instruction shares; they diverge badly in the string helpers.
 two, and their cost is the function bodies, not argument copying — the ~256
 byte `BusterX86MetadataForm` passed by value through the chain accounts for
 only about 0.4%, so a pass-by-pointer refactor is not the answer and should
-not be attempted on that theory. The answer is that a prepared plan lets
+not be attempted on that theory. **[Superseded by `2026-08-15b`: that 0.4% was
+extrapolated from a profile where other costs dominated and is wrong once they
+are gone; the copies were later measured at 63.5% of one of these functions
+and borrowing them was worth taking. The rest of this paragraph stands.]** The
+answer is that a prepared plan lets
 `emit_bind_form` return from its `if (plan)` block before the binding loop
 runs at all. Getting one requires preparing exact plans for the shapes the
 canonical backend selects during the serial prewarm, the way

@@ -1293,6 +1293,23 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataForm const* buster_x86_metadata_normalized_
     return &buster_x86_metadata_normalized_forms[form_id];
 }
 
+// Borrow a form's parsed pattern instead of copying it out.  This is the same
+// cache hit buster_x86_metadata_emit_parse_pattern serves, under the same
+// cacheability test, but the record stays where it is - an exact plan already
+// borrows it this way, and emission reads it on every instruction.  Returns 0
+// when the entry is not available, which makes the caller parse into its own
+// storage exactly as before.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPatternSemantics const* buster_x86_metadata_pattern_semantics_borrow(
+    BusterX86MetadataForm form, bool* parsed)
+{
+    if (form.id >= BUSTER_X86_GENERATED_FORM_COUNT || !buster_x86_metadata_normalized_forms_cached[form.id] ||
+        !buster_x86_metadata_pattern_seed_equal(form, buster_x86_metadata_normalized_forms[form.id]) ||
+        !buster_x86_metadata_pattern_semantics_cached[form.id])
+        return 0;
+    *parsed = buster_x86_metadata_pattern_semantics_results[form.id];
+    return &buster_x86_metadata_pattern_semantics_cache[form.id];
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts const* buster_x86_metadata_form_facts_for(BusterX86MetadataForm form)
 {
     if (!buster_x86_metadata_form_facts_ready || form.id >= BUSTER_X86_GENERATED_FORM_COUNT) return 0;
@@ -3096,14 +3113,30 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_architectural_mask_binding(
                  : buster_x86_metadata_emit_is_writemask_operand(binding.metadata));
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form,
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm const* form_pointer,
                                                               BusterX86MetadataPhysicalBinding* bindings, u32* binding_count,
                                                               u32* diagnostic_operand,
                                                               BusterX86MetadataExactPlanRecord const* plan)
 {
+#define form (*form_pointer)
     BusterX86MetadataPatternSemantics pattern_storage = {0};
-    BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : &pattern_storage;
-    bool pattern_valid = plan ? (pattern_view != 0) : buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+    BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : 0;
+    bool pattern_valid = false;
+    if (plan)
+    {
+        pattern_valid = pattern_view != 0;
+    }
+    else
+    {
+        // Borrow the prewarmed parse where it exists; parsing into local
+        // storage copies the whole record on every emitted instruction.
+        pattern_view = buster_x86_metadata_pattern_semantics_borrow(form, &pattern_valid);
+        if (!pattern_view)
+        {
+            pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+            pattern_view = &pattern_storage;
+        }
+    }
     // Keep the generic implementation below expressed in terms of the
     // value-like `pattern` name while letting prepared plans borrow the
     // immutable cached object instead of copying it on every emission.
@@ -3344,6 +3377,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
     *binding_count = count;
 #undef pattern
     return true;
+#undef form
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86MetadataPhysicalQuery query,
@@ -5000,8 +5034,23 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     BusterX86MetadataMachineExactToken const* machine_token, bool force_disp32, bool policy_prevalidated)
 {
     BusterX86MetadataPatternSemantics pattern_storage = {0};
-    BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : &pattern_storage;
-    bool pattern_valid = plan ? (pattern_view != 0) : buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+    BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : 0;
+    bool pattern_valid = false;
+    if (plan)
+    {
+        pattern_valid = pattern_view != 0;
+    }
+    else
+    {
+        // Borrow the prewarmed parse where it exists; parsing into local
+        // storage copies the whole record on every emitted instruction.
+        pattern_view = buster_x86_metadata_pattern_semantics_borrow(form, &pattern_valid);
+        if (!pattern_view)
+        {
+            pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+            pattern_view = &pattern_storage;
+        }
+    }
     // The standard VEX AMX tile-memory rows predate XED's displacement field
     // annotation.  Their ModRM/SIB schema is still the ordinary x86 memory
     // topology: a nonzero displacement selects MOD=01/10 while the SIB is
@@ -5212,7 +5261,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // fixed-size array on every exact row.
     BusterX86MetadataPhysicalBinding bindings[16];
     u32 binding_count = 0;
-    if (!buster_x86_metadata_emit_bind_form(query, form, bindings, &binding_count, diagnostic_operand, plan))
+    if (!buster_x86_metadata_emit_bind_form(query, &form, bindings, &binding_count, diagnostic_operand, plan))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (!buster_x86_metadata_emit_df64_operands_match(pattern, bindings, binding_count))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
@@ -7459,7 +7508,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         BusterX86MetadataPhysicalBinding shape_bindings[16] = {0};
         u32 shape_binding_count = 0;
         u32 shape_diagnostic_operand = 0;
-        if (!buster_x86_metadata_emit_bind_form(candidate_query, form, shape_bindings, &shape_binding_count, &shape_diagnostic_operand, 0))
+        if (!buster_x86_metadata_emit_bind_form(candidate_query, &form, shape_bindings, &shape_binding_count, &shape_diagnostic_operand, 0))
         {
             if (!shape_diagnostic_recorded)
             {
