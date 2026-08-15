@@ -1098,6 +1098,16 @@ BUSTER_F_DECL bool buster_x86_metadata_block_memory_source_topology(BusterX86Met
                                                                      BusterX86MetadataPhysicalQuery query);
 BUSTER_F_DECL bool buster_x86_metadata_block_memory_source_authoritative(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPhysicalQuery query);
+// A normalized or privileged ModRM aggregate-memory form with one visible
+// read-only GPR64 and one visible read-only ordinary memory operand is
+// source-authoritative when metadata supplies the scalar element width.  The
+// public aggregate qualifier is either unsized or the architectural 512-bit
+// block; other explicit widths remain mismatches.  This is a semantic
+// topology projection and does not identify a mnemonic, form, hash, or ISA.
+BUSTER_F_DECL bool buster_x86_metadata_aggregate_memory_source_topology(BusterX86MetadataForm form,
+                                                                          BusterX86MetadataPhysicalQuery query);
+BUSTER_F_DECL bool buster_x86_metadata_aggregate_memory_source_authoritative(BusterX86MetadataForm form,
+                                                                               BusterX86MetadataPhysicalQuery query);
 // Returns the metadata-derived fixed-round, maskless SAE capability used by
 // the source adapters.  The predicate is intentionally semantic: it parses
 // the normalized pattern and never keys behavior to a form ID, hash, or

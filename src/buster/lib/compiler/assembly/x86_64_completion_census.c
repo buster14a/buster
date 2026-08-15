@@ -955,7 +955,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool mask_decorator = false;
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
-    bool block_source_topology = buster_x86_metadata_block_memory_source_topology(form, query);
+    bool block_source_topology = buster_x86_metadata_block_memory_source_topology(form, query) ||
+                                 buster_x86_metadata_aggregate_memory_source_topology(form, query);
     if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);

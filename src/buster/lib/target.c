@@ -693,6 +693,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                        model == CPU_MODEL_INTEL_GRANDRIDGE ||
                        model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
                        model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool intel_enqcmd = (model >= CPU_MODEL_INTEL_ARROWLAKE && model <= CPU_MODEL_INTEL_PANTHERLAKE) ||
+                        (model >= CPU_MODEL_INTEL_EMERALD_RAPIDS && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                        (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                        model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool intel_ptwrite = model == CPU_MODEL_INTEL_ALDERLAKE ||
                          model == CPU_MODEL_INTEL_RAPTORLAKE ||
                          model == CPU_MODEL_INTEL_METEORLAKE ||
@@ -836,6 +840,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (intel_uintr)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_UINTR);
+    }
+    if (intel_enqcmd)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ENQCMD);
     }
     if (intel_ptwrite)
     {

@@ -173,6 +173,11 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_movdi
     {8762, UINT64_C(0x4f195bc17d9178e7)},
     {8763, UINT64_C(0xd4b2dade382c430e)},
 };
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_enqcmd_forms[] = {
+    {1749, UINT64_C(0xde770d6c9669345e)}, {1750, UINT64_C(0xa97e8fa2c0259e4e)},
+    {8013, UINT64_C(0x9ca0bd82dff5ab9c)}, {8014, UINT64_C(0x313df55a468d4c4e)},
+};
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -1072,6 +1077,320 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             arguments->arena, S8("PTWRITE EAX\n"),
             (AssemblyEncodeOptions){.target = ptwrite_disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         BUSTER_TEST(arguments, ptwrite_disabled.diagnostic_count != 0);
+    }
+    // ENQCMD has two normalized CPL3 rows (legacy and APX) plus their CPL0
+    // ENQCMDS controls.  The feature-disabled comparison pins the generic
+    // source result: Intel selects APX exactly and the legacy row as an
+    // accepted alias; canonical AT&T source cannot force the metadata row's
+    // explicit zero displacement, so both AT&T rows retain byte-mismatch.
+    {
+        u8 enqcmd_inventory_text[4 * 32] = {0};
+        u32 enqcmd_inventory_length = 0;
+        BusterX86MetadataPhysicalOperand enqcmd_topology_operands[2] = {
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+             .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 0,
+             .memory = {.base = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                        .address_size = 64, .scale = 1, .has_base = true}},
+        };
+        BusterX86MetadataPhysicalQuery enqcmd_topology_query = {
+            .operands = enqcmd_topology_operands, .operand_count = 2, .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .include_privileged = true,
+            .source_semantics = true,
+        };
+        for (u32 enqcmd_index = 0; enqcmd_index < BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms); enqcmd_index += 1)
+        {
+            X86CompletionCensusFormKey const* expected = &x86_completion_census_enqcmd_forms[enqcmd_index];
+            BusterX86MetadataForm enqcmd_form = {0};
+            BusterX86MetadataFormKey enqcmd_key = {0};
+            bool enqcmd_form_ok = buster_x86_metadata_form(expected->form_id, &enqcmd_form) &&
+                                  buster_x86_metadata_form_key(expected->form_id, &enqcmd_key);
+            bool enqcmd_apx = expected->form_id == 1749 || expected->form_id == 1750;
+            bool enqcmd_privileged = expected->form_id == 1750 || expected->form_id == 8014;
+            BUSTER_TEST(arguments, enqcmd_form_ok && enqcmd_key.stable_hash == expected->stable_hash &&
+                                     string_equal(buster_x86_metadata_string_span(enqcmd_form.isa_set),
+                                                  enqcmd_apx ? S8("APX_F_ENQCMD") : S8("ENQCMD")) &&
+                                     buster_x86_metadata_string_span(enqcmd_form.cpl).length == 1 &&
+                                     buster_x86_metadata_string_byte(enqcmd_form.cpl, 0) == (enqcmd_privileged ? '0' : '3') &&
+                                     enqcmd_form.coverage_class == (enqcmd_privileged ? BUSTER_X86_METADATA_COVERAGE_PRIVILEGED :
+                                                                     BUSTER_X86_METADATA_COVERAGE_NORMALIZED));
+            String8 enqcmd_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                                expected->form_id, expected->stable_hash);
+            bool enqcmd_fits = enqcmd_inventory_length + enqcmd_line.length <= sizeof(enqcmd_inventory_text);
+            BUSTER_TEST(arguments, enqcmd_fits);
+            if (enqcmd_fits)
+            {
+                memcpy(enqcmd_inventory_text + enqcmd_inventory_length, enqcmd_line.pointer, enqcmd_line.length);
+                enqcmd_inventory_length += (u32)enqcmd_line.length;
+            }
+        }
+        u8 enqcmd_inventory_digest[32] = {0};
+        static u8 const expected_enqcmd_inventory_digest[32] = {
+            0x2b, 0x1f, 0xd3, 0xb0, 0x91, 0x21, 0xe1, 0x47,
+            0x8d, 0x16, 0xb4, 0x3d, 0x73, 0x0c, 0x8b, 0x1b,
+            0x98, 0x4d, 0xc3, 0x20, 0xec, 0xd8, 0x64, 0x86,
+            0x79, 0x2b, 0x26, 0x78, 0x4e, 0x12, 0x64, 0xe8,
+        };
+        link_sha256(arguments->arena, enqcmd_inventory_text, enqcmd_inventory_length, enqcmd_inventory_digest);
+        BUSTER_TEST(arguments, enqcmd_inventory_length == 88 &&
+                                 memcmp(enqcmd_inventory_digest, expected_enqcmd_inventory_digest,
+                                        sizeof(expected_enqcmd_inventory_digest)) == 0);
+        bool enqcmd_seen[BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms)] = {0};
+        u32 enqcmd_discovered_count = 0;
+        for (u32 enqcmd_scan_form_id = 0; enqcmd_scan_form_id < form_count; enqcmd_scan_form_id += 1)
+        {
+            BusterX86MetadataForm enqcmd_scan_form = {0};
+            if (!buster_x86_metadata_form(enqcmd_scan_form_id, &enqcmd_scan_form)) continue;
+            String8 enqcmd_scan_isa = buster_x86_metadata_string_span(enqcmd_scan_form.isa_set);
+            bool enqcmd_scan_match = string_equal(enqcmd_scan_isa, S8("ENQCMD")) ||
+                                     string_equal(enqcmd_scan_isa, S8("APX_F_ENQCMD"));
+            if (!enqcmd_scan_match) continue;
+            enqcmd_discovered_count += 1;
+            bool enqcmd_scan_expected = false;
+            for (u32 enqcmd_scan_index = 0;
+                 enqcmd_scan_index < BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms); enqcmd_scan_index += 1)
+            {
+                if (enqcmd_scan_form_id == x86_completion_census_enqcmd_forms[enqcmd_scan_index].form_id)
+                {
+                    enqcmd_seen[enqcmd_scan_index] = true;
+                    enqcmd_scan_expected = true;
+                }
+            }
+            BUSTER_TEST(arguments, enqcmd_scan_expected);
+        }
+        BUSTER_TEST(arguments, enqcmd_discovered_count == BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms));
+        for (u32 enqcmd_seen_index = 0; enqcmd_seen_index < BUSTER_ARRAY_LENGTH(enqcmd_seen); enqcmd_seen_index += 1)
+            BUSTER_TEST(arguments, enqcmd_seen[enqcmd_seen_index]);
+
+        // The production source projection is deliberately topology-owned.
+        // Scan every generated form with the canonical GPR64+ordinary-memory
+        // source query and prove that the predicate has exactly the four
+        // ENQCMD/ENQCMDS rows above—no census class or mnemonic filter can
+        // hide a collateral match.
+        u8 enqcmd_topology_inventory_text[4 * 32] = {0};
+        u32 enqcmd_topology_inventory_length = 0;
+        u32 enqcmd_topology_count = 0;
+        bool enqcmd_topology_seen[BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms)] = {0};
+        for (u32 enqcmd_topology_form_id = 0; enqcmd_topology_form_id < form_count; enqcmd_topology_form_id += 1)
+        {
+            BusterX86MetadataForm enqcmd_topology_form = {0};
+            if (!buster_x86_metadata_form(enqcmd_topology_form_id, &enqcmd_topology_form)) continue;
+            if (!buster_x86_metadata_aggregate_memory_source_topology(enqcmd_topology_form, enqcmd_topology_query)) continue;
+            enqcmd_topology_count += 1;
+            bool enqcmd_topology_expected = false;
+            for (u32 enqcmd_topology_index = 0;
+                 enqcmd_topology_index < BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms);
+                 enqcmd_topology_index += 1)
+            {
+                X86CompletionCensusFormKey const* expected = &x86_completion_census_enqcmd_forms[enqcmd_topology_index];
+                if (enqcmd_topology_form_id != expected->form_id) continue;
+                enqcmd_topology_expected = true;
+                enqcmd_topology_seen[enqcmd_topology_index] = true;
+                BUSTER_TEST(arguments, enqcmd_topology_form.stable_hash == expected->stable_hash);
+            }
+            BUSTER_TEST(arguments, enqcmd_topology_expected);
+            String8 enqcmd_topology_line = string_format(arguments->arena,
+                                                          S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                                          enqcmd_topology_form_id, enqcmd_topology_form.stable_hash);
+            bool enqcmd_topology_fits = enqcmd_topology_inventory_length + enqcmd_topology_line.length <=
+                                        sizeof(enqcmd_topology_inventory_text);
+            BUSTER_TEST(arguments, enqcmd_topology_fits);
+            if (enqcmd_topology_fits)
+            {
+                memcpy(enqcmd_topology_inventory_text + enqcmd_topology_inventory_length,
+                       enqcmd_topology_line.pointer, enqcmd_topology_line.length);
+                enqcmd_topology_inventory_length += (u32)enqcmd_topology_line.length;
+            }
+        }
+        u8 enqcmd_topology_inventory_digest[32] = {0};
+        link_sha256(arguments->arena, enqcmd_topology_inventory_text, enqcmd_topology_inventory_length,
+                    enqcmd_topology_inventory_digest);
+        BUSTER_TEST(arguments, enqcmd_topology_count == BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_forms) &&
+                                 enqcmd_topology_inventory_length == 88 &&
+                                 memcmp(enqcmd_topology_inventory_digest, expected_enqcmd_inventory_digest,
+                                        sizeof(expected_enqcmd_inventory_digest)) == 0);
+        for (u32 enqcmd_topology_seen_index = 0;
+             enqcmd_topology_seen_index < BUSTER_ARRAY_LENGTH(enqcmd_topology_seen); enqcmd_topology_seen_index += 1)
+            BUSTER_TEST(arguments, enqcmd_topology_seen[enqcmd_topology_seen_index]);
+
+        BusterX86MetadataPhysicalOperand enqcmd_bad_topology_operands[2] = {0};
+        memcpy(enqcmd_bad_topology_operands, enqcmd_topology_operands, sizeof(enqcmd_bad_topology_operands));
+        BusterX86MetadataPhysicalQuery enqcmd_bad_topology_query = enqcmd_topology_query;
+        enqcmd_bad_topology_query.operands = enqcmd_bad_topology_operands;
+        enqcmd_bad_topology_operands[0].reg.physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM;
+        BusterX86MetadataForm enqcmd_topology_form1749 = {0};
+        BusterX86MetadataForm enqcmd_topology_form8013 = {0};
+        buster_x86_metadata_form(1749, &enqcmd_topology_form1749);
+        buster_x86_metadata_form(8013, &enqcmd_topology_form8013);
+        BUSTER_TEST(arguments, !buster_x86_metadata_aggregate_memory_source_topology(enqcmd_topology_form1749,
+                                                                                       enqcmd_bad_topology_query) &&
+                                 !buster_x86_metadata_aggregate_memory_source_topology(enqcmd_topology_form8013,
+                                                                                       enqcmd_bad_topology_query));
+
+        TemporalArena enqcmd_baseline_temporary = scratch_begin(&arguments->arena, 1);
+        BusterX86CompletionCensusRecord* enqcmd_baseline_records =
+            arena_allocate(enqcmd_baseline_temporary.arena, BusterX86CompletionCensusRecord, form_count);
+        Target enqcmd_baseline_target = census_target;
+        enqcmd_baseline_target.cpu_features = target_cpu_features_remove(
+            enqcmd_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_ENQCMD);
+        buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
+            .arena = enqcmd_baseline_temporary.arena, .target = enqcmd_baseline_target,
+            .records = enqcmd_baseline_records, .record_capacity = form_count,
+            .run_intel = true, .run_att = true,
+        });
+        u32 enqcmd_changed_count = 0;
+        for (u32 enqcmd_compare_form_id = 0; enqcmd_compare_form_id < form_count; enqcmd_compare_form_id += 1)
+        {
+            BusterX86CompletionCensusRecord const* before = &enqcmd_baseline_records[enqcmd_compare_form_id];
+            BusterX86CompletionCensusRecord const* after = &records[enqcmd_compare_form_id];
+            bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                           before->intel_source_reason != after->intel_source_reason ||
+                           before->att_source_reason != after->att_source_reason ||
+                           before->intel_byte_count != after->intel_byte_count ||
+                           before->att_byte_count != after->att_byte_count ||
+                           before->metadata_byte_count != after->metadata_byte_count;
+            if (!changed) continue;
+            enqcmd_changed_count += 1;
+            BUSTER_TEST(arguments, enqcmd_compare_form_id == 1749 || enqcmd_compare_form_id == 8013);
+        }
+        BUSTER_TEST(arguments, enqcmd_changed_count == 2);
+        BusterX86CompletionCensusRecord const* before_apx_enqcmd = &enqcmd_baseline_records[1749];
+        BusterX86CompletionCensusRecord const* after_apx_enqcmd = &records[1749];
+        BusterX86CompletionCensusRecord const* before_legacy_enqcmd = &enqcmd_baseline_records[8013];
+        BusterX86CompletionCensusRecord const* after_legacy_enqcmd = &records[8013];
+        BUSTER_TEST(arguments, before_apx_enqcmd->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_apx_enqcmd->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_apx_enqcmd->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before_apx_enqcmd->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after_apx_enqcmd->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after_apx_enqcmd->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after_apx_enqcmd->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_apx_enqcmd->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_apx_enqcmd->intel_byte_count == after_apx_enqcmd->metadata_byte_count &&
+                                 after_apx_enqcmd->intel_byte_count == 7 && after_apx_enqcmd->att_byte_count == 6 &&
+                                 after_apx_enqcmd->metadata_byte_count == 7);
+        BUSTER_TEST(arguments, before_legacy_enqcmd->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_legacy_enqcmd->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before_legacy_enqcmd->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before_legacy_enqcmd->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after_legacy_enqcmd->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_ALIAS_EQUIVALENT &&
+                                 after_legacy_enqcmd->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after_legacy_enqcmd->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_legacy_enqcmd->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after_legacy_enqcmd->intel_byte_count == after_legacy_enqcmd->metadata_byte_count &&
+                                 after_legacy_enqcmd->intel_byte_count == 6 && after_legacy_enqcmd->att_byte_count == 5 &&
+                                 after_legacy_enqcmd->metadata_byte_count == 6);
+        for (u32 enqcmd_control_index = 0; enqcmd_control_index < 2; enqcmd_control_index += 1)
+        {
+            u32 enqcmd_control_form_id = enqcmd_control_index == 0 ? 1750 : 8014;
+            BusterX86CompletionCensusRecord const* before = &enqcmd_baseline_records[enqcmd_control_form_id];
+            BusterX86CompletionCensusRecord const* after = &records[enqcmd_control_form_id];
+            BUSTER_TEST(arguments, before->intel_class == after->intel_class && before->att_class == after->att_class &&
+                                     before->intel_source_reason == after->intel_source_reason &&
+                                     before->att_source_reason == after->att_source_reason &&
+                                     before->intel_byte_count == after->intel_byte_count &&
+                                     before->att_byte_count == after->att_byte_count &&
+                                     before->metadata_byte_count == after->metadata_byte_count);
+        }
+        scratch_end(enqcmd_baseline_temporary);
+        {
+            static u8 const expected_enqcmd_bytes[] = {0xf2, 0x0f, 0x38, 0xf8, 0x01};
+            static u8 const expected_enqcmd_boundary_bytes[] = {0xf2, 0x45, 0x0f, 0x38, 0xf8, 0x7f, 0x40};
+            static u8 const expected_apx_enqcmd_bytes[] = {0x62, 0xe4, 0x7f, 0x08, 0xf8, 0x00};
+            static u8 const expected_apx_enqcmd_boundary_bytes[] = {0x62, 0x44, 0x7f, 0x08, 0xf8, 0x7f, 0x40};
+            Target enqcmd_legacy_target = {
+                .cpu_arch = CPU_ARCH_X86_64,
+                .cpu_model = CPU_MODEL_INTEL_SAPPHIRE_RAPIDS,
+                .os = OPERATING_SYSTEM_LINUX,
+            };
+            Target enqcmd_disabled_target = {
+                .cpu_arch = CPU_ARCH_X86_64,
+                .cpu_model = CPU_MODEL_BASELINE,
+                .os = OPERATING_SYSTEM_LINUX,
+                .cpu_features_explicit = true,
+                .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+                    TARGET_CPU_FEATURE_X86_SSE2}, 1),
+            };
+            AssemblyEncodeResult enqcmd_intel = assembly_encode(
+                arguments->arena, S8("enqcmd rax, zmmword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_intel_unsized = assembly_encode(
+                arguments->arena, S8("enqcmd rax, [rcx]\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_att = assembly_encode(
+                arguments->arena, S8("enqcmd (%rcx), %rax\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_legacy_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult enqcmd_intel_boundary = assembly_encode(
+                arguments->arena, S8("enqcmd r15, zmmword ptr [r15+0x40]\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_legacy_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_att_boundary = assembly_encode(
+                arguments->arena, S8("enqcmd 0x40(%r15), %r15\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_legacy_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult enqcmd_invalid_dword = assembly_encode(
+                arguments->arena, S8("enqcmd rax, dword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_invalid_qword = assembly_encode(
+                arguments->arena, S8("enqcmd rax, qword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_invalid_xmmword = assembly_encode(
+                arguments->arena, S8("enqcmd rax, xmmword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_invalid_ymmword = assembly_encode(
+                arguments->arena, S8("enqcmd rax, ymmword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult apx_enqcmd_intel = assembly_encode(
+                arguments->arena, S8("enqcmd r16, zmmword ptr [rax]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult apx_enqcmd_att = assembly_encode(
+                arguments->arena, S8("enqcmd (%rax), %r16\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult apx_enqcmd_intel_boundary = assembly_encode(
+                arguments->arena, S8("enqcmd r31, zmmword ptr [r15+0x40]\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult apx_enqcmd_att_boundary = assembly_encode(
+                arguments->arena, S8("enqcmd 0x40(%r15), %r31\n"),
+                (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, enqcmd_intel.diagnostic_count == 0 && enqcmd_intel_unsized.diagnostic_count == 0 &&
+                                     enqcmd_att.diagnostic_count == 0 &&
+                                     enqcmd_intel_boundary.diagnostic_count == 0 && enqcmd_att_boundary.diagnostic_count == 0 &&
+                                     enqcmd_intel.bytes.length == sizeof(expected_enqcmd_bytes) &&
+                                     enqcmd_intel_unsized.bytes.length == sizeof(expected_enqcmd_bytes) &&
+                                     enqcmd_att.bytes.length == sizeof(expected_enqcmd_bytes) &&
+                                     enqcmd_intel_boundary.bytes.length == sizeof(expected_enqcmd_boundary_bytes) &&
+                                     enqcmd_att_boundary.bytes.length == sizeof(expected_enqcmd_boundary_bytes) &&
+                                     memcmp(enqcmd_intel.bytes.pointer, expected_enqcmd_bytes, sizeof(expected_enqcmd_bytes)) == 0 &&
+                                     memcmp(enqcmd_intel_unsized.bytes.pointer, expected_enqcmd_bytes, sizeof(expected_enqcmd_bytes)) == 0 &&
+                                     memcmp(enqcmd_att.bytes.pointer, expected_enqcmd_bytes, sizeof(expected_enqcmd_bytes)) == 0 &&
+                                     memcmp(enqcmd_intel_boundary.bytes.pointer, expected_enqcmd_boundary_bytes,
+                                            sizeof(expected_enqcmd_boundary_bytes)) == 0 &&
+                                     memcmp(enqcmd_att_boundary.bytes.pointer, expected_enqcmd_boundary_bytes,
+                                            sizeof(expected_enqcmd_boundary_bytes)) == 0);
+            BUSTER_TEST(arguments, enqcmd_invalid_dword.diagnostic_count != 0 && enqcmd_invalid_dword.bytes.length == 0 &&
+                                     enqcmd_invalid_qword.diagnostic_count != 0 && enqcmd_invalid_qword.bytes.length == 0 &&
+                                     enqcmd_invalid_xmmword.diagnostic_count != 0 && enqcmd_invalid_xmmword.bytes.length == 0 &&
+                                     enqcmd_invalid_ymmword.diagnostic_count != 0 && enqcmd_invalid_ymmword.bytes.length == 0);
+            BUSTER_TEST(arguments, apx_enqcmd_intel.diagnostic_count == 0 && apx_enqcmd_att.diagnostic_count == 0 &&
+                                     apx_enqcmd_intel_boundary.diagnostic_count == 0 && apx_enqcmd_att_boundary.diagnostic_count == 0 &&
+                                     apx_enqcmd_intel.bytes.length == sizeof(expected_apx_enqcmd_bytes) &&
+                                     apx_enqcmd_att.bytes.length == sizeof(expected_apx_enqcmd_bytes) &&
+                                     apx_enqcmd_intel_boundary.bytes.length == sizeof(expected_apx_enqcmd_boundary_bytes) &&
+                                     apx_enqcmd_att_boundary.bytes.length == sizeof(expected_apx_enqcmd_boundary_bytes) &&
+                                     memcmp(apx_enqcmd_intel.bytes.pointer, expected_apx_enqcmd_bytes,
+                                            sizeof(expected_apx_enqcmd_bytes)) == 0 &&
+                                     memcmp(apx_enqcmd_att.bytes.pointer, expected_apx_enqcmd_bytes,
+                                            sizeof(expected_apx_enqcmd_bytes)) == 0 &&
+                                     memcmp(apx_enqcmd_intel_boundary.bytes.pointer, expected_apx_enqcmd_boundary_bytes,
+                                            sizeof(expected_apx_enqcmd_boundary_bytes)) == 0 &&
+                                     memcmp(apx_enqcmd_att_boundary.bytes.pointer, expected_apx_enqcmd_boundary_bytes,
+                                            sizeof(expected_apx_enqcmd_boundary_bytes)) == 0);
+            AssemblyEncodeResult enqcmd_disabled_intel = assembly_encode(
+                arguments->arena, S8("enqcmd rax, zmmword ptr [rcx]\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult enqcmd_disabled_att = assembly_encode(
+                arguments->arena, S8("enqcmd (%rcx), %rax\n"),
+                (AssemblyEncodeOptions){.target = enqcmd_disabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, enqcmd_disabled_intel.diagnostic_count != 0 && enqcmd_disabled_att.diagnostic_count != 0);
+        }
     }
     // The block-transfer inventory has one normalized APX form, one
     // normalized legacy64 form, and one non-64 control.  With the full
@@ -2159,32 +2478,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5622 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 225 && source.intel_unresolved_count == 3964 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5623 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3962 &&
                              source.intel_byte_mismatch_count == 768 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 548 && source.intel_different_encoding_count == 17);
+                             source.intel_policy_rejected_count == 546 && source.intel_different_encoding_count == 17);
     BUSTER_TEST(arguments, source.att_exact_count == 5710 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3777 &&
-                             source.att_byte_mismatch_count == 1048 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 557 && source.att_different_encoding_count == 17);
+                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3775 &&
+                             source.att_byte_mismatch_count == 1050 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 555 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6660 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6662 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3263 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 548);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6847 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 546);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6849 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1187 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 557);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 555);
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
     // is a proof of source reachability under an enabled target, not a change
