@@ -1145,18 +1145,15 @@ BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata
 // unsigned immediate payloads, the memory displacement, and both addends.
 // Symbolic operands are excluded at the call site because they emit a
 // relocation, and a relocation-bearing row is never templated.
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_value_hashes(u64 const* words, u32 count,
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_value_hashes(u64 shape_signature, u64 shape_guard,
                                                                       BusterX86MetadataPhysicalQuery physical,
                                                                       u64* signature, u64* guard)
 {
-    u64 first = UINT64_C(0x243f6a8885a308d3);
-    u64 second = UINT64_C(0x13198a2e03707344);
-    for (u32 index = 0; index < count; index += 1)
-    {
-        u64 word = words[index];
-        first = (first ^ word) * UINT64_C(1099511628211);
-        second = (second ^ word) * UINT64_C(0x9e3779b97f4a7c15);
-    }
+    // Start from the finished shape hashes rather than walking the key words a
+    // second time: they already summarize every word, so folding the values
+    // into them yields the same separation for half the work.
+    u64 first = shape_signature ^ UINT64_C(0x243f6a8885a308d3);
+    u64 second = shape_guard ^ UINT64_C(0x13198a2e03707344);
     for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
     {
         BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
@@ -1281,7 +1278,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     CodegenX64TemplateCacheEntry* templated = 0;
     if (word_count)
     {
-        codegen_canonical_x64_metadata_value_hashes(words, word_count, physical, &value_signature, &value_guard);
+        codegen_canonical_x64_metadata_value_hashes(signature, guard, physical, &value_signature, &value_guard);
         templated = codegen_canonical_x64_template_entry(cache, value_signature, value_guard, false);
         if (templated && templated->length)
         {
@@ -15594,7 +15591,11 @@ struct CodegenCanonicalParallelState
     CodegenCanonicalX64F80Cache const* f80_cache;
     IrModule* module;
     CodegenCanonicalFragment* fragments;
-    CodegenX64MetadataCache* x64_metadata_caches;
+    // One pointer per lane rather than one strided block.  The cache is larger
+    // than 64 KiB and the AArch64 backend cannot currently index an array whose
+    // element stride exceeds a 16-bit immediate, so keep the indexed array at
+    // pointer stride and let each lane's cache be its own allocation.
+    CodegenX64MetadataCache** x64_metadata_caches;
     AtomicU64 take_index;
     AtomicU64 worker_arena_failures;
     CodegenModule result;
@@ -15973,7 +15974,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
     // lane needs its own cursor while emitting debug line rows.
     IrProgram emission_program = *state->program;
     emission_program.source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    CodegenX64MetadataCache* x64_metadata_cache = state->x64_metadata_caches ? state->x64_metadata_caches + lane_index() : 0;
+    CodegenX64MetadataCache* x64_metadata_cache = state->x64_metadata_caches ? state->x64_metadata_caches[lane_index()] : 0;
     // A large generated function can require more transient codegen state
     // than the general-purpose 64 MiB thread scratch arena. The worker arena
     // is reset after each function; only an exact compact copy survives.
@@ -16133,10 +16134,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     u64 x64_metadata_cache_count = 0;
     u64 fragment_arena_reserved_size = arena->reserved_size;
     if (target.cpu_arch == CPU_ARCH_X86_64 && module->function_count &&
-        lane_count <= (ARENA_MAX_RESERVATION - fragment_arena_reserved_size) / sizeof(CodegenX64MetadataCache))
+        lane_count <= (ARENA_MAX_RESERVATION - fragment_arena_reserved_size) /
+                          (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*)))
     {
         x64_metadata_cache_count = lane_count;
-        fragment_arena_reserved_size += x64_metadata_cache_count * sizeof(CodegenX64MetadataCache);
+        fragment_arena_reserved_size +=
+            x64_metadata_cache_count * (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*));
     }
     Arena* fragment_arena = codegen_worker_arena_create(fragment_arena_reserved_size, arena->granularity);
     OsMutexHandle* fragment_mutex = os_mutex_create();
@@ -16153,11 +16156,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         result.error = CODEGEN_ERROR_CAPACITY;
         return result;
     }
-    CodegenX64MetadataCache* x64_metadata_caches = 0;
+    CodegenX64MetadataCache** x64_metadata_caches = 0;
     if (x64_metadata_cache_count)
     {
-        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache, x64_metadata_cache_count);
+        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache*, x64_metadata_cache_count);
         memset(x64_metadata_caches, 0, sizeof(*x64_metadata_caches) * x64_metadata_cache_count);
+        for (u64 cache_index = 0; cache_index < x64_metadata_cache_count; cache_index += 1)
+        {
+            CodegenX64MetadataCache* lane_cache = arena_allocate(fragment_arena, CodegenX64MetadataCache, 1);
+            memset(lane_cache, 0, sizeof(*lane_cache));
+            x64_metadata_caches[cache_index] = lane_cache;
+        }
     }
     CodegenCanonicalParallelState state = {
         .arena = arena,
