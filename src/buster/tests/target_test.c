@@ -1,6 +1,95 @@
 #include <buster/tests/target_test.h>
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/tests/compiler/link/link_test.h>
+
+typedef struct TargetTestX86ModelClosureCase TargetTestX86ModelClosureCase;
+struct TargetTestX86ModelClosureCase
+{
+    CpuModel model;
+    u16 expected_present_mask;
+};
+
+BUSTER_GLOBAL_LOCAL TargetCpuFeature target_test_x86_model_feature(u32 index)
+{
+    static TargetCpuFeature const features[] = {
+        TARGET_CPU_FEATURE_X86_SSSE3,
+        TARGET_CPU_FEATURE_X86_SSE4_1,
+        TARGET_CPU_FEATURE_X86_SSE4_2,
+        TARGET_CPU_FEATURE_X86_F16C,
+        TARGET_CPU_FEATURE_X86_FMA,
+        TARGET_CPU_FEATURE_X86_BMI2,
+        TARGET_CPU_FEATURE_X86_ADX,
+        TARGET_CPU_FEATURE_X86_MOVBE,
+        TARGET_CPU_FEATURE_X86_RDRAND,
+        TARGET_CPU_FEATURE_X86_RDSEED,
+    };
+    return index < BUSTER_ARRAY_LENGTH(features) ? features[index] : TARGET_CPU_FEATURE_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL TargetTestX86ModelClosureCase const target_test_x86_model_closure_cases[] = {
+    {CPU_MODEL_AMD_K6, 0},
+    {CPU_MODEL_AMD_K6_2, 0},
+    {CPU_MODEL_AMD_K6_3, 0},
+    {CPU_MODEL_AMD_GEODE, 0},
+    {CPU_MODEL_AMD_ATHLON, 0},
+    {CPU_MODEL_AMD_ATHLON_XP, 0},
+    {CPU_MODEL_AMD_K8, 0},
+    {CPU_MODEL_AMD_K8_SSE3, 0},
+    {CPU_MODEL_AMD_AMD_FAMILY_10, 0},
+    {CPU_MODEL_AMD_BT_1, 1},
+    {CPU_MODEL_AMD_BT_2, 143},
+    {CPU_MODEL_AMD_BD_1, 7},
+    {CPU_MODEL_AMD_BD_2, 31},
+    {CPU_MODEL_AMD_BD_3, 31},
+    {CPU_MODEL_AMD_BD_4, 447},
+    {CPU_MODEL_AMD_ZEN_1, 1023},
+    {CPU_MODEL_AMD_ZEN_2, 1023},
+    {CPU_MODEL_AMD_ZEN_3, 1023},
+    {CPU_MODEL_AMD_ZEN_4, 1023},
+    {CPU_MODEL_AMD_ZEN_5, 1023},
+    {CPU_MODEL_INTEL_CORE_2, 1},
+    {CPU_MODEL_INTEL_PENRYN, 3},
+    {CPU_MODEL_INTEL_NEHALEM, 7},
+    {CPU_MODEL_INTEL_WESTMERE, 7},
+    {CPU_MODEL_INTEL_SANDY_BRIDGE, 7},
+    {CPU_MODEL_INTEL_IVY_BRIDGE, 271},
+    {CPU_MODEL_INTEL_HASWELL, 447},
+    {CPU_MODEL_INTEL_BROADWELL, 1023},
+    {CPU_MODEL_INTEL_SKYLAKE, 1023},
+    {CPU_MODEL_INTEL_SKYLAKE_AVX512, 1023},
+    {CPU_MODEL_INTEL_ROCKETLAKE, 1023},
+    {CPU_MODEL_INTEL_COOPERLAKE, 1023},
+    {CPU_MODEL_INTEL_CASCADELAKE, 1023},
+    {CPU_MODEL_INTEL_CANNONLAKE, 1023},
+    {CPU_MODEL_INTEL_ICELAKE_CLIENT, 1023},
+    {CPU_MODEL_INTEL_TIGERLAKE, 1023},
+    {CPU_MODEL_INTEL_ALDERLAKE, 1023},
+    {CPU_MODEL_INTEL_RAPTORLAKE, 1023},
+    {CPU_MODEL_INTEL_METEORLAKE, 1023},
+    {CPU_MODEL_INTEL_GRACEMONT, 1023},
+    {CPU_MODEL_INTEL_ARROWLAKE, 1023},
+    {CPU_MODEL_INTEL_ARROWLAKE_S, 1023},
+    {CPU_MODEL_INTEL_LUNARLAKE, 1023},
+    {CPU_MODEL_INTEL_PANTHERLAKE, 1023},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, 1023},
+    {CPU_MODEL_INTEL_EMERALD_RAPIDS, 1023},
+    {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, 1023},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS, 1023},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, 1023},
+    {CPU_MODEL_INTEL_BONNELL, 129},
+    {CPU_MODEL_INTEL_SILVERMONT, 391},
+    {CPU_MODEL_INTEL_GOLDMONT, 903},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, 903},
+    {CPU_MODEL_INTEL_TREMONT, 903},
+    {CPU_MODEL_INTEL_SIERRAFOREST, 1023},
+    {CPU_MODEL_INTEL_GRANDRIDGE, 1023},
+    {CPU_MODEL_INTEL_CLEARWATERFOREST, 1023},
+    {CPU_MODEL_INTEL_KNL, 1023},
+    {CPU_MODEL_INTEL_KNM, 1023},
+    {CPU_MODEL_INTEL_DIAMOND_RAPIDS, 1023},
+};
+
 BUSTER_GLOBAL_LOCAL bool target_test_cpu_features_intersect(TargetCpuFeatures left, TargetCpuFeatures right)
 {
     return target_cpu_features_any(target_cpu_features_intersection(left, right));
@@ -1242,6 +1331,84 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_features = cpu_detect_features_x86_64(),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(detected_x86));
+
+    // The audited Clang ten-feature legacy/scalar closure is serialized
+    // independently of the implementation so that model-name coverage and every represented
+    // feature expectation are pinned together.  The ten bits are, in order,
+    // SSSE3, SSE4.1, SSE4.2, F16C, FMA, BMI2, ADX, MOVBE, RDRAND, RDSEED.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_model_closure_cases) == 60);
+    char8 x86_model_closure_text[4096] = {0};
+    u32 x86_model_closure_length = 0;
+    for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_model_closure_cases); model_index += 1)
+    {
+        TargetTestX86ModelClosureCase const* model_case = &target_test_x86_model_closure_cases[model_index];
+        String8 model_name = cpu_model_to_string_os(model_case->model);
+        String8 line = string_format(arguments->arena, S8("{S8} 0x{u32:x,width=[0,3],no_prefix}\n"),
+                                     model_name, (u32)model_case->expected_present_mask);
+        bool line_fits = x86_model_closure_length + line.length <= sizeof(x86_model_closure_text);
+        BUSTER_TEST(arguments, line_fits);
+        if (!line_fits)
+        {
+            continue;
+        }
+        memcpy(x86_model_closure_text + x86_model_closure_length, line.pointer, line.length);
+        x86_model_closure_length += (u32)line.length;
+
+        BUSTER_TEST(arguments, cpu_model_from_string(model_name) == model_case->model);
+        Target model_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = model_case->model,
+            .os = OPERATING_SYSTEM_LINUX,
+        };
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(model_target), model_features));
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(model_target));
+        TargetCpuFeatures audited_features = target_cpu_features_empty();
+        TargetCpuFeatures expected_features = target_cpu_features_empty();
+        for (u32 feature_index = 0; feature_index < 10; feature_index += 1)
+        {
+            TargetCpuFeature feature = target_test_x86_model_feature(feature_index);
+            audited_features = target_cpu_features_add(audited_features, feature);
+            bool expected_present = (model_case->expected_present_mask & (u16)(1u << feature_index)) != 0;
+            if (expected_present)
+            {
+                expected_features = target_cpu_features_add(expected_features, feature);
+            }
+            BUSTER_TEST(arguments, target_cpu_features_contains(model_features, feature) == expected_present);
+        }
+        BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_intersection(model_features, audited_features),
+                                                         expected_features));
+    }
+    u8 x86_model_closure_digest[32] = {0};
+    link_sha256(arguments->arena, (u8 const*)x86_model_closure_text, x86_model_closure_length, x86_model_closure_digest);
+    static u8 const expected_x86_model_closure_digest[32] = {
+        0x69, 0x31, 0x42, 0x39, 0x41, 0x31, 0x25, 0xb6,
+        0xac, 0x6a, 0x74, 0x4a, 0x3f, 0x05, 0xe7, 0x52,
+        0xa2, 0x4a, 0xc3, 0x86, 0xb4, 0xc6, 0x4e, 0x09,
+        0x95, 0xa4, 0x36, 0x33, 0x9c, 0xfb, 0xcc, 0x13,
+    };
+    BUSTER_TEST(arguments, x86_model_closure_length == 929);
+    BUSTER_TEST(arguments, memcmp(x86_model_closure_digest, expected_x86_model_closure_digest,
+                                  sizeof(x86_model_closure_digest)) == 0);
+    Target diamond_rapids_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    Target granite_rapids_d_target = diamond_rapids_target;
+    granite_rapids_d_target.cpu_model = CPU_MODEL_INTEL_GRANITE_RAPIDS_D;
+    TargetCpuFeatures diamond_rapids_matrix_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    TargetCpuFeatures granite_rapids_d_matrix_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS_D);
+    for (u32 feature_index = 0; feature_index < 10; feature_index += 1)
+    {
+        TargetCpuFeature feature = target_test_x86_model_feature(feature_index);
+        BUSTER_TEST(arguments, target_cpu_features_contains(diamond_rapids_matrix_features, feature));
+        BUSTER_TEST(arguments, target_cpu_features_contains(granite_rapids_d_matrix_features, feature));
+    }
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(diamond_rapids_target), diamond_rapids_matrix_features));
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(granite_rapids_d_target), granite_rapids_d_matrix_features));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(diamond_rapids_target));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(granite_rapids_d_target));
 #endif
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, valid_avx512), S8("avx,avx2,avx512f,sse2"));
     Target sorted_features = valid_avx10_v1_aux;

@@ -608,6 +608,78 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE3);
     }
+    // Keep the ten-feature legacy/scalar closure expressed as generation
+    // ranges rather than repeating the same feature additions in every model
+    // case.  The ranges mirror the architectural feature families represented
+    // by the target model table; SHA is intentionally left for its own
+    // feature-plumbing change.
+    bool amd_ssse3 = model >= CPU_MODEL_AMD_BT_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_ssse3 = model >= CPU_MODEL_INTEL_CORE_2 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_sse4_1 = model >= CPU_MODEL_AMD_BT_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_sse4_1 = (model >= CPU_MODEL_INTEL_PENRYN && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                        (model >= CPU_MODEL_INTEL_SILVERMONT && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    bool amd_sse4_2 = amd_sse4_1;
+    bool intel_sse4_2 = (model >= CPU_MODEL_INTEL_NEHALEM && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                        (model >= CPU_MODEL_INTEL_SILVERMONT && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    bool amd_f16c = model == CPU_MODEL_AMD_BT_2 || (model >= CPU_MODEL_AMD_BD_2 && model <= CPU_MODEL_AMD_ZEN_5);
+    bool intel_phi = model == CPU_MODEL_INTEL_KNL || model == CPU_MODEL_INTEL_KNM;
+    bool intel_future_server = (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                               model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool intel_f16c = (model >= CPU_MODEL_INTEL_IVY_BRIDGE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) || intel_phi || intel_future_server;
+    bool amd_fma = model >= CPU_MODEL_AMD_BD_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_fma = (model >= CPU_MODEL_INTEL_HASWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) || intel_phi || intel_future_server;
+    bool amd_bmi2 = model >= CPU_MODEL_AMD_BD_4 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_bmi2 = (model >= CPU_MODEL_INTEL_HASWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) || intel_phi || intel_future_server;
+    bool amd_adx = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_adx = (model >= CPU_MODEL_INTEL_BROADWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) || intel_phi || intel_future_server;
+    bool amd_movbe = model == CPU_MODEL_AMD_BT_2 || (model >= CPU_MODEL_AMD_BD_4 && model <= CPU_MODEL_AMD_ZEN_5);
+    bool intel_movbe = model >= CPU_MODEL_INTEL_HASWELL && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_rdrand = model >= CPU_MODEL_AMD_BD_4 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_rdrand = (model >= CPU_MODEL_INTEL_IVY_BRIDGE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                        (model >= CPU_MODEL_INTEL_SILVERMONT && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    bool amd_rdseed = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_rdseed = (model >= CPU_MODEL_INTEL_BROADWELL && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                        (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    if (amd_ssse3 || intel_ssse3)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
+    }
+    if (amd_sse4_1 || intel_sse4_1)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4_1);
+    }
+    if (amd_sse4_2 || intel_sse4_2)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4_2);
+    }
+    if (amd_f16c || intel_f16c)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_F16C);
+    }
+    if (amd_fma || intel_fma)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_FMA);
+    }
+    if (amd_bmi2 || intel_bmi2)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_BMI2);
+    }
+    if (amd_adx || intel_adx)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ADX);
+    }
+    if (amd_movbe || intel_movbe)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVBE);
+    }
+    if (amd_rdrand || intel_rdrand)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDRAND);
+    }
+    if (amd_rdseed || intel_rdseed)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDSEED);
+    }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
     if (amd_family_10_or_newer)
     {
