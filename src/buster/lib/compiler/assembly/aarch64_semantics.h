@@ -363,6 +363,9 @@ struct BusterA64SemanticForm
     u8 status;
 };
 
+// Decode the generated semantic blobs once, on the calling thread, before any
+// gang queries the module. See the module rule in AGENTS.md.
+BUSTER_F_DECL void buster_aarch64_semantics_prewarm(void);
 BUSTER_F_DECL u32 buster_a64_semantic_schema_version(void);
 BUSTER_F_DECL u32 buster_a64_semantic_form_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_field_count(void);

@@ -813,6 +813,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     // Every lane in the gang below is an aarch64 suite, and each one queries
     // canonical form validity per encode and per decode.
     buster_aarch64_prewarm();
+    buster_aarch64_semantics_prewarm();
     u64 requested_lanes = buster_test_worker_count(eligible_count);
     lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
 

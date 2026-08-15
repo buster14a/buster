@@ -20,8 +20,8 @@ as written — they are a record, not documentation to keep current.
 
 `2026-08-16a` (Linux x86_64, Zen 4 7940HS; canonical AArch64 form validity is
 derived once instead of per operation, based on `ae39b781`). Whole local
-Release suite `7.48 s` -> `4.25 s`; cumulative with the 2026-08-15j audit,
-`17.54 s` -> `4.25 s`.
+Release suite `7.48 s` -> `3.74 s` across the two finds below; cumulative with
+the 2026-08-15j audit, `17.54 s` -> `3.74 s` (**-78.7%**).
 
 `a64_canonical_form_valid` was **43.4%** of the entire suite's samples --
 27.5% in lane workers and 15.9% on the main thread. It fully revalidates a
@@ -55,16 +55,30 @@ last, and `test.c` calls it beside `machine_x86_64_exact_prewarm` before
 keeps the exact original derivation and **never writes the cache**, so a
 caller that never prewarms stays race-free and merely pays the old cost.
 
-**The next one is already located and not taken.**
-`buster_a64_semantic_blob_byte` is now 16.1% of the suite (13.9% in lane
-workers) and is the whole reason memory semantics moved only 2x. The generated
-semantic tables are stored **base64-encoded in the source**, so every byte
-access decodes a four-character group -- a divide and a modulo by three plus
-four character lookups -- and `_u32`/`_u64` redecode the same group four and
-eight times over. Decoding each blob once at prewarm turns all of it into an
-array index; the blobs total roughly a megabyte
-(`VALUE_ATOM` 404,880, `OPERAND` 338,472, `FIELD` 93,696, `VALUE_ENTRY`
-92,172, `SEGMENT` 23,428), which is the memory this would cost.
+**The same shape again, one layer down, and taken.**
+With the validity cache in, `buster_a64_semantic_blob_byte` became 16.1% of
+the suite (13.9% in lane workers) and was the whole reason memory semantics
+moved only 2x. The generated semantic tables ship **base64-encoded in the
+source**, so every byte access decoded a four-character group -- a divide and
+a modulo by three plus four character lookups -- and `_u16`/`_u32`/`_u64`
+redecoded the same group two, four and eight times over.
+
+Each blob is now decoded once at prewarm and read by index, which costs
+**0.91 MB** of zero-initialized storage (`VALUE_ATOM` 404,880, `OPERAND`
+338,472, `FIELD` 93,696, `VALUE_ENTRY` 92,172, `SEGMENT` 23,428) and is paid
+only by callers that prewarm. Memory semantics `0.821 s -> 0.343 s`, suite
+`4.25 s -> 3.74 s`, and in the sanitized configuration the module is `32.1 s`
+against the `78.4 s` it cost on CI before this audit.
+
+The accessors keep the encoded blob as well as the decoded array and test the
+ready flag, so an unprewarmed caller still decodes and still gets the same
+answer -- the decoded arrays are zeroed until the flag is published, so
+reading them early would silently return zeros rather than fail.
+
+**The trio is no longer the tail.** It was 52% of the local suite
+(3.882 s of 7.48 s) and is now 12% (0.457 s of 3.74 s), and no module
+dominates what remains: machine 0.706 s, census 0.636 s, aarch64 encoding
+0.381 s, C frontend 0.358 s, memory semantics 0.343 s, os 0.336 s.
 
 Validation: full local `test_all_combinations_ci` green, 0 failing modules,
 308,714 Release assertions across 39 modules. Test-visible behavior is
