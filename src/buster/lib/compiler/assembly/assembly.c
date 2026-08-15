@@ -11498,6 +11498,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
     }
     u16 vector_memory_width = 0;
+    // LWPINS/LWPVAL carry a fixed dword memory element but AT&T source has
+    // no ptr qualifier.  Keep this scalar width available even though these
+    // forms have a GPR destination rather than an XMM/YMM/ZMM vector.
+    u16 scalar_memory_width = (assembly_word_equal(mnemonic, S8("lwpins")) ||
+                               assembly_word_equal(mnemonic, S8("lwpval")))
+                                  ? 32
+                                  : 0;
     for (u32 index = 0; index < operand_count; index += 1)
     {
         if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
@@ -11509,26 +11516,25 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             break;
         }
     }
-    if (vector_memory_width)
+    if (vector_memory_width || scalar_memory_width)
     {
-        u16 scalar_memory_width = 0;
-        if (mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
+        if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
             scalar_memory_width = 32;
-        else if (mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 'd')
+        else if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 'd')
             scalar_memory_width = 64;
-        else if ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 'd') ||
-                 assembly_word_equal(mnemonic, S8("vmovapd")) || assembly_word_equal(mnemonic, S8("vmovupd")))
+        else if (!scalar_memory_width && ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 'd') ||
+                 assembly_word_equal(mnemonic, S8("vmovapd")) || assembly_word_equal(mnemonic, S8("vmovupd"))))
             scalar_memory_width = 64;
-        else if ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 's') ||
-                 assembly_word_equal(mnemonic, S8("vmovaps")) || assembly_word_equal(mnemonic, S8("vmovups")))
+        else if (!scalar_memory_width && ((mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 'p' && mnemonic.pointer[mnemonic.length - 1] == 's') ||
+                 assembly_word_equal(mnemonic, S8("vmovaps")) || assembly_word_equal(mnemonic, S8("vmovups"))))
             scalar_memory_width = 32;
-        else if (assembly_word_equal(mnemonic, S8("vmovdqa32")) || assembly_word_equal(mnemonic, S8("vmovdqu32")))
+        else if (!scalar_memory_width && (assembly_word_equal(mnemonic, S8("vmovdqa32")) || assembly_word_equal(mnemonic, S8("vmovdqu32"))))
             scalar_memory_width = 32;
-        else if (assembly_word_equal(mnemonic, S8("vmovdqa64")) || assembly_word_equal(mnemonic, S8("vmovdqu64")))
+        else if (!scalar_memory_width && (assembly_word_equal(mnemonic, S8("vmovdqa64")) || assembly_word_equal(mnemonic, S8("vmovdqu64"))))
             scalar_memory_width = 64;
-        else if (assembly_word_equal(mnemonic, S8("vmovdqu8")))
+        else if (!scalar_memory_width && assembly_word_equal(mnemonic, S8("vmovdqu8")))
             scalar_memory_width = 8;
-        else if (assembly_word_equal(mnemonic, S8("vmovdqu16")))
+        else if (!scalar_memory_width && assembly_word_equal(mnemonic, S8("vmovdqu16")))
             scalar_memory_width = 16;
         if (!scalar_memory_width)
         {
@@ -11606,7 +11612,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 physical[index].memory.source_width = 0;
                 physical[index].width = scalar_memory_width;
             }
-            else if (index == 0 && !physical[index].width && !explicit_width)
+            else if (!physical[index].width && !explicit_width)
             {
                 physical[index].width = scalar_memory_width;
             }

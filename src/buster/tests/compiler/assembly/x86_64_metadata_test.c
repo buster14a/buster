@@ -11093,6 +11093,31 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), fma4_bytes,
                                                                  BUSTER_ARRAY_LENGTH(fma4_bytes)));
+        // AMD's 3DNow rows place the operation selector after ModRM.  Keep
+        // that post-ModRM opcode ordering explicit for the register form.
+        BusterX86MetadataPhysicalOperand pi2fw_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 1, 64),
+        };
+        u8 pi2fw_bytes[] = {0x0f, 0x0f, 0xc1, 0x0c};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PI2FW"), 373, pi2fw_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), pi2fw_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(pi2fw_bytes)));
+        // VPERMIL2 packs its explicit 4-bit immediate into the low nibble of
+        // the selector byte; it is not a second trailing byte.
+        BusterX86MetadataPhysicalOperand vpermil2_operands[5] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 1, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 2, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 3, 128),
+            x86_64_metadata_test_physical_imm(3, 8),
+        };
+        u8 vpermil2_bytes[] = {0xc4, 0xe3, 0x71, 0x48, 0xc2, 0x33};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPERMIL2PS"), 160, vpermil2_operands, 5,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), vpermil2_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpermil2_bytes)));
         BusterX86MetadataEmitResult fma4_missing_selector = x86_64_metadata_test_emit_form(
             S8("VFMADDPS"), 64, fma4_operands, 3, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
             BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);

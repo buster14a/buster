@@ -1257,7 +1257,15 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             {
                 pattern.has_unsupported_token = 1;
             }
-            else if (after_modrm)
+            // 3DNow register rows omit the explicit MODRM() marker even
+            // though their final numeric token is the post-ModRM opcode
+            // extension.  Once the two-byte 0F 0F opcode and MOD/RM shape
+            // are known, retain that token as trailing data just as the
+            // memory rows do.
+            bool numeric_after_modrm = after_modrm ||
+                                       (buster_x86_metadata_string_input_equal(form.extension.offset, S8("3DNOW")) &&
+                                        pattern.has_modrm && pattern.opcode_count >= 2);
+            if (numeric_after_modrm)
             {
                 if (pattern.trailing_count < BUSTER_ARRAY_LENGTH(pattern.trailing)) pattern.trailing[pattern.trailing_count++] = (u8)hex_value;
                 else pattern.has_unsupported_token = 1;
@@ -5662,11 +5670,6 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     {
         if (!buster_x86_metadata_emit_write_byte(scratch, pattern.trailing[index])) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
     }
-    if (pattern.selector_immediate)
-    {
-        if (!buster_x86_metadata_emit_write_byte(scratch, (u8)(selector_binding->physical.reg.index << 4)))
-            return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
-    }
     BusterX86MetadataPhysicalBinding* immediate_binding =
         plan && plan->exact_bind_simple && pattern.immediate_count <= 1 && plan->exact_bind_immediate != UINT8_MAX
             ? bindings + plan->exact_bind_immediate
@@ -5682,13 +5685,37 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             }
         }
     }
+    bool selector_immediate_combined = false;
+    if (pattern.selector_immediate)
+    {
+        u8 selector_byte = (u8)(selector_binding->physical.reg.index << 4);
+        // SE_IMM8 is a packed selector in the AMD VPERMIL2 family: the
+        // selector register occupies the high nibble and the explicit
+        // 4-bit immediate occupies the low nibble of the same trailing byte.
+        // Forms such as VPCMOV have no immediate operand and retain the
+        // register-only spelling.
+        if (immediate_binding)
+        {
+            BusterX86MetadataPhysicalOperand immediate = immediate_binding->physical;
+            if (immediate.has_symbol || (!immediate.has_value && !immediate.has_unsigned_value))
+                return BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE;
+            u64 value = immediate.has_unsigned_value ? immediate.unsigned_value : (u64)immediate.value;
+            if ((immediate.has_value && immediate.value < 0) || value > 0xf)
+                return BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE;
+            selector_byte |= (u8)value;
+            selector_immediate_combined = true;
+        }
+        if (!buster_x86_metadata_emit_write_byte(scratch, selector_byte))
+            return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    }
     if (pattern.immediate_count > BUSTER_ARRAY_LENGTH(pattern.immediate_widths))
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     u32 immediate_count = (u32)pattern.immediate_count;
+    if (selector_immediate_combined) immediate_count = 0;
     // ONE() is an implicit constant encoded in the opcode.  When source
     // projection consumed its explicit value-1 operand, retain the binding
     // for validation but never turn it into a trailing immediate byte.
-    if (!immediate_count && immediate_binding && !pattern.has_implicit_one) immediate_count = 1;
+    if (!immediate_count && immediate_binding && !pattern.has_implicit_one && !selector_immediate_combined) immediate_count = 1;
     for (u32 immediate_index = 0; immediate_index < immediate_count; immediate_index += 1)
     {
         BusterX86MetadataPhysicalBinding* binding = pattern.immediate_count
@@ -7262,10 +7289,26 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                                      candidate_pattern.has_modrm && !candidate_pattern.w;
         bool prefer_x87_no_rexw = scratch.byte_count == result.selected_byte_count && candidate_x87_no_rexw &&
                                  !selected_x87_no_rexw;
+        // FMA4's generated XED rows intentionally duplicate each source
+        // topology with both VEX.W values.  The architectural/default
+        // spelling is W=1 (LLVM and the legacy assembler table agree), while
+        // W=0 is only the alternate topology used when the memory operand is
+        // in slot two.  When both register forms tie on size, prefer W=1;
+        // operand binding still selects W=0 for the slot-two memory form.
+        bool candidate_fma4_w1 = buster_x86_metadata_string_input_equal(form.extension.offset, S8("FMA4")) &&
+                                 candidate_pattern.has_w && candidate_pattern.w;
+        BusterX86MetadataForm selected_form = {0};
+        BusterX86MetadataPatternSemantics selected_pattern = {0};
+        bool selected_fma4_w1 = result.form_id != UINT32_MAX &&
+                                buster_x86_metadata_form(result.form_id, &selected_form) &&
+                                buster_x86_metadata_emit_parse_pattern(selected_form, &selected_pattern) &&
+                                buster_x86_metadata_string_input_equal(selected_form.extension.offset, S8("FMA4")) &&
+                                selected_pattern.has_w && selected_pattern.w;
+        bool prefer_fma4_w1 = scratch.byte_count == result.selected_byte_count && candidate_fma4_w1 && !selected_fma4_w1;
         if (result.form_id == UINT32_MAX || scratch.byte_count < result.selected_byte_count || prefer_implicit_one ||
-            prefer_x87_no_rexw ||
+            prefer_x87_no_rexw || prefer_fma4_w1 ||
             (scratch.byte_count == result.selected_byte_count && candidate_implicit_one == selected_implicit_one &&
-             candidate_x87_no_rexw == selected_x87_no_rexw && form_id < result.form_id))
+             candidate_x87_no_rexw == selected_x87_no_rexw && !prefer_fma4_w1 && form_id < result.form_id))
         {
             result.form_id = form_id;
             result.stable_hash = form.stable_hash;
