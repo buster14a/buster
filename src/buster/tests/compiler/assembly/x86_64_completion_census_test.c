@@ -163,6 +163,10 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_shstk
     {7945, UINT64_C(0x625b38a34729634e)}, {7946, UINT64_C(0xd4f17e4479e73ef7)},
     {2839, UINT64_C(0xd3d36a7ca38fbe76)}, {2840, UINT64_C(0x5c33d83f492271b0)},
 };
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_ptwrite_forms[] = {
+    {8827, UINT64_C(0x263769210dc3d35f)}, {8828, UINT64_C(0x4371a45c4965fbc3)},
+};
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -935,6 +939,134 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  shstk_baseline_records[control_form_id].att_source_reason == records[control_form_id].att_source_reason);
     }
     BUSTER_TEST(arguments, shstk_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_forms));
+
+    // PTWRITE has two public CPL3 forms.  The feature-disabled comparison
+    // proves that model-default exposure moves exactly these rows and that
+    // the Intel and AT&T source paths agree on their bytes.
+    u8 ptwrite_inventory_text[2 * 32] = {0};
+    u32 ptwrite_inventory_length = 0;
+    for (u32 ptwrite_index = 0; ptwrite_index < BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms);
+         ptwrite_index += 1)
+    {
+        X86CompletionCensusFormKey const* expected = &x86_completion_census_ptwrite_forms[ptwrite_index];
+        BusterX86MetadataForm ptwrite_form = {0};
+        BusterX86MetadataFormKey ptwrite_key = {0};
+        bool ptwrite_form_ok = buster_x86_metadata_form(expected->form_id, &ptwrite_form) &&
+                               buster_x86_metadata_form_key(expected->form_id, &ptwrite_key);
+        BUSTER_TEST(arguments, ptwrite_form_ok && ptwrite_key.stable_hash == expected->stable_hash &&
+                                 string_equal(buster_x86_metadata_string_span(ptwrite_form.isa_set), S8("PTWRITE")) &&
+                                 buster_x86_metadata_string_span(ptwrite_form.cpl).length == 1 &&
+                                 buster_x86_metadata_string_byte(ptwrite_form.cpl, 0) == '3');
+        String8 ptwrite_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                             expected->form_id, expected->stable_hash);
+        BUSTER_TEST(arguments, ptwrite_inventory_length + ptwrite_line.length <= sizeof(ptwrite_inventory_text));
+        if (ptwrite_inventory_length + ptwrite_line.length <= sizeof(ptwrite_inventory_text))
+        {
+            memcpy(ptwrite_inventory_text + ptwrite_inventory_length, ptwrite_line.pointer, ptwrite_line.length);
+            ptwrite_inventory_length += (u32)ptwrite_line.length;
+        }
+        BUSTER_TEST(arguments, records[expected->form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[expected->form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[expected->form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 records[expected->form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 records[expected->form_id].intel_byte_count == records[expected->form_id].metadata_byte_count &&
+                                 records[expected->form_id].att_byte_count == records[expected->form_id].metadata_byte_count &&
+                                 records[expected->form_id].intel_relocation_count == records[expected->form_id].metadata_relocation_count &&
+                                 records[expected->form_id].att_relocation_count == records[expected->form_id].metadata_relocation_count);
+    }
+    u8 ptwrite_inventory_digest[32] = {0};
+    static u8 const expected_ptwrite_inventory_digest[32] = {
+        0xc1, 0x64, 0xdb, 0x81, 0x72, 0x27, 0xc0, 0x5f,
+        0x5b, 0xcf, 0x27, 0xdc, 0x77, 0x7d, 0x79, 0x3c,
+        0x93, 0xc5, 0xb9, 0xc5, 0x13, 0xb2, 0x5e, 0x1d,
+        0x1a, 0xe8, 0x0f, 0xfb, 0x7d, 0xf5, 0xaf, 0x39,
+    };
+    link_sha256(arguments->arena, ptwrite_inventory_text, ptwrite_inventory_length, ptwrite_inventory_digest);
+    BUSTER_TEST(arguments, ptwrite_inventory_length == 44 &&
+                             memcmp(ptwrite_inventory_digest, expected_ptwrite_inventory_digest,
+                                    sizeof(expected_ptwrite_inventory_digest)) == 0);
+    BusterX86CompletionCensusRecord* ptwrite_baseline_records =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
+    Target ptwrite_baseline_target = census_target;
+    ptwrite_baseline_target.cpu_features = target_cpu_features_remove(ptwrite_baseline_target.cpu_features,
+                                                                       TARGET_CPU_FEATURE_X86_PTWRITE);
+    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
+        .arena = arguments->arena, .target = ptwrite_baseline_target, .records = ptwrite_baseline_records,
+        .record_capacity = form_count, .run_intel = true, .run_att = true,
+    });
+    u32 ptwrite_changed_count = 0;
+    for (u32 ptwrite_compare_form_id = 0; ptwrite_compare_form_id < form_count; ptwrite_compare_form_id += 1)
+    {
+        BusterX86CompletionCensusRecord const* before = &ptwrite_baseline_records[ptwrite_compare_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[ptwrite_compare_form_id];
+        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                       before->intel_source_reason != after->intel_source_reason ||
+                       before->att_source_reason != after->att_source_reason ||
+                       before->intel_byte_count != after->intel_byte_count ||
+                       before->att_byte_count != after->att_byte_count ||
+                       before->metadata_byte_count != after->metadata_byte_count;
+        if (!changed) continue;
+        ptwrite_changed_count += 1;
+        bool selected = false;
+        for (u32 ptwrite_index = 0; ptwrite_index < BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms);
+             ptwrite_index += 1)
+            selected |= ptwrite_compare_form_id == x86_completion_census_ptwrite_forms[ptwrite_index].form_id;
+        BUSTER_TEST(arguments, selected);
+    }
+    for (u32 ptwrite_index = 0; ptwrite_index < BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms); ptwrite_index += 1)
+    {
+        u32 ptwrite_form_id = x86_completion_census_ptwrite_forms[ptwrite_index].form_id;
+        BusterX86CompletionCensusRecord const* before = &ptwrite_baseline_records[ptwrite_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[ptwrite_form_id];
+        BUSTER_TEST(arguments, before->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+    }
+    BUSTER_TEST(arguments, ptwrite_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms));
+    {
+        static u8 const expected_ptwrite_register_bytes[] = {0xf3, 0x0f, 0xae, 0xe0};
+        static u8 const expected_ptwrite_memory_bytes[] = {0xf3, 0x41, 0x0f, 0xae, 0x67, 0x40};
+        AssemblyEncodeResult ptwrite_intel_register = assembly_encode(
+            arguments->arena, S8("PTWRITE EAX\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult ptwrite_att_register = assembly_encode(
+            arguments->arena, S8("ptwrite %eax\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult ptwrite_intel_memory = assembly_encode(
+            arguments->arena, S8("PTWRITE DWORD PTR [R15+0x40]\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult ptwrite_att_memory = assembly_encode(
+            arguments->arena, S8("ptwrite 0x40(%r15)\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, ptwrite_intel_register.diagnostic_count == 0 &&
+                                 ptwrite_intel_register.bytes.length == sizeof(expected_ptwrite_register_bytes) &&
+                                 memcmp(ptwrite_intel_register.bytes.pointer, expected_ptwrite_register_bytes,
+                                        sizeof(expected_ptwrite_register_bytes)) == 0);
+        BUSTER_TEST(arguments, ptwrite_att_register.diagnostic_count == 0 &&
+                                 ptwrite_att_register.bytes.length == sizeof(expected_ptwrite_register_bytes) &&
+                                 memcmp(ptwrite_att_register.bytes.pointer, expected_ptwrite_register_bytes,
+                                        sizeof(expected_ptwrite_register_bytes)) == 0);
+        BUSTER_TEST(arguments, ptwrite_intel_memory.diagnostic_count == 0 &&
+                                 ptwrite_intel_memory.bytes.length == sizeof(expected_ptwrite_memory_bytes) &&
+                                 memcmp(ptwrite_intel_memory.bytes.pointer, expected_ptwrite_memory_bytes,
+                                        sizeof(expected_ptwrite_memory_bytes)) == 0);
+        BUSTER_TEST(arguments, ptwrite_att_memory.diagnostic_count == 0 &&
+                                 ptwrite_att_memory.bytes.length == sizeof(expected_ptwrite_memory_bytes) &&
+                                 memcmp(ptwrite_att_memory.bytes.pointer, expected_ptwrite_memory_bytes,
+                                        sizeof(expected_ptwrite_memory_bytes)) == 0);
+        Target ptwrite_disabled_target = census_target;
+        ptwrite_disabled_target.cpu_features = target_cpu_features_remove(ptwrite_disabled_target.cpu_features,
+                                                                            TARGET_CPU_FEATURE_X86_PTWRITE);
+        AssemblyEncodeResult ptwrite_disabled = assembly_encode(
+            arguments->arena, S8("PTWRITE EAX\n"),
+            (AssemblyEncodeOptions){.target = ptwrite_disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, ptwrite_disabled.diagnostic_count != 0);
+    }
     for (u32 crypto_shadow_index = 0;
          crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
          crypto_shadow_index += 1)
@@ -1785,32 +1917,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5619 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 225 && source.intel_unresolved_count == 3968 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5621 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 225 && source.intel_unresolved_count == 3966 &&
                              source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 552 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 5708 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3781 &&
+                             source.intel_policy_rejected_count == 550 && source.intel_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.att_exact_count == 5710 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 46 && source.att_unresolved_count == 3779 &&
                              source.att_byte_mismatch_count == 1046 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 561 && source.att_different_encoding_count == 17);
+                             source.att_policy_rejected_count == 559 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6656 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6658 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3263 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 552);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6843 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 550);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6845 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1187 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 561);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 559);
 
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
