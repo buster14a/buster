@@ -9739,17 +9739,17 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 u8 opcode;
                 u8 modrm;
             } const x87_integer_memory_cases[] = {
-                {S8("FILD"), 16, 9234, 0xdf, 0x00},
-                {S8("FILD"), 32, 9168, 0xdb, 0x00},
-                {S8("FILD"), 64, 9239, 0xdf, 0x28},
-                {S8("FIST"), 16, 9236, 0xdf, 0x10},
-                {S8("FIST"), 32, 9170, 0xdb, 0x10},
-                {S8("FISTP"), 16, 9237, 0xdf, 0x18},
-                {S8("FISTP"), 32, 9171, 0xdb, 0x18},
-                {S8("FISTP"), 64, 9241, 0xdf, 0x38},
-                {S8("FISTTP"), 16, 9235, 0xdf, 0x08},
-                {S8("FISTTP"), 32, 9169, 0xdb, 0x08},
-                {S8("FISTTP"), 64, 9198, 0xdd, 0x08},
+                {S8("FILD"), 16, 9233, 0xdf, 0x00},
+                {S8("FILD"), 32, 9167, 0xdb, 0x00},
+                {S8("FILD"), 64, 9238, 0xdf, 0x28},
+                {S8("FIST"), 16, 9235, 0xdf, 0x10},
+                {S8("FIST"), 32, 9169, 0xdb, 0x10},
+                {S8("FISTP"), 16, 9236, 0xdf, 0x18},
+                {S8("FISTP"), 32, 9170, 0xdb, 0x18},
+                {S8("FISTP"), 64, 9240, 0xdf, 0x38},
+                {S8("FISTTP"), 16, 9234, 0xdf, 0x08},
+                {S8("FISTTP"), 32, 9168, 0xdb, 0x08},
+                {S8("FISTTP"), 64, 9197, 0xdd, 0x08},
             };
             bool x87_integer_memory_valid = true;
             for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(x87_integer_memory_cases); case_index += 1)

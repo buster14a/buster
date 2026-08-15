@@ -10372,6 +10372,7 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("f64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("zi64")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("mem64int")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("m64int")) ||
         // XED uses x87-specific real-memory width tokens rather than the
         // generic q/d/b spellings.  Keep those tokens width-aware so FLD

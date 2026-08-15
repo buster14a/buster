@@ -11916,12 +11916,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     // APX immediate rows interpret the byte as a signed field.  Preserve
     // source literals 0x80..0xff as their architectural low-byte values.
-    if (assembly_word_equal(mnemonic, S8("add")) || assembly_word_equal(mnemonic, S8("adc")) ||
-        assembly_word_equal(mnemonic, S8("sub")) || assembly_word_equal(mnemonic, S8("sbb")) ||
-        assembly_word_equal(mnemonic, S8("and")) || assembly_word_equal(mnemonic, S8("or")) ||
-        assembly_word_equal(mnemonic, S8("xor")) || assembly_word_equal(mnemonic, S8("imul")) ||
-        assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("shr")) ||
-        assembly_word_equal(mnemonic, S8("sar")))
+    if (attributes.apx_flags != 0 &&
+        (assembly_word_equal(mnemonic, S8("add")) || assembly_word_equal(mnemonic, S8("adc")) ||
+         assembly_word_equal(mnemonic, S8("sub")) || assembly_word_equal(mnemonic, S8("sbb")) ||
+         assembly_word_equal(mnemonic, S8("and")) || assembly_word_equal(mnemonic, S8("or")) ||
+         assembly_word_equal(mnemonic, S8("xor")) || assembly_word_equal(mnemonic, S8("imul")) ||
+         assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("shr")) ||
+         assembly_word_equal(mnemonic, S8("sar"))))
     {
         for (u32 index = 0; index < operand_count; index += 1)
         {
