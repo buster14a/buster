@@ -78,19 +78,20 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusOutcomeControl const x86_completion_censu
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
      BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
-    // The opposite-dialect store forms are unchanged exact/invalid controls.
+    // Full metadata authority makes the opposite-dialect store forms exact in
+    // both source syntaxes.
     {10089, UINT64_C(0xc7b0bcf068f01edf), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
     {10094, UINT64_C(0x1285dedcd0bd3f8d), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
     {10108, UINT64_C(0xb70fc1f33fd9be47), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
     {10114, UINT64_C(0x9a647bd79a3b833d), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
-     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
 };
 #endif
 
@@ -529,7 +530,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              memcmp(legacy_xmm_memory_changed_digest, expected_legacy_xmm_memory_changed_digest,
                                     sizeof(expected_legacy_xmm_memory_changed_digest)) == 0);
     BUSTER_TEST(arguments, legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
-                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 190 &&
+                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 139 &&
+                             legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
+                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] == 51 &&
                              legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED]
                                   [BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] == 1 &&
                              legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]
@@ -996,8 +999,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5518 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 223 && source.intel_unresolved_count == 4079 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5570 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 223 && source.intel_unresolved_count == 4027 &&
                              source.intel_byte_mismatch_count == 759 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 587 && source.intel_different_encoding_count == 17);
     BUSTER_TEST(arguments, source.att_exact_count == 5659 && source.att_normalized_relocation_count == 26 &&
@@ -1010,8 +1013,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6545 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3339 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6597 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3287 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 587);

@@ -11651,6 +11651,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
+                // Intel legacy XMM source spells the aggregate memory width
+                // directly.  VEX/EVEX/XOP rows and AT&T suffix projection
+                // publish a scalar element width while carrying the aggregate
+                // width in their vector/register topology.
+                if (syntax == ASSEMBLY_SYNTAX_INTEL &&
+                    (!mnemonic.length || assembly_ascii_lower(mnemonic.pointer[0]) != 'v'))
+                {
+                    continue;
+                }
                 if (assembly_word_equal(mnemonic, S8("vcvtbf42hf8")) &&
                     physical[index].memory.source_width != vector_memory_width / 2)
                 {
