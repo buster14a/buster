@@ -655,6 +655,17 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                                 model == CPU_MODEL_INTEL_PANTHERLAKE ||
                                 model == CPU_MODEL_INTEL_CLEARWATERFOREST ||
                                 model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool amd_state_fsgsbase = model >= CPU_MODEL_AMD_BD_3 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool amd_state_xsave = model >= CPU_MODEL_AMD_BT_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool amd_state_xsaves = model >= CPU_MODEL_AMD_ZEN_1 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_atom_future = (model >= CPU_MODEL_INTEL_GOLDMONT && model <= CPU_MODEL_INTEL_TREMONT) ||
+                             (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST);
+    bool intel_state_fsgsbase = (model >= CPU_MODEL_INTEL_IVY_BRIDGE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                                intel_atom_future || intel_phi || model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool intel_state_xsave = (model >= CPU_MODEL_INTEL_SANDY_BRIDGE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                             intel_atom_future || intel_phi || model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool intel_state_xsaves = (model >= CPU_MODEL_INTEL_SKYLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                              intel_atom_future || model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     if (amd_ssse3 || intel_ssse3)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
@@ -703,6 +714,18 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     {
         result = target_cpu_features_union(result, target_cpu_features_from_array((TargetCpuFeature const[]){
             TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4}, 3));
+    }
+    if (amd_state_fsgsbase || intel_state_fsgsbase)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_FSGSBASE);
+    }
+    if (amd_state_xsave || intel_state_xsave)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVE);
+    }
+    if (amd_state_xsaves || intel_state_xsaves)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVES);
     }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
     if (amd_family_10_or_newer)
