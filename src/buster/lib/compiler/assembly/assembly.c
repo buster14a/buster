@@ -10696,11 +10696,29 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     {
         return false;
     }
+    // The full AT&T mnemonic is present in the x87 typed alias table (for
+    // example `fiadds`), while the base candidate below is the unsuffixed
+    // `fiadd` entry and therefore has no suffix_width metadata of its own.
+    // Capture the typed width before stripping the suffix.
+    AssemblyInstructionInfo suffixed_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    if (assembly_instruction_lookup(target, syntax, mnemonic, &suffixed_info) && suffixed_info.suffix_width)
+    {
+        suffix_width = suffixed_info.suffix_width;
+    }
     String8 candidate = string_slice(mnemonic, 0, mnemonic.length - 1);
     AssemblyInstructionInfo info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     bool has_handwritten_base = assembly_instruction_lookup(target, syntax, candidate, &info);
     if (has_handwritten_base)
     {
+        // x87 AT&T suffix aliases carry their architectural element width in
+        // the handwritten lookup table (`fiadds` is mem16int, while `fadds`
+        // is mem32real).  Prefer that typed width over the generic character
+        // suffix mapping, which treats every `-s` as 32 bits and would select
+        // the DB opcode for 16-bit integer forms.
+        if (info.suffix_width)
+        {
+            suffix_width = info.suffix_width;
+        }
         if ((!info.operand_count && info.opcode != ASSEMBLY_OPCODE_X86_RET) || info.opcode == ASSEMBLY_OPCODE_X86_JCC ||
             info.opcode == ASSEMBLY_OPCODE_X86_SETCC)
         {

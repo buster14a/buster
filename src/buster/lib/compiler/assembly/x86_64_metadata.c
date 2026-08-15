@@ -10312,6 +10312,7 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
         buster_x86_metadata_pool_string_equal_literal(offset, S8("i16")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u16")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("f16")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("mem16int")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("bf16")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("zi16")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("z2i16")) ||
@@ -10321,6 +10322,7 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
         buster_x86_metadata_pool_string_equal_literal(offset, S8("i32")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u32")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("f32")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("mem32int")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("zi32")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("zd")))
         return BUSTER_X86_METADATA_PHYSICAL_WIDTH_32;
@@ -10329,6 +10331,7 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
         buster_x86_metadata_pool_string_equal_literal(offset, S8("u64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("f64")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("zi64")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("m64int")) ||
         // XED uses x87-specific real-memory width tokens rather than the
         // generic q/d/b spellings.  Keep those tokens width-aware so FLD
         // source selection cannot accept the first ModRM alias (m32real)

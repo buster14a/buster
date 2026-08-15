@@ -9691,6 +9691,43 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, x87_memory_valid);
 
+            // Integer x87 memory operands use XED's mem16int/mem32int/m64int
+            // tokens.  They select different opcode families (DF, DB, and
+            // DD respectively); treating an unknown token as a wildcard
+            // silently chose the first DB row for FILD/FIST/FISTP.
+            struct
+            {
+                String8 mnemonic;
+                u16 width;
+                u32 form_id;
+                u8 opcode;
+                u8 modrm;
+            } const x87_integer_memory_cases[] = {
+                {S8("FILD"), 16, 9234, 0xdf, 0x00},
+                {S8("FILD"), 32, 9168, 0xdb, 0x00},
+                {S8("FILD"), 64, 9239, 0xdf, 0x28},
+                {S8("FIST"), 16, 9236, 0xdf, 0x10},
+                {S8("FIST"), 32, 9170, 0xdb, 0x10},
+                {S8("FISTP"), 16, 9237, 0xdf, 0x18},
+                {S8("FISTP"), 32, 9171, 0xdb, 0x18},
+                {S8("FISTP"), 64, 9241, 0xdf, 0x38},
+                {S8("FISTTP"), 16, 9235, 0xdf, 0x08},
+                {S8("FISTTP"), 32, 9169, 0xdb, 0x08},
+                {S8("FISTTP"), 64, 9198, 0xdd, 0x08},
+            };
+            bool x87_integer_memory_valid = true;
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(x87_integer_memory_cases); case_index += 1)
+            {
+                BusterX86MetadataPhysicalOperand integer_operand = x86_64_metadata_test_physical_mem_base(
+                    0, x87_integer_memory_cases[case_index].width, 0);
+                u8 expected[2] = {x87_integer_memory_cases[case_index].opcode, x87_integer_memory_cases[case_index].modrm};
+                x87_integer_memory_valid &= x86_64_metadata_test_emit_exact(
+                    x87_integer_memory_cases[case_index].mnemonic, x87_integer_memory_cases[case_index].form_id,
+                    &integer_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), expected,
+                    BUSTER_ARRAY_LENGTH(expected));
+            }
+            BUSTER_TEST(arguments, x87_integer_memory_valid);
+
             // FCMOV/FCOMI carry generated ISA-set spellings that are not
             // target feature names.  They are baseline x87 forms, so the
             // ordinary sse2 feature input must authorize both selection and
