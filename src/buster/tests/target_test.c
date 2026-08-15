@@ -53,6 +53,13 @@ struct TargetTestX86HresetModelCase
     bool expected_present;
 };
 
+typedef struct TargetTestX86PconfigModelCase TargetTestX86PconfigModelCase;
+struct TargetTestX86PconfigModelCase
+{
+    CpuModel model;
+    bool expected_present;
+};
+
 typedef struct TargetTestX86PtwriteModelCase TargetTestX86PtwriteModelCase;
 struct TargetTestX86PtwriteModelCase
 {
@@ -489,6 +496,39 @@ BUSTER_GLOBAL_LOCAL TargetTestX86HresetModelCase const target_test_x86_hreset_mo
     {CPU_MODEL_INTEL_SIERRAFOREST, true}, {CPU_MODEL_INTEL_GRANDRIDGE, true},
     {CPU_MODEL_INTEL_CLEARWATERFOREST, true}, {CPU_MODEL_INTEL_KNL, false},
     {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, false},
+};
+
+// Independent Clang 22.1.8 PCONFIG membership, serialized as one bit per
+// concrete model in the canonical 62-model order.  PCONFIG has three exact
+// boundaries: Alder through Granite Rapids-D (including Icelake-server),
+// Sierra through Clearwater Forest, and Diamond Rapids alone.  ENQCMD is a
+// strict subset; Icelake-server is the important PCONFIG-only server row.
+BUSTER_GLOBAL_LOCAL TargetTestX86PconfigModelCase const target_test_x86_pconfig_model_cases[] = {
+    {CPU_MODEL_AMD_I486, false}, {CPU_MODEL_AMD_PENTIUM, false}, {CPU_MODEL_AMD_K6, false},
+    {CPU_MODEL_AMD_K6_2, false}, {CPU_MODEL_AMD_K6_3, false}, {CPU_MODEL_AMD_GEODE, false},
+    {CPU_MODEL_AMD_ATHLON, false}, {CPU_MODEL_AMD_ATHLON_XP, false}, {CPU_MODEL_AMD_K8, false},
+    {CPU_MODEL_AMD_K8_SSE3, false}, {CPU_MODEL_AMD_AMD_FAMILY_10, false}, {CPU_MODEL_AMD_BT_1, false},
+    {CPU_MODEL_AMD_BT_2, false}, {CPU_MODEL_AMD_BD_1, false}, {CPU_MODEL_AMD_BD_2, false},
+    {CPU_MODEL_AMD_BD_3, false}, {CPU_MODEL_AMD_BD_4, false}, {CPU_MODEL_AMD_ZEN_1, false},
+    {CPU_MODEL_AMD_ZEN_2, false}, {CPU_MODEL_AMD_ZEN_3, false}, {CPU_MODEL_AMD_ZEN_4, false},
+    {CPU_MODEL_AMD_ZEN_5, false}, {CPU_MODEL_INTEL_CORE_2, false}, {CPU_MODEL_INTEL_PENRYN, false},
+    {CPU_MODEL_INTEL_NEHALEM, false}, {CPU_MODEL_INTEL_WESTMERE, false}, {CPU_MODEL_INTEL_SANDY_BRIDGE, false},
+    {CPU_MODEL_INTEL_IVY_BRIDGE, false}, {CPU_MODEL_INTEL_HASWELL, false}, {CPU_MODEL_INTEL_BROADWELL, false},
+    {CPU_MODEL_INTEL_SKYLAKE, false}, {CPU_MODEL_INTEL_SKYLAKE_AVX512, false}, {CPU_MODEL_INTEL_ROCKETLAKE, false},
+    {CPU_MODEL_INTEL_COOPERLAKE, false}, {CPU_MODEL_INTEL_CASCADELAKE, false}, {CPU_MODEL_INTEL_CANNONLAKE, false},
+    {CPU_MODEL_INTEL_ICELAKE_CLIENT, false}, {CPU_MODEL_INTEL_TIGERLAKE, false},
+    {CPU_MODEL_INTEL_ALDERLAKE, true}, {CPU_MODEL_INTEL_RAPTORLAKE, true},
+    {CPU_MODEL_INTEL_METEORLAKE, true}, {CPU_MODEL_INTEL_GRACEMONT, true},
+    {CPU_MODEL_INTEL_ARROWLAKE, true}, {CPU_MODEL_INTEL_ARROWLAKE_S, true},
+    {CPU_MODEL_INTEL_LUNARLAKE, true}, {CPU_MODEL_INTEL_PANTHERLAKE, true},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, true}, {CPU_MODEL_INTEL_EMERALD_RAPIDS, true},
+    {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, true}, {CPU_MODEL_INTEL_GRANITE_RAPIDS, true},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, true}, {CPU_MODEL_INTEL_BONNELL, false},
+    {CPU_MODEL_INTEL_SILVERMONT, false}, {CPU_MODEL_INTEL_GOLDMONT, false},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, false}, {CPU_MODEL_INTEL_TREMONT, false},
+    {CPU_MODEL_INTEL_SIERRAFOREST, true}, {CPU_MODEL_INTEL_GRANDRIDGE, true},
+    {CPU_MODEL_INTEL_CLEARWATERFOREST, true}, {CPU_MODEL_INTEL_KNL, false},
+    {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
 };
 
 // Independent Clang 22.1.8 MOVDIR64B membership, serialized as one bit per
@@ -1632,6 +1672,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_VMX));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SVM));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_MOVDIR64B));
+    BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_PCONFIG));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_PTWRITE));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SHA));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SHA512));
@@ -1783,6 +1824,18 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     no_enqcmd_leaf.maximum_basic_leaf = 6;
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_enqcmd_leaf),
                                                          TARGET_CPU_FEATURE_X86_ENQCMD));
+    X86_64CpuFeatureInput no_pconfig_hardware = full_cpuid;
+    no_pconfig_hardware.leaf_7_0.edx &= ~UINT32_C(0x40000);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_pconfig_hardware),
+                                                         TARGET_CPU_FEATURE_X86_PCONFIG));
+    X86_64CpuFeatureInput no_pconfig_leaf = full_cpuid;
+    no_pconfig_leaf.maximum_basic_leaf = 6;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_pconfig_leaf),
+                                                         TARGET_CPU_FEATURE_X86_PCONFIG));
+    X86_64CpuFeatureInput no_pconfig_xcr0 = full_cpuid;
+    no_pconfig_xcr0.xcr0 = 0;
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_pconfig_xcr0),
+                                                        TARGET_CPU_FEATURE_X86_PCONFIG));
     X86_64CpuFeatureInput no_ibt_hardware = full_cpuid;
     no_ibt_hardware.leaf_7_0.edx &= ~(UINT32_C(0x100000));
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_ibt_hardware), TARGET_CPU_FEATURE_X86_IBT));
@@ -2598,6 +2651,83 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                              !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_KNM),
                                                            TARGET_CPU_FEATURE_X86_HRESET));
 
+    // PCONFIG/PCONFIG64 are privileged instruction-set defaults.  Pin the
+    // complete Clang model membership and its three discontinuous Intel
+    // ranges so a broad-range edit cannot silently absorb Tiger/Icelake-client
+    // or legacy Atom rows.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_pconfig_model_cases) == 62);
+    char8 x86_pconfig_model_text[2048] = {0};
+    u32 x86_pconfig_model_length = 0;
+    u32 x86_pconfig_model_present_count = 0;
+    for (u32 pconfig_model_index = 0;
+         pconfig_model_index < BUSTER_ARRAY_LENGTH(target_test_x86_pconfig_model_cases);
+         pconfig_model_index += 1)
+    {
+        TargetTestX86PconfigModelCase const* model_case = &target_test_x86_pconfig_model_cases[pconfig_model_index];
+        String8 model_name = cpu_model_to_string_os(model_case->model);
+        char8 pconfig_bit = model_case->expected_present ? '1' : '0';
+        String8 line = string_format(arguments->arena, S8("{S8} {char8}\n"), model_name, pconfig_bit);
+        bool line_fits = x86_pconfig_model_length + line.length <= sizeof(x86_pconfig_model_text);
+        BUSTER_TEST(arguments, line_fits);
+        if (!line_fits) continue;
+        memcpy(x86_pconfig_model_text + x86_pconfig_model_length, line.pointer, line.length);
+        x86_pconfig_model_length += (u32)line.length;
+        x86_pconfig_model_present_count += model_case->expected_present;
+        BUSTER_TEST(arguments, cpu_model_from_string(model_name) == model_case->model);
+        Target model_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = model_case->model,
+            .os = OPERATING_SYSTEM_LINUX,
+        };
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(model_target));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_PCONFIG) ==
+                             model_case->expected_present);
+    }
+    u8 x86_pconfig_model_digest[32] = {0};
+    static u8 const expected_x86_pconfig_model_digest[32] = {
+        0x54, 0xf2, 0x6e, 0x5b, 0x1c, 0x16, 0xf6, 0x74,
+        0xb5, 0xad, 0xb2, 0xf7, 0x88, 0x71, 0x0c, 0x30,
+        0x5d, 0xfd, 0x0e, 0xc3, 0x5b, 0xf8, 0xf3, 0x87,
+        0xa3, 0x03, 0x82, 0xdf, 0x12, 0xe2, 0x6a, 0x13,
+    };
+    link_sha256(arguments->arena, (u8 const*)x86_pconfig_model_text, x86_pconfig_model_length,
+                x86_pconfig_model_digest);
+    BUSTER_TEST(arguments, x86_pconfig_model_length == 706 && x86_pconfig_model_present_count == 17 &&
+                             memcmp(x86_pconfig_model_digest, expected_x86_pconfig_model_digest,
+                                    sizeof(expected_x86_pconfig_model_digest)) == 0);
+    // Boundary witnesses: PCONFIG begins at Alder, includes Icelake-server,
+    // and resumes at Sierra; the ENQCMD/HRESET overlaps remain distinct.
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_5),
+                                                         TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ICELAKE_CLIENT),
+                                                           TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_TIGERLAKE),
+                                                           TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ALDERLAKE),
+                                                          TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ICELAKE_SERVER),
+                                                          TARGET_CPU_FEATURE_X86_PCONFIG));
+    BUSTER_TEST(arguments, target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_SIERRAFOREST),
+                                                        TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_CLEARWATERFOREST),
+                                                          TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_KNL),
+                                                           TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_KNM),
+                                                           TARGET_CPU_FEATURE_X86_PCONFIG));
+    TargetCpuFeatures pconfig_icelake_server =
+        target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ICELAKE_SERVER);
+    TargetCpuFeatures pconfig_diamond = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS);
+    BUSTER_TEST(arguments, target_cpu_features_contains(pconfig_icelake_server, TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             !target_cpu_features_contains(pconfig_icelake_server, TARGET_CPU_FEATURE_X86_ENQCMD) &&
+                             !target_cpu_features_contains(pconfig_icelake_server, TARGET_CPU_FEATURE_X86_HRESET) &&
+                             target_cpu_features_contains(pconfig_diamond, TARGET_CPU_FEATURE_X86_PCONFIG) &&
+                             target_cpu_features_contains(pconfig_diamond, TARGET_CPU_FEATURE_X86_ENQCMD) &&
+                             !target_cpu_features_contains(pconfig_diamond, TARGET_CPU_FEATURE_X86_HRESET));
+
     // PTWRITE is an Intel Processor Trace instruction set.  Pin the complete
     // Clang model membership independently of target_cpu_features_default so
     // the discontinuous Atom and future-client/server boundaries cannot drift.
@@ -3007,8 +3137,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, memcmp(x86_clang_reference_digest, expected_x86_clang_reference_digest,
                                   sizeof(expected_x86_clang_reference_digest)) == 0);
 
-    // These are the intentional post-SHA/state/cache/security/control/PTWRITE/MOVDIR64B/ENQCMD/HRESET-default gaps against the fixed Clang
-    // reference.  The three extra entries are modeled in Buster but absent
+    // These are the intentional post-SHA/state/cache/security/control/PTWRITE/MOVDIR64B/ENQCMD/HRESET/PCONFIG-default gaps against the fixed Clang
+    // reference.  The remaining two entries are modeled in Buster but absent
     // from the corresponding Clang CPU profiles; sse2 is an additional
     // implicit Buster baseline invariant outside this 82-feature reference.
     static struct
@@ -3016,7 +3146,6 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         u8 index;
         u8 count;
     } const expected_x86_clang_reference_missing_entries[] = {
-        {53, 17},
         {56, 1}, {73, 5},
     };
     static struct
@@ -3051,7 +3180,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_clang_reference_missing[feature_index] == expected_x86_clang_reference_missing[feature_index]);
         BUSTER_TEST(arguments, x86_clang_reference_extra[feature_index] == expected_x86_clang_reference_extra[feature_index]);
     }
-    BUSTER_TEST(arguments, x86_clang_reference_missing_total == 23);
+    BUSTER_TEST(arguments, x86_clang_reference_missing_total == 6);
     BUSTER_TEST(arguments, x86_clang_reference_extra_total == 6);
     TargetCpuFeatures baseline_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_BASELINE);
     BUSTER_TEST(arguments, target_cpu_features_contains(baseline_features, TARGET_CPU_FEATURE_X86_SSE2));

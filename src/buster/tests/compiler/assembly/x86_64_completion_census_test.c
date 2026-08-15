@@ -182,6 +182,10 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_enqcm
 BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_hreset_forms[] = {
     {8099, UINT64_C(0xefd1dddbe29380f1)},
 };
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_pconfig_forms[] = {
+    {8823, UINT64_C(0x274d1da5031a4bf6)}, {8824, UINT64_C(0x1aa8e61e5736a61e)},
+};
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -929,6 +933,89 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                         sizeof(expected_hreset_max_bytes)) == 0 &&
                                  memcmp(hreset_att_max.bytes.pointer, expected_hreset_max_bytes,
                                         sizeof(expected_hreset_max_bytes)) == 0);
+    }
+
+    // PCONFIG/PCONFIG64 are privileged system rows.  Pin both generated
+    // identities, keep them policy-excluded from the source census, and emit
+    // their shared 0f 01 c5 bytes through the public metadata API's explicit
+    // ANY inspection mode; the form mode flags pin the NOT64/64 split.
+    u8 pconfig_inventory_text[2 * 32] = {0};
+    u32 pconfig_inventory_length = 0;
+    for (u32 pconfig_index = 0; pconfig_index < BUSTER_ARRAY_LENGTH(x86_completion_census_pconfig_forms); pconfig_index += 1)
+    {
+        X86CompletionCensusFormKey const* expected = &x86_completion_census_pconfig_forms[pconfig_index];
+        BusterX86MetadataForm pconfig_form = {0};
+        BusterX86MetadataFormKey pconfig_key = {0};
+        bool pconfig_form_ok = buster_x86_metadata_form(expected->form_id, &pconfig_form) &&
+                               buster_x86_metadata_form_key(expected->form_id, &pconfig_key);
+        bool pconfig_mode64 = expected->form_id == 8824;
+        BUSTER_TEST(arguments, pconfig_form_ok && pconfig_key.stable_hash == expected->stable_hash &&
+                                 string_equal(buster_x86_metadata_string_span(pconfig_form.isa_set), S8("PCONFIG")) &&
+                                 buster_x86_metadata_string_span(pconfig_form.cpl).length == 1 &&
+                                 buster_x86_metadata_string_byte(pconfig_form.cpl, 0) == '0' &&
+                                 pconfig_form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED &&
+                                 pconfig_form.encoder_family == BUSTER_X86_METADATA_ENCODER_SYSTEM &&
+                                 pconfig_form.mode_flags == (pconfig_mode64 ? BUSTER_X86_METADATA_MODE_64
+                                                                              : BUSTER_X86_METADATA_MODE_NOT64));
+        String8 pconfig_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                              expected->form_id, expected->stable_hash);
+        BUSTER_TEST(arguments, pconfig_inventory_length + pconfig_line.length <= sizeof(pconfig_inventory_text));
+        if (pconfig_inventory_length + pconfig_line.length <= sizeof(pconfig_inventory_text))
+        {
+            memcpy(pconfig_inventory_text + pconfig_inventory_length, pconfig_line.pointer, pconfig_line.length);
+            pconfig_inventory_length += (u32)pconfig_line.length;
+        }
+        BusterX86CompletionCensusRecord const* pconfig_record = &records[expected->form_id];
+        BUSTER_TEST(arguments, pconfig_record->structural_class == BUSTER_X86_COMPLETION_CENSUS_POLICY_EXCLUDED &&
+                                 pconfig_record->policy_excluded &&
+                                 pconfig_record->intel_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                 pconfig_record->att_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                 pconfig_record->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 pconfig_record->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+    }
+    u8 pconfig_inventory_digest[32] = {0};
+    static u8 const expected_pconfig_inventory_digest[32] = {
+        0xc2, 0xb1, 0x6f, 0xc1, 0x25, 0xc3, 0xed, 0x80,
+        0xd3, 0x37, 0xf3, 0x15, 0x24, 0x9c, 0xc7, 0x64,
+        0x9f, 0x73, 0xc8, 0xe3, 0xa2, 0xfc, 0x5e, 0x44,
+        0x03, 0x54, 0xf6, 0xbe, 0x74, 0x82, 0x6d, 0x7c,
+    };
+    link_sha256(arguments->arena, pconfig_inventory_text, pconfig_inventory_length, pconfig_inventory_digest);
+    BUSTER_TEST(arguments, pconfig_inventory_length == 44 &&
+                             memcmp(pconfig_inventory_digest, expected_pconfig_inventory_digest,
+                                    sizeof(expected_pconfig_inventory_digest)) == 0);
+    {
+        static String8 const pconfig_feature_names[] = {S8_INITIALIZER("pconfig")};
+        static u8 const expected_pconfig_bytes[] = {0x0f, 0x01, 0xc5};
+        BusterX86MetadataPhysicalQuery pconfig32_query = {
+            .mnemonic = S8("pconfig"), .operands = 0, .operand_count = 0,
+            .features = {.names = pconfig_feature_names, .count = BUSTER_ARRAY_LENGTH(pconfig_feature_names)},
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY,
+            .include_privileged = true, .include_not64 = true,
+        };
+        BusterX86MetadataPhysicalQuery pconfig64_query = pconfig32_query;
+        u8 pconfig32_output[16] = {0};
+        u8 pconfig64_output[16] = {0};
+        BusterX86MetadataRelocation pconfig32_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+        BusterX86MetadataRelocation pconfig64_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+        BusterX86MetadataEmitResult pconfig32_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = pconfig32_query, .form_id = 8823, .output = pconfig32_output,
+            .output_capacity = sizeof(pconfig32_output), .relocations = pconfig32_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(pconfig32_relocations),
+        });
+        BusterX86MetadataEmitResult pconfig64_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = pconfig64_query, .form_id = 8824, .output = pconfig64_output,
+            .output_capacity = sizeof(pconfig64_output), .relocations = pconfig64_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(pconfig64_relocations),
+        });
+        BUSTER_TEST(arguments, pconfig32_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                 pconfig32_emit.byte_count == sizeof(expected_pconfig_bytes) &&
+                                 pconfig32_emit.relocation_count == 0 &&
+                                 memcmp(pconfig32_output, expected_pconfig_bytes, sizeof(expected_pconfig_bytes)) == 0 &&
+                                 pconfig64_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                 pconfig64_emit.byte_count == sizeof(expected_pconfig_bytes) &&
+                                 pconfig64_emit.relocation_count == 0 &&
+                                 memcmp(pconfig64_output, expected_pconfig_bytes, sizeof(expected_pconfig_bytes)) == 0);
     }
 
     // SHSTK/CET source reachability is pinned to the eight public CET rows

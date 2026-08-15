@@ -676,6 +676,14 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                         model == CPU_MODEL_INTEL_SIERRAFOREST ||
                         model == CPU_MODEL_INTEL_GRANDRIDGE ||
                         model == CPU_MODEL_INTEL_CLEARWATERFOREST;
+    // PCONFIG follows the audited Clang 22 model ranges exactly: the full
+    // Alder-to-Granite-D client/server run, the Sierra-to-Clearwater future
+    // Atom run, and Diamond Rapids as a singleton.  The intervening
+    // Icelake-server row is intentionally included; no broad Intel range is
+    // safe because Tiger/Icelake-client and the legacy Atom rows are gaps.
+    bool intel_pconfig = (model >= CPU_MODEL_INTEL_ALDERLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                         (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                         model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool intel_serialize_waitpkg = model == CPU_MODEL_INTEL_ALDERLAKE ||
                                    model == CPU_MODEL_INTEL_RAPTORLAKE ||
                                    model == CPU_MODEL_INTEL_METEORLAKE ||
@@ -846,6 +854,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (intel_hreset)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_HRESET);
+    }
+    if (intel_pconfig)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PCONFIG);
     }
     if (intel_serialize_waitpkg)
     {
