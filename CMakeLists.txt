@@ -1540,12 +1540,6 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
         target_link_options(${name} PRIVATE "-fsanitize=${sanitizer_flag}")
 
-        if (WIN32)
-            # Clang's sanitizer instrumentation substantially enlarges Debug
-            # test frames; the PE default 1 MiB stack is insufficient.
-            target_link_options(${name} PRIVATE "LINKER:/stack:8388608")
-        endif()
-
         if (UNIX AND NOT APPLE AND C_COMPILER_CLANG AND NOT C_COMPILER_ZIG AND BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
             target_link_options(${name} PRIVATE -shared-libasan)
             target_link_options(${name} PRIVATE "-Wl,-rpath,${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME_DIR}")
@@ -1625,6 +1619,11 @@ function(executable_add name is_buster_program main_file)
     endif()
 
     if (${is_buster_program})
+        if (WIN32)
+            # Metadata-backed compilation and sanitizer instrumentation can
+            # both exceed the PE default 1 MiB stack in Debug builds.
+            target_link_options(${name} PRIVATE "LINKER:/stack:8388608")
+        endif()
         if (UNIX)
             target_link_libraries(${name} PRIVATE m)
         endif()
