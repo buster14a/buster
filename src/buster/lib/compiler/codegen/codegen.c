@@ -1663,15 +1663,19 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation_kind(X64Builder
         case 0xfb: mnemonic = S8("VPSUBQ"); memory_width = 64; break;
         case 0xdb:
             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPANDD") : S8("VPANDQ")) : S8("VPAND");
-            memory_width = size == 64 ? element_width : 256;
+            // The AVX-512 D/Q logical forms use their tuple element width
+            // (dword/qword) for memory matching even when the IR vector is
+            // byte/word-granular: the operation is bitwise and does not
+            // change its result based on the logical lane size.
+            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
             break;
         case 0xeb:
             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPORD") : S8("VPORQ")) : S8("VPOR");
-            memory_width = size == 64 ? element_width : 256;
+            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
             break;
         case 0xef:
             mnemonic = size == 64 ? (element_width <= 32 ? S8("VPXORD") : S8("VPXORQ")) : S8("VPXOR");
-            memory_width = size == 64 ? element_width : 256;
+            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
             break;
         default: break;
         }
@@ -1694,10 +1698,16 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation_kind(X64Builder
         return;
     }
     u16 vector_width = (u16)(size * 8);
+    BusterX86MetadataPhysicalOperand memory_operand = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
+    // Vector memory operands carry the scalar element width used by the
+    // tuple encoding together with their aggregate source width.  The
+    // latter is what lets metadata distinguish (for example) a dword
+    // tuple in a zmmword operand from an ordinary scalar dword load.
+    memory_operand.memory.source_width = vector_width;
     BusterX86MetadataPhysicalOperand operands[3] = {
         codegen_canonical_x64_metadata_vector(0, vector_width),
         codegen_canonical_x64_metadata_vector(0, vector_width),
-        codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0),
+        memory_operand,
     };
     String8 feature_names[2] = {0};
     u32 feature_count = 0;
@@ -12382,7 +12392,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                         }
-                        else if (xgetbv || pause)
+                        else if (xgetbv)
                         {
                             AssemblyEncodeResult encoded = assembly_encode(arena, asm_extra.literal,
                                                                             (AssemblyEncodeOptions){
@@ -12411,6 +12421,23 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             if (encoded.bytes.length)
                             {
                                 memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
+                            }
+                        }
+                        else if (pause)
+                        {
+                            // PAUSE is an architectural baseline instruction
+                            // even though the imported ISA row is tagged with
+                            // the PAUSE feature.  Inline asm has historically
+                            // accepted it unconditionally; provide that
+                            // explicit feature authorization while still
+                            // emitting through the canonical metadata bridge.
+                            String8 feature_names[] = {S8("pause")};
+                            if (!codegen_canonical_x64_metadata_emit_features(
+                                    &buffer, S8("PAUSE"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
+                            {
+                                result.error = buffer.error;
+                                return result;
                             }
                         }
                         else if (ordinary)
