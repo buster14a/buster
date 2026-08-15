@@ -1622,7 +1622,11 @@ function(executable_add name is_buster_program main_file)
         if (WIN32)
             # Metadata-backed compilation and sanitizer instrumentation can
             # both exceed the PE default 1 MiB stack in Debug builds.
-            target_link_options(${name} PRIVATE "LINKER:/stack:8388608")
+            if (C_COMPILER_ZIG OR MINGW)
+                target_link_options(${name} PRIVATE "LINKER:--stack,8388608")
+            else()
+                target_link_options(${name} PRIVATE "LINKER:/stack:8388608")
+            endif()
         endif()
         if (UNIX)
             target_link_libraries(${name} PRIVATE m)
