@@ -92,11 +92,37 @@ ModRM/SIB, displacement and immediate construction with its validity checks —
 not argument passing or re-derivation. Cutting it further means giving the
 canonical cache the byte-template mechanism the MIR path already has
 (`machine_fast_kind` SCALAR/TEMPLATE: prepared bytes plus the offset and width
-of the fields to patch). That is a real design increment, not a cleanup: the
-codegen cache key captures displacement and immediate only as *classes*, so a
-template must carry patch descriptors rather than finished bytes. Stage 1 is
-still about 3.6x the 9.02 G pre-routing baseline, and that mechanism is where
-the rest of it is.
+of the fields to patch). Stage 1 is still about 3.6x the 9.02 G pre-routing
+baseline, and that mechanism is where the rest of it is.
+
+**Measure the template's shape before building it; a census was taken and it
+is not what the paragraph above assumes.** Every little-endian value field goes
+through `buster_x86_metadata_emit_write_le` and nothing else does, so tagging
+its five call sites counts exactly which emissions depend on an operand value.
+Over one single-lane stage-1 self-compile, of 4,863,969 relocation-free
+canonical emissions:
+
+```
+no value field at all                                829,657   17.1%
+computed address displacement (emit_address)       3,469,582   71.3%
+immediate                                            387,094    8.0%
+relative                                             177,619    3.7%
+both displacement kinds                                   17    0.0%
+```
+
+Three things follow. **A template with no patch slot covers only 17.1%** — the
+simple, provably-correct "memoize the bytes and memcpy them" design is worth
+roughly 2-3% of the stage, not the rest of the 3.6x. **Essentially every
+emission needs at most one patch slot** (82.9% have exactly one value field and
+17 have two), so the descriptor table can be a single slot rather than a list.
+And the dominant field is the **computed** displacement written from
+`address.displacement`, which `buster_x86_metadata_emit_address` derives — it
+is not the raw `memory.displacement` of the operand. A patch slot therefore
+cannot be filled by re-injecting an operand field; the value has to come from
+re-running that derivation, which is its own 1.54% of the stage. A template
+that skips everything except `emit_address` is still the right target, but it
+is a narrower win than "skip emission", and anyone sizing this work should
+start from these numbers rather than from the sentence above.
 
 `2026-08-15a` (Linux x86_64, Zen 4 7940HS; canonical x86-64 emission stops
 re-deriving per-form metadata on every instruction, based on `134b96b0`).
