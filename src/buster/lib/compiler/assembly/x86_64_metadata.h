@@ -1094,6 +1094,18 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX8
 // and source-level mnemonic/operand diagnostics.  Physical operand shape,
 // address/immediate ranges, output capacities, instruction length, feature
 // policy, and relocation validation remain in the shared encoder transform.
+// Emit a durable form key whose ISA gate the caller has already cleared for
+// this exact query.  This is for a caller that memoizes the result of a
+// checked selection under a key covering the mnemonic, operands, attributes
+// and target feature set: the coverage, execution-mode and feature checks
+// then re-derive a decision that selection already made, and the feature check
+// in particular is a long comparison against canonical feature spellings.
+// Every structural check - operand shape, registers, ranges, addressing,
+// instruction length, output and relocation capacity - is still performed.
+// Callers that do not memoize under such a key must use
+// buster_x86_metadata_emit_form_exact instead.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_selected(BusterX86MetadataEmitQuery query,
+                                                                                  BusterX86MetadataFormKey key);
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86MetadataEmitQuery query,
                                                                                 BusterX86MetadataFormKey key);
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(BusterX86MetadataEmitQuery query,

@@ -1148,7 +1148,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     BusterX86MetadataEmitResult emitted = {0};
     if (cached)
     {
-        emitted = buster_x86_metadata_emit_form_exact(
+        emitted = buster_x86_metadata_emit_form_selected(
             (BusterX86MetadataEmitQuery){
                 .physical = physical,
                 .form_id = cached->form_id - 1u,
