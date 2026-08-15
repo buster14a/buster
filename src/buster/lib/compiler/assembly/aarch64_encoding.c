@@ -1,5 +1,6 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/string.h>
+#include <buster/lib/os.h>
 
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
@@ -2484,7 +2485,43 @@ BUSTER_GLOBAL_LOCAL bool a64_canonical_segment_valid(BusterAarch64CanonicalDecod
            (u32)segment.instruction_lsb + segment.width <= 32 && (u32)segment.value_lsb + segment.width <= 32;
 }
 
+// The validity of a canonical decoder form is a property of `static const`
+// generated tables: it cannot change while the process runs, so it is derived
+// once and read forever after. Before this cache the full derivation ran on
+// every encode, decode and field access -- 43.4% of the whole test suite's
+// samples, because the aarch64 audits call those in their innermost loops.
+//
+// Published per the module rule in AGENTS.md: filled by the prewarm on the
+// calling thread, flag set last, and read through plain loads thereafter. The
+// lazy path below stays exact so a caller that never prewarms still gets the
+// same answer, just at the old cost.
+BUSTER_GLOBAL_LOCAL u8 a64_canonical_form_validity[BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool a64_canonical_form_validity_ready;
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_form_valid_derive(u32 form_index, BusterAarch64CanonicalDecoderForm const** result);
+
 BUSTER_GLOBAL_LOCAL bool a64_canonical_form_valid(u32 form_index, BusterAarch64CanonicalDecoderForm const** result)
+{
+    if (form_index >= BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT)
+    {
+        return false;
+    }
+    if (a64_canonical_form_validity_ready)
+    {
+        if (!a64_canonical_form_validity[form_index])
+        {
+            return false;
+        }
+        if (result)
+        {
+            *result = buster_aarch64_canonical_decoder_forms + form_index;
+        }
+        return true;
+    }
+    return a64_canonical_form_valid_derive(form_index, result);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_form_valid_derive(u32 form_index, BusterAarch64CanonicalDecoderForm const** result)
 {
     if (form_index >= BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT)
     {
@@ -2571,6 +2608,23 @@ BUSTER_GLOBAL_LOCAL bool a64_canonical_form_valid(u32 form_index, BusterAarch64C
         *result = form;
     }
     return true;
+}
+
+// Derive every form's validity on the calling thread and publish the table
+// last. Call before `lane_run`: the aarch64 audits query this from every lane
+// and the fill is an unsynchronized write to shared state.
+void buster_aarch64_prewarm(void)
+{
+    if (a64_canonical_form_validity_ready)
+    {
+        return;
+    }
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    for (u32 form_index = 0; form_index < BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT; form_index += 1)
+    {
+        a64_canonical_form_validity[form_index] = a64_canonical_form_valid_derive(form_index, 0) ? 1u : 0u;
+    }
+    a64_canonical_form_validity_ready = true;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_canonical_source_value(BusterAarch64CanonicalDecoderForm const* form, u32 source_index, u32 word, u32* value)

@@ -18,6 +18,59 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-16a` (Linux x86_64, Zen 4 7940HS; canonical AArch64 form validity is
+derived once instead of per operation, based on `ae39b781`). Whole local
+Release suite `7.48 s` -> `4.25 s`; cumulative with the 2026-08-15j audit,
+`17.54 s` -> `4.25 s`.
+
+`a64_canonical_form_valid` was **43.4%** of the entire suite's samples --
+27.5% in lane workers and 15.9% on the main thread. It fully revalidates a
+form's field, segment, source and constraint-program tables, and
+`buster_a64_direct_simd_encode`, `buster_a64_direct_simd_decode_internal` and
+every field accessor call it once per operation, inside the innermost loops of
+the combinatorial aarch64 audits.
+
+The answer cannot change. Everything it walks is `static const` generated
+data, so a form's validity is fixed for the life of the process. It is now
+derived once into a per-form byte and the predicate is a bounds check plus a
+load:
+
+```
+aarch64_complex_simd       1.318 s -> 0.097 s   (13.6x)
+aarch64_direct_simd        0.926 s -> 0.081 s   (11.4x)
+aarch64_memory_semantics   1.638 s -> 0.821 s   ( 2.0x)
+```
+
+**This answers the question the audit opened with.** The three aarch64 suites
+were 61% of the sanitized configuration and looked like irreducible
+combinatorial coverage; they were not, and no generated case had to be given
+up. It is the same shape as the two finds in `2026-08-15j` -- an immutable
+answer re-derived in a loop -- which is now three for three, and is the first
+thing to look for in this tree.
+
+Published per the module rule: `buster_aarch64_prewarm` fills the table on the
+calling thread under `BUSTER_CHECK_SERIAL_INITIALIZATION()`, sets its flag
+last, and `test.c` calls it beside `machine_x86_64_exact_prewarm` before
+`lane_run`, because every lane in that gang is an aarch64 suite. The lazy path
+keeps the exact original derivation and **never writes the cache**, so a
+caller that never prewarms stays race-free and merely pays the old cost.
+
+**The next one is already located and not taken.**
+`buster_a64_semantic_blob_byte` is now 16.1% of the suite (13.9% in lane
+workers) and is the whole reason memory semantics moved only 2x. The generated
+semantic tables are stored **base64-encoded in the source**, so every byte
+access decodes a four-character group -- a divide and a modulo by three plus
+four character lookups -- and `_u32`/`_u64` redecode the same group four and
+eight times over. Decoding each blob once at prewarm turns all of it into an
+array index; the blobs total roughly a megabyte
+(`VALUE_ATOM` 404,880, `OPERAND` 338,472, `FIELD` 93,696, `VALUE_ENTRY`
+92,172, `SEGMENT` 23,428), which is the memory this would cost.
+
+Validation: full local `test_all_combinations_ci` green, 0 failing modules,
+308,714 Release assertions across 39 modules. Test-visible behavior is
+unchanged -- the cached and derived paths return the same answer -- and no
+aarch64 case count was reduced.
+
 `2026-08-15j` (Linux x86_64, Zen 4 7940HS; **CI test time, not compiler
 throughput** — the two modules that had become most of it, based on
 `a4049376`). Local Release module totals `17.54 s` -> `7.48 s`; in the
