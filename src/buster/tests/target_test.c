@@ -60,6 +60,20 @@ struct TargetTestX86PconfigModelCase
     bool expected_present;
 };
 
+typedef struct TargetTestX86PrefetchiModelCase TargetTestX86PrefetchiModelCase;
+struct TargetTestX86PrefetchiModelCase
+{
+    CpuModel model;
+    bool expected_present;
+};
+
+typedef struct TargetTestX86TsxldtrkModelCase TargetTestX86TsxldtrkModelCase;
+struct TargetTestX86TsxldtrkModelCase
+{
+    CpuModel model;
+    bool expected_present;
+};
+
 typedef struct TargetTestX86PtwriteModelCase TargetTestX86PtwriteModelCase;
 struct TargetTestX86PtwriteModelCase
 {
@@ -531,6 +545,67 @@ BUSTER_GLOBAL_LOCAL TargetTestX86PconfigModelCase const target_test_x86_pconfig_
     {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
 };
 
+// Independent Clang 22.1.8 PREFETCHI membership, serialized as one bit per
+// concrete model in canonical order.  The only AMD default is Zen5; the Intel
+// set is the Granite/Clearwater/Diamond discontinuity from Clang's model table.
+BUSTER_GLOBAL_LOCAL TargetTestX86PrefetchiModelCase const target_test_x86_prefetchi_model_cases[] = {
+    {CPU_MODEL_AMD_I486, false}, {CPU_MODEL_AMD_PENTIUM, false}, {CPU_MODEL_AMD_K6, false},
+    {CPU_MODEL_AMD_K6_2, false}, {CPU_MODEL_AMD_K6_3, false}, {CPU_MODEL_AMD_GEODE, false},
+    {CPU_MODEL_AMD_ATHLON, false}, {CPU_MODEL_AMD_ATHLON_XP, false}, {CPU_MODEL_AMD_K8, false},
+    {CPU_MODEL_AMD_K8_SSE3, false}, {CPU_MODEL_AMD_AMD_FAMILY_10, false}, {CPU_MODEL_AMD_BT_1, false},
+    {CPU_MODEL_AMD_BT_2, false}, {CPU_MODEL_AMD_BD_1, false}, {CPU_MODEL_AMD_BD_2, false},
+    {CPU_MODEL_AMD_BD_3, false}, {CPU_MODEL_AMD_BD_4, false}, {CPU_MODEL_AMD_ZEN_1, false},
+    {CPU_MODEL_AMD_ZEN_2, false}, {CPU_MODEL_AMD_ZEN_3, false}, {CPU_MODEL_AMD_ZEN_4, false},
+    {CPU_MODEL_AMD_ZEN_5, true}, {CPU_MODEL_INTEL_CORE_2, false}, {CPU_MODEL_INTEL_PENRYN, false},
+    {CPU_MODEL_INTEL_NEHALEM, false}, {CPU_MODEL_INTEL_WESTMERE, false}, {CPU_MODEL_INTEL_SANDY_BRIDGE, false},
+    {CPU_MODEL_INTEL_IVY_BRIDGE, false}, {CPU_MODEL_INTEL_HASWELL, false}, {CPU_MODEL_INTEL_BROADWELL, false},
+    {CPU_MODEL_INTEL_SKYLAKE, false}, {CPU_MODEL_INTEL_SKYLAKE_AVX512, false}, {CPU_MODEL_INTEL_ROCKETLAKE, false},
+    {CPU_MODEL_INTEL_COOPERLAKE, false}, {CPU_MODEL_INTEL_CASCADELAKE, false}, {CPU_MODEL_INTEL_CANNONLAKE, false},
+    {CPU_MODEL_INTEL_ICELAKE_CLIENT, false}, {CPU_MODEL_INTEL_TIGERLAKE, false},
+    {CPU_MODEL_INTEL_ALDERLAKE, false}, {CPU_MODEL_INTEL_RAPTORLAKE, false},
+    {CPU_MODEL_INTEL_METEORLAKE, false}, {CPU_MODEL_INTEL_GRACEMONT, false},
+    {CPU_MODEL_INTEL_ARROWLAKE, false}, {CPU_MODEL_INTEL_ARROWLAKE_S, false},
+    {CPU_MODEL_INTEL_LUNARLAKE, false}, {CPU_MODEL_INTEL_PANTHERLAKE, false},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, false}, {CPU_MODEL_INTEL_EMERALD_RAPIDS, false},
+    {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, false}, {CPU_MODEL_INTEL_GRANITE_RAPIDS, true},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, true}, {CPU_MODEL_INTEL_BONNELL, false},
+    {CPU_MODEL_INTEL_SILVERMONT, false}, {CPU_MODEL_INTEL_GOLDMONT, false},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, false}, {CPU_MODEL_INTEL_TREMONT, false},
+    {CPU_MODEL_INTEL_SIERRAFOREST, false}, {CPU_MODEL_INTEL_GRANDRIDGE, false},
+    {CPU_MODEL_INTEL_CLEARWATERFOREST, true}, {CPU_MODEL_INTEL_KNL, false},
+    {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
+};
+
+// Independent Clang 22.1.8 TSXLDTRK membership.  It is the exact five-model
+// server/future-server set: Emerald, Sapphire, Granite, Granite-D, Diamond.
+BUSTER_GLOBAL_LOCAL TargetTestX86TsxldtrkModelCase const target_test_x86_tsxldtrk_model_cases[] = {
+    {CPU_MODEL_AMD_I486, false}, {CPU_MODEL_AMD_PENTIUM, false}, {CPU_MODEL_AMD_K6, false},
+    {CPU_MODEL_AMD_K6_2, false}, {CPU_MODEL_AMD_K6_3, false}, {CPU_MODEL_AMD_GEODE, false},
+    {CPU_MODEL_AMD_ATHLON, false}, {CPU_MODEL_AMD_ATHLON_XP, false}, {CPU_MODEL_AMD_K8, false},
+    {CPU_MODEL_AMD_K8_SSE3, false}, {CPU_MODEL_AMD_AMD_FAMILY_10, false}, {CPU_MODEL_AMD_BT_1, false},
+    {CPU_MODEL_AMD_BT_2, false}, {CPU_MODEL_AMD_BD_1, false}, {CPU_MODEL_AMD_BD_2, false},
+    {CPU_MODEL_AMD_BD_3, false}, {CPU_MODEL_AMD_BD_4, false}, {CPU_MODEL_AMD_ZEN_1, false},
+    {CPU_MODEL_AMD_ZEN_2, false}, {CPU_MODEL_AMD_ZEN_3, false}, {CPU_MODEL_AMD_ZEN_4, false},
+    {CPU_MODEL_AMD_ZEN_5, false}, {CPU_MODEL_INTEL_CORE_2, false}, {CPU_MODEL_INTEL_PENRYN, false},
+    {CPU_MODEL_INTEL_NEHALEM, false}, {CPU_MODEL_INTEL_WESTMERE, false}, {CPU_MODEL_INTEL_SANDY_BRIDGE, false},
+    {CPU_MODEL_INTEL_IVY_BRIDGE, false}, {CPU_MODEL_INTEL_HASWELL, false}, {CPU_MODEL_INTEL_BROADWELL, false},
+    {CPU_MODEL_INTEL_SKYLAKE, false}, {CPU_MODEL_INTEL_SKYLAKE_AVX512, false}, {CPU_MODEL_INTEL_ROCKETLAKE, false},
+    {CPU_MODEL_INTEL_COOPERLAKE, false}, {CPU_MODEL_INTEL_CASCADELAKE, false}, {CPU_MODEL_INTEL_CANNONLAKE, false},
+    {CPU_MODEL_INTEL_ICELAKE_CLIENT, false}, {CPU_MODEL_INTEL_TIGERLAKE, false},
+    {CPU_MODEL_INTEL_ALDERLAKE, false}, {CPU_MODEL_INTEL_RAPTORLAKE, false},
+    {CPU_MODEL_INTEL_METEORLAKE, false}, {CPU_MODEL_INTEL_GRACEMONT, false},
+    {CPU_MODEL_INTEL_ARROWLAKE, false}, {CPU_MODEL_INTEL_ARROWLAKE_S, false},
+    {CPU_MODEL_INTEL_LUNARLAKE, false}, {CPU_MODEL_INTEL_PANTHERLAKE, false},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, false}, {CPU_MODEL_INTEL_EMERALD_RAPIDS, true},
+    {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, true}, {CPU_MODEL_INTEL_GRANITE_RAPIDS, true},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, true}, {CPU_MODEL_INTEL_BONNELL, false},
+    {CPU_MODEL_INTEL_SILVERMONT, false}, {CPU_MODEL_INTEL_GOLDMONT, false},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, false}, {CPU_MODEL_INTEL_TREMONT, false},
+    {CPU_MODEL_INTEL_SIERRAFOREST, false}, {CPU_MODEL_INTEL_GRANDRIDGE, false},
+    {CPU_MODEL_INTEL_CLEARWATERFOREST, false}, {CPU_MODEL_INTEL_KNL, false},
+    {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
+};
+
 // Independent Clang 22.1.8 MOVDIR64B membership, serialized as one bit per
 // concrete model in the canonical 62-model order.  The AMD Zen5 and Intel
 // client/server/future discontinuities are intentionally explicit.
@@ -847,7 +922,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_difference(zen5_features, zen4_features),
                                                      target_cpu_features_from_array((TargetCpuFeature const[]){
                                                          TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
-                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B}, 3)));
+                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PREFETCHI}, 4)));
     BUSTER_TEST(arguments, !target_cpu_features_contains(zen5_features, TARGET_CPU_FEATURE_X86_AVX512FP16));
     TargetCpuFeatures tigerlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_TIGERLAKE);
     BUSTER_TEST(arguments, target_cpu_features_contains(tigerlake_features, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT));
@@ -1845,6 +1920,35 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     X86_64CpuFeatureInput no_prefetchi_hardware = full_cpuid;
     no_prefetchi_hardware.leaf_7_1.edx &= ~(UINT32_C(0x4000));
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_prefetchi_hardware), TARGET_CPU_FEATURE_X86_PREFETCHI));
+    X86_64CpuFeatureInput no_prefetchi_leaf = full_cpuid;
+    no_prefetchi_leaf.maximum_basic_leaf = 6;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_prefetchi_leaf),
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI));
+    X86_64CpuFeatureInput no_prefetchi_subleaf = full_cpuid;
+    no_prefetchi_subleaf.leaf_7_0.eax = 0;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_prefetchi_subleaf),
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI));
+    X86_64CpuFeatureInput prefetchi_no_xcr0 = full_cpuid;
+    prefetchi_no_xcr0.xcr0 = 0;
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(prefetchi_no_xcr0),
+                                                        TARGET_CPU_FEATURE_X86_PREFETCHI));
+    // TSXLDTRK is CPUID.07H:0.EDX[16], with no RTM or XCR0 dependency.
+    X86_64CpuFeatureInput no_tsxldtrk_hardware = full_cpuid;
+    no_tsxldtrk_hardware.leaf_7_0.edx &= ~(UINT32_C(0x10000));
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_tsxldtrk_hardware),
+                                                         TARGET_CPU_FEATURE_X86_TSXLDTRK));
+    X86_64CpuFeatureInput no_tsxldtrk_leaf = full_cpuid;
+    no_tsxldtrk_leaf.maximum_basic_leaf = 6;
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_tsxldtrk_leaf),
+                                                         TARGET_CPU_FEATURE_X86_TSXLDTRK));
+    X86_64CpuFeatureInput tsxldtrk_no_rtm = full_cpuid;
+    tsxldtrk_no_rtm.leaf_7_0.ebx &= ~(UINT32_C(0x800));
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(tsxldtrk_no_rtm),
+                                                        TARGET_CPU_FEATURE_X86_TSXLDTRK));
+    X86_64CpuFeatureInput tsxldtrk_no_xcr0 = full_cpuid;
+    tsxldtrk_no_xcr0.xcr0 = 0;
+    BUSTER_TEST(arguments, target_cpu_features_contains(x86_64_cpu_features_from_cpuid(tsxldtrk_no_xcr0),
+                                                        TARGET_CPU_FEATURE_X86_TSXLDTRK));
     X86_64CpuFeatureInput no_shstk_hardware = full_cpuid;
     no_shstk_hardware.leaf_7_0.ecx &= ~(UINT32_C(0x80));
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_shstk_hardware), TARGET_CPU_FEATURE_X86_SHSTK));
@@ -2728,6 +2832,133 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                              target_cpu_features_contains(pconfig_diamond, TARGET_CPU_FEATURE_X86_ENQCMD) &&
                              !target_cpu_features_contains(pconfig_diamond, TARGET_CPU_FEATURE_X86_HRESET));
 
+    // PREFETCHI is a cache-instruction default.  Pin the complete Clang
+    // matrix and digest so only the audited Zen5/Granite/Clearwater/Diamond
+    // membership can satisfy the model-default contract.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_prefetchi_model_cases) == 62);
+    char8 x86_prefetchi_model_text[2048] = {0};
+    u32 x86_prefetchi_model_length = 0;
+    u32 x86_prefetchi_model_present_count = 0;
+    for (u32 prefetchi_model_index = 0;
+         prefetchi_model_index < BUSTER_ARRAY_LENGTH(target_test_x86_prefetchi_model_cases);
+         prefetchi_model_index += 1)
+    {
+        TargetTestX86PrefetchiModelCase const* model_case = &target_test_x86_prefetchi_model_cases[prefetchi_model_index];
+        String8 model_name = cpu_model_to_string_os(model_case->model);
+        char8 prefetchi_bit = model_case->expected_present ? '1' : '0';
+        String8 line = string_format(arguments->arena, S8("{S8} {char8}\n"), model_name, prefetchi_bit);
+        bool line_fits = x86_prefetchi_model_length + line.length <= sizeof(x86_prefetchi_model_text);
+        BUSTER_TEST(arguments, line_fits);
+        if (!line_fits) continue;
+        memcpy(x86_prefetchi_model_text + x86_prefetchi_model_length, line.pointer, line.length);
+        x86_prefetchi_model_length += (u32)line.length;
+        x86_prefetchi_model_present_count += model_case->expected_present;
+        BUSTER_TEST(arguments, cpu_model_from_string(model_name) == model_case->model);
+        Target model_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = model_case->model,
+            .os = OPERATING_SYSTEM_LINUX,
+        };
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(model_target));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_PREFETCHI) ==
+                             model_case->expected_present);
+    }
+    u8 x86_prefetchi_model_digest[32] = {0};
+    static u8 const expected_x86_prefetchi_model_digest[32] = {
+        0x71, 0xaf, 0x82, 0x8e, 0x8f, 0x09, 0x5e, 0x6f,
+        0x53, 0x49, 0x84, 0x2a, 0x14, 0x6f, 0xb6, 0x95,
+        0x20, 0xb3, 0x1f, 0x9d, 0x43, 0xa2, 0x7b, 0x65,
+        0x2e, 0xe6, 0x74, 0x08, 0xb1, 0x01, 0x56, 0x57,
+    };
+    link_sha256(arguments->arena, (u8 const*)x86_prefetchi_model_text, x86_prefetchi_model_length,
+                x86_prefetchi_model_digest);
+    BUSTER_TEST(arguments, x86_prefetchi_model_length == 706);
+    BUSTER_TEST(arguments, x86_prefetchi_model_present_count == 5);
+    BUSTER_TEST(arguments, memcmp(x86_prefetchi_model_digest, expected_x86_prefetchi_model_digest,
+                                  sizeof(expected_x86_prefetchi_model_digest)) == 0);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_4),
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_5),
+                                                          TARGET_CPU_FEATURE_X86_PREFETCHI));
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_EMERALD_RAPIDS),
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_SAPPHIRE_RAPIDS),
+                                                           TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS_D),
+                                                          TARGET_CPU_FEATURE_X86_PREFETCHI));
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_SIERRAFOREST),
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANDRIDGE),
+                                                           TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_CLEARWATERFOREST),
+                                                          TARGET_CPU_FEATURE_X86_PREFETCHI) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_PREFETCHI));
+
+    // TSXLDTRK is the exact five-model Intel server/future-server set.  Keep
+    // its independent matrix and digest adjacent to PREFETCHI to prevent the
+    // two nearby CPUID/model boundaries from being conflated.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_tsxldtrk_model_cases) == 62);
+    char8 x86_tsxldtrk_model_text[2048] = {0};
+    u32 x86_tsxldtrk_model_length = 0;
+    u32 x86_tsxldtrk_model_present_count = 0;
+    for (u32 tsxldtrk_model_index = 0;
+         tsxldtrk_model_index < BUSTER_ARRAY_LENGTH(target_test_x86_tsxldtrk_model_cases);
+         tsxldtrk_model_index += 1)
+    {
+        TargetTestX86TsxldtrkModelCase const* model_case = &target_test_x86_tsxldtrk_model_cases[tsxldtrk_model_index];
+        String8 model_name = cpu_model_to_string_os(model_case->model);
+        char8 tsxldtrk_bit = model_case->expected_present ? '1' : '0';
+        String8 line = string_format(arguments->arena, S8("{S8} {char8}\n"), model_name, tsxldtrk_bit);
+        bool line_fits = x86_tsxldtrk_model_length + line.length <= sizeof(x86_tsxldtrk_model_text);
+        BUSTER_TEST(arguments, line_fits);
+        if (!line_fits) continue;
+        memcpy(x86_tsxldtrk_model_text + x86_tsxldtrk_model_length, line.pointer, line.length);
+        x86_tsxldtrk_model_length += (u32)line.length;
+        x86_tsxldtrk_model_present_count += model_case->expected_present;
+        BUSTER_TEST(arguments, cpu_model_from_string(model_name) == model_case->model);
+        Target model_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = model_case->model,
+            .os = OPERATING_SYSTEM_LINUX,
+        };
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(model_target));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_TSXLDTRK) ==
+                             model_case->expected_present);
+    }
+    u8 x86_tsxldtrk_model_digest[32] = {0};
+    static u8 const expected_x86_tsxldtrk_model_digest[32] = {
+        0xa0, 0x07, 0x8c, 0xfb, 0xf2, 0x7b, 0xd4, 0x19,
+        0xe5, 0x5c, 0x26, 0x84, 0x89, 0xca, 0x8e, 0x96,
+        0x03, 0xd9, 0x2f, 0x2c, 0xc2, 0xa2, 0x71, 0x5a,
+        0xee, 0x1b, 0xfc, 0xf8, 0x04, 0x16, 0x40, 0x8f,
+    };
+    link_sha256(arguments->arena, (u8 const*)x86_tsxldtrk_model_text, x86_tsxldtrk_model_length,
+                x86_tsxldtrk_model_digest);
+    BUSTER_TEST(arguments, x86_tsxldtrk_model_length == 706 && x86_tsxldtrk_model_present_count == 5 &&
+                             memcmp(x86_tsxldtrk_model_digest, expected_x86_tsxldtrk_model_digest,
+                                    sizeof(expected_x86_tsxldtrk_model_digest)) == 0);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ICELAKE_SERVER),
+                                                         TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_EMERALD_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_SAPPHIRE_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_GRANITE_RAPIDS_D),
+                                                          TARGET_CPU_FEATURE_X86_TSXLDTRK));
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_SIERRAFOREST),
+                                                         TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_CLEARWATERFOREST),
+                                                           TARGET_CPU_FEATURE_X86_TSXLDTRK) &&
+                             target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
+                                                          TARGET_CPU_FEATURE_X86_TSXLDTRK));
+
     // PTWRITE is an Intel Processor Trace instruction set.  Pin the complete
     // Clang model membership independently of target_cpu_features_default so
     // the discontinuous Atom and future-client/server boundaries cannot drift.
@@ -3137,17 +3368,12 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, memcmp(x86_clang_reference_digest, expected_x86_clang_reference_digest,
                                   sizeof(expected_x86_clang_reference_digest)) == 0);
 
-    // These are the intentional post-SHA/state/cache/security/control/PTWRITE/MOVDIR64B/ENQCMD/HRESET/PCONFIG-default gaps against the fixed Clang
-    // reference.  The remaining two entries are modeled in Buster but absent
+    // The audited SHA/state/cache/security/control/PTWRITE/MOVDIR64B/ENQCMD/
+    // HRESET/PCONFIG/PREFETCHI/TSXLDTRK defaults close every missing entry
+    // against the fixed Clang reference.  The three extra entries are modeled
+    // in Buster but absent
     // from the corresponding Clang CPU profiles; sse2 is an additional
     // implicit Buster baseline invariant outside this 82-feature reference.
-    static struct
-    {
-        u8 index;
-        u8 count;
-    } const expected_x86_clang_reference_missing_entries[] = {
-        {56, 1}, {73, 5},
-    };
     static struct
     {
         u8 index;
@@ -3157,15 +3383,6 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     };
     u8 expected_x86_clang_reference_missing[82] = {0};
     u8 expected_x86_clang_reference_extra[82] = {0};
-    for (u32 entry_index = 0;
-         entry_index < BUSTER_ARRAY_LENGTH(expected_x86_clang_reference_missing_entries);
-         entry_index += 1)
-    {
-        BUSTER_TEST(arguments, expected_x86_clang_reference_missing_entries[entry_index].index <
-                                 BUSTER_ARRAY_LENGTH(expected_x86_clang_reference_missing));
-        expected_x86_clang_reference_missing[expected_x86_clang_reference_missing_entries[entry_index].index] =
-            expected_x86_clang_reference_missing_entries[entry_index].count;
-    }
     for (u32 entry_index = 0;
          entry_index < BUSTER_ARRAY_LENGTH(expected_x86_clang_reference_extra_entries);
          entry_index += 1)
@@ -3180,7 +3397,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_clang_reference_missing[feature_index] == expected_x86_clang_reference_missing[feature_index]);
         BUSTER_TEST(arguments, x86_clang_reference_extra[feature_index] == expected_x86_clang_reference_extra[feature_index]);
     }
-    BUSTER_TEST(arguments, x86_clang_reference_missing_total == 6);
+    BUSTER_TEST(arguments, x86_clang_reference_missing_total == 0);
     BUSTER_TEST(arguments, x86_clang_reference_extra_total == 6);
     TargetCpuFeatures baseline_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_BASELINE);
     BUSTER_TEST(arguments, target_cpu_features_contains(baseline_features, TARGET_CPU_FEATURE_X86_SSE2));

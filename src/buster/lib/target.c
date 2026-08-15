@@ -684,6 +684,9 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     bool intel_pconfig = (model >= CPU_MODEL_INTEL_ALDERLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                          (model >= CPU_MODEL_INTEL_SIERRAFOREST && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
                          model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    bool intel_tsxldtrk = (model >= CPU_MODEL_INTEL_EMERALD_RAPIDS &&
+                           model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                          model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
     bool intel_serialize_waitpkg = model == CPU_MODEL_INTEL_ALDERLAKE ||
                                    model == CPU_MODEL_INTEL_RAPTORLAKE ||
                                    model == CPU_MODEL_INTEL_METEORLAKE ||
@@ -858,6 +861,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
     if (intel_pconfig)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PCONFIG);
+    }
+    if (intel_tsxldtrk)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_TSXLDTRK);
     }
     if (intel_serialize_waitpkg)
     {
@@ -1058,7 +1065,7 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         result = target_cpu_features_union(result, avx512_ice_lake);
         result = target_cpu_features_union(result, target_cpu_features_from_array((TargetCpuFeature const[]){
             TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX_VNNI,
-            TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT}, 3));
+            TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_PREFETCHI}, 4));
         break;
     case CPU_MODEL_INTEL_SKYLAKE_AVX512:
         result = target_cpu_features_union(result, avx512_skylake);
