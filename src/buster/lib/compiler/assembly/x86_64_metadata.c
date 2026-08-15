@@ -3389,8 +3389,32 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86MetadataPhysicalQuery query,
                                                                       BusterX86MetadataForm form, u32* count)
 {
-    BusterX86MetadataPatternSemantics pattern = {0};
-    bool pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern);
+    // A simple-binding row exposes every metadata operand and has no moffs,
+    // maskmov, VSIB or writemask handling, so nothing below can skip or
+    // default an operand and the count is just the row's own.  Selection calls
+    // this for every candidate it considers, and the general path re-parses the
+    // pattern and re-derives those facts per operand to reach the same answer.
+    bool pattern_valid_borrowed = false;
+    BusterX86MetadataFormFacts const* simple_facts = buster_x86_metadata_form_facts_for(form);
+    if (simple_facts && (simple_facts->shape_flags & BUSTER_X86_METADATA_FORM_FACT2_BIND_SIMPLE) &&
+        !query.include_implicit)
+    {
+        *count = form.operand_count;
+        return true;
+    }
+    BusterX86MetadataPatternSemantics pattern_storage = {0};
+    BusterX86MetadataPatternSemantics const* pattern_view = buster_x86_metadata_pattern_semantics_borrow(form, &pattern_valid_borrowed);
+    bool pattern_valid = false;
+    if (pattern_view)
+    {
+        pattern_valid = pattern_valid_borrowed;
+    }
+    else
+    {
+        pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+        pattern_view = &pattern_storage;
+    }
+#define pattern (*pattern_view)
     bool moffs_form = pattern_valid && buster_x86_metadata_emit_is_moffs(form, pattern);
     bool maskmov_form = pattern_valid && buster_x86_metadata_emit_is_maskmov(form, pattern);
     bool moffs_source_accumulator = pattern_valid &&
@@ -3444,6 +3468,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
     }
     *count = result;
     return true;
+#undef pattern
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86MetadataString atom, String8 needle)
