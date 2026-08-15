@@ -15890,7 +15890,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     {
         memset(fragments, 0, sizeof(*fragments) * module->function_count);
     }
-    Arena* fragment_arena = codegen_worker_arena_create(arena->reserved_size, arena->granularity);
+    u64 x64_metadata_cache_count = 0;
+    u64 fragment_arena_reserved_size = arena->reserved_size;
+    if (target.cpu_arch == CPU_ARCH_X86_64 && module->function_count &&
+        lane_count <= (ARENA_MAX_RESERVATION - fragment_arena_reserved_size) / sizeof(CodegenX64MetadataCache))
+    {
+        x64_metadata_cache_count = lane_count;
+        fragment_arena_reserved_size += x64_metadata_cache_count * sizeof(CodegenX64MetadataCache);
+    }
+    Arena* fragment_arena = codegen_worker_arena_create(fragment_arena_reserved_size, arena->granularity);
     OsMutexHandle* fragment_mutex = os_mutex_create();
     if (!fragment_arena || !fragment_mutex)
     {
@@ -15906,10 +15914,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         return result;
     }
     CodegenX64MetadataCache* x64_metadata_caches = 0;
-    if (target.cpu_arch == CPU_ARCH_X86_64)
+    if (x64_metadata_cache_count)
     {
-        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache, lane_count);
-        memset(x64_metadata_caches, 0, sizeof(*x64_metadata_caches) * lane_count);
+        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache, x64_metadata_cache_count);
+        memset(x64_metadata_caches, 0, sizeof(*x64_metadata_caches) * x64_metadata_cache_count);
     }
     CodegenCanonicalParallelState state = {
         .arena = arena,
