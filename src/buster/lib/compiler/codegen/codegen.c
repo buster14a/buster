@@ -928,6 +928,128 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     };
 }
 
+#define CODEGEN_X64_METADATA_CACHE_CAPACITY 512u
+typedef struct CodegenX64MetadataCacheEntry CodegenX64MetadataCacheEntry;
+struct CodegenX64MetadataCacheEntry
+{
+    u64 signature;
+    u64 guard;
+    u32 form_id;
+};
+typedef struct CodegenX64MetadataCache CodegenX64MetadataCache;
+struct CodegenX64MetadataCache
+{
+    CodegenX64MetadataCacheEntry entries[CODEGEN_X64_METADATA_CACHE_CAPACITY];
+};
+BUSTER_CT_CHECK((CODEGEN_X64_METADATA_CACHE_CAPACITY & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u)) == 0);
+
+BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_hash_bytes(u64 hash, void const* pointer, u64 length)
+{
+    u8 const* bytes = (u8 const*)pointer;
+    for (u64 index = 0; index < length; index += 1)
+    {
+        hash ^= bytes[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_immediate_class(BusterX86MetadataPhysicalOperand operand)
+{
+    if (operand.has_unsigned_value)
+    {
+        if (operand.unsigned_value == 1) return 1;
+        if (operand.unsigned_value <= INT8_MAX) return 2;
+        if (operand.unsigned_value <= UINT8_MAX) return 3;
+        if (operand.unsigned_value <= INT32_MAX) return 4;
+        if (operand.unsigned_value <= UINT32_MAX) return 5;
+        return 6;
+    }
+    if (!operand.has_value) return 0;
+    if (operand.value == 1) return 7;
+    if (operand.value >= INT8_MIN && operand.value <= INT8_MAX) return 8;
+    if (operand.value >= INT32_MIN && operand.value <= INT32_MAX) return 9;
+    return 10;
+}
+
+BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_displacement_class(BusterX86MetadataPhysicalMemory memory)
+{
+    if (!memory.has_displacement) return 0;
+    if (memory.displacement == 0) return 1;
+    if (memory.displacement >= INT8_MIN && memory.displacement <= INT8_MAX) return 2;
+    if (memory.displacement >= INT32_MIN && memory.displacement <= INT32_MAX) return 3;
+    return 4;
+}
+
+BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_query_hash(BusterX86MetadataPhysicalQuery physical, u64 seed)
+{
+    u64 hash = codegen_canonical_x64_metadata_hash_bytes(seed, &physical.mnemonic.length, sizeof(physical.mnemonic.length));
+    hash = codegen_canonical_x64_metadata_hash_bytes(hash, physical.mnemonic.pointer, physical.mnemonic.length);
+    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.operand_count, sizeof(physical.operand_count));
+    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.attributes, sizeof(physical.attributes));
+    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.features.count, sizeof(physical.features.count));
+    for (u32 feature_index = 0; feature_index < physical.features.count; feature_index += 1)
+    {
+        String8 feature = physical.features.names[feature_index];
+        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &feature.length, sizeof(feature.length));
+        hash = codegen_canonical_x64_metadata_hash_bytes(hash, feature.pointer, feature.length);
+    }
+    for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
+        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.kind, sizeof(operand.kind));
+        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.width, sizeof(operand.width));
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        {
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.reg, sizeof(operand.reg));
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            u8 displacement_class = codegen_canonical_x64_metadata_displacement_class(operand.memory);
+            u64 memory_shape = (u64)operand.memory.address_size | ((u64)operand.memory.scale << 8) |
+                               ((u64)operand.memory.segment << 16) | ((u64)operand.memory.has_base << 24) |
+                               ((u64)operand.memory.has_index << 25) | ((u64)operand.memory.has_displacement << 26) |
+                               ((u64)operand.memory.rip_relative << 27) | ((u64)operand.memory.has_symbol << 28) |
+                               ((u64)operand.memory.has_segment << 29) | ((u64)operand.memory.vsib << 30) |
+                               ((u64)operand.memory.source_width << 32);
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.memory.base, sizeof(operand.memory.base));
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.memory.index, sizeof(operand.memory.index));
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &memory_shape, sizeof(memory_shape));
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &displacement_class, sizeof(displacement_class));
+        }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE ||
+                 operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE)
+        {
+            u8 immediate_class = codegen_canonical_x64_metadata_immediate_class(operand);
+            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &immediate_class, sizeof(immediate_class));
+        }
+    }
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata_cache_entry(
+    CodegenX64MetadataCache* cache, BusterX86MetadataPhysicalQuery physical, bool insertion)
+{
+    if (!cache) return 0;
+    u64 signature = codegen_canonical_x64_metadata_query_hash(physical, UINT64_C(1469598103934665603));
+    u64 guard = codegen_canonical_x64_metadata_query_hash(physical, UINT64_C(0x6a09e667f3bcc909));
+    u32 slot = (u32)signature & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
+    for (u32 probe = 0; probe < CODEGEN_X64_METADATA_CACHE_CAPACITY; probe += 1)
+    {
+        CodegenX64MetadataCacheEntry* entry = cache->entries + slot;
+        if (!entry->form_id)
+        {
+            if (!insertion) return 0;
+            entry->signature = signature;
+            entry->guard = guard;
+            return entry;
+        }
+        if (entry->signature == signature && entry->guard == guard) return entry;
+        slot = (slot + 1u) & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
+    }
+    return 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenBuffer* buffer, String8 mnemonic,
                                                                          BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
                                                                          BusterX86MetadataFeatureInput features,
@@ -961,13 +1083,38 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     };
     u64 remaining = buffer->capacity - buffer->count;
     u32 output_capacity = remaining > UINT32_MAX ? UINT32_MAX : (u32)remaining;
-    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+    CodegenX64MetadataCache* cache = (CodegenX64MetadataCache*)buffer->x64_metadata_cache;
+    CodegenX64MetadataCacheEntry* cached = codegen_canonical_x64_metadata_cache_entry(cache, physical, false);
+    BusterX86MetadataEmitResult emitted = {0};
+    if (cached)
+    {
+        emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = physical,
+            .form_id = cached->form_id - 1u,
+            .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
+            .output_capacity = output_capacity,
+            .relocations = 0,
+            .relocation_capacity = 0,
+        });
+    }
+    if (!cached || emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+    {
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
         .physical = physical,
         .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
         .output_capacity = output_capacity,
         .relocations = 0,
         .relocation_capacity = 0,
-    });
+        });
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.form_id != UINT32_MAX)
+        {
+            CodegenX64MetadataCacheEntry* insertion = codegen_canonical_x64_metadata_cache_entry(cache, physical, true);
+            if (insertion && !insertion->form_id)
+            {
+                insertion->form_id = emitted.form_id + 1u;
+            }
+        }
+    }
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
         emitted.byte_count > output_capacity)
     {
@@ -5578,7 +5725,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                            CodegenCanonicalX64F80Cache const* f80_cache, IrModule* module,
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted, bool allow_unresolved_label_addresses,
-                                                                           CodegenCanonicalFragmentInfo* fragment_info)
+                                                                           CodegenCanonicalFragmentInfo* fragment_info,
+                                                                           CodegenX64MetadataCache* x64_metadata_cache)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -5851,6 +5999,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
         .exhausted = code_buffer_exhausted,
+        .x64_metadata_cache = x64_metadata_cache,
     };
     // Every function contributes a row for its own declaration on top of the
     // per-instruction rows.
@@ -15583,6 +15732,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
     // lane needs its own cursor while emitting debug line rows.
     IrProgram emission_program = *state->program;
     emission_program.source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+    CodegenX64MetadataCache x64_metadata_cache = {0};
     // A large generated function can require more transient codegen state
     // than the general-purpose 64 MiB thread scratch arena. The worker arena
     // is reset after each function; only an exact compact copy survives.
@@ -15625,7 +15775,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
             emitted_info = (CodegenCanonicalFragmentInfo){0};
             emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, state->f80_cache, &fragment_module,
                                                                  state->target, fragment_options, capacity_scale, &code_buffer_exhausted, false,
-                                                                 &emitted_info);
+                                                                 &emitted_info, &x64_metadata_cache);
             if (!code_buffer_exhausted)
             {
                 break;
@@ -15706,8 +15856,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     serial_options.assume_validated = true;
     serial_options.lane_count = 1;
     bool globals_buffer_exhausted = false;
+    CodegenX64MetadataCache x64_metadata_cache = {0};
     result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, &globals_module, target, serial_options, 1,
-                                                       &globals_buffer_exhausted, true, 0);
+                                                       &globals_buffer_exhausted, true, 0, &x64_metadata_cache);
     BUSTER_CHECK(!globals_buffer_exhausted);
     result.ir_module = module;
     if (result.error != CODEGEN_ERROR_NONE)

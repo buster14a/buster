@@ -8,6 +8,7 @@ struct CodegenBuffer
     u8* bytes;
     u64 count;
     u64 capacity;
+    void* x64_metadata_cache;
     u8* value_registers;
     // Raised where a byte is refused for want of room, and nowhere else. Most
     // capacity failures are things a bigger buffer cannot fix -- a frame past
