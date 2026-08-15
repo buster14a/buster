@@ -9312,7 +9312,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                advanced_apx_legacy_memory.relocation_count == 1 &&
                                advanced_apx_legacy_memory.relocations[0].offset == 24 &&
                                advanced_apx_legacy_memory.relocations[0].addend == 0 &&
-                               advanced_apx_legacy_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               advanced_apx_legacy_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
                                string_equal(advanced_apx_legacy_memory.symbols[advanced_apx_legacy_memory.relocations[0].symbol].name,
                                             S8("apx_external")));
 

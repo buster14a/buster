@@ -10212,6 +10212,45 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
     return count;
 }
 
+BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_feature(String8* names, u32* count, u32 capacity, String8 feature)
+{
+    if (!names || !count || *count >= capacity) return;
+    for (u32 index = 0; index < *count; index += 1)
+    {
+        if (assembly_word_equal(names[index], feature)) return;
+    }
+    names[(*count)++] = feature;
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_append_avx10_aliases(Target target, String8* names, u32* count, u32 capacity,
+                                                                      BusterX86MetadataPhysicalOperand const* operands,
+                                                                      u32 operand_count)
+{
+    if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+        return;
+    u16 max_vector_width = 0;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = operands[index];
+        if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) continue;
+        u16 width = 0;
+        if (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM)
+            width = 128;
+        else if (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM)
+            width = 256;
+        else if (operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM)
+            width = 512;
+        if (width > max_vector_width) max_vector_width = width;
+    }
+    if (!max_vector_width) return;
+    assembly_x86_metadata_append_feature(names, count, capacity, S8("avx512f"));
+    if (max_vector_width >= 512)
+        assembly_x86_metadata_append_feature(names, count, capacity, S8("avx512dq"));
+    else
+        assembly_x86_metadata_append_feature(names, count, capacity, S8("avx512vl"));
+}
+
 BUSTER_GLOBAL_LOCAL u8 assembly_x86_metadata_physical_class(AssemblyRegisterClass class)
 {
     return class == ASSEMBLY_REGISTER_GPR       ? BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR
@@ -11283,9 +11322,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             }
         }
         AssemblyOperand* operand = operands + operand_count;
-        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, &no_flags))
+        bool operand_no_flags = false;
+        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, &operand_no_flags))
         {
             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+        }
+        if (operand_no_flags)
+        {
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
         bool att_immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$';
         if (att_immediate)
@@ -11536,6 +11580,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             scalar_memory_width = 8;
         else if (!scalar_memory_width && assembly_word_equal(mnemonic, S8("vmovdqu16")))
             scalar_memory_width = 16;
+        else if (!scalar_memory_width && assembly_word_equal(mnemonic, S8("vcvtbf42hf8")))
+            scalar_memory_width = vector_memory_width / 2;
         if (!scalar_memory_width)
         {
             // AMD/XOP and FMA4 rows publish the scalar memory element on the
@@ -11600,6 +11646,25 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
+                if (assembly_word_equal(mnemonic, S8("vcvtbf42hf8")) &&
+                    physical[index].memory.source_width != vector_memory_width / 2)
+                {
+                    return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                }
+                if (assembly_word_equal(mnemonic, S8("vcvtbf42hf8")) &&
+                    physical[index].memory.source_width == vector_memory_width / 2)
+                {
+                    physical[index].memory.source_width = 0;
+                    physical[index].width = vector_memory_width / 2;
+                    continue;
+                }
+                if ((assembly_word_equal(mnemonic, S8("vpslld")) || assembly_word_equal(mnemonic, S8("vpsrld"))) &&
+                    physical[index].memory.source_width == 128 && vector_memory_width >= 256)
+                {
+                    physical[index].memory.source_width = 0;
+                    physical[index].width = 32;
+                    continue;
+                }
                 if (physical[index].memory.source_width != vector_memory_width)
                 {
                     return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
@@ -11818,6 +11883,66 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         attributes.apx_flags |= BUSTER_X86_METADATA_APX_NF;
     }
     assembly_x86_metadata_apx_disasm_alias(metadata_source_mnemonic, &attributes);
+    bool has_immediate_operand = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        has_immediate_operand |= physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE;
+    }
+    // The three-operand APX spelling is NDD for arithmetic/logical forms.
+    // IMUL's three-operand immediate form is the NF-capable legacy/APX row,
+    // not NDD; leave it to the immediate-form selector below.
+    if (operand_count == 3 &&
+        (assembly_word_equal(mnemonic, S8("add")) || assembly_word_equal(mnemonic, S8("adc")) ||
+         assembly_word_equal(mnemonic, S8("sub")) || assembly_word_equal(mnemonic, S8("sbb")) ||
+         assembly_word_equal(mnemonic, S8("and")) || assembly_word_equal(mnemonic, S8("or")) ||
+         assembly_word_equal(mnemonic, S8("xor")) ||
+         (assembly_word_equal(mnemonic, S8("imul")) && !has_immediate_operand)))
+    {
+        attributes.apx_flags |= BUSTER_X86_METADATA_APX_NDD;
+    }
+    if (assembly_word_equal(mnemonic, S8("imul")) && attributes.apx_flags)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !physical[index].has_value)
+                continue;
+            if (physical[index].value >= INT8_MIN && physical[index].value <= INT8_MAX) physical[index].width = 8;
+        }
+    }
+    // APX immediate rows interpret the byte as a signed field.  Preserve
+    // source literals 0x80..0xff as their architectural low-byte values.
+    if (assembly_word_equal(mnemonic, S8("add")) || assembly_word_equal(mnemonic, S8("adc")) ||
+        assembly_word_equal(mnemonic, S8("sub")) || assembly_word_equal(mnemonic, S8("sbb")) ||
+        assembly_word_equal(mnemonic, S8("and")) || assembly_word_equal(mnemonic, S8("or")) ||
+        assembly_word_equal(mnemonic, S8("xor")) || assembly_word_equal(mnemonic, S8("imul")) ||
+        assembly_word_equal(mnemonic, S8("shl")) || assembly_word_equal(mnemonic, S8("shr")) ||
+        assembly_word_equal(mnemonic, S8("sar")))
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !physical[index].has_value ||
+                physical[index].value < 0 || physical[index].value > UINT8_MAX)
+                continue;
+            physical[index].value = (s64)(s8)(u8)physical[index].value;
+            physical[index].width = 8;
+        }
+    }
+    if (assembly_word_equal(mnemonic, S8("vrndscaleps")) || assembly_word_equal(mnemonic, S8("vrndscalepd")))
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !physical[index].has_value ||
+                physical[index].value < INT8_MIN || physical[index].value > UINT8_MAX)
+                continue;
+            physical[index].width = 8;
+            if (physical[index].value < 0)
+            {
+                physical[index].unsigned_value = (u64)(u8)physical[index].value;
+                physical[index].has_unsigned_value = true;
+                physical[index].has_value = false;
+            }
+        }
+    }
     if (leading_sae)
     {
         attributes.sae = true;
@@ -11835,6 +11960,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+    assembly_x86_metadata_append_avx10_aliases(target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names), physical,
+                                                operand_count);
     // XED classifies a subset of legacy MMX rows under SSE2MMX even though
     // the assembler's baseline MMX contract accepts them without SSE2.  The
     // physical query is already restricted to MMX rows above, so supplying
@@ -12011,6 +12138,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_unsigned_expression(Assemb
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInstruction instruction)
 {
+    if (assembly_word_equal(instruction.metadata_mnemonic, S8("vcvtbf42hf8")) ||
+        assembly_word_equal(instruction.metadata_mnemonic, S8("vpslld")) ||
+        assembly_word_equal(instruction.metadata_mnemonic, S8("vpsrld")))
+    {
+        return true;
+    }
     // PUSH immediate is a classic encoding that has no handwritten form yet.
     // Preserve its metadata result instead of restoring the handwritten
     // invalid-operand diagnostic just because the encoding is not an ISA
@@ -12951,6 +13084,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     {
         memcpy(operands, instruction->metadata_operands, instruction->metadata_operand_count * sizeof(*operands));
     }
+    assembly_x86_metadata_append_avx10_aliases(builder->target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names),
+                                                operands, instruction->metadata_operand_count);
     bool mmx_instruction = false;
     for (u32 operand_index = 0; operand_index < instruction->metadata_operand_count; operand_index += 1)
     {
