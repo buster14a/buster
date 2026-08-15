@@ -18,6 +18,99 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15a` (Linux x86_64, Zen 4 7940HS; canonical x86-64 emission stops
+re-deriving per-form metadata on every instruction, based on `134b96b0`).
+
+**The stage-1 regression this entry attacks was 7x, and it is only partly
+repaid.** A trusted Clang Release stage-1 self-compile retired
+`63,291,586,657` instructions against the `8,966,954,627` recorded in
+`2026-08-14b`. A four-point bisect over the `route x86 ... through metadata`
+series located it, measuring the same single-lane stage-1 command on each
+build:
+
+```
+f8f3a2b3  9,022,417,769   before the routing series      (baseline)
+649d7596  624,118,764,392 routed, no cache               69x
+f4b8bfe8  646,549,725,603 routed, no cache               72x
+6416d299  64,740,628,621  canonical form cache landed     7.2x
+134b96b0  63,291,586,657  head at audit time              7.0x
+```
+
+The recent `codegen: cache canonical x86 metadata forms` commit and its three
+follow-ups are therefore a **fix, not a cause**: they recovered a 10x factor.
+The residue is that the canonical backend (`allocator=none`, the path stage 1
+and stage 2 use — the MIR path with its prepared plans is a separate `machine
+stage`) has no prepared exact plan, so every cache *hit* still re-derived each
+per-form fact through the plan-less side of the `plan ? cheap : derive`
+branches in `emit_form_to_scratch`/`emit_bind_form`, each a string comparison
+against an iclass or category spelling.
+
+A 120,383-sample retired-instruction profile of that stage attributed 16.30%
+to `emit_form_to_scratch`, 13.27% to `emit_bind_form`, 10.17% to
+`codegen_canonical_x64_metadata_query_hash`, 5.04% to
+`pool_string_equal_literal`, 3.43% to `lookup_text`, 2.62% to
+`emit_effective_field_source` and 2.52% to `emit_is_maskmov` — roughly 75% of
+the whole compile inside the metadata emitter. Four changes followed, each
+measured on its own and each holding the self-host fixed point:
+
+| change | stage 1 | delta |
+|---|---|---|
+| base `134b96b0` | 63,291,586,657 | — |
+| packed cache key, one dual-chain hash | 61,278,652,257 | -3.2% |
+| prewarmed per-form facts table | 55,283,996,391 | -12.7% |
+| re-emit through the durable form key | 46,342,991,578 | -26.8% |
+| hoisted feature-ladder span resolution | 46,279,216,101 | -26.9% |
+
+The cache key was two byte-at-a-time FNV passes over the query's raw struct
+bytes; it is now built once as packed 64-bit words and hashed word at a time
+with two independent chains, which also keeps structure padding out of the
+hash. The per-form facts table records the ten derived facts the plan-less
+path recomputed (`moffs`, `maskmov`, hidden segment override, `notrack`,
+`loop`, `jecxz`, `requires_dfv`, `dataxfer`, the pattern control blocker, and
+both field-source arrays), filled by the prewarm loop that already walks all
+11,013 forms and published after it. It mirrors the **plan-less** spellings
+deliberately: the binding loop rewrites an operand's field source to the
+pattern-aware value and only then reads the effective source, and an exact
+plan's `effective_field_sources` is a different function, so substituting it
+would change emitted bytes. The largest single win was re-emitting a cache hit
+through `buster_x86_metadata_emit_form_exact` with the stored
+`{form_id, stable_hash}` instead of `emit_form`: the latter re-ran
+`lookup_mnemonic` — a 256-byte buffer clear, a normalize, a binary search, then
+a scan of every candidate — purely to re-verify a mnemonic the cache key
+already contains, and the durable key is a strictly stronger identity check.
+
+Cumulative: stage 1 `63,683,992,612` -> `46,724,514,531` (**-26.6%**) and
+stage 2 `881,471,005,675` -> `650,331,336,690` (**-26.2%**) as reported by
+`test_self_host`. Every step reached a byte-identical stage-1/stage-2 fixed
+point (final `SELF_HOST deterministic bytes=45458416`), and the Release suite
+passed 301,723 unit assertions across 38 modules. Machine-stage instructions
+are unchanged at `338.2 G` (`1,461,017` exact attempts, zero failures), as
+expected: that path already had prepared plans and none of this touches it.
+
+Two results worth keeping. The instruction count is **not** inflated by worker
+spin — the same compile retires `63,291,586,657` at one lane and
+`63,685,166,439` at sixteen, so this is real work and `BUSTER_TEST_JOBS=1` is
+the right way to profile it without smearing samples. And the feature-ladder
+hoist returned only -0.14% of instructions despite `pool_string_equal_literal`
+showing 5-6% of *cycles*: that cost is cache misses on the per-pool-byte
+`nul_distances` table, not instructions retired. Do not read cycle shares off
+this profile as instruction shares; they diverge badly in the string helpers.
+
+**The remaining 5x is one identified lever, deliberately left untaken here.**
+`emit_form_to_scratch` (14.8%) and `emit_bind_form` (15.0%) are still the top
+two, and their cost is the function bodies, not argument copying — the ~256
+byte `BusterX86MetadataForm` passed by value through the chain accounts for
+only about 0.4%, so a pass-by-pointer refactor is not the answer and should
+not be attempted on that theory. The answer is that a prepared plan lets
+`emit_bind_form` return from its `if (plan)` block before the binding loop
+runs at all. Getting one requires preparing exact plans for the shapes the
+canonical backend selects during the serial prewarm, the way
+`machine_x64_metadata_shape_cache_prewarm` already does for the MIR path;
+`BUSTER_X86_METADATA_EXACT_PLAN_CAPACITY` is 1024 and the canonical backend's
+distinct form set should fit, but that must be measured before relying on it.
+Do not instead widen the plan-less fast paths ad hoc, and do not reintroduce
+target-local byte templates, which `2026-08-14b` already ruled out.
+
 `2026-08-14b` (Linux x86_64, Zen 4 7940HS; single metadata authority for the
 x86-64 machine encoder, based on `3dec8b04`). The MIR x86-64 encoder no longer
 contains a second opcode/prefix/REX/ModRM/EVEX byte construction path. Its

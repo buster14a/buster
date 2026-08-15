@@ -1190,6 +1190,44 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataExactPlanRecord
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_exact_plan_slots[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_exact_plan_count;
 
+// Derived per-form facts for callers that hold no prepared exact plan.  An
+// exact plan carries these already, but only 1024 of them exist and they are
+// keyed by a durable form key; the canonical backend selects forms at emission
+// time and so used to recompute every one of these on every instruction, each
+// a string comparison against an iclass or category spelling.  They are pure
+// functions of the normalized form and its parsed pattern, so the serial
+// prewarm that already walks all forms fills them once here.
+//
+// These mirror the plan-less spellings exactly, not the prepared plan's: the
+// field sources use the operand-only helper the generic path calls, because
+// the pattern-aware variant an exact plan stores is a different function and
+// substituting it would change emitted bytes.
+enum
+{
+    BUSTER_X86_METADATA_FORM_FACT_MOFFS = 1u << 0,
+    BUSTER_X86_METADATA_FORM_FACT_MASKMOV = 1u << 1,
+    BUSTER_X86_METADATA_FORM_FACT_HIDDEN_SEGMENT_OVERRIDE = 1u << 2,
+    BUSTER_X86_METADATA_FORM_FACT_NOTRACK = 1u << 3,
+    BUSTER_X86_METADATA_FORM_FACT_LOOP = 1u << 4,
+    BUSTER_X86_METADATA_FORM_FACT_JECXZ = 1u << 5,
+    BUSTER_X86_METADATA_FORM_FACT_REQUIRES_DFV = 1u << 6,
+    BUSTER_X86_METADATA_FORM_FACT_DATAXFER = 1u << 7,
+};
+typedef struct BusterX86MetadataFormFacts BusterX86MetadataFormFacts;
+struct BusterX86MetadataFormFacts
+{
+    u8 flags;
+    u8 pattern_control_blocker;
+    // The plan-less binding loop first rewrites an operand's field source to
+    // the pattern-aware value and only then asks for the effective source, so
+    // both values are recorded and the second is derived from the first.
+    u8 pattern_field_sources[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
+    u8 effective_field_sources[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
+};
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts buster_x86_metadata_form_facts[BUSTER_X86_GENERATED_FORM_COUNT];
+// Published last by the prewarm, after every entry above is written.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_facts_ready;
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_seed_equal(BusterX86MetadataForm form, BusterX86MetadataForm cached)
 {
     return form.pattern.offset == cached.pattern.offset && form.pattern.length == cached.pattern.length &&
@@ -1197,6 +1235,26 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_seed_equal(BusterX86Metadat
            form.immediate_width == cached.immediate_width && form.immediate_signed == cached.immediate_signed &&
            form.relocation_base == cached.relocation_base && form.displacement_width == cached.displacement_width &&
            form.field_flags == cached.field_flags;
+}
+
+// Returns the prewarmed facts for a form, or null when the table is not
+// published or the form is not the normalized row the facts were derived from.
+// A null result makes the caller recompute, so this stays correct for
+// fabricated forms and for any use before prewarm.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts const* buster_x86_metadata_form_facts_for(BusterX86MetadataForm form)
+{
+    if (!buster_x86_metadata_form_facts_ready || form.id >= BUSTER_X86_GENERATED_FORM_COUNT) return 0;
+    if (!buster_x86_metadata_normalized_forms_cached[form.id] ||
+        !buster_x86_metadata_pattern_seed_equal(form, buster_x86_metadata_normalized_forms[form.id]))
+        return 0;
+    BusterX86MetadataForm cached = buster_x86_metadata_normalized_forms[form.id];
+    // The facts also depend on fields the pattern seed does not cover.
+    if (form.stable_hash != cached.stable_hash || form.iclass.offset != cached.iclass.offset ||
+        form.category.offset != cached.category.offset || form.category.length != cached.category.length ||
+        form.operand_count != cached.operand_count ||
+        form.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY)
+        return 0;
+    return &buster_x86_metadata_form_facts[form.id];
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86MetadataForm form,
@@ -3032,8 +3090,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
         *binding_count = plan->operand_count;
         return true;
     }
-    bool moffs_form = pattern_valid && (plan ? plan->moffs_form : buster_x86_metadata_emit_is_moffs(form, pattern));
-    bool maskmov_form = pattern_valid && (plan ? plan->maskmov_form : buster_x86_metadata_emit_is_maskmov(form, pattern));
+    BusterX86MetadataFormFacts const* facts = plan ? 0 : buster_x86_metadata_form_facts_for(form);
+    bool moffs_form = pattern_valid && (plan   ? plan->moffs_form
+                                        : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_MOFFS) != 0
+                                                : buster_x86_metadata_emit_is_moffs(form, pattern));
+    bool maskmov_form = pattern_valid && (plan   ? plan->maskmov_form
+                                          : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_MASKMOV) != 0
+                                                  : buster_x86_metadata_emit_is_maskmov(form, pattern));
     bool moffs_source_accumulator = pattern_valid &&
                                     buster_x86_metadata_emit_moffs_source_accumulator(query, form, pattern);
     u32 actual_index = 0;
@@ -3071,9 +3134,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
             return false;
         }
         if (pattern_valid && !plan)
-            metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
-        u8 effective_field_source = plan ? plan->effective_field_sources[operand_index]
-                                         : buster_x86_metadata_emit_effective_field_source(metadata);
+            metadata.field_source = facts ? facts->pattern_field_sources[operand_index]
+                                          : buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
+        u8 effective_field_source = plan   ? plan->effective_field_sources[operand_index]
+                                    : facts ? facts->effective_field_sources[operand_index]
+                                            : buster_x86_metadata_emit_effective_field_source(metadata);
         bool moffs_fixed_accumulator = moffs_source_accumulator &&
                                        (prepared_flags_valid
                                             ? (prepared_flags & BUSTER_X86_METADATA_PLAN_OPERAND_FLAG_MOFFS_FIXED_ACCUMULATOR)
@@ -4872,32 +4937,47 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
 #define pattern (*pattern_view)
     if (!pattern_valid) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
-    bool moffs_form = plan ? plan->moffs_form : buster_x86_metadata_emit_is_moffs(form, pattern);
+    // Callers without a prepared plan take their per-form facts from the
+    // prewarmed table instead of recomputing a string comparison per field on
+    // every emitted instruction.  Both fall back to the original derivation.
+    BusterX86MetadataFormFacts const* facts = plan ? 0 : buster_x86_metadata_form_facts_for(form);
+    bool moffs_form = plan   ? plan->moffs_form
+                      : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_MOFFS) != 0
+                              : buster_x86_metadata_emit_is_moffs(form, pattern);
     if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE &&
-        (!pattern.has_segment_override || !(plan ? plan->canonical_hidden_segment_override
-                                                 : buster_x86_metadata_emit_canonical_hidden_segment_override(form, pattern))))
+        (!pattern.has_segment_override ||
+         !(plan   ? plan->canonical_hidden_segment_override
+           : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_HIDDEN_SEGMENT_OVERRIDE) != 0
+                   : buster_x86_metadata_emit_canonical_hidden_segment_override(form, pattern))))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && !pattern.has_branch_hint_control)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (pattern.has_branch_hint_control && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (!buster_x86_metadata_prefetchit_address_valid(query)) return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-    u8 pattern_control_blocker = plan ? plan->pattern_control_blocker : buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
+    u8 pattern_control_blocker = plan   ? plan->pattern_control_blocker
+                                 : facts ? facts->pattern_control_blocker
+                                         : buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
     if (pattern_control_blocker != BUSTER_X86_METADATA_BLOCKER_NONE)
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     bool canonical_notrack = pattern.has_cet_no_track &&
-                             (plan ? plan->canonical_notrack : buster_x86_metadata_emit_canonical_cet_no_track(form, pattern));
+                             (plan   ? plan->canonical_notrack
+                              : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_NOTRACK) != 0
+                                      : buster_x86_metadata_emit_canonical_cet_no_track(form, pattern));
     if (query.attributes.notrack && !canonical_notrack)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (query.attributes.notrack && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
-    bool loop_form = plan ? plan->loop_form != 0
-                          : buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
-                                buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
-                                buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
+    bool loop_form = plan   ? plan->loop_form != 0
+                     : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_LOOP) != 0
+                             : buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
+                                   buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
+                                   buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
     if (loop_form && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && query.address_size == 16)
         return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
-    bool jecxz_form = plan ? plan->jecxz_form != 0 : buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JECXZ"));
+    bool jecxz_form = plan   ? plan->jecxz_form != 0
+                      : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_JECXZ) != 0
+                              : buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JECXZ"));
     bool implicit_eamode32 = jecxz_form && pattern.required_address_size == 32 && !pattern.has_memory &&
                              query.address_size == 64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64;
     if (pattern.required_address_size && query.address_size && query.address_size != pattern.required_address_size &&
@@ -4917,7 +4997,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
         }
     }
-    bool requires_dfv = plan ? plan->requires_dfv : buster_x86_metadata_form_iform_requires_dfv(form);
+    bool requires_dfv = plan   ? plan->requires_dfv
+                        : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_REQUIRES_DFV) != 0
+                                : buster_x86_metadata_form_iform_requires_dfv(form);
     if (requires_dfv != query.attributes.has_dfv || (requires_dfv && query.attributes.dfv >= 16))
         return BUSTER_X86_METADATA_ENCODE_INVALID_INPUT;
     form.prefix_kind = pattern.prefix_kind;
@@ -5178,8 +5260,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // RM for the APX REX2 form.  Normalize only this exact symmetric field
     // shape; XADD, CMPXCHG, and memory forms retain their declared roles.
     if (!has_memory && reg_binding && rm_binding && pattern.has_modrm && pattern.opcode_count &&
-        pattern.opcode[0] == 0x87 && (plan ? plan->dataxfer_category
-                                           : form.category.length == 8 && buster_x86_metadata_emit_string_has(form.category, S8("DATAXFER"))) &&
+        pattern.opcode[0] == 0x87 &&
+        (plan   ? plan->dataxfer_category
+         : facts ? (facts->flags & BUSTER_X86_METADATA_FORM_FACT_DATAXFER) != 0
+                 : form.category.length == 8 && buster_x86_metadata_emit_string_has(form.category, S8("DATAXFER"))) &&
         reg_binding->metadata.access == (BUSTER_X86_METADATA_ACCESS_READ | BUSTER_X86_METADATA_ACCESS_WRITE) &&
         rm_binding->metadata.access == (BUSTER_X86_METADATA_ACCESS_READ | BUSTER_X86_METADATA_ACCESS_WRITE) &&
         reg_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
@@ -9507,15 +9591,46 @@ void buster_x86_metadata_prewarm(void)
             continue;
         }
         BusterX86MetadataPatternSemantics pattern = {0};
-        (void)buster_x86_metadata_emit_parse_pattern(form, &pattern);
+        bool pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern);
+        BusterX86MetadataFormFacts facts = {0};
         for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
         {
             BusterX86MetadataOperand operand = {0};
-            (void)buster_x86_metadata_operand(form_id, operand_index, &operand);
+            if (!buster_x86_metadata_operand(form_id, operand_index, &operand)) continue;
+            if (operand_index >= BUSTER_ARRAY_LENGTH(facts.effective_field_sources)) continue;
+            // Mirror the plan-less binding loop exactly: the pattern-aware
+            // source replaces the declared one, and the effective source is
+            // then read from the rewritten operand.
+            if (pattern_valid) operand.field_source = buster_x86_metadata_emit_effective_field_source_pattern(operand, pattern);
+            facts.pattern_field_sources[operand_index] = operand.field_source;
+            facts.effective_field_sources[operand_index] = buster_x86_metadata_emit_effective_field_source(operand);
         }
+        // The pattern-derived facts are only meaningful for a form whose
+        // pattern parsed; emission rejects the rest before it reads them.
+        if (pattern_valid)
+        {
+            facts.pattern_control_blocker = buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
+            if (buster_x86_metadata_emit_is_moffs(form, pattern)) facts.flags |= BUSTER_X86_METADATA_FORM_FACT_MOFFS;
+            if (buster_x86_metadata_emit_is_maskmov(form, pattern)) facts.flags |= BUSTER_X86_METADATA_FORM_FACT_MASKMOV;
+            if (buster_x86_metadata_emit_canonical_hidden_segment_override(form, pattern))
+                facts.flags |= BUSTER_X86_METADATA_FORM_FACT_HIDDEN_SEGMENT_OVERRIDE;
+            if (buster_x86_metadata_emit_canonical_cet_no_track(form, pattern))
+                facts.flags |= BUSTER_X86_METADATA_FORM_FACT_NOTRACK;
+        }
+        if (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
+            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
+            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE")))
+            facts.flags |= BUSTER_X86_METADATA_FORM_FACT_LOOP;
+        if (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JECXZ")))
+            facts.flags |= BUSTER_X86_METADATA_FORM_FACT_JECXZ;
+        if (buster_x86_metadata_form_iform_requires_dfv(form)) facts.flags |= BUSTER_X86_METADATA_FORM_FACT_REQUIRES_DFV;
+        if (form.category.length == 8 && buster_x86_metadata_emit_string_has(form.category, S8("DATAXFER")))
+            facts.flags |= BUSTER_X86_METADATA_FORM_FACT_DATAXFER;
+        buster_x86_metadata_form_facts[form_id] = facts;
     }
     // Publish only after decode, normalization, pattern parsing, and every
     // physical operand-view cache insertion have completed.
+    buster_x86_metadata_form_facts_ready = true;
     buster_x86_metadata_prewarmed = true;
 }
 
@@ -9970,6 +10085,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_input_contains_avx512_width
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offset, BusterX86MetadataFeatureInput input)
 {
+    // The ladder below compares one pooled requirement spelling against a long
+    // list of canonical names.  Going through the pool offset for each
+    // comparison repeats the terminator lookup, the bounds check and the pool
+    // decode entry every time, so resolve the span once and compare against
+    // that.  The shadowing macro keeps each comparison spelled as before; the
+    // underlying comparison is the same case-insensitive one.
+    u32 canonical_length = 0;
+    if (!buster_x86_metadata_string_offset_terminated(offset, &canonical_length)) return false;
+    String8 canonical_name = buster_x86_metadata_pool_span(offset, canonical_length);
+    if (canonical_name.length != canonical_length) return false;
+#define buster_x86_metadata_pool_string_equal_literal(unused_offset, literal) \
+    buster_x86_metadata_input_string_equal(canonical_name, (literal))
     // These imported names have an explicit canonical spelling.  Resolve
     // them before the raw fallback so a generated conjunction such as
     // APX_F_VMX cannot be authorized by passing that one token alone.
@@ -10246,6 +10373,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
     if (avx512_feature.length)
         return buster_x86_metadata_feature_input_contains_avx512_width(offset, input, avx512_feature);
     return false;
+#undef buster_x86_metadata_pool_string_equal_literal
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_baseline(BusterX86GeneratedForm form)

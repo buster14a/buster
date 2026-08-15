@@ -934,6 +934,11 @@ struct CodegenX64MetadataCacheEntry
 {
     u64 signature;
     u64 guard;
+    // The durable form key, kept whole.  Re-emitting through the key rather
+    // than the form id alone lets the metadata module verify the row's
+    // identity directly instead of re-deriving the mnemonic's candidate list,
+    // which is a normalize-and-binary-search on every emitted instruction.
+    u64 stable_hash;
     u32 form_id;
 };
 typedef struct CodegenX64MetadataCache CodegenX64MetadataCache;
@@ -942,6 +947,14 @@ struct CodegenX64MetadataCache
     CodegenX64MetadataCacheEntry entries[CODEGEN_X64_METADATA_CACHE_CAPACITY];
 };
 BUSTER_CT_CHECK((CODEGEN_X64_METADATA_CACHE_CAPACITY & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u)) == 0);
+
+// The cache key is built once as packed 64-bit words and then hashed word at a
+// time, rather than folding the query's raw struct bytes twice.  Two things
+// follow from that.  The hash loop is an order of magnitude shorter, which
+// matters because it runs on every emitted instruction and its multiply chain
+// is latency-bound; and the key names its fields explicitly, so structure
+// padding never reaches the hash.
+#define CODEGEN_X64_METADATA_KEY_WORD_CAPACITY 80u
 
 BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_hash_bytes(u64 hash, void const* pointer, u64 length)
 {
@@ -952,6 +965,11 @@ BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_hash_bytes(u64 hash, void
         hash *= UINT64_C(1099511628211);
     }
     return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_register_word(BusterX86MetadataPhysicalRegister reg)
+{
+    return (u64)reg.index | ((u64)reg.width << 16) | ((u64)reg.physical_class << 32) | ((u64)reg.high_byte << 40);
 }
 
 BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_immediate_class(BusterX86MetadataPhysicalOperand operand)
@@ -981,58 +999,100 @@ BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_displacement_class(BusterX
     return 4;
 }
 
-BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_metadata_query_hash(BusterX86MetadataPhysicalQuery physical, u64 seed)
+// Build the packed key.  Returns the word count, or 0 when the query does not
+// fit, in which case the caller emits without consulting the cache rather than
+// risking a key that does not separate two different queries.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_metadata_query_key(BusterX86MetadataPhysicalQuery physical, u64* words)
 {
-    u64 hash = codegen_canonical_x64_metadata_hash_bytes(seed, &physical.mnemonic.length, sizeof(physical.mnemonic.length));
-    hash = codegen_canonical_x64_metadata_hash_bytes(hash, physical.mnemonic.pointer, physical.mnemonic.length);
-    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.operand_count, sizeof(physical.operand_count));
-    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.attributes, sizeof(physical.attributes));
-    hash = codegen_canonical_x64_metadata_hash_bytes(hash, &physical.features.count, sizeof(physical.features.count));
+    u32 count = 0;
+    // Mnemonics and feature names are short spellings and are the only
+    // variable-length input, so they keep a byte fold; everything else is
+    // already a small enumerated field.
+    words[count++] = codegen_canonical_x64_metadata_hash_bytes(
+        UINT64_C(1469598103934665603) ^ physical.mnemonic.length, physical.mnemonic.pointer, physical.mnemonic.length);
+    words[count++] = (u64)physical.operand_count | ((u64)physical.features.count << 32);
+    BusterX86MetadataPhysicalAttributes attributes = physical.attributes;
+    words[count++] = (u64)attributes.decorator_flags | ((u64)attributes.apx_flags << 16) |
+                     ((u64)attributes.amx_flags << 32) | ((u64)attributes.mask_register << 48) |
+                     ((u64)attributes.broadcast_elements << 56);
+    words[count++] = (u64)attributes.rounding_mode | ((u64)attributes.has_mask_register << 8) |
+                     ((u64)attributes.zeroing << 9) | ((u64)attributes.sae << 10) | ((u64)attributes.no_flags << 11) |
+                     ((u64)attributes.lock << 12) | ((u64)attributes.rep << 13) | ((u64)attributes.repne << 14) |
+                     ((u64)attributes.implicit_segment << 16) | ((u64)attributes.branch_hint << 24) |
+                     ((u64)attributes.notrack << 32) | ((u64)attributes.dfv << 40) | ((u64)attributes.has_dfv << 48);
     for (u32 feature_index = 0; feature_index < physical.features.count; feature_index += 1)
     {
+        if (count >= CODEGEN_X64_METADATA_KEY_WORD_CAPACITY) return 0;
         String8 feature = physical.features.names[feature_index];
-        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &feature.length, sizeof(feature.length));
-        hash = codegen_canonical_x64_metadata_hash_bytes(hash, feature.pointer, feature.length);
+        words[count++] = codegen_canonical_x64_metadata_hash_bytes(UINT64_C(1469598103934665603) ^ feature.length,
+                                                                    feature.pointer, feature.length);
     }
     for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
     {
+        if (count + 4u > CODEGEN_X64_METADATA_KEY_WORD_CAPACITY) return 0;
         BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
-        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.kind, sizeof(operand.kind));
-        hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.width, sizeof(operand.width));
+        words[count++] = (u64)operand.kind | ((u64)operand.width << 32);
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
         {
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.reg, sizeof(operand.reg));
+            words[count++] = codegen_canonical_x64_metadata_register_word(operand.reg);
         }
         else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
         {
-            u8 displacement_class = codegen_canonical_x64_metadata_displacement_class(operand.memory);
-            u64 memory_shape = (u64)operand.memory.address_size | ((u64)operand.memory.scale << 8) |
-                               ((u64)operand.memory.segment << 16) | ((u64)operand.memory.has_base << 24) |
-                               ((u64)operand.memory.has_index << 25) | ((u64)operand.memory.has_displacement << 26) |
-                               ((u64)operand.memory.rip_relative << 27) | ((u64)operand.memory.has_symbol << 28) |
-                               ((u64)operand.memory.has_segment << 29) | ((u64)operand.memory.vsib << 30) |
-                               ((u64)operand.memory.source_width << 32);
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.memory.base, sizeof(operand.memory.base));
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &operand.memory.index, sizeof(operand.memory.index));
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &memory_shape, sizeof(memory_shape));
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &displacement_class, sizeof(displacement_class));
+            words[count++] = codegen_canonical_x64_metadata_register_word(operand.memory.base);
+            words[count++] = codegen_canonical_x64_metadata_register_word(operand.memory.index);
+            words[count++] = (u64)operand.memory.address_size | ((u64)operand.memory.scale << 8) |
+                             ((u64)operand.memory.segment << 16) | ((u64)operand.memory.has_base << 24) |
+                             ((u64)operand.memory.has_index << 25) | ((u64)operand.memory.has_displacement << 26) |
+                             ((u64)operand.memory.rip_relative << 27) | ((u64)operand.memory.has_symbol << 28) |
+                             ((u64)operand.memory.has_segment << 29) | ((u64)operand.memory.vsib << 30) |
+                             ((u64)operand.memory.source_width << 32) |
+                             ((u64)codegen_canonical_x64_metadata_displacement_class(operand.memory) << 48);
         }
         else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE ||
                  operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE)
         {
-            u8 immediate_class = codegen_canonical_x64_metadata_immediate_class(operand);
-            hash = codegen_canonical_x64_metadata_hash_bytes(hash, &immediate_class, sizeof(immediate_class));
+            words[count++] = codegen_canonical_x64_metadata_immediate_class(operand);
         }
     }
-    return hash;
+    return count;
+}
+
+// Both 64-bit halves of the key come from one pass.  The chains use different
+// seeds and different multipliers and are independent, so they issue in
+// parallel instead of doubling the dependent multiply latency.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_key_hashes(u64 const* words, u32 count, u64* signature, u64* guard)
+{
+    u64 first = UINT64_C(1469598103934665603);
+    u64 second = UINT64_C(0x6a09e667f3bcc909);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u64 word = words[index];
+        first = (first ^ word) * UINT64_C(1099511628211);
+        second = (second ^ word) * UINT64_C(0x9e3779b97f4a7c15);
+    }
+    // The slot index reads the signature's low bits directly, and a word-at-a-
+    // time multiply leaves the least mixing there.  Avalanche both halves so
+    // neighbouring keys do not land on neighbouring slots.
+    first ^= first >> 32;
+    first *= UINT64_C(0xd6e8feb86659fd93);
+    first ^= first >> 32;
+    second ^= second >> 32;
+    second *= UINT64_C(0xd6e8feb86659fd93);
+    second ^= second >> 32;
+    *signature = first;
+    *guard = second;
 }
 
 BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata_cache_entry(
     CodegenX64MetadataCache* cache, BusterX86MetadataPhysicalQuery physical, bool insertion)
 {
     if (!cache) return 0;
-    u64 signature = codegen_canonical_x64_metadata_query_hash(physical, UINT64_C(1469598103934665603));
-    u64 guard = codegen_canonical_x64_metadata_query_hash(physical, UINT64_C(0x6a09e667f3bcc909));
+    u64 words[CODEGEN_X64_METADATA_KEY_WORD_CAPACITY];
+    u32 word_count = codegen_canonical_x64_metadata_query_key(physical, words);
+    if (!word_count) return 0;
+    u64 signature = 0;
+    u64 guard = 0;
+    codegen_canonical_x64_metadata_key_hashes(words, word_count, &signature, &guard);
     u32 slot = (u32)signature & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
     for (u32 probe = 0; probe < CODEGEN_X64_METADATA_CACHE_CAPACITY; probe += 1)
     {
@@ -1088,14 +1148,16 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     BusterX86MetadataEmitResult emitted = {0};
     if (cached)
     {
-        emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = physical,
-            .form_id = cached->form_id - 1u,
-            .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
-            .output_capacity = output_capacity,
-            .relocations = 0,
-            .relocation_capacity = 0,
-        });
+        emitted = buster_x86_metadata_emit_form_exact(
+            (BusterX86MetadataEmitQuery){
+                .physical = physical,
+                .form_id = cached->form_id - 1u,
+                .output = buffer->bytes ? buffer->bytes + buffer->count : 0,
+                .output_capacity = output_capacity,
+                .relocations = 0,
+                .relocation_capacity = 0,
+            },
+            (BusterX86MetadataFormKey){.form_id = cached->form_id - 1u, .stable_hash = cached->stable_hash});
     }
     if (!cached || emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
     {
@@ -1106,11 +1168,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
         .relocations = 0,
         .relocation_capacity = 0,
         });
-        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.form_id != UINT32_MAX)
+        // Only a complete durable key is worth caching: the hit path re-emits
+        // through it, and a row without a stable hash cannot be identified.
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.form_id != UINT32_MAX && emitted.stable_hash)
         {
             CodegenX64MetadataCacheEntry* insertion = codegen_canonical_x64_metadata_cache_entry(cache, physical, true);
             if (insertion && !insertion->form_id)
             {
+                insertion->stable_hash = emitted.stable_hash;
                 insertion->form_id = emitted.form_id + 1u;
             }
         }
