@@ -18,6 +18,73 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15i` (Linux x86_64, Zen 4 7940HS; the form-selection candidate loop
+stops re-deriving loop-invariant work, based on `91eba52e`). Stage 1
+`15,991,731,490` -> `15,600,981,922` instructions (**-2.4%**) measured
+single-lane, and `test_self_host` stage-1 wall 1.653 s. Cumulative across the
+2026-08-15 audits: stage 1 `63,683,992,612` -> `15,600,981,922`, **-75.5%**.
+
+All three finds are in `buster_x86_metadata_select_form`'s per-candidate loop,
+which runs on the ~24.5% of emissions the byte table misses. Nothing in the
+loop's *result* changed — see the verification below.
+
+**`emit_parse_pattern` was already cached, so its cost was the copy.** It
+returns `BusterX86MetadataPatternSemantics` **by value**, and that record is
+176 bytes; the cache hit is a 176-byte copy out of a table the caller could
+read in place. `buster_x86_metadata_pattern_semantics_borrow` already existed
+for exactly this and was already used by `emit_bind_form` and
+`emit_form_to_scratch` — the candidate loop was simply never converted. It
+called `emit_parse_pattern` **three times per candidate** (the filter pattern,
+the implicit-one test, and the FMA4 tie-break) and read four fields, one
+field, and two fields from the three copies. This is precisely the leftover
+`2026-08-15g` pointed at when it said to check whether any other consumer
+still derives the per-form facts the long way.
+
+**A 2,304-byte dead zero-initializer.** `candidate_operands[16] = {0}` zeroed
+sixteen 144-byte operands per candidate, and both writers `memcpy` the query's
+whole operand prefix before touching it. The array is now uninitialized; the
+one later read is guarded by `inferred_memory_width`, which is set only on
+those memcpy paths, so no uninitialized byte is ever read. Note that the
+matrix's sanitizers are ASan+UBSan, neither of which detects an uninitialized
+read, so this was established by reading every use rather than by a run.
+
+**Three loop-invariant probes.** `aggregate_memory_source_topology_internal`,
+`block_memory_source_topology_internal` and `prepare_typed_memory_query` each
+begin by rejecting on conditions that depend only on the query, and the query
+does not change across candidates — so each candidate paid a call and an
+80-byte query copy to re-derive one constant answer. The query-side tests are
+now hoisted out of the loop. They are used as a **necessary** condition, so
+the guard can only skip a call that would have returned false; exhaustiveness
+was not required and was not claimed. The two families are mutually exclusive
+by construction, the topology pair requiring no decorator at all and the typed
+probe requiring the broadcast decorator.
+
+**Verification that selection did not move.** The byte-identity gates here are
+stronger than a test count, because this loop chooses instruction encodings.
+The pre-change and post-change compilers, given identical input, produce
+identical output: 46 of 46 `tests/basic_c_*.c` fixtures compile to
+byte-identical objects with matching exit status, and the complete self-host
+unit compiles to a byte-identical **45,626,304**-byte executable. A change
+that altered form selection anywhere in that 27 MB of code could not produce
+that result.
+
+Validation: byte-identical stage-1/stage-2 fixed point, byte-identical output
+at 1, 4 and 16 lanes, 305,278 Release assertions across 39 modules, the
+cross-compiler byte comparison above, and a full local
+`test_all_combinations_ci`. That matrix is Linux-only, so the aarch64 and
+Windows verdicts come from remote CI.
+
+The remaining profile is flat: after this, no single symbol outside
+`codegen_canonical_x64_metadata_emit_attributes` exceeds 8% of retired
+instructions. That function is now the standing lever and is **not** a
+cache-miss problem any more — it is the ~430 instructions per emission spent
+building the key (packing up to 80 words, two hash chains over them, then a
+ten-multiply value fold per operand) before either table is touched. Shortening
+the value fold's dependent chain by mixing the five per-operand values with one
+linear combination was considered and **not** taken: it would collapse a
+nonlinear compression into a linear form whose collisions are constructible,
+and a collision here is a silent miscompile, not a slow path.
+
 `2026-08-15h` (Linux x86_64, Zen 4 7940HS; the byte-template table is probed as
 a cache instead of a dictionary, based on `37d59296`). Stage 1
 `18,150,530,759` -> `15,900,336,190` instructions (**-12.4%**) measured

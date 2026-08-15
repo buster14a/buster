@@ -7493,8 +7493,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_is_mmx_movq_transfer_alias(BusterX8
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_is_undocumented_shift_alias(BusterX86MetadataForm form,
-                                                                           BusterX86MetadataPatternSemantics pattern)
+                                                                           BusterX86MetadataPatternSemantics const* pattern_view)
 {
+    BusterX86MetadataPatternSemantics pattern = *pattern_view;
     // A few imported memory rows omit XED's UNDOCUMENTED attribute even
     // though they duplicate the reserved group-2 /6 encoding.  Keep the
     // architectural shape rule with the general undocumented-row filter so
@@ -7722,6 +7723,27 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
     bool first_failure_form_recorded = false;
     bool selected_implicit_one = false;
     bool selected_x87_no_rexw = false;
+    // The three memory-topology probes below run once per candidate, but each
+    // one first rejects on conditions that depend only on the query, which is
+    // loop-invariant.  Hoist those here so a query that can satisfy neither
+    // shape skips all three calls outright instead of re-deriving the same
+    // answer for every candidate considered.  These are the callees' own
+    // query-side tests, so this is a necessary condition and can only skip a
+    // call that would have returned false.  The two families are mutually
+    // exclusive by construction: the topology pair requires no decorator at
+    // all, the typed probe requires the broadcast decorator.
+    bool topology_query_possible =
+        query.operands && query.operand_count == 2 && query.address_size == 64 &&
+        query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && !query.attributes.lock &&
+        !query.attributes.rep && !query.attributes.repne && !query.attributes.notrack &&
+        !query.attributes.decorator_flags && !query.attributes.apx_flags && !query.attributes.amx_flags &&
+        !query.attributes.has_dfv && !query.attributes.no_flags &&
+        query.attributes.implicit_segment == BUSTER_X86_METADATA_SEGMENT_NONE &&
+        query.attributes.branch_hint == BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+    bool typed_query_possible = query.address_size == 64 && query.operand_count <= 16 &&
+                                (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0 &&
+                                !query.attributes.sae &&
+                                query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
     for (u32 position = 0; position < candidates.count; position += 1)
     {
         u32 form_id = 0;
@@ -7734,19 +7756,30 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         // selector is the canonical source of instruction bytes, so it must
         // never expose those rows; explicit exact-form identities remain
         // available for provenance and machine plans.
-        BusterX86MetadataPatternSemantics filter_pattern = {0};
-        if (!buster_x86_metadata_emit_parse_pattern(form, &filter_pattern)) continue;
+        // Borrowed, not copied out: this runs once per candidate considered and
+        // the record is 176 bytes, of which four fields are read here.  The
+        // storage below is only reached when the cache cannot serve the form.
+        BusterX86MetadataPatternSemantics filter_storage = {0};
+        BusterX86MetadataPatternSemantics const* filter_view = 0;
+        bool filter_parsed = false;
+        filter_view = buster_x86_metadata_pattern_semantics_borrow(form, &filter_parsed);
+        if (!filter_view)
+        {
+            filter_parsed = buster_x86_metadata_emit_parse_pattern(form, &filter_storage);
+            filter_view = &filter_storage;
+        }
+        if (!filter_parsed) continue;
         // The public one-memory NOP spelling is the architectural 0F 1F /0
         // padding form.  XED also indexes decode-only 0F 18/19 aliases under
         // the NOP mnemonic; keep those aliases out of source/link selection.
         if (buster_x86_metadata_input_string_equal(query.mnemonic, S8("NOP")) && query.operand_count == 1 &&
             query.operands && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-            filter_pattern.opcode_count >= 2 && filter_pattern.opcode[0] == 0x0f && filter_pattern.opcode[1] != 0x1f)
+            filter_view->opcode_count >= 2 && filter_view->opcode[0] == 0x0f && filter_view->opcode[1] != 0x1f)
             continue;
         bool x87_free_pop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FFREEP"));
         if ((!x87_free_pop && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED"))) ||
-            buster_x86_metadata_is_undocumented_shift_alias(form, filter_pattern))
+            buster_x86_metadata_is_undocumented_shift_alias(form, filter_view))
             continue;
         BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form_id);
         BusterX86MetadataResolveQuery filter_query = {
@@ -7774,14 +7807,20 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             if (buster_x86_metadata_emit_parse_pattern(form, &pattern) && pattern.has_modep5 && pattern.modep5_value != 0)
                 continue;
         }
-        BusterX86MetadataPhysicalOperand candidate_operands[16] = {0};
+        // Deliberately uninitialized: both writers below memcpy the query's
+        // whole operand prefix before touching it, and `candidate_query`
+        // adopts the array only when one of them ran.  Zero-initializing all
+        // sixteen entries is 2,304 bytes of dead stores per candidate.
+        BusterX86MetadataPhysicalOperand candidate_operands[16];
         BusterX86MetadataPhysicalQuery candidate_query = query;
         u16 block_memory_width = 0;
         bool inferred_memory_width = false;
-        bool aggregate_memory_topology = buster_x86_metadata_aggregate_memory_source_topology_internal(form, query,
-                                                                                                           &block_memory_width);
-        bool block_memory_topology = !aggregate_memory_topology &&
-                                     buster_x86_metadata_block_memory_source_topology_internal(form, query, &block_memory_width);
+        bool aggregate_memory_topology =
+            topology_query_possible &&
+            buster_x86_metadata_aggregate_memory_source_topology_internal(form, query, &block_memory_width);
+        bool block_memory_topology =
+            topology_query_possible && !aggregate_memory_topology &&
+            buster_x86_metadata_block_memory_source_topology_internal(form, query, &block_memory_width);
         if (aggregate_memory_topology || block_memory_topology)
         {
             memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
@@ -7798,7 +7837,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         }
         else
         {
-            inferred_memory_width = buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
+            inferred_memory_width = typed_query_possible &&
+                                    buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
         }
         if (inferred_memory_width)
             candidate_query.operands = candidate_operands;
@@ -7873,11 +7913,19 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             continue;
         }
         result.candidate_count += 1;
-        BusterX86MetadataPatternSemantics candidate_pattern = {0};
-        bool candidate_implicit_one = buster_x86_metadata_emit_parse_pattern(form, &candidate_pattern) && candidate_pattern.has_implicit_one;
+        BusterX86MetadataPatternSemantics candidate_storage = {0};
+        bool candidate_parsed = false;
+        BusterX86MetadataPatternSemantics const* candidate_view =
+            buster_x86_metadata_pattern_semantics_borrow(form, &candidate_parsed);
+        if (!candidate_view)
+        {
+            candidate_parsed = buster_x86_metadata_emit_parse_pattern(form, &candidate_storage);
+            candidate_view = &candidate_storage;
+        }
+        bool candidate_implicit_one = candidate_parsed && candidate_view->has_implicit_one;
         bool prefer_implicit_one = scratch.byte_count == result.selected_byte_count && candidate_implicit_one && !selected_implicit_one;
         bool candidate_x87_no_rexw = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
-                                     candidate_pattern.has_modrm && !candidate_pattern.w;
+                                     candidate_view->has_modrm && !candidate_view->w;
         bool prefer_x87_no_rexw = scratch.byte_count == result.selected_byte_count && candidate_x87_no_rexw &&
                                  !selected_x87_no_rexw;
         // FMA4's generated XED rows intentionally duplicate each source
@@ -7887,14 +7935,24 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         // in slot two.  When both register forms tie on size, prefer W=1;
         // operand binding still selects W=0 for the slot-two memory form.
         bool candidate_fma4_w1 = buster_x86_metadata_string_input_equal(form.extension.offset, S8("FMA4")) &&
-                                 candidate_pattern.has_w && candidate_pattern.w;
+                                 candidate_view->has_w && candidate_view->w;
         BusterX86MetadataForm selected_form = {0};
-        BusterX86MetadataPatternSemantics selected_pattern = {0};
-        bool selected_fma4_w1 = result.form_id != UINT32_MAX &&
-                                buster_x86_metadata_form(result.form_id, &selected_form) &&
-                                buster_x86_metadata_emit_parse_pattern(selected_form, &selected_pattern) &&
-                                buster_x86_metadata_string_input_equal(selected_form.extension.offset, S8("FMA4")) &&
-                                selected_pattern.has_w && selected_pattern.w;
+        BusterX86MetadataPatternSemantics selected_storage = {0};
+        BusterX86MetadataPatternSemantics const* selected_view = 0;
+        bool selected_parsed = false;
+        bool selected_fma4_w1 = false;
+        if (result.form_id != UINT32_MAX && buster_x86_metadata_form(result.form_id, &selected_form))
+        {
+            selected_view = buster_x86_metadata_pattern_semantics_borrow(selected_form, &selected_parsed);
+            if (!selected_view)
+            {
+                selected_parsed = buster_x86_metadata_emit_parse_pattern(selected_form, &selected_storage);
+                selected_view = &selected_storage;
+            }
+            selected_fma4_w1 = selected_parsed &&
+                               buster_x86_metadata_string_input_equal(selected_form.extension.offset, S8("FMA4")) &&
+                               selected_view->has_w && selected_view->w;
+        }
         bool prefer_fma4_w1 = scratch.byte_count == result.selected_byte_count && candidate_fma4_w1 && !selected_fma4_w1;
         bool aggregate_block_query = false;
         for (u32 aggregate_operand_index = 0; aggregate_operand_index < query.operand_count; aggregate_operand_index += 1)
