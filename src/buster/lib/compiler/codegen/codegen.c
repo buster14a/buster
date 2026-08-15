@@ -1538,10 +1538,13 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, 
         return true;
     }
     u64 loop_patch = buffer->count;
-    u64 final_offset = buffer->count;
     BusterX86MetadataPhysicalOperand loop_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
+    if (!codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1))
+    {
+        return true;
+    }
+    u64 final_offset = buffer->count;
+    if (!codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
         !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_rsp_operands, BUSTER_ARRAY_LENGTH(sub_rsp_operands)))
     {
         return true;
@@ -5274,7 +5277,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_frame_to_rsp(CodegenBuffer* 
             return false;
         }
         BusterX86MetadataPhysicalOperand store_operands[2] = {
-            codegen_canonical_x64_metadata_memory(through_scratch ? X64_REGISTER_R11 : X64_REGISTER_RSP, width, through_scratch ? 0 : (s64)destination),
+            codegen_canonical_x64_metadata_memory(through_scratch ? X64_REGISTER_R11 : X64_REGISTER_RSP, width, (s64)destination),
             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, width),
         };
         if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_operands, BUSTER_ARRAY_LENGTH(store_operands)))
@@ -7521,7 +7524,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 BusterX86MetadataPhysicalOperand tls_index_memory =
-                                    codegen_canonical_x64_metadata_segment_memory(BUSTER_X86_METADATA_SEGMENT_FS, 64, 0x58);
+                                    codegen_canonical_x64_metadata_segment_memory(BUSTER_X86_METADATA_SEGMENT_GS, 64, 0x58);
                                 BusterX86MetadataPhysicalOperand tls_index_load_operands[2] = {
                                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
                                     tls_index_memory,
