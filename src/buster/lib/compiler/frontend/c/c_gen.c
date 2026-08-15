@@ -1474,7 +1474,7 @@ BUSTER_C_INTERNAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
 BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32 expression_start, u32 index)
 {
     CScopeId scope = c_ir_current_scope(builder);
-    return c_parse_label_address_prefix_with_typedef(&builder->parse, builder->preprocess, scope, expression_start, index);
+    return c_parse_label_address_prefix_with_typedef(&builder->parse, &builder->preprocess, scope, expression_start, index);
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer);
@@ -21929,7 +21929,7 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
             }
             continue;
         }
-        if (c_parse_label_address_prefix(preprocess, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+        if (c_parse_label_address_prefix(&preprocess, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
             !c_preprocess_dialect_is_gnu(preprocess.dialect))
         {
             *token_index_out = index;

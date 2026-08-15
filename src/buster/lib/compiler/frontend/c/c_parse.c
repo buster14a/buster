@@ -2533,8 +2533,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     }
 }
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, u32 expression_start, u32 index);
-BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
+BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                                     u32 expression_start, u32 index);
 BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
 
@@ -8055,7 +8055,7 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
                          string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[use_index - 1]), S8("union")) ||
                          string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[use_index - 1]), S8("enum")));
         if (use.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, use_index) && !member && !tag_name &&
-                !(use_index && c_parse_label_address_prefix_with_typedef(result, preprocess, scope, start, use_index - 1)) &&
+                !(use_index && c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, start, use_index - 1)) &&
                 !c_parse_identifier_is_bound(result, use_index))
         {
             c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
@@ -8580,7 +8580,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[use_index - 1]), S8("struct")) ||
                  string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[use_index - 1]), S8("union")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[use_index - 1]), S8("enum")));
             if (use.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, use_index) && !member && !tag_name &&
-                !(use_index && c_parse_label_address_prefix_with_typedef(result, preprocess, scope, initializer_start, use_index - 1)) &&
+                !(use_index && c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, initializer_start, use_index - 1)) &&
                 !c_parse_identifier_is_bound(result, use_index))
             {
                 c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
@@ -8594,10 +8594,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, u32 body_start, u32 index)
+BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
-    if (body_start >= preprocess.token_count || index >= preprocess.token_count ||
-        !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+    if (body_start >= preprocess->token_count || index >= preprocess->token_count ||
+        !c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
     {
         return false;
     }
@@ -8609,10 +8609,10 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
     {
         return false;
     }
-    CToken previous = preprocess.tokens[index - 1];
+    CToken previous = preprocess->tokens[index - 1];
     if (previous.kind == C_TOKEN_IDENTIFIER)
     {
-        return string_equal(c_token_spelling(preprocess.spelling_base, previous), S8("return")) || string_equal(c_token_spelling(preprocess.spelling_base, previous), S8("case"));
+        return string_equal(c_token_spelling(preprocess->spelling_base, previous), S8("return")) || string_equal(c_token_spelling(preprocess->spelling_base, previous), S8("case"));
     }
     if (previous.kind == C_TOKEN_PREPROCESSING_NUMBER || previous.kind == C_TOKEN_CHARACTER_LITERAL || previous.kind == C_TOKEN_STRING_LITERAL)
     {
@@ -8624,7 +8624,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
         u32 open = UINT32_MAX;
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-            CToken candidate = preprocess.tokens[scan];
+            CToken candidate = preprocess->tokens[scan];
             if (c_token_is_punctuator(&candidate, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
                 depth += 1;
@@ -8649,8 +8649,8 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
         }
         if (open != UINT32_MAX)
         {
-            if (open > body_start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
-                (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]))))
+            if (open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+                (string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]))))
             {
                 return false;
             }
@@ -8658,7 +8658,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
             bool tag_name = false;
             for (u32 scan = open + 1; scan < index - 1; scan += 1)
             {
-                CToken candidate = preprocess.tokens[scan];
+                CToken candidate = preprocess->tokens[scan];
                 if (candidate.kind == C_TOKEN_IDENTIFIER)
                 {
                     if (tag_name)
@@ -8666,13 +8666,13 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
                         tag_name = false;
                         type_like = true;
                     }
-                    else if (string_equal(c_token_spelling(preprocess.spelling_base, candidate), S8("struct")) || string_equal(c_token_spelling(preprocess.spelling_base, candidate), S8("union")) ||
-                             string_equal(c_token_spelling(preprocess.spelling_base, candidate), S8("enum")))
+                    else if (string_equal(c_token_spelling(preprocess->spelling_base, candidate), S8("struct")) || string_equal(c_token_spelling(preprocess->spelling_base, candidate), S8("union")) ||
+                             string_equal(c_token_spelling(preprocess->spelling_base, candidate), S8("enum")))
                     {
                         tag_name = true;
                         type_like = true;
                     }
-                    else if (c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, candidate), preprocess.dialect))
+                    else if (c_parse_type_word_for_dialect(c_token_spelling(preprocess->spelling_base, candidate), preprocess->dialect))
                     {
                         type_like = true;
                     }
@@ -8698,16 +8698,16 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult preprocess, 
            !c_token_is_punctuator(&previous, C_PUNCTUATOR_MINUS_MINUS);
 }
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                                     u32 body_start, u32 index)
 {
     if (c_parse_label_address_prefix(preprocess, body_start, index))
     {
         return true;
     }
-    if (!result || body_start >= preprocess.token_count || index >= preprocess.token_count ||
-        !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) || !index ||
-        !c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    if (!result || body_start >= preprocess->token_count || index >= preprocess->token_count ||
+        !c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) || !index ||
+        !c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
     {
         return false;
     }
@@ -8715,7 +8715,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
     u32 open = UINT32_MAX;
     for (u32 scan = index - 1; scan >= body_start; scan -= 1)
     {
-        CToken token = preprocess.tokens[scan];
+        CToken token = preprocess->tokens[scan];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
             depth += 1;
@@ -8742,8 +8742,8 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
     {
         return false;
     }
-    if (open > body_start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
-        (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]))))
+    if (open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+        (string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]))))
     {
         return false;
     }
@@ -8751,7 +8751,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
     bool tag_name = false;
     for (u32 scan = open + 1; scan < index - 1; scan += 1)
     {
-        CToken token = preprocess.tokens[scan];
+        CToken token = preprocess->tokens[scan];
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             if (tag_name)
@@ -8759,13 +8759,13 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
                 tag_name = false;
                 type_name = true;
             }
-            else if (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("struct")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("union")) ||
-                     string_equal(c_token_spelling(preprocess.spelling_base, token), S8("enum")))
+            else if (string_equal(c_token_spelling(preprocess->spelling_base, token), S8("struct")) || string_equal(c_token_spelling(preprocess->spelling_base, token), S8("union")) ||
+                     string_equal(c_token_spelling(preprocess->spelling_base, token), S8("enum")))
             {
                 tag_name = true;
                 type_name = true;
             }
-            else if (c_parse_type_start(result, scope, c_token_spelling(preprocess.spelling_base, token), preprocess.dialect))
+            else if (c_parse_type_start(result, scope, c_token_spelling(preprocess->spelling_base, token), preprocess->dialect))
             {
                 type_name = true;
             }
@@ -9421,7 +9421,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
             if (!member && !tag_name && !label && !goto_target && !asm_goto_label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
                 !(index > declaration->body_start &&
-                  c_parse_label_address_prefix_with_typedef(result, preprocess, scope_stack[scope_count - 1], declaration->body_start, index - 1)) &&
+                  c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], declaration->body_start, index - 1)) &&
                 !(asm_operand_range_start != UINT32_MAX &&
                   c_parse_asm_operand_name_token(preprocess, asm_operand_range_start, asm_operand_range_end, index)))
             {

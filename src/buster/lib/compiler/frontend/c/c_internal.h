@@ -122,9 +122,9 @@ BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,
                                                                      IrSourceMapCursor* cursor);
-BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult preprocess,
+BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
                                                                  CScopeId scope, u32 expression_start, u32 index);
-BUSTER_C_EXTERN bool c_parse_label_address_prefix(CPreprocessResult preprocess, u32 expression_start, u32 index);
+BUSTER_C_EXTERN bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
 BUSTER_C_EXTERN bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect);
 typedef struct CSpellingSpace CSpellingSpace;
