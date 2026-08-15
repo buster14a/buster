@@ -15354,6 +15354,7 @@ struct CodegenCanonicalParallelState
     CodegenCanonicalX64F80Cache const* f80_cache;
     IrModule* module;
     CodegenCanonicalFragment* fragments;
+    CodegenX64MetadataCache* x64_metadata_caches;
     AtomicU64 take_index;
     AtomicU64 worker_arena_failures;
     CodegenModule result;
@@ -15732,7 +15733,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
     // lane needs its own cursor while emitting debug line rows.
     IrProgram emission_program = *state->program;
     emission_program.source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    CodegenX64MetadataCache x64_metadata_cache = {0};
+    CodegenX64MetadataCache* x64_metadata_cache = state->x64_metadata_caches ? state->x64_metadata_caches + lane_index() : 0;
     // A large generated function can require more transient codegen state
     // than the general-purpose 64 MiB thread scratch arena. The worker arena
     // is reset after each function; only an exact compact copy survives.
@@ -15775,7 +15776,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
             emitted_info = (CodegenCanonicalFragmentInfo){0};
             emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, state->f80_cache, &fragment_module,
                                                                  state->target, fragment_options, capacity_scale, &code_buffer_exhausted, false,
-                                                                 &emitted_info, &x64_metadata_cache);
+                                                                 &emitted_info, x64_metadata_cache);
             if (!code_buffer_exhausted)
             {
                 break;
@@ -15845,6 +15846,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
     }
+    u64 lane_count = codegen_module_lane_count(options, module->function_count);
+    CodegenX64MetadataCache* globals_x64_metadata_cache = 0;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        globals_x64_metadata_cache = arena_allocate(arena, CodegenX64MetadataCache, 1);
+        memset(globals_x64_metadata_cache, 0, sizeof(*globals_x64_metadata_cache));
+    }
     IrModule globals_module = *module;
     globals_module.functions = 0;
     globals_module.function_count = 0;
@@ -15856,9 +15864,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     serial_options.assume_validated = true;
     serial_options.lane_count = 1;
     bool globals_buffer_exhausted = false;
-    CodegenX64MetadataCache x64_metadata_cache = {0};
     result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, &globals_module, target, serial_options, 1,
-                                                       &globals_buffer_exhausted, true, 0, &x64_metadata_cache);
+                                                       &globals_buffer_exhausted, true, 0, globals_x64_metadata_cache);
     BUSTER_CHECK(!globals_buffer_exhausted);
     result.ir_module = module;
     if (result.error != CODEGEN_ERROR_NONE)
@@ -15904,6 +15911,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         result.error = CODEGEN_ERROR_CAPACITY;
         return result;
     }
+    CodegenX64MetadataCache* x64_metadata_caches = 0;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache, lane_count);
+        memset(x64_metadata_caches, 0, sizeof(*x64_metadata_caches) * lane_count);
+    }
     CodegenCanonicalParallelState state = {
         .arena = arena,
         .fragment_arena = fragment_arena,
@@ -15912,6 +15925,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         .f80_cache = &f80_cache,
         .module = module,
         .fragments = fragments,
+        .x64_metadata_caches = x64_metadata_caches,
         .result = result,
         .target = target,
         .options = options,
@@ -15920,7 +15934,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         .worker_arena_reserve = arena->reserved_size,
         .worker_arena_granularity = arena->granularity,
     };
-    lane_run(codegen_module_lane_count(options, module->function_count), &codegen_canonical_parallel_lane, &state);
+    lane_run(lane_count, &codegen_canonical_parallel_lane, &state);
     os_mutex_destroy(fragment_mutex);
     BUSTER_CHECK(arena_destroy(fragment_arena, 1));
     return state.result;
