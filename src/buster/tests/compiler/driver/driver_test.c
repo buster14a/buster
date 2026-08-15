@@ -422,6 +422,39 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_fallthrough
     return remaining >= 2 && text.pointer[offset] == 0xc9 && text.pointer[offset + 1] == 0xc3;
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 compiler_driver_test_x64_restore_rbx_size(ByteSlice text, u64 offset, u64 function_end)
+{
+    if (!text.pointer || offset > function_end)
+    {
+        return 0;
+    }
+    u64 remaining = function_end - offset;
+    // MOV rbx, [rbp+disp8] is the canonical compact form; a large frame
+    // uses the equivalent disp32 form.  Both restore the same callee-saved
+    // register and must be recognized by the semantic edge scan.
+    if (remaining >= 4 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x5d)
+    {
+        return 4;
+    }
+    if (remaining >= 7 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
+    {
+        return 7;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_unconditional_jump(ByteSlice text, u64 offset, u64 function_end)
+{
+    if (!text.pointer || offset > function_end)
+    {
+        return false;
+    }
+    u64 remaining = function_end - offset;
+    // Canonical metadata may select either the short or near unconditional
+    // branch when the target displacement permits it.
+    return (remaining >= 2 && text.pointer[offset] == 0xeb) || (remaining >= 5 && text.pointer[offset] == 0xe9);
+}
+
 #endif
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dynamic_rbx(ObjectFile* object)
@@ -3100,14 +3133,14 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         bool windows_target = c_labels_object.object.target.os == OPERATING_SYSTEM_WINDOWS;
         if (function_found && function_offset <= text.length && function_size <= text.length - function_offset)
         {
-            for (u64 byte_index = function_offset; byte_index + 7 < function_offset + function_size; byte_index += 1)
+            for (u64 byte_index = function_offset; byte_index < function_offset + function_size; byte_index += 1)
             {
-                bool restore = text.pointer[byte_index] == 0x48 && text.pointer[byte_index + 1] == 0x8b && text.pointer[byte_index + 2] == 0x9d;
-                if (restore)
+                u64 function_end = function_offset + function_size;
+                u32 restore_size = compiler_driver_test_x64_restore_rbx_size(text, byte_index, function_end);
+                if (restore_size)
                 {
-                    u64 after_restore = byte_index + 7;
-                    u64 function_end = function_offset + function_size;
-                    restored_before_taken_edge |= after_restore < function_end && text.pointer[after_restore] == 0xe9;
+                    u64 after_restore = byte_index + restore_size;
+                    restored_before_taken_edge |= compiler_driver_test_x64_unconditional_jump(text, after_restore, function_end);
                     restored_before_fallthrough |= compiler_driver_test_x64_fallthrough_epilog(text, after_restore, function_end, windows_target);
                 }
             }
