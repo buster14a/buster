@@ -965,7 +965,19 @@ struct CodegenX64MetadataCacheEntry
 // Sized from a census of one stage-1 self-compile: the value-free table hits
 // 99.46% of 4.86 M emissions but only 16.5% of them are value-free and so
 // templatable, while a value-inclusive key matches 60.9%.
-#define CODEGEN_X64_TEMPLATE_CACHE_CAPACITY 4096u
+// The table is sized from the module rather than fixed, because its useful
+// size is the number of distinct instruction spellings the module emits and
+// that scales with the module.  A fixed constant either starves a large
+// translation unit or makes a ten-function one pay for a large one: measured
+// on the self-host unit, stage-1 instructions fall monotonically from 25.94 G
+// at 4096 entries to 16.27 G at 524288.  Wall time is flat across that whole
+// range, so the ceiling is chosen on memory rather than on the instruction
+// curve: entries are 32 bytes, so 65536 is 2 MiB per lane and 32 MiB across a
+// sixteen-lane gang, which is proportionate to what a unit of this size
+// already costs elsewhere.  Raising it further keeps paying in instructions
+// (-36% at 262144) but costs 128 MiB for no measured wall improvement.
+#define CODEGEN_X64_TEMPLATE_CACHE_MINIMUM 4096u
+#define CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM 65536u
 typedef struct CodegenX64TemplateCacheEntry CodegenX64TemplateCacheEntry;
 struct CodegenX64TemplateCacheEntry
 {
@@ -974,13 +986,33 @@ struct CodegenX64TemplateCacheEntry
     u8 length;
     u8 bytes[CODEGEN_X64_TEMPLATE_BYTE_CAPACITY];
 };
-BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_CACHE_CAPACITY & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u)) == 0);
+BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_CACHE_MINIMUM & (CODEGEN_X64_TEMPLATE_CACHE_MINIMUM - 1u)) == 0);
+BUSTER_CT_CHECK((CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM & (CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM - 1u)) == 0);
+
+// Entries per function, from the same measurement: the self-host unit's 3,517
+// functions reach the ceiling, and smaller units scale down from there so a
+// ten-function translation unit does not pay for a large one.
+#define CODEGEN_X64_TEMPLATE_ENTRIES_PER_FUNCTION 64u
+
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_template_capacity(u64 function_count)
+{
+    u64 wanted = function_count * CODEGEN_X64_TEMPLATE_ENTRIES_PER_FUNCTION;
+    u32 capacity = CODEGEN_X64_TEMPLATE_CACHE_MINIMUM;
+    while (capacity < CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM && capacity < wanted)
+    {
+        capacity *= 2u;
+    }
+    return capacity;
+}
 
 typedef struct CodegenX64MetadataCache CodegenX64MetadataCache;
 struct CodegenX64MetadataCache
 {
     CodegenX64MetadataCacheEntry entries[CODEGEN_X64_METADATA_CACHE_CAPACITY];
-    CodegenX64TemplateCacheEntry templates[CODEGEN_X64_TEMPLATE_CACHE_CAPACITY];
+    // Borrowed from the same allocation that holds the cache; `template_mask`
+    // is capacity - 1 and capacity is always a power of two.
+    CodegenX64TemplateCacheEntry* templates;
+    u32 template_mask;
 };
 BUSTER_CT_CHECK((CODEGEN_X64_METADATA_CACHE_CAPACITY & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u)) == 0);
 
@@ -1198,7 +1230,8 @@ BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template
                                                                                         u64 signature, u64 guard, bool insertion)
 {
     if (!cache) return 0;
-    u32 slot = (u32)signature & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u);
+    if (!cache->templates) return 0;
+    u32 slot = (u32)signature & cache->template_mask;
     for (u32 probe = 0; probe < 64u; probe += 1)
     {
         CodegenX64TemplateCacheEntry* entry = cache->templates + slot;
@@ -1211,7 +1244,7 @@ BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template
             return entry;
         }
         if (entry->signature == signature && entry->guard == guard) return entry;
-        slot = (slot + 1u) & (CODEGEN_X64_TEMPLATE_CACHE_CAPACITY - 1u);
+        slot = (slot + 1u) & cache->template_mask;
     }
     return 0;
 }
@@ -16132,14 +16165,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         memset(fragments, 0, sizeof(*fragments) * module->function_count);
     }
     u64 x64_metadata_cache_count = 0;
+    u32 x64_template_capacity = 0;
     u64 fragment_arena_reserved_size = arena->reserved_size;
     if (target.cpu_arch == CPU_ARCH_X86_64 && module->function_count &&
         lane_count <= (ARENA_MAX_RESERVATION - fragment_arena_reserved_size) /
-                          (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*)))
+                          (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*) +
+                           (u64)CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM * sizeof(CodegenX64TemplateCacheEntry)))
     {
         x64_metadata_cache_count = lane_count;
+        x64_template_capacity = codegen_canonical_x64_template_capacity(module->function_count);
         fragment_arena_reserved_size +=
-            x64_metadata_cache_count * (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*));
+            x64_metadata_cache_count * (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*) +
+                                        x64_template_capacity * sizeof(CodegenX64TemplateCacheEntry));
     }
     Arena* fragment_arena = codegen_worker_arena_create(fragment_arena_reserved_size, arena->granularity);
     OsMutexHandle* fragment_mutex = os_mutex_create();
@@ -16165,6 +16202,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         {
             CodegenX64MetadataCache* lane_cache = arena_allocate(fragment_arena, CodegenX64MetadataCache, 1);
             memset(lane_cache, 0, sizeof(*lane_cache));
+            lane_cache->templates = arena_allocate(fragment_arena, CodegenX64TemplateCacheEntry, x64_template_capacity);
+            memset(lane_cache->templates, 0, sizeof(*lane_cache->templates) * x64_template_capacity);
+            lane_cache->template_mask = x64_template_capacity - 1u;
             x64_metadata_caches[cache_index] = lane_cache;
         }
     }
