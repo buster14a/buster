@@ -8,14 +8,14 @@
 #include <buster/tests/compiler/link/link_test.h>
 
 #if BUSTER_CPU_ARCH_X86_64
-typedef struct X86CompletionCensusShaForm X86CompletionCensusShaForm;
-struct X86CompletionCensusShaForm
+typedef struct X86CompletionCensusFormKey X86CompletionCensusFormKey;
+struct X86CompletionCensusFormKey
 {
     u32 form_id;
     u64 stable_hash;
 };
 
-BUSTER_GLOBAL_LOCAL X86CompletionCensusShaForm const x86_completion_census_sha_forms[] = {
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_sha_forms[] = {
     {8845, UINT64_C(0xee97de2b222473f0)}, {8846, UINT64_C(0x162cc7cd02282552)},
     {8847, UINT64_C(0xcccd57c10c8a3ebe)}, {8848, UINT64_C(0x447901e09888d774)},
     {8849, UINT64_C(0xa246c74e160d72be)}, {8850, UINT64_C(0x4b96b86a50fe74b4)},
@@ -23,6 +23,74 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusShaForm const x86_completion_census_sha_f
     {8853, UINT64_C(0xda318bc38fc8830c)}, {8854, UINT64_C(0xdce6b464e6d7e6fd)},
     {8855, UINT64_C(0x2dcf6f8ac01bf425)}, {8856, UINT64_C(0xec4e803f801b861e)},
     {8857, UINT64_C(0xf5b0cda333e330b9)}, {8858, UINT64_C(0x3ea943b7a373cef2)},
+};
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_legacy_xmm_changed_forms[] = {
+    {10085, UINT64_C(0xa188a812b928c5a8)}, {10103, UINT64_C(0x3d8fe741af12d499)},
+    {10166, UINT64_C(0x7c707ec1ebf7b86f)}, {10183, UINT64_C(0x004a5906ba6c91f5)},
+    {10211, UINT64_C(0xafaa14af00823f6a)}, {10213, UINT64_C(0x870cea79b97cd89f)},
+    {10215, UINT64_C(0x2440ed8f2a4b7e6e)}, {10230, UINT64_C(0x93ca20607bdfb157)},
+    {10232, UINT64_C(0xe66cdbe5695555df)}, {10234, UINT64_C(0x54484b5aa190cbf5)},
+    {10418, UINT64_C(0xd7af09e34c35605e)}, {10445, UINT64_C(0x026f9a42fa8bc6aa)},
+    {10488, UINT64_C(0x0c40051728589467)}, {10490, UINT64_C(0xbfc2a7138ba39c5c)},
+    {10496, UINT64_C(0x5423a998b010043c)}, {10500, UINT64_C(0x3b28a14cb33b80bc)},
+    {10504, UINT64_C(0x6cb1c8acaade2409)}, {10520, UINT64_C(0xd815e11e679ae999)},
+    {10522, UINT64_C(0x0632007969649928)}, {10528, UINT64_C(0xa59e4601690c45f0)},
+    {10532, UINT64_C(0x3ae9b095f672243b)}, {10536, UINT64_C(0xb573872e33ed2289)},
+    {10580, UINT64_C(0x3022769a22e9cea5)}, {10777, UINT64_C(0x6cfe0b83efeb7bf4)},
+};
+
+typedef struct X86CompletionCensusOutcomeControl X86CompletionCensusOutcomeControl;
+struct X86CompletionCensusOutcomeControl
+{
+    u32 form_id;
+    u64 stable_hash;
+    u8 intel_class;
+    u8 att_class;
+    u8 intel_reason;
+    u8 att_reason;
+};
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusOutcomeControl const x86_completion_census_legacy_xmm_controls[] = {
+    // Store-direction forms remain the handwritten/source controls.
+    {10087, UINT64_C(0x0fd91e57af10e912), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
+    {10105, UINT64_C(0x62f238e90101ab0c), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
+    {10420, UINT64_C(0x459319443976a607), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
+    {10447, UINT64_C(0x44495e911d41bbdc), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
+    // Ambiguous/unknown MOVSD/MOVQ forms do not acquire source authority.
+    {10115, UINT64_C(0xc1d09809729f02cb), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION},
+    {10116, UINT64_C(0xe883b23a096e675b), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION},
+    {10581, UINT64_C(0x3283c18154507cf1), BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+    // The opposite-dialect store forms are unchanged exact/invalid controls.
+    {10089, UINT64_C(0xc7b0bcf068f01edf), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+    {10094, UINT64_C(0x1285dedcd0bd3f8d), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+    {10108, UINT64_C(0xb70fc1f33fd9be47), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
+    {10114, UINT64_C(0x9a647bd79a3b833d), BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
+     BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS},
 };
 #endif
 
@@ -128,7 +196,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     for (u32 sha_census_index = 0; sha_census_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sha_forms);
          sha_census_index += 1)
     {
-        X86CompletionCensusShaForm const* expected = &x86_completion_census_sha_forms[sha_census_index];
+        X86CompletionCensusFormKey const* expected = &x86_completion_census_sha_forms[sha_census_index];
         BusterX86MetadataForm sha_form = {0};
         BusterX86MetadataFormKey sha_key = {0};
         String8 sha_line = {0};
@@ -351,6 +419,122 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              control_inventory_counts[3] == 4);
     BUSTER_TEST(arguments, memcmp(control_inventory_digest, expected_control_inventory_digest,
                                   sizeof(control_inventory_digest)) == 0);
+
+    // Plain legacy XMM memory-source authority is an exhaustive metadata
+    // topology, not a mnemonic or census-class list.  The inventory contains
+    // every normalized MODRM/MEMORY/REGISTER form whose canonical query has
+    // one XMM128 register destination and one ordinary memory source.  The
+    // changed partition is pinned separately so already-capable stores,
+    // policies, and malformed/ambiguous forms remain visible controls.
+    u8 legacy_xmm_memory_inventory_hash_text[220 * 32] = {0};
+    u8 legacy_xmm_memory_changed_hash_text[24 * 32] = {0};
+    u32 legacy_xmm_memory_inventory_hash_length = 0;
+    u32 legacy_xmm_memory_changed_hash_length = 0;
+    u32 legacy_xmm_memory_inventory_count = 0;
+    u32 legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT]
+                                     [BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT] = {0};
+    for (u32 legacy_xmm_form_id = 0; legacy_xmm_form_id < form_count; legacy_xmm_form_id += 1)
+    {
+        BusterX86MetadataForm legacy_xmm_form = {0};
+        BusterX86MetadataPhysicalQuery legacy_xmm_query = {0};
+        BusterX86MetadataPhysicalOperand legacy_xmm_operands[16] = {0};
+        String8 legacy_xmm_features[1] = {0};
+        char8 legacy_xmm_mnemonic[128] = {0};
+        BusterX86MetadataFormKey legacy_xmm_key = {0};
+        if (!buster_x86_metadata_form(legacy_xmm_form_id, &legacy_xmm_form) ||
+            !buster_x86_completion_census_test_query(legacy_xmm_form_id, &legacy_xmm_query, legacy_xmm_operands,
+                                                      legacy_xmm_features, legacy_xmm_mnemonic) ||
+            !buster_x86_metadata_legacy_xmm_memory_authoritative(legacy_xmm_form, legacy_xmm_query))
+            continue;
+        bool legacy_xmm_key_ok = buster_x86_metadata_form_key(legacy_xmm_form_id, &legacy_xmm_key);
+        BUSTER_TEST(arguments, legacy_xmm_key_ok);
+        if (!legacy_xmm_key_ok) continue;
+        String8 legacy_xmm_hash_line = string_format(arguments->arena,
+                                                      S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                                      legacy_xmm_form_id, legacy_xmm_key.stable_hash);
+        bool legacy_xmm_hash_fits = legacy_xmm_memory_inventory_hash_length + legacy_xmm_hash_line.length <=
+                                    sizeof(legacy_xmm_memory_inventory_hash_text);
+        BUSTER_TEST(arguments, legacy_xmm_hash_fits);
+        if (!legacy_xmm_hash_fits) continue;
+        memcpy(legacy_xmm_memory_inventory_hash_text + legacy_xmm_memory_inventory_hash_length,
+               legacy_xmm_hash_line.pointer, legacy_xmm_hash_line.length);
+        legacy_xmm_memory_inventory_hash_length += (u32)legacy_xmm_hash_line.length;
+        legacy_xmm_memory_inventory_count += 1;
+        legacy_xmm_memory_pair_matrix[records[legacy_xmm_form_id].intel_class][records[legacy_xmm_form_id].att_class] += 1;
+    }
+    for (u32 legacy_xmm_changed_index = 0;
+         legacy_xmm_changed_index < BUSTER_ARRAY_LENGTH(x86_completion_census_legacy_xmm_changed_forms);
+         legacy_xmm_changed_index += 1)
+    {
+        X86CompletionCensusFormKey expected = x86_completion_census_legacy_xmm_changed_forms[legacy_xmm_changed_index];
+        BusterX86MetadataForm legacy_xmm_form = {0};
+        BusterX86MetadataPhysicalQuery legacy_xmm_query = {0};
+        BusterX86MetadataPhysicalOperand legacy_xmm_operands[16] = {0};
+        String8 legacy_xmm_features[1] = {0};
+        char8 legacy_xmm_mnemonic[128] = {0};
+        BusterX86MetadataFormKey legacy_xmm_key = {0};
+        bool legacy_xmm_ok = buster_x86_metadata_form(expected.form_id, &legacy_xmm_form) &&
+                             buster_x86_completion_census_test_query(expected.form_id, &legacy_xmm_query, legacy_xmm_operands,
+                                                                       legacy_xmm_features, legacy_xmm_mnemonic) &&
+                             buster_x86_metadata_form_key(expected.form_id, &legacy_xmm_key) &&
+                             buster_x86_metadata_legacy_xmm_memory_authoritative(legacy_xmm_form, legacy_xmm_query);
+        BUSTER_TEST(arguments, legacy_xmm_ok && legacy_xmm_key.stable_hash == expected.stable_hash &&
+                                 records[expected.form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[expected.form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 records[expected.form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 records[expected.form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+        String8 legacy_xmm_hash_line = string_format(arguments->arena,
+                                                      S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
+                                                      expected.form_id, expected.stable_hash);
+        bool legacy_xmm_hash_fits = legacy_xmm_memory_changed_hash_length + legacy_xmm_hash_line.length <=
+                                    sizeof(legacy_xmm_memory_changed_hash_text);
+        BUSTER_TEST(arguments, legacy_xmm_hash_fits);
+        if (legacy_xmm_hash_fits)
+        {
+            memcpy(legacy_xmm_memory_changed_hash_text + legacy_xmm_memory_changed_hash_length,
+                   legacy_xmm_hash_line.pointer, legacy_xmm_hash_line.length);
+            legacy_xmm_memory_changed_hash_length += (u32)legacy_xmm_hash_line.length;
+        }
+    }
+    for (u32 legacy_xmm_control_index = 0;
+         legacy_xmm_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_legacy_xmm_controls);
+         legacy_xmm_control_index += 1)
+    {
+        X86CompletionCensusOutcomeControl expected = x86_completion_census_legacy_xmm_controls[legacy_xmm_control_index];
+        BusterX86MetadataFormKey legacy_xmm_key = {0};
+        bool legacy_xmm_control_ok = buster_x86_metadata_form_key(expected.form_id, &legacy_xmm_key);
+        BUSTER_TEST(arguments, legacy_xmm_control_ok && legacy_xmm_key.stable_hash == expected.stable_hash &&
+                                 records[expected.form_id].intel_class == expected.intel_class &&
+                                 records[expected.form_id].att_class == expected.att_class &&
+                                 records[expected.form_id].intel_source_reason == expected.intel_reason &&
+                                 records[expected.form_id].att_source_reason == expected.att_reason);
+    }
+    u8 legacy_xmm_memory_inventory_digest[32] = {0};
+    u8 legacy_xmm_memory_changed_digest[32] = {0};
+    link_sha256(arguments->arena, legacy_xmm_memory_inventory_hash_text, legacy_xmm_memory_inventory_hash_length,
+                legacy_xmm_memory_inventory_digest);
+    link_sha256(arguments->arena, legacy_xmm_memory_changed_hash_text, legacy_xmm_memory_changed_hash_length,
+                legacy_xmm_memory_changed_digest);
+    static u8 const expected_legacy_xmm_memory_inventory_digest[32] = {
+        0x9c, 0x17, 0x9e, 0xad, 0x87, 0x4d, 0xed, 0x5a, 0x6e, 0x31, 0x60, 0x7b, 0xc8, 0x97, 0x71, 0x92,
+        0xb5, 0xc1, 0xc0, 0x2f, 0xfa, 0x97, 0x90, 0x1c, 0x6d, 0xc6, 0x27, 0xed, 0x60, 0xee, 0xd6, 0x6a,
+    };
+    static u8 const expected_legacy_xmm_memory_changed_digest[32] = {
+        0x3f, 0x68, 0xc3, 0x44, 0x7a, 0x97, 0xc6, 0x0a, 0xcb, 0x46, 0xa3, 0x0d, 0x8e, 0x61, 0x70, 0xe0,
+        0x2f, 0x37, 0x3d, 0xfa, 0xb0, 0xf5, 0x64, 0xab, 0xff, 0x51, 0x5d, 0x03, 0x03, 0x97, 0x3c, 0x07,
+    };
+    BUSTER_TEST(arguments, legacy_xmm_memory_inventory_count == 195 && legacy_xmm_memory_inventory_hash_length > 0 &&
+                             legacy_xmm_memory_changed_hash_length > 0 &&
+                             memcmp(legacy_xmm_memory_inventory_digest, expected_legacy_xmm_memory_inventory_digest,
+                                    sizeof(expected_legacy_xmm_memory_inventory_digest)) == 0 &&
+                             memcmp(legacy_xmm_memory_changed_digest, expected_legacy_xmm_memory_changed_digest,
+                                    sizeof(expected_legacy_xmm_memory_changed_digest)) == 0);
+    BUSTER_TEST(arguments, legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
+                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 190 &&
+                             legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED]
+                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] == 1 &&
+                             legacy_xmm_memory_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]
+                                  [BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED] == 4);
 
     // The VSIB source cohort is mechanically exhaustive: every normalized
     // form whose canonical physical query binds one VSIB memory operand is
@@ -797,12 +981,12 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5256 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 4283 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5280 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 191 && source.intel_unresolved_count == 4258 &&
                              source.intel_byte_mismatch_count == 850 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 587 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 5690 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 3917 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5691 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 43 && source.att_unresolved_count == 3915 &&
                              source.att_byte_mismatch_count == 932 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 596 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
@@ -811,16 +995,16 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6341 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3543 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6366 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3518 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 587);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6707 &&
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6709 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1288 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1286 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 596);
 

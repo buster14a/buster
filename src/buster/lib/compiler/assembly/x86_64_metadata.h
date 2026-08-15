@@ -1053,6 +1053,12 @@ BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(Bust
 // register-only SAE/rounding topology.
 BUSTER_F_DECL bool buster_x86_metadata_typed_decorator_authoritative(BusterX86MetadataForm form,
                                                                       BusterX86MetadataPhysicalQuery query);
+// A plain legacy XMM register/memory form is source-authoritative when the
+// normalized metadata topology proves one XMM128 register destination and one
+// ordinary memory source.  This is intentionally independent of mnemonic,
+// form ID, stable hash, and generated ISA spelling.
+BUSTER_F_DECL bool buster_x86_metadata_legacy_xmm_memory_authoritative(BusterX86MetadataForm form,
+                                                                        BusterX86MetadataPhysicalQuery query);
 // Returns the metadata-derived fixed-round, maskless SAE capability used by
 // the source adapters.  The predicate is intentionally semantic: it parses
 // the normalized pattern and never keys behavior to a form ID, hash, or

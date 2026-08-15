@@ -6685,6 +6685,62 @@ bool buster_x86_metadata_typed_decorator_authoritative(BusterX86MetadataForm for
     return false;
 }
 
+bool buster_x86_metadata_legacy_xmm_memory_authoritative(BusterX86MetadataForm form,
+                                                         BusterX86MetadataPhysicalQuery query)
+{
+    if (form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+        form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY ||
+        form.field_flags != (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_MEMORY |
+                              BUSTER_X86_METADATA_FIELD_REGISTER) ||
+        form.decorator_flags || form.apx_flags || form.amx_flags || !query.operands ||
+        query.operand_count != 2 || query.address_size != 64 || query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_64 ||
+        query.attributes.decorator_flags || query.attributes.apx_flags || query.attributes.amx_flags ||
+        query.attributes.has_dfv || query.attributes.no_flags || query.attributes.lock || query.attributes.rep ||
+        query.attributes.repne || query.attributes.notrack || query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE ||
+        query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE)
+        return false;
+
+    u32 physical_xmm_count = 0;
+    u32 physical_memory_count = 0;
+    for (u32 operand_index = 0; operand_index < query.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand operand = query.operands[operand_index];
+        if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM && operand.reg.width == 128)
+            physical_xmm_count += 1;
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !operand.memory.vsib &&
+                 !operand.memory.has_segment && (!operand.memory.address_size || operand.memory.address_size == 64))
+            physical_memory_count += 1;
+        else return false;
+    }
+    if (physical_xmm_count != 1 || physical_memory_count != 1) return false;
+
+    u32 visible_count = 0;
+    u32 register_destination_count = 0;
+    u32 memory_source_count = 0;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        visible_count += 1;
+        if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+            metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+            metadata.physical_width_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_128 &&
+            metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG &&
+            (metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE) && !(metadata.access & BUSTER_X86_METADATA_ACCESS_SUPPRESSED))
+            register_destination_count += 1;
+        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                 metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY &&
+                 metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_RM &&
+                 (metadata.access & BUSTER_X86_METADATA_ACCESS_READ) && !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE) &&
+                 !(metadata.access & BUSTER_X86_METADATA_ACCESS_SUPPRESSED))
+            memory_source_count += 1;
+        else return false;
+    }
+    return visible_count == 2 && register_destination_count == 1 && memory_source_count == 1;
+}
+
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
     BusterX86MetadataSelectResult result = {

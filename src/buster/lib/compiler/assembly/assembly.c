@@ -11822,26 +11822,28 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     {
         bool metadata_novel = builder->instruction_count > instruction_count &&
                               assembly_x86_metadata_instruction_is_novel(builder->instructions[instruction_count]);
-        bool typed_decorator_authoritative = false;
+        bool metadata_source_authoritative = false;
         if (builder->instruction_count > instruction_count)
         {
             AssemblyInstruction metadata_instruction = builder->instructions[instruction_count];
             BusterX86MetadataForm metadata_form = {0};
-            typed_decorator_authoritative = buster_x86_metadata_form(metadata_instruction.metadata_form_id, &metadata_form) &&
-                                            assembly_x86_metadata_typed_decorator_authoritative(
-                                                metadata_form,
-                                                (BusterX86MetadataPhysicalQuery){
-                                                    .operands = metadata_instruction.metadata_operands,
-                                                    .operand_count = metadata_instruction.metadata_operand_count,
-                                                    .attributes = metadata_instruction.metadata_attributes,
-                                                    .address_size = metadata_instruction.metadata_address_size,
-                                                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-                                                    .source_semantics = true,
-                                                });
+            if (buster_x86_metadata_form(metadata_instruction.metadata_form_id, &metadata_form))
+            {
+                BusterX86MetadataPhysicalQuery metadata_query = {
+                    .operands = metadata_instruction.metadata_operands,
+                    .operand_count = metadata_instruction.metadata_operand_count,
+                    .attributes = metadata_instruction.metadata_attributes,
+                    .address_size = metadata_instruction.metadata_address_size,
+                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                    .source_semantics = true,
+                };
+                metadata_source_authoritative = assembly_x86_metadata_typed_decorator_authoritative(metadata_form, metadata_query) ||
+                                                buster_x86_metadata_legacy_xmm_memory_authoritative(metadata_form, metadata_query);
+            }
         }
-        if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !typed_decorator_authoritative) ||
+        if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !metadata_source_authoritative) ||
             (handwritten_kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
-             (!typed_decorator_authoritative &&
+             (!metadata_source_authoritative &&
               (!metadata_novel || assembly_x86_metadata_instruction_has_duplicate_registers(builder->instructions[instruction_count])))))
         {
             builder->instruction_count = instruction_count;

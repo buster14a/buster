@@ -2715,6 +2715,98 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, sha_wrong_register_class.diagnostic_count == 1 &&
                                sha_wrong_register_class.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
 #endif
+#if BUSTER_CPU_ARCH_X86_64
+    // Metadata-authoritative legacy XMM memory-source forms retain the
+    // normal Intel/AT&T operand projection and exact bytes.  High-register
+    // addressing, packed/scalar widths, and a 64-bit MOVQ load cover the
+    // distinct field-source shapes; the final cases are parser/feature
+    // controls for stores and malformed source.
+    Target legacy_xmm_target = x86_target;
+    legacy_xmm_target.cpu_model = CPU_MODEL_BASELINE;
+    legacy_xmm_target.cpu_features_explicit = true;
+    legacy_xmm_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1);
+    AssemblyEncodeResult legacy_xmm_movups_intel = assembly_encode(
+        arguments->arena, S8("movups xmm15, xmmword ptr [r15+16]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_movups_att = assembly_encode(
+        arguments->arena, S8("movups 16(%r15), %xmm15\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult legacy_xmm_xorps_intel = assembly_encode(
+        arguments->arena, S8("xorps xmm0, xmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_xorps_att = assembly_encode(
+        arguments->arena, S8("xorps (%rax), %xmm0\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult legacy_xmm_paddw_intel = assembly_encode(
+        arguments->arena, S8("paddw xmm0, xmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_paddw_att = assembly_encode(
+        arguments->arena, S8("paddw (%rax), %xmm0\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult legacy_xmm_movq_intel = assembly_encode(
+        arguments->arena, S8("movq xmm0, qword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_movq_att = assembly_encode(
+        arguments->arena, S8("movq (%rax), %xmm0\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult legacy_xmm_store_intel = assembly_encode(
+        arguments->arena, S8("movups xmmword ptr [rax], xmm0\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_store_att = assembly_encode(
+        arguments->arena, S8("movups %xmm0, (%rax)\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult legacy_xmm_feature_negative = assembly_encode(
+        arguments->arena, S8("phaddw xmm0, xmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_wrong_class = assembly_encode(
+        arguments->arena, S8("movups eax, xmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult legacy_xmm_wrong_arity = assembly_encode(
+        arguments->arena, S8("movups xmm0, xmmword ptr [rax], xmm1\n"),
+        (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_legacy_xmm_movups[] = {0x45, 0x0f, 0x10, 0x7f, 0x10};
+    u8 expected_legacy_xmm_xorps[] = {0x0f, 0x57, 0x00};
+    u8 expected_legacy_xmm_paddw[] = {0x66, 0x0f, 0xfd, 0x00};
+    u8 expected_legacy_xmm_movq[] = {0xf3, 0x0f, 0x7e, 0x00};
+    u8 expected_legacy_xmm_store[] = {0x0f, 0x11, 0x00};
+    BUSTER_TEST(arguments, legacy_xmm_movups_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_movups_intel.bytes, expected_legacy_xmm_movups,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_movups)));
+    BUSTER_TEST(arguments, legacy_xmm_movups_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_movups_att.bytes, expected_legacy_xmm_movups,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_movups)));
+    BUSTER_TEST(arguments, legacy_xmm_xorps_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_xorps_intel.bytes, expected_legacy_xmm_xorps,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_xorps)));
+    BUSTER_TEST(arguments, legacy_xmm_xorps_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_xorps_att.bytes, expected_legacy_xmm_xorps,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_xorps)));
+    BUSTER_TEST(arguments, legacy_xmm_paddw_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_paddw_intel.bytes, expected_legacy_xmm_paddw,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_paddw)));
+    BUSTER_TEST(arguments, legacy_xmm_paddw_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_paddw_att.bytes, expected_legacy_xmm_paddw,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_paddw)));
+    BUSTER_TEST(arguments, legacy_xmm_movq_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_movq_intel.bytes, expected_legacy_xmm_movq,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_movq)));
+    BUSTER_TEST(arguments, legacy_xmm_movq_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_movq_att.bytes, expected_legacy_xmm_movq,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_movq)));
+    BUSTER_TEST(arguments, legacy_xmm_store_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_store_intel.bytes, expected_legacy_xmm_store,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_store)));
+    BUSTER_TEST(arguments, legacy_xmm_store_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(legacy_xmm_store_att.bytes, expected_legacy_xmm_store,
+                                                         BUSTER_ARRAY_LENGTH(expected_legacy_xmm_store)));
+    BUSTER_TEST(arguments, legacy_xmm_feature_negative.diagnostic_count == 1 &&
+                               legacy_xmm_feature_negative.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, legacy_xmm_wrong_class.diagnostic_count == 1 &&
+                               legacy_xmm_wrong_class.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    BUSTER_TEST(arguments, legacy_xmm_wrong_arity.diagnostic_count == 1 &&
+                               legacy_xmm_wrong_arity.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+#endif
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;
