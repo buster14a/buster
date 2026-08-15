@@ -198,6 +198,110 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_prefe
 BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_tsxldtrk_forms[] = {
     {8895, UINT64_C(0x85ad7969cc0bd0a1)}, {8896, UINT64_C(0x8e2e2c0936a6394f)},
 };
+
+// Every feature group below used to buy its "removing these features moves
+// exactly these forms" gate with its own full census scan.  Each scan walks
+// all 11,013 forms and assembles every one of them twice, so a group that
+// pins nine form ids cost the same as the whole census; the count grew with
+// one scan per feature commit and became the largest single module in CI.
+//
+// The gate is now bought once for all groups.  One baseline scan removes
+// every group's features together and proves that nothing outside the union
+// of the group lists moves, and a per-group isolation pass evaluates just the
+// union's forms under each group's own removal to prove that each form is
+// gated on its own group's features and no other's.  Together those two
+// statements are what the per-group scans asserted, at a fraction of the
+// encoding: the isolation pass touches 67 forms per group where a scan
+// touched 11,013.
+//
+// Adding a feature group is a row here plus its inventory assertions; it
+// costs no additional full-table scan.
+typedef struct X86CompletionCensusFeatureGroup X86CompletionCensusFeatureGroup;
+struct X86CompletionCensusFeatureGroup
+{
+    String8 name;
+    TargetCpuFeature const* features;
+    u32 feature_count;
+    // The forms whose source classification must move when, and only when,
+    // this group's features leave the target.
+    u32 const* changed_form_ids;
+    u32 changed_form_count;
+};
+
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_state_features[] = {
+    TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_XSAVES,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_user_control_features[] = {
+    TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_UINTR,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_cache_features[] = {
+    TARGET_CPU_FEATURE_X86_CLFLUSHOPT, TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_WBNOINVD,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_security_features[] = {
+    TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_PKU, TARGET_CPU_FEATURE_X86_SGX,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_tsxldtrk_features[] = {
+    TARGET_CPU_FEATURE_X86_TSXLDTRK,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_shstk_features[] = {
+    TARGET_CPU_FEATURE_X86_SHSTK,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_ptwrite_features[] = {
+    TARGET_CPU_FEATURE_X86_PTWRITE,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_enqcmd_features[] = {
+    TARGET_CPU_FEATURE_X86_ENQCMD,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_movdir64b_features[] = {
+    TARGET_CPU_FEATURE_X86_MOVDIR64B,
+};
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_crypto_features[] = {
+    TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4,
+};
+
+// The moving subset of each group's inventory.  It is not always the whole
+// inventory: a group's CPL0 and non-64-bit rows sit outside the source
+// partition and stay put when the feature leaves, and those rows keep their
+// own unchanged-assertions in the blocks below.
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_state_changed[] = {
+    8019, 8020, 8021, 8022, 10970, 10972, 10973, 10974, 10975,
+};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_user_control_changed[] = {
+    8841, 8897, 8898, 8899, 8900, 8901, 9061, 9062, 9063,
+};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_cache_changed[] = {7979, 7980};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_security_changed[] = {8825, 8826, 8842, 8843};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_tsxldtrk_changed[] = {8895, 8896};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_shstk_changed[] = {
+    7938, 7939, 7940, 7941, 7942, 7943, 7945, 7946, 2839, 2840,
+};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_ptwrite_changed[] = {8827, 8828};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_enqcmd_changed[] = {1749, 8013};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_movdir64b_changed[] = {1886, 8763};
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_crypto_changed[] = {
+    8859, 8860, 8861, 8862, 8863, 8864, 8865, 8866, 8867, 8880, 8881, 8882, 8883, 8884, 8885, 8886, 8887,
+    8868, 8869, 8870, 8871, 8874, 8875, 8876, 8877,
+};
+
+#define X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(group_name)                                                  \
+    {S8_INITIALIZER(#group_name), x86_completion_census_##group_name##_features,                             \
+     BUSTER_ARRAY_LENGTH(x86_completion_census_##group_name##_features),                                     \
+     x86_completion_census_##group_name##_changed,                                                           \
+     BUSTER_ARRAY_LENGTH(x86_completion_census_##group_name##_changed)},
+
+BUSTER_GLOBAL_LOCAL X86CompletionCensusFeatureGroup const x86_completion_census_feature_groups[] = {
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(state)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(user_control)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(cache)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(security)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(tsxldtrk)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(shstk)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(ptwrite)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(enqcmd)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(movdir64b)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(crypto)
+};
+#undef X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW
 #endif
 
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
@@ -295,6 +399,134 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         .run_intel = true,
         .run_att = true,
     });
+
+    // The one baseline every feature group shares.  Removing all the groups'
+    // features at once and diffing the whole table against the aggregate
+    // proves the containment half of each group's gate: no form outside the
+    // union of the group lists is reachable-or-not on account of any of these
+    // features.
+    BusterX86CompletionCensusRecord* feature_baseline_records =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
+    Target feature_baseline_target = census_target;
+    u32 feature_group_index = 0;
+    u32 feature_index = 0;
+    u32 union_form_count = 0;
+    for (feature_group_index = 0; feature_group_index < BUSTER_ARRAY_LENGTH(x86_completion_census_feature_groups);
+         feature_group_index += 1)
+    {
+        X86CompletionCensusFeatureGroup const* group = &x86_completion_census_feature_groups[feature_group_index];
+        for (feature_index = 0; feature_index < group->feature_count; feature_index += 1)
+        {
+            feature_baseline_target.cpu_features =
+                target_cpu_features_remove(feature_baseline_target.cpu_features, group->features[feature_index]);
+        }
+        union_form_count += group->changed_form_count;
+    }
+    BusterX86CompletionCensusResult feature_baseline_source =
+        buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
+            .arena = arguments->arena, .target = feature_baseline_target, .records = feature_baseline_records,
+            .record_capacity = form_count, .run_intel = true, .run_att = true,
+        });
+    u32* union_form_ids = arena_allocate(arguments->arena, u32, union_form_count);
+    u32 union_write_index = 0;
+    for (feature_group_index = 0; feature_group_index < BUSTER_ARRAY_LENGTH(x86_completion_census_feature_groups);
+         feature_group_index += 1)
+    {
+        X86CompletionCensusFeatureGroup const* group = &x86_completion_census_feature_groups[feature_group_index];
+        for (u32 group_form_index = 0; group_form_index < group->changed_form_count; group_form_index += 1)
+        {
+            union_form_ids[union_write_index] = group->changed_form_ids[group_form_index];
+            union_write_index += 1;
+        }
+    }
+    // The lists must partition, not merely cover: a form claimed by two
+    // groups would make the isolation pass below vacuous for one of them.
+    for (u32 first_union_index = 0; first_union_index < union_form_count; first_union_index += 1)
+    {
+        for (u32 second_union_index = first_union_index + 1; second_union_index < union_form_count;
+             second_union_index += 1)
+        {
+            BUSTER_TEST(arguments, union_form_ids[first_union_index] != union_form_ids[second_union_index]);
+        }
+    }
+    u32 feature_changed_count = 0;
+    for (u32 feature_compare_form_id = 0; feature_compare_form_id < form_count; feature_compare_form_id += 1)
+    {
+        BusterX86CompletionCensusRecord const* before = &feature_baseline_records[feature_compare_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[feature_compare_form_id];
+        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                       before->intel_source_reason != after->intel_source_reason ||
+                       before->att_source_reason != after->att_source_reason ||
+                       before->intel_byte_count != after->intel_byte_count ||
+                       before->att_byte_count != after->att_byte_count ||
+                       before->metadata_byte_count != after->metadata_byte_count;
+        if (!changed) continue;
+        feature_changed_count += 1;
+        bool in_union = false;
+        for (u32 union_index = 0; union_index < union_form_count; union_index += 1)
+        {
+            in_union |= feature_compare_form_id == union_form_ids[union_index];
+        }
+        BUSTER_TEST(arguments, in_union);
+    }
+    BUSTER_TEST(arguments, feature_changed_count == union_form_count);
+    // Each group's block below asserts its own forms' before and after
+    // classes individually, which is stronger than any bucket-count
+    // arithmetic over the union: the groups do not all land in the same
+    // bucket (the SHSTK aliases become alias-equivalent and the MOVDIR64B
+    // rows byte-mismatch in AT&T), so only the totals of the scan itself are
+    // uniform enough to state here.
+    BUSTER_TEST(arguments, feature_baseline_source.scanned_form_count == source.scanned_form_count &&
+                             feature_baseline_source.metadata_emitted_count == source.metadata_emitted_count &&
+                             feature_baseline_source.metadata_blocked_count == source.metadata_blocked_count);
+
+    // The isolation half.  Each group's features are removed on their own and
+    // every form in the union is re-evaluated: a form's classification must
+    // move exactly when its own group's features are the ones missing.  This
+    // is what stops one group's removal from silently moving another group's
+    // rows, and it is the reason the merged baseline above is sound rather
+    // than merely cheaper.
+    //
+    // The comparison is against each form's own classification under the full
+    // target rather than against a fixed class, because the groups do not all
+    // land in the same place when their feature leaves -- which class a row
+    // moves to is asserted by that group's block below.
+    BusterX86CompletionCensusClass* union_intel_present =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusClass, union_form_count);
+    BusterX86CompletionCensusClass* union_att_present =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusClass, union_form_count);
+    for (u32 union_index = 0; union_index < union_form_count; union_index += 1)
+    {
+        union_intel_present[union_index] =
+            buster_x86_completion_census_test_source_class(arguments->arena, census_target, union_form_ids[union_index], false);
+        union_att_present[union_index] =
+            buster_x86_completion_census_test_source_class(arguments->arena, census_target, union_form_ids[union_index], true);
+    }
+    for (feature_group_index = 0; feature_group_index < BUSTER_ARRAY_LENGTH(x86_completion_census_feature_groups);
+         feature_group_index += 1)
+    {
+        X86CompletionCensusFeatureGroup const* group = &x86_completion_census_feature_groups[feature_group_index];
+        Target group_target = census_target;
+        for (feature_index = 0; feature_index < group->feature_count; feature_index += 1)
+        {
+            group_target.cpu_features = target_cpu_features_remove(group_target.cpu_features, group->features[feature_index]);
+        }
+        for (u32 union_index = 0; union_index < union_form_count; union_index += 1)
+        {
+            u32 union_form_id = union_form_ids[union_index];
+            bool owned = false;
+            for (u32 group_form_index = 0; group_form_index < group->changed_form_count; group_form_index += 1)
+            {
+                owned |= union_form_id == group->changed_form_ids[group_form_index];
+            }
+            BusterX86CompletionCensusClass intel_class =
+                buster_x86_completion_census_test_source_class(arguments->arena, group_target, union_form_id, false);
+            BusterX86CompletionCensusClass att_class =
+                buster_x86_completion_census_test_source_class(arguments->arena, group_target, union_form_id, true);
+            bool moved = intel_class != union_intel_present[union_index] || att_class != union_att_present[union_index];
+            BUSTER_TEST(arguments, moved == owned);
+        }
+    }
     u8 sha_census_inventory_text[14 * 32] = {0};
     u32 sha_census_inventory_length = 0;
     u32 sha_census_intel_exact_count = 0;
@@ -453,38 +685,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  records[expected->form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  records[expected->form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BusterX86CompletionCensusRecord* state_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target state_baseline_target = census_target;
-    state_baseline_target.cpu_features = target_cpu_features_remove(state_baseline_target.cpu_features,
-                                                                     TARGET_CPU_FEATURE_X86_FSGSBASE);
-    state_baseline_target.cpu_features = target_cpu_features_remove(state_baseline_target.cpu_features,
-                                                                     TARGET_CPU_FEATURE_X86_XSAVE);
-    state_baseline_target.cpu_features = target_cpu_features_remove(state_baseline_target.cpu_features,
-                                                                     TARGET_CPU_FEATURE_X86_XSAVES);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = state_baseline_target, .records = state_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 state_changed_count = 0;
-    for (u32 state_compare_form_id = 0; state_compare_form_id < form_count; state_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &state_baseline_records[state_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[state_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count || before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        state_changed_count += 1;
-        bool state_form = false;
-        for (u32 state_index = 0; state_index < BUSTER_ARRAY_LENGTH(x86_completion_census_state_forms); state_index += 1)
-        {
-            state_form |= state_compare_form_id == x86_completion_census_state_forms[state_index].form_id;
-        }
-        BUSTER_TEST(arguments, state_form);
-    }
+    BusterX86CompletionCensusRecord* state_baseline_records = feature_baseline_records;
     for (u32 state_index = 0; state_index < BUSTER_ARRAY_LENGTH(x86_completion_census_state_forms); state_index += 1)
     {
         u32 state_form_id = x86_completion_census_state_forms[state_index].form_id;
@@ -499,7 +700,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BUSTER_TEST(arguments, state_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_state_forms));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_state_changed) ==
+                             BUSTER_ARRAY_LENGTH(x86_completion_census_state_forms));
 
     // The unprivileged control/scheduling source movement is pinned by the
     // nine CPL3 forms below.  The feature-disabled comparison must show no
@@ -560,42 +762,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              user_control_att_exact_count == 9 &&
                              memcmp(user_control_inventory_digest, expected_user_control_inventory_digest,
                                     sizeof(expected_user_control_inventory_digest)) == 0);
-    BusterX86CompletionCensusRecord* user_control_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target user_control_baseline_target = census_target;
-    user_control_baseline_target.cpu_features = target_cpu_features_remove(user_control_baseline_target.cpu_features,
-                                                                            TARGET_CPU_FEATURE_X86_SERIALIZE);
-    user_control_baseline_target.cpu_features = target_cpu_features_remove(user_control_baseline_target.cpu_features,
-                                                                            TARGET_CPU_FEATURE_X86_WAITPKG);
-    user_control_baseline_target.cpu_features = target_cpu_features_remove(user_control_baseline_target.cpu_features,
-                                                                            TARGET_CPU_FEATURE_X86_UINTR);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = user_control_baseline_target, .records = user_control_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 user_control_changed_count = 0;
-    for (u32 user_control_compare_form_id = 0; user_control_compare_form_id < form_count;
-         user_control_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &user_control_baseline_records[user_control_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[user_control_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        user_control_changed_count += 1;
-        bool selected = false;
-        for (u32 user_control_index = 0;
-             user_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_user_control_forms);
-             user_control_index += 1)
-        {
-            selected |= user_control_compare_form_id == x86_completion_census_user_control_forms[user_control_index].form_id;
-        }
-        BUSTER_TEST(arguments, selected);
-    }
+    BusterX86CompletionCensusRecord* user_control_baseline_records = feature_baseline_records;
     for (u32 user_control_index = 0;
          user_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_user_control_forms);
          user_control_index += 1)
@@ -612,7 +779,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BUSTER_TEST(arguments, user_control_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_user_control_forms));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_user_control_changed) ==
+                             BUSTER_ARRAY_LENGTH(x86_completion_census_user_control_forms));
     for (u32 state_privileged_index = 0;
          state_privileged_index < BUSTER_ARRAY_LENGTH(x86_completion_census_state_privileged_forms);
          state_privileged_index += 1)
@@ -683,35 +851,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, cache_inventory_length == 66 &&
                              memcmp(cache_inventory_digest, expected_cache_inventory_digest,
                                     sizeof(expected_cache_inventory_digest)) == 0);
-    BusterX86CompletionCensusRecord* cache_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target cache_baseline_target = census_target;
-    cache_baseline_target.cpu_features = target_cpu_features_remove(cache_baseline_target.cpu_features,
-                                                                    TARGET_CPU_FEATURE_X86_CLFLUSHOPT);
-    cache_baseline_target.cpu_features = target_cpu_features_remove(cache_baseline_target.cpu_features,
-                                                                    TARGET_CPU_FEATURE_X86_CLWB);
-    cache_baseline_target.cpu_features = target_cpu_features_remove(cache_baseline_target.cpu_features,
-                                                                    TARGET_CPU_FEATURE_X86_WBNOINVD);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = cache_baseline_target, .records = cache_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 cache_changed_count = 0;
-    for (u32 cache_compare_form_id = 0; cache_compare_form_id < form_count; cache_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &cache_baseline_records[cache_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[cache_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        cache_changed_count += 1;
-        BUSTER_TEST(arguments, cache_compare_form_id == x86_completion_census_cache_forms[0].form_id ||
-                                 cache_compare_form_id == x86_completion_census_cache_forms[1].form_id);
-    }
+    BusterX86CompletionCensusRecord* cache_baseline_records = feature_baseline_records;
     for (u32 cache_index = 0; cache_index < 2; cache_index += 1)
     {
         u32 cache_form_id = x86_completion_census_cache_forms[cache_index].form_id;
@@ -735,7 +875,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              records[cache_privileged_form_id].intel_source_reason &&
                              cache_baseline_records[cache_privileged_form_id].att_source_reason ==
                              records[cache_privileged_form_id].att_source_reason);
-    BUSTER_TEST(arguments, cache_changed_count == 2);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_cache_changed) == 2);
 
     // Security/isolation source reachability is pinned by two public PKU and
     // two public SGX forms. INVPCID and SGX's ring-0 form remain outside the
@@ -797,39 +937,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, security_inventory_length == 176 &&
                              memcmp(security_inventory_digest, expected_security_inventory_digest,
                                     sizeof(expected_security_inventory_digest)) == 0);
-    BusterX86CompletionCensusRecord* security_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target security_baseline_target = census_target;
-    security_baseline_target.cpu_features = target_cpu_features_remove(security_baseline_target.cpu_features,
-                                                                        TARGET_CPU_FEATURE_X86_INVPCID);
-    security_baseline_target.cpu_features = target_cpu_features_remove(security_baseline_target.cpu_features,
-                                                                        TARGET_CPU_FEATURE_X86_PKU);
-    security_baseline_target.cpu_features = target_cpu_features_remove(security_baseline_target.cpu_features,
-                                                                        TARGET_CPU_FEATURE_X86_SGX);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = security_baseline_target, .records = security_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 security_changed_count = 0;
-    for (u32 security_compare_form_id = 0; security_compare_form_id < form_count; security_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &security_baseline_records[security_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[security_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        security_changed_count += 1;
-        bool security_public = false;
-        for (u32 security_index = 3; security_index <= 6; security_index += 1)
-        {
-            security_public |= security_compare_form_id == x86_completion_census_security_forms[security_index].form_id;
-        }
-        BUSTER_TEST(arguments, security_public);
-    }
+    BusterX86CompletionCensusRecord* security_baseline_records = feature_baseline_records;
     for (u32 security_index = 0; security_index < BUSTER_ARRAY_LENGTH(x86_completion_census_security_forms); security_index += 1)
     {
         u32 security_form_id = x86_completion_census_security_forms[security_index].form_id;
@@ -856,7 +964,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                      after->att_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED);
         }
     }
-    BUSTER_TEST(arguments, security_changed_count == 4);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_security_changed) == 4);
 
     // HRESET is a single privileged/system form.  It is intentionally kept
     // out of the normalized source partition: enabling the model default (or
@@ -1138,31 +1246,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, tsxldtrk_inventory_length == 44 &&
                              memcmp(tsxldtrk_inventory_digest, expected_tsxldtrk_inventory_digest,
                                     sizeof(expected_tsxldtrk_inventory_digest)) == 0);
-    u64 tsxldtrk_baseline_arena_position = arguments->arena->position;
-    BusterX86CompletionCensusRecord* tsxldtrk_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target tsxldtrk_baseline_target = census_target;
-    tsxldtrk_baseline_target.cpu_features = target_cpu_features_remove(tsxldtrk_baseline_target.cpu_features,
-                                                                        TARGET_CPU_FEATURE_X86_TSXLDTRK);
-    BusterX86CompletionCensusResult tsxldtrk_baseline_source = buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = tsxldtrk_baseline_target, .records = tsxldtrk_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 tsxldtrk_changed_count = 0;
-    for (u32 tsxldtrk_compare_form_id = 0; tsxldtrk_compare_form_id < form_count; tsxldtrk_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &tsxldtrk_baseline_records[tsxldtrk_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[tsxldtrk_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason || before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count || before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        tsxldtrk_changed_count += 1;
-        bool tsxldtrk_form = tsxldtrk_compare_form_id == x86_completion_census_tsxldtrk_forms[0].form_id ||
-                             tsxldtrk_compare_form_id == x86_completion_census_tsxldtrk_forms[1].form_id;
-        BUSTER_TEST(arguments, tsxldtrk_form);
-    }
+    BusterX86CompletionCensusRecord* tsxldtrk_baseline_records = feature_baseline_records;
     for (u32 tsxldtrk_index = 0; tsxldtrk_index < BUSTER_ARRAY_LENGTH(x86_completion_census_tsxldtrk_forms);
          tsxldtrk_index += 1)
     {
@@ -1178,12 +1262,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BUSTER_TEST(arguments, tsxldtrk_changed_count == 2 &&
-                             tsxldtrk_baseline_source.intel_exact_count + 2 == source.intel_exact_count &&
-                             tsxldtrk_baseline_source.att_exact_count + 2 == source.att_exact_count &&
-                             tsxldtrk_baseline_source.intel_unresolved_count == source.intel_unresolved_count + 2 &&
-                             tsxldtrk_baseline_source.att_unresolved_count == source.att_unresolved_count + 2);
-    arena_set_position(arguments->arena, tsxldtrk_baseline_arena_position);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_tsxldtrk_changed) == 2);
     {
         static u8 const expected_tsxldtrk_bytes[] = {
             0xf2, 0x0f, 0x01, 0xe9,
@@ -1261,33 +1340,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, shstk_inventory_length == 220 &&
                              memcmp(shstk_inventory_digest, expected_shstk_inventory_digest,
                                     sizeof(expected_shstk_inventory_digest)) == 0);
-    BusterX86CompletionCensusRecord* shstk_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target shstk_baseline_target = census_target;
-    shstk_baseline_target.cpu_features = target_cpu_features_remove(shstk_baseline_target.cpu_features,
-                                                                      TARGET_CPU_FEATURE_X86_SHSTK);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = shstk_baseline_target, .records = shstk_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 shstk_changed_count = 0;
-    for (u32 shstk_compare_form_id = 0; shstk_compare_form_id < form_count; shstk_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &shstk_baseline_records[shstk_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[shstk_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        shstk_changed_count += 1;
-        bool selected = false;
-        for (u32 shstk_index = 0; shstk_index < BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_forms); shstk_index += 1)
-            selected |= shstk_compare_form_id == x86_completion_census_shstk_forms[shstk_index].form_id;
-        BUSTER_TEST(arguments, selected);
-    }
+    BusterX86CompletionCensusRecord* shstk_baseline_records = feature_baseline_records;
     for (u32 shstk_index = 0; shstk_index < BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_forms); shstk_index += 1)
     {
         u32 shstk_form_id = x86_completion_census_shstk_forms[shstk_index].form_id;
@@ -1316,7 +1369,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  shstk_baseline_records[control_form_id].intel_source_reason == records[control_form_id].intel_source_reason &&
                                  shstk_baseline_records[control_form_id].att_source_reason == records[control_form_id].att_source_reason);
     }
-    BUSTER_TEST(arguments, shstk_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_forms));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_changed) ==
+                             BUSTER_ARRAY_LENGTH(x86_completion_census_shstk_forms));
 
     // PTWRITE has two public CPL3 forms.  The feature-disabled comparison
     // proves that model-default exposure moves exactly these rows and that
@@ -1363,34 +1417,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ptwrite_inventory_length == 44 &&
                              memcmp(ptwrite_inventory_digest, expected_ptwrite_inventory_digest,
                                     sizeof(expected_ptwrite_inventory_digest)) == 0);
-    BusterX86CompletionCensusRecord* ptwrite_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target ptwrite_baseline_target = census_target;
-    ptwrite_baseline_target.cpu_features = target_cpu_features_remove(ptwrite_baseline_target.cpu_features,
-                                                                       TARGET_CPU_FEATURE_X86_PTWRITE);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = ptwrite_baseline_target, .records = ptwrite_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 ptwrite_changed_count = 0;
-    for (u32 ptwrite_compare_form_id = 0; ptwrite_compare_form_id < form_count; ptwrite_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &ptwrite_baseline_records[ptwrite_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[ptwrite_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        ptwrite_changed_count += 1;
-        bool selected = false;
-        for (u32 ptwrite_index = 0; ptwrite_index < BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms);
-             ptwrite_index += 1)
-            selected |= ptwrite_compare_form_id == x86_completion_census_ptwrite_forms[ptwrite_index].form_id;
-        BUSTER_TEST(arguments, selected);
-    }
+    BusterX86CompletionCensusRecord* ptwrite_baseline_records = feature_baseline_records;
     for (u32 ptwrite_index = 0; ptwrite_index < BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms); ptwrite_index += 1)
     {
         u32 ptwrite_form_id = x86_completion_census_ptwrite_forms[ptwrite_index].form_id;
@@ -1405,7 +1432,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BUSTER_TEST(arguments, ptwrite_changed_count == BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_changed) ==
+                             BUSTER_ARRAY_LENGTH(x86_completion_census_ptwrite_forms));
     {
         static u8 const expected_ptwrite_register_bytes[] = {0xf3, 0x0f, 0xae, 0xe0};
         static u8 const expected_ptwrite_memory_bytes[] = {0xf3, 0x41, 0x0f, 0xae, 0x67, 0x40};
@@ -1594,33 +1622,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  !buster_x86_metadata_aggregate_memory_source_topology(enqcmd_topology_form8013,
                                                                                        enqcmd_bad_topology_query));
 
-        TemporalArena enqcmd_baseline_temporary = scratch_begin(&arguments->arena, 1);
-        BusterX86CompletionCensusRecord* enqcmd_baseline_records =
-            arena_allocate(enqcmd_baseline_temporary.arena, BusterX86CompletionCensusRecord, form_count);
-        Target enqcmd_baseline_target = census_target;
-        enqcmd_baseline_target.cpu_features = target_cpu_features_remove(
-            enqcmd_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_ENQCMD);
-        buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-            .arena = enqcmd_baseline_temporary.arena, .target = enqcmd_baseline_target,
-            .records = enqcmd_baseline_records, .record_capacity = form_count,
-            .run_intel = true, .run_att = true,
-        });
-        u32 enqcmd_changed_count = 0;
-        for (u32 enqcmd_compare_form_id = 0; enqcmd_compare_form_id < form_count; enqcmd_compare_form_id += 1)
-        {
-            BusterX86CompletionCensusRecord const* before = &enqcmd_baseline_records[enqcmd_compare_form_id];
-            BusterX86CompletionCensusRecord const* after = &records[enqcmd_compare_form_id];
-            bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                           before->intel_source_reason != after->intel_source_reason ||
-                           before->att_source_reason != after->att_source_reason ||
-                           before->intel_byte_count != after->intel_byte_count ||
-                           before->att_byte_count != after->att_byte_count ||
-                           before->metadata_byte_count != after->metadata_byte_count;
-            if (!changed) continue;
-            enqcmd_changed_count += 1;
-            BUSTER_TEST(arguments, enqcmd_compare_form_id == 1749 || enqcmd_compare_form_id == 8013);
-        }
-        BUSTER_TEST(arguments, enqcmd_changed_count == 2);
+        BusterX86CompletionCensusRecord* enqcmd_baseline_records = feature_baseline_records;
+        BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_enqcmd_changed) == 2);
         BusterX86CompletionCensusRecord const* before_apx_enqcmd = &enqcmd_baseline_records[1749];
         BusterX86CompletionCensusRecord const* after_apx_enqcmd = &records[1749];
         BusterX86CompletionCensusRecord const* before_legacy_enqcmd = &enqcmd_baseline_records[8013];
@@ -1659,7 +1662,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                      before->att_byte_count == after->att_byte_count &&
                                      before->metadata_byte_count == after->metadata_byte_count);
         }
-        scratch_end(enqcmd_baseline_temporary);
         {
             static u8 const expected_enqcmd_bytes[] = {0xf2, 0x0f, 0x38, 0xf8, 0x01};
             static u8 const expected_enqcmd_boundary_bytes[] = {0xf2, 0x45, 0x0f, 0x38, 0xf8, 0x7f, 0x40};
@@ -1873,38 +1875,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_x86_metadata_block_memory_source_authoritative(legacy_memory_form,
                                                                                    block_memory_topology_query));
     block_memory_topology_operands[1].memory.source_width = 512;
-    BusterX86CompletionCensusRecord* movdir64b_baseline_records =
-        arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target movdir64b_baseline_target = census_target;
-    movdir64b_baseline_target.cpu_features = target_cpu_features_remove(
-        movdir64b_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_MOVDIR64B);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = movdir64b_baseline_target,
-        .records = movdir64b_baseline_records, .record_capacity = form_count,
-        .run_intel = true, .run_att = true,
-    });
-    u32 movdir64b_changed_count = 0;
-    for (u32 movdir64b_compare_form_id = 0; movdir64b_compare_form_id < form_count;
-         movdir64b_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &movdir64b_baseline_records[movdir64b_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[movdir64b_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason ||
-                       before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count ||
-                       before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (!changed) continue;
-        movdir64b_changed_count += 1;
-        bool selected = false;
-        for (u32 movdir64b_index = 0;
-             movdir64b_index < BUSTER_ARRAY_LENGTH(x86_completion_census_movdir64b_forms);
-             movdir64b_index += 1)
-            selected |= movdir64b_compare_form_id == x86_completion_census_movdir64b_forms[movdir64b_index].form_id;
-        BUSTER_TEST(arguments, selected);
-    }
-    BUSTER_TEST(arguments, movdir64b_changed_count == 2);
+    BusterX86CompletionCensusRecord* movdir64b_baseline_records = feature_baseline_records;
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_movdir64b_changed) == 2);
     {
         BusterX86CompletionCensusRecord const* before_apx = &movdir64b_baseline_records[1886];
         BusterX86CompletionCensusRecord const* after_apx = &records[1886];
@@ -2018,65 +1990,51 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         intel_reason_non_none += source.intel_source_reason_counts[class_index];
         att_reason_non_none += source.att_source_reason_counts[class_index];
     }
-    BusterX86CompletionCensusRecord* crypto_baseline_records = arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target crypto_baseline_target = census_target;
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SHA512);
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SM3);
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SM4);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = crypto_baseline_target, .records = crypto_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 crypto_changed_count = 0;
+    // Containment ("only these rows move") is proved once by the shared
+    // baseline diff above; what stays here is the classification each of this
+    // group's rows must land in, which differs between the exact controls and
+    // the EVEX shadows.
+    BusterX86CompletionCensusRecord* crypto_baseline_records = feature_baseline_records;
     u32 crypto_changed_exact_count = 0;
     u32 crypto_changed_shadow_count = 0;
-    for (u32 crypto_compare_form_id = 0; crypto_compare_form_id < form_count; crypto_compare_form_id += 1)
+    for (u32 crypto_control_index = 0;
+         crypto_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sha512_sm3_sm4_forms);
+         crypto_control_index += 1)
     {
-        BusterX86CompletionCensusRecord const* before = &crypto_baseline_records[crypto_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[crypto_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason || before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count || before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (changed)
-        {
-            crypto_changed_count += 1;
-            bool exact_control = false;
-            for (u32 crypto_control_index = 0;
-                 crypto_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sha512_sm3_sm4_forms);
-                 crypto_control_index += 1)
-            {
-                exact_control |= crypto_compare_form_id == x86_completion_census_sha512_sm3_sm4_forms[crypto_control_index].form_id;
-            }
-            bool shadow_control = false;
-            for (u32 crypto_shadow_index = 0;
-                 crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
-                 crypto_shadow_index += 1)
-            {
-                shadow_control |= crypto_compare_form_id == x86_completion_census_sm4_evex_shadow_forms[crypto_shadow_index].form_id;
-            }
-            BUSTER_TEST(arguments, exact_control || shadow_control);
-            if (exact_control)
-            {
-                crypto_changed_exact_count += 1;
-                BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                         after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                         after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
-            }
-            if (shadow_control)
-            {
-                crypto_changed_shadow_count += 1;
-                BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
-                                         after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
-                                         after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->intel_relocation_count == after->metadata_relocation_count &&
-                                         after->att_relocation_count == after->metadata_relocation_count);
-            }
-        }
+        u32 crypto_form_id = x86_completion_census_sha512_sm3_sm4_forms[crypto_control_index].form_id;
+        BusterX86CompletionCensusRecord const* before = &crypto_baseline_records[crypto_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[crypto_form_id];
+        // The row must move, and it must land on exact.  Where it moved
+        // *from* is deliberately not pinned: these rows are reached through
+        // more than one feature gate, so the baseline class is not uniformly
+        // the policy rejection the simpler groups show.
+        crypto_changed_exact_count += before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                                      before->intel_byte_count != after->intel_byte_count ||
+                                      before->att_byte_count != after->att_byte_count;
+        BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
     }
-    BUSTER_TEST(arguments, crypto_changed_count == 25 && crypto_changed_exact_count == 17 && crypto_changed_shadow_count == 8);
+    for (u32 crypto_shadow_index = 0;
+         crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
+         crypto_shadow_index += 1)
+    {
+        u32 crypto_form_id = x86_completion_census_sm4_evex_shadow_forms[crypto_shadow_index].form_id;
+        BusterX86CompletionCensusRecord const* before = &crypto_baseline_records[crypto_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[crypto_form_id];
+        crypto_changed_shadow_count += before->intel_class != after->intel_class || before->att_class != after->att_class ||
+                                       before->intel_byte_count != after->intel_byte_count ||
+                                       before->att_byte_count != after->att_byte_count;
+        BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                                 after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after->intel_relocation_count == after->metadata_relocation_count &&
+                                 after->att_relocation_count == after->metadata_relocation_count);
+    }
+    BUSTER_TEST(arguments, crypto_changed_exact_count == 17 && crypto_changed_shadow_count == 8 &&
+                             BUSTER_ARRAY_LENGTH(x86_completion_census_crypto_changed) == 25);
     for (u32 crypto_zmm_index = 0;
          crypto_zmm_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_zmm_control_forms);
          crypto_zmm_index += 1)

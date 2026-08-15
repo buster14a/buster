@@ -18,6 +18,74 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15j` (Linux x86_64, Zen 4 7940HS; **CI test time, not compiler
+throughput** — the two modules that had become most of it, based on
+`a4049376`). Local Release module totals `17.54 s` -> `7.48 s`; in the
+sanitized Debug configuration that gates every CI runner,
+`x86_64_completion_census_tests` and `machine_tests` together fell from about
+`300 s` to `47 s`.
+
+Per-push CI wall time had roughly quadrupled in a week — `x86_64-linux`
+2.6 -> 12.5 min, `x86_64-windows-znver5` 6.0 -> 19.6 min — and every runner
+ended with one sanitized `test_all` step running alone on an otherwise idle
+box for 39-49% of the job. `test_timing_summary` over the job logs put five
+modules at 88% of all test time, with the top two at 56%.
+
+**The census was 13 full-table scans and gaining one per feature commit.**
+Each `buster_x86_completion_census_run` walks all 11,013 forms and assembles
+every one in both dialects; ten of the thirteen existed only so a feature
+group could show that removing its 1-3 CPU features moves exactly its 2-25
+form ids. The count went `2 -> 13` on 2026-08-15 alone, one per
+"Add x86 `<FEATURE>` model defaults" commit, so the module grew without bound
+by construction.
+
+The gate is now bought once for all groups: one merged baseline scan with
+every group's features removed proves that nothing outside the union of the
+group lists moves, and a per-group isolation pass re-evaluates just the
+union's 67 forms under each group's own removal to prove each form is gated
+on its own group's features and no other's. Those two statements are what
+the ten scans asserted. `3.47 s -> 0.636 s` (**-81.7%**) with *more*
+assertions than before, 31,160 -> 34,043. A new feature group is a table row
+and costs no scan.
+
+One correction worth recording: the baseline class is **not** uniformly
+`SOURCE_POLICY_REJECTED`. The SHA512/SM3/SM4 rows are reached through more
+than one feature gate and land elsewhere when their feature leaves, so the
+isolation pass compares each form against its own classification under the
+full target rather than against a fixed class. Asserting the fixed class
+fails on 24 of the crypto group's 25 rows.
+
+**`machine_tests` was quadratic in the source-authority audit.**
+`machine_test_x86_source_authority_audit` was 55.4% of the module and
+`machine_test_source_function_body_from` was 49.9% of that. For every
+`codegen_canonical_x64_*`/`x64_emit_*` occurrence it searched *forward to
+end-of-file* for a definition, but codegen.c holds 1,597 occurrences of only
+86 distinct names — so ~1,511 call sites each scanned ~485 KB with a `memcmp`
+per byte, about 730 MB of byte-at-a-time scanning per configuration, ASan
+instrumented on the critical path. The name already starts at the offset in
+hand, so it now asks whether a definition begins *there*: `8.15 s -> 0.797 s`
+(**-90.2%**), and `122.32 s -> 12.38 s` in the sanitized configuration.
+
+That also fixed a latent hole in the gate. A call site that resolved to a
+later definition advanced the cursor past that definition's body, so owners
+could be skipped without trace. Every definition is a prefix match at its own
+offset, so the new form finds all of them and the audited set strictly
+widened; `forbidden_count == 0` and `owners_found` still hold.
+
+Validation: full local `test_all_combinations_ci` green twice (8
+configurations, 0 failing modules), 308,699 Release assertions across 39
+modules. Both changes are test-only, so the self-hosting fixed point is
+untouched — `BUSTER_INCLUDE_TESTS=0` compiles neither file. aarch64 and
+Windows verdicts come from remote CI.
+
+**Left untaken deliberately.** Restricting these two modules to fewer matrix
+configurations was considered and rejected *after* the fixes: both test
+compiler-independent properties and run in all 8-10 configurations, which was
+worth ~750 s of Windows CPU beforehand and is worth ~100 s now — no longer a
+fair price for the coverage or for a carve-out in the "every configuration
+runs `test_all`" rule. The remaining structural lever is the trailing
+sanitized step itself, which still runs alone on an idle runner.
+
 `2026-08-15i` (Linux x86_64, Zen 4 7940HS; the form-selection candidate loop
 stops re-deriving loop-invariant work, based on `91eba52e`). Stage 1
 `15,991,731,490` -> `15,600,981,922` instructions (**-2.4%**) measured

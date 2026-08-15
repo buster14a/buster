@@ -600,7 +600,14 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
                 while (end < source.end && machine_test_source_identifier_continue(source.bytes[end])) end += 1;
                 String8 owner = {.pointer = (char8*)(source.bytes + offset), .length = end - offset};
                 MachineX64SourceSpan body = {0};
-                if (!machine_test_source_function_body_from(source, owner, offset, &body)) continue;
+                // The name starts at `offset`, so ask whether a definition
+                // begins *here* rather than searching forward for one.  The
+                // forward search made every call site cost a scan to the end
+                // of the file -- half the module's time on codegen.c alone --
+                // and it could also step over an intervening definition,
+                // because a call site that resolved to a later definition
+                // advanced the cursor past that definition's body.
+                if (!machine_test_source_function_body_at(source, owner, offset, &body)) continue;
                 audit.owner_count += 1;
                 bool has_x86 = false;
                 bool has_aarch64 = false;
