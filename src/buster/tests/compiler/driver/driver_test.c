@@ -488,19 +488,51 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_dyn
     bool found_restore = false;
     s32 save_displacement = 0;
     s32 restore_displacement = 0;
-    for (u64 offset = function->value; offset + 7 <= function_end; offset += 1)
+    // The canonical encoder uses the compact disp8 form whenever the frame
+    // slot fits, and widens to disp32 for larger offsets.  Decode both forms
+    // semantically instead of assuming every ModRM memory operand consumes a
+    // seven-byte disp32 sequence.
+    for (u64 offset = function->value; offset < function_end;)
     {
-        if (text.pointer[offset] != 0x48 || text.pointer[offset + 1] != 0x89 || text.pointer[offset + 2] != 0x9d)
+        u64 next_offset = offset + 1;
+        if (offset + 3 <= function_end && text.pointer[offset] == 0x48 &&
+            (text.pointer[offset + 1] == 0x89 || text.pointer[offset + 1] == 0x8b))
         {
-            if (text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
+            u8 modrm = text.pointer[offset + 2];
+            u8 mode = modrm >> 6;
+            u8 reg = (modrm >> 3) & 7;
+            u8 base = modrm & 7;
+            if (reg == 3 && base == 5 && (mode == 1 || mode == 2))
             {
-                memcpy(&restore_displacement, text.pointer + offset + 3, sizeof(restore_displacement));
-                found_restore = true;
+                s32 displacement = 0;
+                if (mode == 1 && offset + 4 <= function_end)
+                {
+                    displacement = (s32)(s8)text.pointer[offset + 3];
+                    next_offset = offset + 4;
+                }
+                else if (mode == 2 && offset + 7 <= function_end)
+                {
+                    memcpy(&displacement, text.pointer + offset + 3, sizeof(displacement));
+                    next_offset = offset + 7;
+                }
+                else
+                {
+                    offset = next_offset;
+                    continue;
+                }
+                if (text.pointer[offset + 1] == 0x89)
+                {
+                    save_displacement = displacement;
+                    found_save = true;
+                }
+                else
+                {
+                    restore_displacement = displacement;
+                    found_restore = true;
+                }
             }
-            continue;
         }
-        memcpy(&save_displacement, text.pointer + offset + 3, sizeof(save_displacement));
-        found_save = true;
+        offset = next_offset;
     }
     if (!found_save || !found_restore || save_displacement != restore_displacement || save_displacement < 0)
     {
