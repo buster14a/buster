@@ -15847,12 +15847,6 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
     }
     u64 lane_count = codegen_module_lane_count(options, module->function_count);
-    CodegenX64MetadataCache* globals_x64_metadata_cache = 0;
-    if (target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        globals_x64_metadata_cache = arena_allocate(arena, CodegenX64MetadataCache, 1);
-        memset(globals_x64_metadata_cache, 0, sizeof(*globals_x64_metadata_cache));
-    }
     IrModule globals_module = *module;
     globals_module.functions = 0;
     globals_module.function_count = 0;
@@ -15865,7 +15859,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     serial_options.lane_count = 1;
     bool globals_buffer_exhausted = false;
     result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, &globals_module, target, serial_options, 1,
-                                                       &globals_buffer_exhausted, true, 0, globals_x64_metadata_cache);
+                                                       &globals_buffer_exhausted, true, 0, 0);
     BUSTER_CHECK(!globals_buffer_exhausted);
     result.ir_module = module;
     if (result.error != CODEGEN_ERROR_NONE)
