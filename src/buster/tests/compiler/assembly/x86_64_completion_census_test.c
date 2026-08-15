@@ -162,7 +162,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, audit.entry_count == form_count);
     BUSTER_TEST(arguments, audit.normalized_entry_count == buster_x86_metadata_normalized_form_count());
     BUSTER_TEST(arguments, audit.emitted_count == 10607 && audit.blocked_count == 406);
-    BUSTER_TEST(arguments, buster_x86_metadata_coverage_digest(entries, audit.entry_count, form_count) == UINT64_C(0xef8690567887ffc6));
+    BUSTER_TEST(arguments, buster_x86_metadata_coverage_digest(entries, audit.entry_count, form_count) == UINT64_C(0xcbfbcf6712723dfa));
     BUSTER_TEST(arguments, structural.structural_complete);
     BUSTER_TEST(arguments, structural.records_complete);
     BUSTER_TEST(arguments, structural.form_partition_complete);
@@ -451,7 +451,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             typed_inventory_hash_length += (u32)hash_text.length;
             typed_inventory_count += 1;
             typed_pair_matrix[records[inventory_form_id].intel_class][records[inventory_form_id].att_class] += 1;
-
             // The AVX10.2 feature-map cohort is a semantic intersection of
             // the typed topology and the generated ISA family.  Classify
             // DS before SAT_CVT because the former has the latter as a text
@@ -1064,7 +1063,22 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             typed_pair_total += typed_pair_matrix[intel_class][att_class];
     BUSTER_TEST(arguments, typed_pair_total == 1458);
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
-                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 1442);
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 1433);
+    static u32 const exact_intel_syntax_att_ids[] = {
+        6336, 6338, 6374, 6376, 6502, 6506, 7669, 7673, 7715,
+    };
+    BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] ==
+                         BUSTER_ARRAY_LENGTH(exact_intel_syntax_att_ids));
+    for (u32 exact_syntax_index = 0; exact_syntax_index < BUSTER_ARRAY_LENGTH(exact_intel_syntax_att_ids); exact_syntax_index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[exact_intel_syntax_att_ids[exact_syntax_index]];
+        BUSTER_TEST(arguments, record.form_id == exact_intel_syntax_att_ids[exact_syntax_index] &&
+                                 record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                 record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS);
+    }
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
                              [BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED] == 0);
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]
@@ -1073,6 +1087,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         for (u32 att_class = 0; att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; att_class += 1)
             if (!((intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
                    (att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
+                    att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED ||
                     att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED)) ||
                   (intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
                    att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED)))
