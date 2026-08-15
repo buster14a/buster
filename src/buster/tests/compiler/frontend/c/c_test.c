@@ -5783,6 +5783,105 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
 // runs (`b ? b ? c : s : l`) whose middle identifier must not be mistaken
 // for a label; the misdetection left an unreachable, unterminated label
 // block behind and failed canonical validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_for_declaration_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena for_scope_temporary = scratch_begin(0, 0);
+    // A for statement's init declaration scopes over the whole controlled statement, and the
+    // controlled statement is not required to be a compound one. Every body below is unbraced, so
+    // the scope has to be built from the statement grammar rather than from a closing brace: the
+    // selection case ends past the `else` arm, and the nested and guarded cases put the `for`
+    // itself where no `;`, `{` or `}` precedes it.
+    CPreprocessResult for_scope_tokens = c_preprocess(for_scope_temporary.arena,
+                                                      S8("int single(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    for (int index = 0; index < count; index += 1)"
+                                                         " total = total + index;\n"
+                                                         "    return total;\n"
+                                                         "}\n"
+                                                         "int selection(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    for (int index = 0; index < count; index += 1)"
+                                                         " if (index & 1) total = total + index;"
+                                                         " else total = total - index;\n"
+                                                         "    return total;\n"
+                                                         "}\n"
+                                                         "int nested(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    for (int outer = 0; outer < count; outer += 1)"
+                                                         " for (int inner = 0; inner < outer; inner += 1)"
+                                                         " total = total + outer + inner;\n"
+                                                         "    return total;\n"
+                                                         "}\n"
+                                                         "int guarded(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    if (count > 0)"
+                                                         " for (int index = 0; index < count; index += 1)"
+                                                         " total = total + index;\n"
+                                                         "    return total;\n"
+                                                         "}\n"
+                                                         "int repeated(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    for (int index = 0; index < count; index += 1)"
+                                                         " do { total = total + index; } while (0);\n"
+                                                         "    return total;\n"
+                                                         "}\n"
+                                                         "int empty(int count)\n"
+                                                         "{\n"
+                                                         "    int total = 0;\n"
+                                                         "    for (int index = 0; index < count; index += 1) ;\n"
+                                                         "    return total;\n"
+                                                         "}\n"),
+                                                      (CPreprocessOptions){0});
+    CParseResult for_scope_parse = c_parse(for_scope_temporary.arena, for_scope_tokens);
+    BUSTER_TEST(arguments, for_scope_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, for_scope_parse.diagnostic_count == 0);
+    CIRLowerResult for_scope_ir =
+        c_lower_to_ir(for_scope_temporary.arena, S8("for-declaration-scopes.c"), for_scope_tokens, for_scope_parse, target_native);
+    BUSTER_TEST(arguments, for_scope_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, for_scope_ir.program != 0);
+    if (for_scope_ir.program)
+    {
+        IrModule* module = &for_scope_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 6);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(for_scope_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    // The scope ends with the controlled statement and no later: a use after the loop is undeclared.
+    CPreprocessResult after_single_tokens = c_preprocess(for_scope_temporary.arena,
+                                                         S8("int after_single(int count)\n"
+                                                            "{\n"
+                                                            "    int total = 0;\n"
+                                                            "    for (int index = 0; index < count; index += 1)"
+                                                            " total = total + index;\n"
+                                                            "    return total + index;\n"
+                                                            "}\n"),
+                                                         (CPreprocessOptions){0});
+    CParseResult after_single_parse = c_parse(for_scope_temporary.arena, after_single_tokens);
+    BUSTER_TEST(arguments, after_single_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, after_single_parse.diagnostic_count != 0);
+    CPreprocessResult after_selection_tokens = c_preprocess(for_scope_temporary.arena,
+                                                            S8("int after_selection(int count)\n"
+                                                               "{\n"
+                                                               "    int total = 0;\n"
+                                                               "    for (int index = 0; index < count; index += 1)"
+                                                               " if (index & 1) total = total + index;"
+                                                               " else total = total - index;\n"
+                                                               "    return total + index;\n"
+                                                               "}\n"),
+                                                            (CPreprocessOptions){0});
+    CParseResult after_selection_parse = c_parse(for_scope_temporary.arena, after_selection_tokens);
+    BUSTER_TEST(arguments, after_selection_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, after_selection_parse.diagnostic_count != 0);
+    scratch_end(for_scope_temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_then_nested_conditionals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8311,6 +8410,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
+    c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));

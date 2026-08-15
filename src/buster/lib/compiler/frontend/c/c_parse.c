@@ -8991,6 +8991,162 @@ BUSTER_C_INTERNAL bool c_parse_asm_operand_name_token(CPreprocessResult preproce
     return false;
 }
 
+typedef enum CParseStatementSuffix
+{
+    C_PARSE_STATEMENT_SUFFIX_ELSE,
+    C_PARSE_STATEMENT_SUFFIX_DO_WHILE,
+} CParseStatementSuffix;
+
+BUSTER_C_INTERNAL bool c_parse_statement_keyword_at(CPreprocessResult preprocess, u32 index, u32 end, String8 keyword)
+{
+    return index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), keyword);
+}
+
+// One past the last token of the single statement beginning at `start`, or UINT32_MAX when that
+// statement is not closed inside [start, end).
+//
+// The rule is the grammar's and not "the next semicolon at depth zero": a statement ends at its
+// terminating `;` at delimiter depth zero, or past the `}` closing a compound statement, except
+// that the constructs owning a substatement hold it open past that point. `if (c)`, `while (c)`,
+// `for (...)`, `switch (c)` and `label:` prefix one more statement; `if` additionally admits a
+// trailing `else` statement and `do` a trailing `while (c);`. Those two trailing forms are pushed
+// onto `suffix` and discharged innermost-first, so `for (int i = 0; ...) if (a) b; else c;` spans
+// the whole if-else rather than stopping at the `;` after `b`, and `do x; while (c);` covers its
+// own terminator. `suffix_capacity` must be at least the token count of the range, since every
+// obligation is introduced by a token of its own.
+//
+// Declarations, `_Generic`, statement expressions and every other construct that can hold a `;`
+// inside a delimiter are covered by the depth count alone; nothing here needs to know their shape.
+BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 start, u32 end, u8* suffix, u32 suffix_capacity)
+{
+    u32 cursor = start;
+    u32 suffix_count = 0;
+    while (cursor < end)
+    {
+        bool prefix = true;
+        while (prefix && cursor < end && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
+            bool conditional = string_equal(spelling, S8("if"));
+            if (conditional || string_equal(spelling, S8("while")) || string_equal(spelling, S8("for")) || string_equal(spelling, S8("switch")))
+            {
+                if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    return UINT32_MAX;
+                }
+                u32 header_close = c_parse_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (header_close == end)
+                {
+                    return UINT32_MAX;
+                }
+                if (conditional)
+                {
+                    if (suffix_count == suffix_capacity)
+                    {
+                        return UINT32_MAX;
+                    }
+                    suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_ELSE;
+                }
+                cursor = header_close + 1;
+            }
+            else if (string_equal(spelling, S8("do")))
+            {
+                if (suffix_count == suffix_capacity)
+                {
+                    return UINT32_MAX;
+                }
+                suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_DO_WHILE;
+                cursor += 1;
+            }
+            else if (cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_COLON))
+            {
+                cursor += 2;
+            }
+            else
+            {
+                prefix = false;
+            }
+        }
+        if (cursor >= end)
+        {
+            return UINT32_MAX;
+        }
+        if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_parse_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            if (close == end)
+            {
+                return UINT32_MAX;
+            }
+            cursor = close + 1;
+        }
+        else
+        {
+            u32 depth = 0;
+            while (cursor < end)
+            {
+                CToken token = preprocess.tokens[cursor];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                    c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    if (!depth)
+                    {
+                        return UINT32_MAX;
+                    }
+                    depth -= 1;
+                }
+                else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                {
+                    break;
+                }
+                cursor += 1;
+            }
+            if (cursor == end)
+            {
+                return UINT32_MAX;
+            }
+            cursor += 1;
+        }
+        bool continued = false;
+        while (suffix_count && !continued)
+        {
+            if (suffix[suffix_count - 1] == C_PARSE_STATEMENT_SUFFIX_DO_WHILE)
+            {
+                if (!c_parse_statement_keyword_at(preprocess, cursor, end, S8("while")) || cursor + 1 >= end ||
+                    !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    return UINT32_MAX;
+                }
+                u32 close = c_parse_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (close == end || close + 1 == end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
+                {
+                    return UINT32_MAX;
+                }
+                cursor = close + 2;
+                suffix_count -= 1;
+                continue;
+            }
+            suffix_count -= 1;
+            if (c_parse_statement_keyword_at(preprocess, cursor, end, S8("else")))
+            {
+                cursor += 1;
+                continued = true;
+            }
+        }
+        if (!continued)
+        {
+            return cursor;
+        }
+    }
+    return UINT32_MAX;
+}
+
 BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                     CPreprocessResult preprocess, u32 declaration_index)
 {
@@ -9005,6 +9161,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
     CScopeId* scope_stack = arena_allocate(temporary.arena, CScopeId, declaration->body_token_count + 1);
     u32* scope_end_stack = arena_allocate(temporary.arena, u32, declaration->body_token_count + 1);
+    u8* statement_suffix = arena_allocate(temporary.arena, u8, declaration->body_token_count + 1);
     u32 scope_count = 1;
     scope_stack[0] = declaration->scope;
     scope_end_stack[0] = UINT32_MAX;
@@ -9115,7 +9272,11 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             index += 1;
             continue;
         }
-        if (statement_start && token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("for")) && index + 1 < body_end &&
+        // `for` is reserved, so a token spelled that way followed by `(` is a for statement wherever
+        // it appears; `statement_start` is deliberately not required. It is only set after `;`, `{`
+        // and `}`, which misses every `for` that is itself the unbraced body of an enclosing
+        // control statement — `for (...) for (int j = ...) ...` and `if (c) for (int j = ...) ...`.
+        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("for")) && index + 1 < body_end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 header_close = UINT32_MAX;
@@ -9140,31 +9301,11 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
                     }
                 }
             }
-            if (header_close != UINT32_MAX && header_close + 1 < body_end &&
-                c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE))
+            if (header_close != UINT32_MAX && header_close + 1 < body_end)
             {
-                u32 body_close = UINT32_MAX;
-                depth = 0;
-                for (u32 scan = header_close + 1; scan < body_end; scan += 1)
-                {
-                    if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        depth += 1;
-                    }
-                    else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        if (!depth)
-                        {
-                            break;
-                        }
-                        depth -= 1;
-                        if (!depth)
-                        {
-                            body_close = scan;
-                            break;
-                        }
-                    }
-                }
+                // The loop scope covers the whole controlled statement, compound or not, so the
+                // init declaration stays visible across every form of body.
+                u32 loop_end = c_parse_statement_end(preprocess, header_close + 1, body_end, statement_suffix, declaration->body_token_count + 1);
                 u32 first_separator = UINT32_MAX;
                 depth = 0;
                 for (u32 scan = index + 2; scan < header_close; scan += 1)
@@ -9188,7 +9329,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
                         break;
                     }
                 }
-                if (body_close != UINT32_MAX && first_separator != UINT32_MAX)
+                if (loop_end != UINT32_MAX && first_separator != UINT32_MAX)
                 {
                     CScopeId parent = scope_stack[scope_count - 1];
                     CScopeId loop_scope = {
@@ -9200,10 +9341,10 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
                         .first_entity = C_ENTITY_ID_INVALID,
                         .last_entity = C_ENTITY_ID_INVALID,
                         .token_start = index + 2,
-                        .token_end = body_close + 1,
+                        .token_end = loop_end,
                     };
                     scope_stack[scope_count] = loop_scope;
-                    scope_end_stack[scope_count] = body_close + 1;
+                    scope_end_stack[scope_count] = loop_end;
                     scope_count += 1;
                     if (index + 2 < first_separator &&
                         c_parse_local_declarations(machine, result_arena, result, preprocess, loop_scope, declaration_index, index + 2,
