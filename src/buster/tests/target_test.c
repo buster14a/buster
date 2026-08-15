@@ -3,6 +3,7 @@
 
 #include <buster/tests/compiler/link/link_test.h>
 
+#if BUSTER_CPU_ARCH_X86_64
 typedef struct TargetTestX86ModelClosureCase TargetTestX86ModelClosureCase;
 struct TargetTestX86ModelClosureCase
 {
@@ -89,6 +90,7 @@ BUSTER_GLOBAL_LOCAL TargetTestX86ModelClosureCase const target_test_x86_model_cl
     {CPU_MODEL_INTEL_KNM, 1023},
     {CPU_MODEL_INTEL_DIAMOND_RAPIDS, 1023},
 };
+#endif
 
 BUSTER_GLOBAL_LOCAL bool target_test_cpu_features_intersect(TargetCpuFeatures left, TargetCpuFeatures right)
 {
