@@ -4684,18 +4684,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             IrBinaryOperation binary = instruction->binary_operation;
             if (binary == IR_BINARY_VECTOR_INTEGER_ADD)
             {
-                operation = element->bit_width == 8 ? 0xfc : element->bit_width == 16 ? 0xfd : element->bit_width == 32 ? 0xfe : 0xd4;
                 native = true;
             }
             else if (binary == IR_BINARY_VECTOR_INTEGER_SUBTRACT)
             {
-                operation = element->bit_width == 8 ? 0xf8 : element->bit_width == 16 ? 0xf9 : element->bit_width == 32 ? 0xfa : 0xfb;
                 native = true;
             }
             else if (binary == IR_BINARY_VECTOR_INTEGER_BITWISE_AND || binary == IR_BINARY_VECTOR_INTEGER_BITWISE_OR ||
                      binary == IR_BINARY_VECTOR_INTEGER_BITWISE_XOR)
             {
-                operation = binary == IR_BINARY_VECTOR_INTEGER_BITWISE_AND ? 0xdb : binary == IR_BINARY_VECTOR_INTEGER_BITWISE_OR ? 0xeb : 0xef;
                 native = true;
             }
             if (native)
