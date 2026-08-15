@@ -931,6 +931,12 @@ struct BusterX86MetadataEmitResult
     u32 diagnostic_operand;
     s64 diagnostic_value;
     BusterX86MetadataString required_feature;
+    // Zero when the emitted byte string depends on no operand value, only on
+    // the form and the operand shape.  A caller that memoizes emission under a
+    // key covering that shape may then reuse the bytes verbatim.  Any other
+    // value means at least one displacement, immediate, relative or absolute
+    // field was written from an operand, and the bytes are specific to it.
+    u32 value_field_count;
 };
 
 typedef enum BusterX86MetadataCoverageDisposition

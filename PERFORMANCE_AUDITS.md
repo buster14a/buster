@@ -18,6 +18,40 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-15c` (Linux x86_64, Zen 4 7940HS; value-free emissions are memoized as
+byte templates, based on `879d3e00`). Stage 1 `32,738,139,154` ->
+`30,171,862,831` instructions (**-7.9%**) and stage 2 `466,777,002,988` ->
+`429,417,305,821`. Cumulative across the three 2026-08-15 audits: stage 1
+`63,683,992,612` -> `30,171,862,831`, **-52.6%**.
+
+The census in `2026-08-15b` found that 17.1% of canonical emissions write no
+operand-derived value field. For those the emitted byte string is a pure
+function of the codegen cache key, so the entry now retains the bytes and a
+later hit copies them instead of running the transform. The remaining 82.9%
+are untouched and still emit normally.
+
+The soundness argument is worth stating because it is not "the key looks
+specific enough". `buster_x86_metadata_emit_write_le` is the only path that
+writes an operand *value*, and `value_field_count` counts its calls, so zero
+means no value reached the bytes. Everything else that varies per query does
+reach the bytes — register numbers through ModRM/SIB/REX, and the displacement
+size class through the ModRM mod field — but all of it is written with
+`emit_write_byte` from inputs the key already carries: `reg.index`, the memory
+base and index registers, the scale, and the displacement and immediate size
+classes. So the byte string is pinned by the key exactly when
+`value_field_count` is zero. Templates are also capped at 15 bytes and skipped
+for any row with a relocation.
+
+Capture happens after a successful emission rather than at insertion, so a
+first pass with no output buffer does not lose the chance; a later untemplated
+hit fills it.
+
+Validation beyond the usual: the stage-1 binary that this path produces is
+itself the compiler that produces stage 2, so a template emitting wrong bytes
+would have to survive compiling the whole compiler and still land on a
+byte-identical fixed point. That held, alongside 302,625 Release assertions
+across 38 modules and the full matrix including the x86 completion census.
+
 `2026-08-15b` (Linux x86_64, Zen 4 7940HS; the canonical x86-64 path takes the
 prepared binding route, based on `01758505`). This is the lever `2026-08-15a`
 identified and left untaken, plus what profiling it exposed underneath.
@@ -110,9 +144,12 @@ relative                                             177,619    3.7%
 both displacement kinds                                   17    0.0%
 ```
 
-Three things follow. **A template with no patch slot covers only 17.1%** — the
-simple, provably-correct "memoize the bytes and memcpy them" design is worth
-roughly 2-3% of the stage, not the rest of the 3.6x. **Essentially every
+Three things follow. **A template with no patch slot covers only 17.1%** of
+emissions — but see `2026-08-15c`: that still measured **-7.9%** of stage-1
+instructions, because those emissions each cost the full transform and the
+template replaces it with a `memcpy`. The "2-3% of the stage" first written
+here was wrong; it divided the emission share by total stage work instead of
+weighting by per-emission cost. **Essentially every
 emission needs at most one patch slot** (82.9% have exactly one value field and
 17 have two), so the descriptor table can be a single slot rather than a list.
 And the dominant field is the **computed** displacement written from

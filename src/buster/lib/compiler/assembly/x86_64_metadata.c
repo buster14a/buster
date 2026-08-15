@@ -941,6 +941,12 @@ struct BusterX86MetadataEncodeScratch
     BusterX86MetadataRelocation relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY];
     u32 byte_count;
     u32 relocation_count;
+    // How many little-endian value fields the transform wrote.  Every
+    // displacement, immediate, relative and absolute field goes through
+    // buster_x86_metadata_emit_write_le and nothing else does, so a zero here
+    // means the byte string depends on no operand value - only on the form and
+    // the operand shape.
+    u32 value_field_count;
 };
 
 enum
@@ -4629,6 +4635,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_write_byte(BusterX86MetadataEn
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_write_le(BusterX86MetadataEncodeScratch* scratch, u64 value, u8 width)
 {
+    if (width) scratch->value_field_count += 1;
     for (u8 index = 0; index < width; index += 1)
     {
         if (!buster_x86_metadata_emit_write_byte(scratch, (u8)(value >> (index * 8)))) return false;
@@ -7788,6 +7795,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
     BusterX86MetadataEncodeScratch scratch;
     scratch.byte_count = 0;
     scratch.relocation_count = 0;
+    scratch.value_field_count = 0;
     result.status = buster_x86_metadata_emit_form_to_scratch(query.physical, form, &scratch, &result.diagnostic_operand,
                                                               &result.diagnostic_value, plan, machine_token, force_disp32,
                                                               policy_prevalidated);
@@ -7795,6 +7803,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
         result.required_feature = buster_x86_metadata_emit_required_feature(query.physical, form);
     result.required_byte_count = scratch.byte_count;
     result.required_relocation_count = scratch.relocation_count;
+    result.value_field_count = scratch.value_field_count;
     if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS) return result;
     if (query.output_capacity < scratch.byte_count)
     {

@@ -940,6 +940,17 @@ struct CodegenX64MetadataCacheEntry
     // which is a normalize-and-binary-search on every emitted instruction.
     u64 stable_hash;
     u32 form_id;
+    // Emitted bytes for a row whose byte string depends on no operand value.
+    // The metadata transform reports that as value_field_count == 0, and the
+    // key above covers the whole operand shape - mnemonic, operand kinds,
+    // register numbers, memory topology, the displacement and immediate size
+    // classes, attributes and target features - so for such a row the bytes
+    // are a pure function of the key and a later hit can copy them instead of
+    // running the transform again.  Zero length means no template, which is
+    // the case for every row that writes a displacement, immediate, relative
+    // or absolute field from an operand.
+    u8 template_length;
+    u8 template_bytes[15];
 };
 typedef struct CodegenX64MetadataCache CodegenX64MetadataCache;
 struct CodegenX64MetadataCache
@@ -1146,6 +1157,19 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
     CodegenX64MetadataCache* cache = (CodegenX64MetadataCache*)buffer->x64_metadata_cache;
     CodegenX64MetadataCacheEntry* cached = codegen_canonical_x64_metadata_cache_entry(cache, physical, false);
     BusterX86MetadataEmitResult emitted = {0};
+    // A templated entry needs no transform at all: its bytes are already the
+    // answer for every query that reaches this key.
+    if (cached && cached->template_length)
+    {
+        if (output_capacity < cached->template_length)
+        {
+            codegen_buffer_report_exhausted(buffer);
+            return false;
+        }
+        if (buffer->bytes) memcpy(buffer->bytes + buffer->count, cached->template_bytes, cached->template_length);
+        buffer->count += cached->template_length;
+        return true;
+    }
     if (cached)
     {
         emitted = buster_x86_metadata_emit_form_selected(
@@ -1178,6 +1202,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
                 insertion->stable_hash = emitted.stable_hash;
                 insertion->form_id = emitted.form_id + 1u;
             }
+            cached = insertion;
         }
     }
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
@@ -1192,6 +1217,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit_attributes(CodegenB
             buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
         }
         return false;
+    }
+    // Retain the bytes when they cannot depend on anything outside the key.
+    // This runs on the miss that filled the entry and on any later untemplated
+    // hit, so a first pass with no output buffer does not lose the chance.
+    if (cached && !cached->template_length && !emitted.value_field_count && !emitted.relocation_count && buffer->bytes &&
+        emitted.byte_count && emitted.byte_count <= BUSTER_ARRAY_LENGTH(cached->template_bytes))
+    {
+        memcpy(cached->template_bytes, buffer->bytes + buffer->count, emitted.byte_count);
+        cached->template_length = (u8)emitted.byte_count;
     }
     buffer->count += emitted.byte_count;
     return true;
