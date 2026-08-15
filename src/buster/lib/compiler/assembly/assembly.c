@@ -11580,7 +11580,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     if (vector_memory_width || scalar_memory_width)
     {
-        if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
+        if (!scalar_memory_width && (assembly_word_equal(mnemonic, S8("vpslld")) || assembly_word_equal(mnemonic, S8("vpsrld"))))
+            scalar_memory_width = 32;
+        else if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
             scalar_memory_width = 32;
         else if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 'd')
             scalar_memory_width = 64;

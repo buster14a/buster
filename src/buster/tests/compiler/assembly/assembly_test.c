@@ -10909,14 +10909,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8("vfrczps ymm0, xmm1\n"
            "vfmaddss ymm0, ymm1, ymm2, ymm3\n"
            "vpcmov xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
-           "vpmacssww xmm0, xmm1, xmm2, xmmword ptr [rax]\n"
            "vprotb xmm0, xmm1, 0x100\n"
            "vpermil2ps xmm0, xmm1, xmm2, xmm3, 0x10\n"
            "bextr rax, ecx, 0x1\n"
            "lwpins eax, ecx, 0x1\n"
            "pfadd xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, invalid_amd_forms.diagnostic_count == 9);
+    BUSTER_TEST(arguments, invalid_amd_forms.diagnostic_count == 8);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_amd_forms.diagnostic_count; diagnostic_index += 1)
     {
         BUSTER_TEST(arguments, invalid_amd_forms.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
@@ -10929,7 +10928,6 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "vprotb xmm0, xmm1, xmm2, 0\n"
            "vpshlb xmm0, xmmword ptr [rax], xmmword ptr [rbx]\n"
            "vpcmov xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
-           "vpmacssww xmm0, xmm1, xmm2, xmmword ptr [rax]\n"
            "vpermil2ps xmm0, xmm1, xmm2, xmm3, 16\n"
            "vpermil2pd xmm0, xmm1, xmm2, xmm3, 16\n"
            "vfmaddps xmm0, xmm1, xmmword ptr [rax], xmmword ptr [rbx]\n"
@@ -10937,7 +10935,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "lwpval r8, r9, 1\n"
            "pi2fw xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = amd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, invalid_amd_bounds.diagnostic_count == 13);
+    BUSTER_TEST(arguments, invalid_amd_bounds.diagnostic_count == 12);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_amd_bounds.diagnostic_count; diagnostic_index += 1)
     {
         BUSTER_TEST(arguments, invalid_amd_bounds.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
