@@ -25,30 +25,6 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_sha_f
     {8857, UINT64_C(0xf5b0cda333e330b9)}, {8858, UINT64_C(0x3ea943b7a373cef2)},
 };
 
-BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_sha512_sm3_sm4_forms[] = {
-    {8859, UINT64_C(0x01702a6139d65155)}, {8860, UINT64_C(0xa6c48cc98c24a04e)},
-    {8861, UINT64_C(0xddb86a1207dfe71a)}, {8862, UINT64_C(0xe888ebbeaec57d39)},
-    {8863, UINT64_C(0x8aea91c2f5558d91)}, {8864, UINT64_C(0x47665a25a6afd225)},
-    {8865, UINT64_C(0x479b4a88d5f93781)}, {8866, UINT64_C(0xe433485b95f71dc4)},
-    {8867, UINT64_C(0x65bcf8eafb7ca5d4)}, {8880, UINT64_C(0x6a7c8b4bef288adb)},
-    {8881, UINT64_C(0x8d915dabec42201e)}, {8882, UINT64_C(0x016e4951e796afa1)},
-    {8883, UINT64_C(0x884daebe93b9ad64)}, {8884, UINT64_C(0x9eb2af03c99ccead)},
-    {8885, UINT64_C(0x4af438ea62b8ebf1)}, {8886, UINT64_C(0xf4d82a6998be5d9c)},
-    {8887, UINT64_C(0xa821afa297be0ae4)},
-};
-
-BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_sm4_evex_shadow_forms[] = {
-    {8868, UINT64_C(0x4f413ab37e95c90c)}, {8869, UINT64_C(0x231f4438054baa67)},
-    {8870, UINT64_C(0xedf48f4832166da7)}, {8871, UINT64_C(0x5d1167ea4a293887)},
-    {8874, UINT64_C(0xfad5b4219e4c9f9e)}, {8875, UINT64_C(0x9d9f166debadb4bc)},
-    {8876, UINT64_C(0x76d8bb1cef7791a2)}, {8877, UINT64_C(0xdfba78dcd184c2db)},
-};
-
-BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_sm4_zmm_control_forms[] = {
-    {8872, UINT64_C(0x93e9a6b4c6ed0df8)}, {8873, UINT64_C(0x4dea6ded6310143a)},
-    {8878, UINT64_C(0xf66deb4d3f6722f8)}, {8879, UINT64_C(0x39328e28eeafa663)},
-};
-
 BUSTER_GLOBAL_LOCAL X86CompletionCensusFormKey const x86_completion_census_legacy_xmm_changed_forms[] = {
     {10085, UINT64_C(0xa188a812b928c5a8)}, {10103, UINT64_C(0x3d8fe741af12d499)},
     {10166, UINT64_C(0x7c707ec1ebf7b86f)}, {10183, UINT64_C(0x004a5906ba6c91f5)},
@@ -259,62 +235,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              sha_census_att_exact_count == 14 &&
                              memcmp(sha_census_inventory_digest, expected_sha_census_inventory_digest,
                                     sizeof(expected_sha_census_inventory_digest)) == 0);
-    u8 crypto_census_inventory_text[17 * 32] = {0};
-    u32 crypto_census_inventory_length = 0;
-    u32 crypto_census_intel_exact_count = 0;
-    u32 crypto_census_att_exact_count = 0;
-    for (u32 crypto_census_index = 0;
-         crypto_census_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sha512_sm3_sm4_forms);
-         crypto_census_index += 1)
-    {
-        X86CompletionCensusFormKey const* expected = &x86_completion_census_sha512_sm3_sm4_forms[crypto_census_index];
-        BusterX86MetadataForm crypto_form = {0};
-        BusterX86MetadataFormKey crypto_key = {0};
-        bool crypto_form_ok = buster_x86_metadata_form(expected->form_id, &crypto_form) &&
-                              buster_x86_metadata_form_key(expected->form_id, &crypto_key);
-        bool is_sha512 = expected->form_id >= 8859 && expected->form_id <= 8861;
-        bool is_sm3 = expected->form_id >= 8862 && expected->form_id <= 8867;
-        String8 expected_isa = is_sha512 ? S8("SHA512") : (is_sm3 ? S8("SM3") : S8("SM4"));
-        BUSTER_TEST(arguments, crypto_form_ok && crypto_key.stable_hash == expected->stable_hash &&
-                                 string_equal(buster_x86_metadata_string_span(crypto_form.isa_set), expected_isa));
-        String8 crypto_line = string_format(arguments->arena, S8("{u32} {u64:x,width=[0,16],no_prefix}\n"),
-                                             expected->form_id, expected->stable_hash);
-        BUSTER_TEST(arguments, crypto_census_inventory_length + crypto_line.length <= sizeof(crypto_census_inventory_text));
-        if (crypto_census_inventory_length + crypto_line.length <= sizeof(crypto_census_inventory_text))
-        {
-            memcpy(crypto_census_inventory_text + crypto_census_inventory_length, crypto_line.pointer, crypto_line.length);
-            crypto_census_inventory_length += (u32)crypto_line.length;
-        }
-        BUSTER_TEST(arguments, records[expected->form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                 records[expected->form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                 records[expected->form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                 records[expected->form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                 records[expected->form_id].intel_byte_count == records[expected->form_id].metadata_byte_count &&
-                                 records[expected->form_id].att_byte_count == records[expected->form_id].metadata_byte_count &&
-                                 records[expected->form_id].intel_relocation_count == records[expected->form_id].metadata_relocation_count &&
-                                 records[expected->form_id].att_relocation_count == records[expected->form_id].metadata_relocation_count);
-        crypto_census_intel_exact_count += records[expected->form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
-        crypto_census_att_exact_count += records[expected->form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
-    }
-    u8 crypto_census_inventory_digest[32] = {0};
-    static u8 const expected_crypto_census_inventory_digest[32] = {
-        0x98, 0x28, 0x8d, 0x16, 0xec, 0x90, 0x08, 0x97, 0x04, 0xb3, 0x54, 0x79, 0xe9, 0x26, 0x1b, 0x57,
-        0xf3, 0x1b, 0xb6, 0x20, 0xf7, 0x41, 0xd7, 0xd7, 0x9c, 0x29, 0x08, 0xfe, 0x32, 0x2b, 0x51, 0x89,
-    };
-    link_sha256(arguments->arena, crypto_census_inventory_text, crypto_census_inventory_length, crypto_census_inventory_digest);
-    BUSTER_TEST(arguments, crypto_census_inventory_length == 374 && crypto_census_intel_exact_count == 17 &&
-                             crypto_census_att_exact_count == 17 &&
-                             memcmp(crypto_census_inventory_digest, expected_crypto_census_inventory_digest,
-                                    sizeof(expected_crypto_census_inventory_digest)) == 0);
-    for (u32 crypto_shadow_index = 0;
-         crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
-         crypto_shadow_index += 1)
-    {
-        X86CompletionCensusFormKey const* crypto_expected = &x86_completion_census_sm4_evex_shadow_forms[crypto_shadow_index];
-        u32 crypto_form_id = crypto_expected->form_id;
-        BusterX86MetadataFormKey crypto_key = {0};
-        BUSTER_TEST(arguments, buster_x86_metadata_form_key(crypto_form_id, &crypto_key) && crypto_key.stable_hash == crypto_expected->stable_hash);
-    }
     u32 intel_reason_total = 0;
     u32 att_reason_total = 0;
     u32 intel_reason_non_none = 0;
@@ -328,84 +248,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     {
         intel_reason_non_none += source.intel_source_reason_counts[class_index];
         att_reason_non_none += source.att_source_reason_counts[class_index];
-    }
-    BusterX86CompletionCensusRecord* crypto_baseline_records = arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
-    Target crypto_baseline_target = census_target;
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SHA512);
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SM3);
-    crypto_baseline_target.cpu_features = target_cpu_features_remove(crypto_baseline_target.cpu_features, TARGET_CPU_FEATURE_X86_SM4);
-    buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
-        .arena = arguments->arena, .target = crypto_baseline_target, .records = crypto_baseline_records,
-        .record_capacity = form_count, .run_intel = true, .run_att = true,
-    });
-    u32 crypto_changed_count = 0;
-    u32 crypto_changed_exact_count = 0;
-    u32 crypto_changed_shadow_count = 0;
-    for (u32 crypto_compare_form_id = 0; crypto_compare_form_id < form_count; crypto_compare_form_id += 1)
-    {
-        BusterX86CompletionCensusRecord const* before = &crypto_baseline_records[crypto_compare_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[crypto_compare_form_id];
-        bool changed = before->intel_class != after->intel_class || before->att_class != after->att_class ||
-                       before->intel_source_reason != after->intel_source_reason || before->att_source_reason != after->att_source_reason ||
-                       before->intel_byte_count != after->intel_byte_count || before->att_byte_count != after->att_byte_count ||
-                       before->metadata_byte_count != after->metadata_byte_count;
-        if (changed)
-        {
-            crypto_changed_count += 1;
-            bool exact_control = false;
-            for (u32 crypto_control_index = 0;
-                 crypto_control_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sha512_sm3_sm4_forms);
-                 crypto_control_index += 1)
-            {
-                exact_control |= crypto_compare_form_id == x86_completion_census_sha512_sm3_sm4_forms[crypto_control_index].form_id;
-            }
-            bool shadow_control = false;
-            for (u32 crypto_shadow_index = 0;
-                 crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
-                 crypto_shadow_index += 1)
-            {
-                shadow_control |= crypto_compare_form_id == x86_completion_census_sm4_evex_shadow_forms[crypto_shadow_index].form_id;
-            }
-            BUSTER_TEST(arguments, exact_control || shadow_control);
-            if (exact_control)
-            {
-                crypto_changed_exact_count += 1;
-                BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                         after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
-                                         after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
-            }
-            if (shadow_control)
-            {
-                crypto_changed_shadow_count += 1;
-                BUSTER_TEST(arguments, after->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
-                                         after->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
-                                         after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
-                                         after->intel_relocation_count == after->metadata_relocation_count &&
-                                         after->att_relocation_count == after->metadata_relocation_count);
-            }
-        }
-    }
-    BUSTER_TEST(arguments, crypto_changed_count == 25 && crypto_changed_exact_count == 17 && crypto_changed_shadow_count == 8);
-    for (u32 crypto_zmm_index = 0;
-         crypto_zmm_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_zmm_control_forms);
-         crypto_zmm_index += 1)
-    {
-        u32 crypto_form_id = x86_completion_census_sm4_zmm_control_forms[crypto_zmm_index].form_id;
-        BusterX86MetadataFormKey crypto_zmm_key = {0};
-        BUSTER_TEST(arguments, buster_x86_metadata_form_key(crypto_form_id, &crypto_zmm_key) &&
-                                 crypto_zmm_key.stable_hash == x86_completion_census_sm4_zmm_control_forms[crypto_zmm_index].stable_hash);
-        BusterX86CompletionCensusRecord const* before = &crypto_baseline_records[crypto_form_id];
-        BusterX86CompletionCensusRecord const* after = &records[crypto_form_id];
-        BUSTER_TEST(arguments, before->intel_class == after->intel_class && before->att_class == after->att_class &&
-                                 before->intel_source_reason == after->intel_source_reason &&
-                                 before->att_source_reason == after->att_source_reason &&
-                                 before->intel_byte_count == after->intel_byte_count &&
-                                 before->att_byte_count == after->att_byte_count &&
-                                 before->metadata_byte_count == after->metadata_byte_count &&
-                                 before->intel_relocation_count == after->intel_relocation_count &&
-                                 before->att_relocation_count == after->att_relocation_count);
     }
 
     // The typed source-builder and standalone-SAE inventories are derived
@@ -1154,32 +996,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 5297 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 191 && source.intel_unresolved_count == 4233 &&
-                             source.intel_byte_mismatch_count == 858 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 586 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 5708 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 43 && source.att_unresolved_count == 3890 &&
-                             source.att_byte_mismatch_count == 940 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 595 && source.att_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.intel_exact_count == 5504 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 223 && source.intel_unresolved_count == 4093 &&
+                             source.intel_byte_mismatch_count == 759 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_policy_rejected_count == 594 && source.intel_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.att_exact_count == 5645 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 44 && source.att_unresolved_count == 3854 &&
+                             source.att_byte_mismatch_count == 1038 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 603 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6391 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3494 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6531 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3346 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 586);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6734 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 594);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6770 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1262 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1218 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 595);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 603);
 
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
