@@ -1503,8 +1503,8 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, 
         codegen_canonical_x64_metadata_immediate(4096, 32),
     };
     BusterX86MetadataPhysicalOperand cmp_operands[2] = {
-        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),
         codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_R10, 64),
     };
     BusterX86MetadataPhysicalOperand test_r11_operands[2] = {
         codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R11, 8, 0),
