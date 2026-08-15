@@ -4385,7 +4385,20 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_hidden_control_projection(Bust
     if (visible.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
         visible.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ||
         form.prefix_kind != BUSTER_X86_METADATA_PREFIX_REX2)
-        return false;
+    {
+        // CET_NO_TRACK near-indirect JMP rows carry a suppressed RIP
+        // operand in the normalized form.  The source-visible operand is
+        // solely the memory address; project only the architectural /4 row
+        // and leave the ordinary /5 indirect JMP row on the normal path.
+        if (visible.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !jmp_form ||
+            form.prefix_kind != BUSTER_X86_METADATA_PREFIX_REX2 || form.operand_count != 2)
+            return false;
+        BusterX86MetadataPatternSemantics pattern = {0};
+        if (!buster_x86_metadata_emit_parse_pattern(form, &pattern) || !pattern.has_modrm || pattern.reg_fixed != 4 ||
+            !pattern.opcode_count || pattern.opcode[0] != 0xff)
+            return false;
+        return true;
+    }
     // The REX2 indirect rows are the only CALL/JMP forms with one visible
     // GPR and suppressed stack/RIP effects.  Their normalized operand counts
     // are stable shape evidence (CALL: visible+stack+RIP, JMP: visible+RIP);
@@ -5299,6 +5312,20 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // solely for opcode selection. Their qword address operand must not
     // synthesize REX.W; only base/index extension bits may require REX.
     bool mpx_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("MPX"));
+    // APX REX2's unary qword IMUL memory row is encoded by F7 /5, whose
+    // normalized pattern omits the W token even though the source memory
+    // width selects the qword operation.  Derive REX2.W only for that exact
+    // fixed-width topology; byte/word/dword unary forms stay W=0.
+    bool apx_rex2_unary_imul_qword = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
+                                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("IMUL")) &&
+                                     pattern.has_modrm && pattern.opcode_count && pattern.opcode[0] == 0xf7 &&
+                                     pattern.reg_fixed == 5 && binding_count == 1 &&
+                                     bindings[0].physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                                     (bindings[0].physical.width ? bindings[0].physical.width
+                                                                   : bindings[0].physical.memory.source_width) == 64;
+    bool apx_rex2_mov_memory_qword = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
+                                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOV")) &&
+                                     pattern.has_modrm;
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
@@ -5331,15 +5358,19 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
         }
+        if ((apx_rex2_unary_imul_qword || apx_rex2_mov_memory_qword) &&
+            physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            (physical.width ? physical.width : physical.memory.source_width) == 64)
+            rex_w = true;
     }
     // DF64 rows encode their 64-bit default without a synthetic REX.W.  An
     // explicit W token remains authoritative for the small subset whose XED
     // row actually requires it (for example the PUSHF/POPF aliases).
-    if (pattern.df64 && !pattern.has_w) rex_w = false;
+    if (pattern.df64 && !pattern.has_w && !apx_rex2_unary_imul_qword && !apx_rex2_mov_memory_qword) rex_w = false;
     // IMMUNE_REXW rows intentionally ignore a derived REX.W.  The typed
     // query has no separate "prefix was explicitly requested" bit, so a
     // width heuristic must not turn a valid fixed-width form into a failure.
-    if (pattern.immune_rexw) rex_w = false;
+    if (pattern.immune_rexw && !apx_rex2_unary_imul_qword && !apx_rex2_mov_memory_qword) rex_w = false;
     bool vector_family = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP ||
                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX;
     if (vector_family && buster_x86_metadata_emit_any_high_byte(bindings, binding_count))

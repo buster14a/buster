@@ -9167,6 +9167,42 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    x86_64_metadata_test_bytes_equal(jmp_output, jmp_emit.byte_count,
                                                                      (u8[]){0xd5, 0x11, 0xff, 0xe7}, 4));
 
+        BusterX86MetadataPhysicalOperand jmp_memory_operand =
+            x86_64_metadata_test_physical_mem_base(19, 64, 0);
+        BusterX86MetadataPhysicalQuery jmp_memory_query = x86_64_metadata_test_physical_query(
+            S8("JMP"), &jmp_memory_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        jmp_memory_query.source_semantics = true;
+        jmp_memory_query.include_privileged = true;
+        BusterX86MetadataSelectResult jmp_memory_selection = buster_x86_metadata_select_form(jmp_memory_query);
+        u8 jmp_memory_output[8] = {0};
+        BusterX86MetadataEmitResult jmp_memory_emit = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = jmp_memory_query, .output = jmp_memory_output,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(jmp_memory_output)});
+        BUSTER_TEST(arguments, jmp_memory_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   jmp_memory_selection.form_id == 9487 && jmp_memory_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   jmp_memory_emit.form_id == 9487 &&
+                                   x86_64_metadata_test_bytes_equal(jmp_memory_output, jmp_memory_emit.byte_count,
+                                                                     (u8[]){0xd5, 0x10, 0xff, 0x23}, 4));
+
+        BusterX86MetadataPhysicalOperand imul_memory_operand =
+            x86_64_metadata_test_physical_mem_base(25, 64, 0);
+        BusterX86MetadataPhysicalQuery imul_memory_query = x86_64_metadata_test_physical_query(
+            S8("IMUL"), &imul_memory_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, apx_features,
+            BUSTER_ARRAY_LENGTH(apx_features));
+        imul_memory_query.source_semantics = true;
+        imul_memory_query.include_privileged = true;
+        BusterX86MetadataSelectResult imul_memory_selection = buster_x86_metadata_select_form(imul_memory_query);
+        u8 imul_memory_output[8] = {0};
+        BusterX86MetadataEmitResult imul_memory_emit = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = imul_memory_query, .output = imul_memory_output,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(imul_memory_output)});
+        BUSTER_TEST(arguments, imul_memory_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   imul_memory_selection.form_id == 9465 && imul_memory_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   imul_memory_emit.form_id == 9465 &&
+                                   x86_64_metadata_test_bytes_equal(imul_memory_output, imul_memory_emit.byte_count,
+                                                                     (u8[]){0xd5, 0x19, 0xf7, 0x29}, 4));
+
         BusterX86MetadataPhysicalOperand push2_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 16, 64),
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 17, 64),
