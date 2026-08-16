@@ -2842,7 +2842,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     }
     case IR_OPCODE_SWITCH:
     {
-        u32 maximum = instruction->immediate_count * 2 + 3;
+        u32 maximum = (u32)instruction->immediate_count * 2 + 3;
         u64* switch_operands = arena_allocate(context->arena, u64, maximum);
         IrValueId condition_id = instruction->operands[0];
         IrType* condition_type = llvm_bc_ir_type(context, function->values[condition_id.value].canonical_type);
