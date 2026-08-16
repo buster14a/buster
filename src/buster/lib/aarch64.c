@@ -1,5 +1,9 @@
 
 
+// AArch64 host probing: detected model resolution for the paths target.c
+// dispatches here (MIDR_EL1 through sysfs on Linux, hw.cpufamily sysctl on
+// Apple platforms).
+
 #include <buster/lib/aarch64.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>

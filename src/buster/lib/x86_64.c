@@ -1,3 +1,8 @@
+// x86-64 host probing: CPUID enumeration into TargetCpuFeatures
+// (x86_64_cpu_features_from_cpuid) and detected-model resolution
+// (cpu_detect_model_x86_64). target.c dispatches here; nothing else should
+// issue CPUID directly.
+
 #include <buster/lib/x86_64.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/string.h>

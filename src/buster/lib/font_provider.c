@@ -1,3 +1,9 @@
+// System font discovery for the retained UI stack: resolves platform font
+// paths (fontconfig on Linux, the system font folders on Windows/macOS,
+// bundled resources on iOS) into files truetype.c can parse. Resolved
+// paths are a
+// lazily built global; font_provider_prewarm fills them serially before
+// parallel readers (AGENTS.md).
 
 #include <buster/lib/font_provider.h>
 #include <buster/lib/file.h>

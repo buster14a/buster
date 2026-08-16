@@ -1,3 +1,14 @@
+// Implementation of the platform boundary declared in os.h. Each facility
+// keeps its POSIX and Windows paths side by side inside one function
+// rather than in per-platform files, so the contract stays in one place:
+// virtual memory (os_reserve/os_commit/os_decommit and protection flags),
+// threads, mutexes, and TLS, file IO, process spawn/wait with deadlines,
+// dynamic libraries, and the crash/failure printers. The lane model's
+// implementation lives at the bottom — lane_run dispatches through a
+// persistent LaneGang of workers that survives across phases
+// (lane_persistent_worker_entry_point); creating threads per phase is the
+// shape it exists to avoid.
+
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/arena.h>

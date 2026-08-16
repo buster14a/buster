@@ -1,3 +1,9 @@
+// Platform-neutral front door of the windowing module: event-list
+// ownership and window lifecycle policy. Native windowing (XCB, Win32,
+// Cocoa, ...) lives in the backend implementation files under window/,
+// selected and included through internal.h; renderers receive handles
+// through WmNativeSurface rather than reaching into WmHandle (AGENTS.md).
+
 #define BUSTER_WINDOW_IMPLEMENTATION 1
 #include <buster/lib/window/internal.h>
 #undef BUSTER_WINDOW_IMPLEMENTATION

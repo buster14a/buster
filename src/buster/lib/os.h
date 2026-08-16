@@ -1,4 +1,18 @@
 #pragma once
+
+// The platform boundary: virtual memory, threads and synchronization,
+// files, process spawn/wait, dynamic libraries, timestamps, and failure
+// reporting, one API over Linux, Windows, macOS, Android, and iOS.
+//
+// This header also owns the SPMD lane model every parallel phase uses
+// (AGENTS.md): lane_run starts or reuses a persistent worker gang, every
+// lane runs the same callback, lane_index/lane_count/lane_range split the
+// work, lane_sync barriers, lane_broadcast shares one lane's value. Code
+// written against it must degrade to serial — a one-lane gang and
+// BUSTER_SINGLE_THREADED builds run the identical path. Lazily built
+// globals state BUSTER_CHECK_SERIAL_INITIALIZATION() and are filled by
+// their module's prewarm entry point before lanes run.
+
 #include <buster/lib/base.h>
 
 typedef struct ProtectionFlags ProtectionFlags;

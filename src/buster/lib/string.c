@@ -1,3 +1,9 @@
+// String8 operations: classification and numeric parsing, the
+// string_format family (integers up to u128, floats, padding), UTF-8/16
+// conversion, path helpers, and OS argument/command-line building
+// including Windows quoting. Everything allocates from caller arenas;
+// nothing here owns memory or touches the OS.
+
 #include <buster/lib/string.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/os.h>

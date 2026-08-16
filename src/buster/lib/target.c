@@ -1,3 +1,12 @@
+// Target and CPU-model knowledge: the feature-set algebra
+// (target_cpu_features_add/subset), host CPU detection dispatch (the
+// per-architecture probes live in x86_64.c and aarch64.c), the canonical
+// CPU model names and their feature tables that -march/-mcpu resolve
+// through (cpu_model_from_string, cpu_model_to_string_os), model/arch
+// compatibility checks, target triple splitting/printing, and per-target
+// data layouts. New CPU models are added to the tables here, spelled the
+// way cpu_model_to_string_os prints them.
+
 #include <buster/lib/target.h>
 
 #include <buster/lib/string.h>

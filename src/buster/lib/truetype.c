@@ -1,3 +1,9 @@
+// Dependency-free TrueType font parsing and glyph rasterization for the
+// retained UI stack: table directory and cmap/glyf/hmtx reading, outline
+// extraction, and scanline coverage rasterization into byte bitmaps.
+// Input fonts are untrusted files — offsets and counts are checked before
+// use.
+
 #include <buster/lib/truetype.h>
 #include <buster/lib/float.h>
 #include <buster/lib/string.h>

@@ -1,3 +1,9 @@
+// Process entry for every platform: main plus the Android/iOS/Windows
+// freestanding variants, argument processing into buster_entry_point,
+// crash-signal reporting, the fuzzer entry, and — for freestanding links —
+// the minimal libc surface (memset/memcpy/strlen/abort/...) the compiler
+// may emit calls to.
+
 #include <buster/lib/entry_point.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/target.h>

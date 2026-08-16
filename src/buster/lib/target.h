@@ -1,5 +1,11 @@
 #pragma once
 
+// Target description shared by every compiler layer: architecture, OS,
+// environment, CPU model, and the TargetCpuFeatures bit set, plus the
+// queries codegen and the frontend make against them. A Target value is
+// plain data — building one never probes the host; cpu_detect_* does that
+// explicitly.
+
 #include <buster/lib/base.h>
 
 typedef enum CpuArch

@@ -1,5 +1,12 @@
 #pragma once
 
+// The foundation every file includes first: compiler/platform detection
+// macros, fixed-width scalar aliases, linkage and attribute macros
+// (BUSTER_F_DECL, BUSTER_GLOBAL_LOCAL, ...), assertion/check macros, the
+// STRUCT/slice declaration idioms, ByteSlice, and String8 with the S8("")
+// literal — the repository's replacement for C strings. Keep this header
+// dependency-free; anything needing the OS belongs in os.h.
+
 // This should be enough to achieve compilation of headers
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

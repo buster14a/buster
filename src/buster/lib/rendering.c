@@ -1,3 +1,11 @@
+// Platform-neutral front door of the rendering module: draw-list
+// generation, font/texture orchestration, and lifecycle policy shared by
+// every backend. Native API calls live in the backend implementation files
+// under rendering/ (Vulkan, Metal, ...), which this module selects and
+// includes; backends consume window handles only through WmNativeSurface
+// (AGENTS.md). Retained as opt-in infrastructure — the default build runs
+// headless.
+
 #include <buster/lib/rendering/internal.h>
 
 bool rendering_vulkan_window_requires_device_initialization(bool device_initialized)
