@@ -16,6 +16,12 @@
 #pragma GCC diagnostic pop
 #endif
 
+#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
+#define BUSTER_METADATA_AVX512 1
+#else
+#define BUSTER_METADATA_AVX512 0
+#endif
+
 // The generated tables stay pointer-free so Buster itself can consume them:
 // the string pool is a switch over 422 flat chunks and the numeric blobs add a
 // base64 group decode on top of a 560-way switch, so every single byte costs a
@@ -2766,30 +2772,55 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
     return BUSTER_X86_METADATA_BLOCKER_NONE;
 }
 
+// The nine architectural widths are all multiples of eight up to 1024, so
+// `width >> 3` indexes them densely and the switch becomes one load.  Every
+// other index holds UNKNOWN, which is exactly what the switch's default
+// returned, so a misaligned or out-of-range width lands on it too.
+static u16 const buster_x86_metadata_width_flag_table[129] = {
+    [8 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_8,       [16 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_16,
+    [32 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_32,     [64 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_64,
+    [80 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_80,     [128 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_128,
+    [256 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_256,   [512 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_512,
+    [1024 >> 3] = BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024,
+};
+
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_width_flags(u16 width)
 {
-    switch (width)
-    {
-    case 8: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_8;
-    case 16: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_16;
-    case 32: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_32;
-    case 64: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_64;
-    case 80: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_80;
-    case 128: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_128;
-    case 256: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_256;
-    case 512: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_512;
-    case 1024: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024;
-    default: return BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;
-    }
+    u32 index = (u32)width >> 3;
+    bool indexable = (width & 7) == 0 && index < BUSTER_ARRAY_LENGTH(buster_x86_metadata_width_flag_table);
+    u16 flags = indexable ? buster_x86_metadata_width_flag_table[index] : 0;
+    return flags ? flags : BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;
+}
+
+#define BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY 0xFFu
+static u8 const buster_x86_metadata_required_physical_kind[16] = {
+    [BUSTER_X86_METADATA_OPERAND_NONE] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [BUSTER_X86_METADATA_OPERAND_REGISTER] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+    [BUSTER_X86_METADATA_OPERAND_MEMORY] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+    [BUSTER_X86_METADATA_OPERAND_IMMEDIATE] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+    [BUSTER_X86_METADATA_OPERAND_RELATIVE] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+    [BUSTER_X86_METADATA_OPERAND_ABSOLUTE] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE,
+    [BUSTER_X86_METADATA_OPERAND_BASE] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [BUSTER_X86_METADATA_OPERAND_SEGMENT] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR] = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+    [BUSTER_X86_METADATA_OPERAND_PSEUDO] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [10] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY, [11] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [12] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY, [13] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+    [14] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY, [15] = BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY,
+};
+
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_operand_class_extended(BusterX86MetadataPhysicalOperandKind kind, u8 register_physical_class)
+{
+    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) return BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY;
+    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_IMMEDIATE;
+    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_RELATIVE;
+    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_ABSOLUTE;
+    return register_physical_class;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_operand_class(BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) return BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY;
-    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_IMMEDIATE;
-    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_RELATIVE;
-    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_ABSOLUTE;
-    return operand.reg.physical_class;
+    return buster_x86_metadata_emit_operand_class_extended(operand.kind, operand.reg.physical_class);
 }
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_operand_width(BusterX86MetadataPhysicalOperand operand)
@@ -2978,38 +3009,33 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
                                                                     BusterX86MetadataPatternSemantics pattern)
 {
     u8 actual_class = buster_x86_metadata_emit_operand_class(physical);
-    bool address_generator = metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
-        physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
-        return false;
-    if ((metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY || address_generator) &&
-        physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
-        return false;
-    // XED exposes an AGEN source operand for address-only forms such as LEA.
-    // The public physical API represents the same ModRM/SIB address as a
-    // memory operand; no data width or load/store semantics are implied.
-    if (address_generator && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) return false;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
-        return false;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_RELATIVE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE)
-        return false;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_ABSOLUTE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
-        return false;
-    if (!address_generator && metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE &&
-        metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN &&
-        metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_ANY && metadata.physical_class != actual_class)
-        return false;
+    u8 metadata_kind = metadata.kind;
+    BusterX86MetadataPhysicalOperandKind physical_kind = physical.kind;
     u16 width = buster_x86_metadata_emit_operand_width(physical);
-    bool vector_register = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                           (physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
-                            physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
-                            physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM);
-    bool variable_encoded_width = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE ||
-                                  physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE ||
-                                  physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE;
-    if ((metadata.kind == BUSTER_X86_METADATA_OPERAND_RELATIVE || metadata.kind == BUSTER_X86_METADATA_OPERAND_ABSOLUTE) &&
-        physical.width && pattern.relative_width && physical.width != (u16)pattern.relative_width * 8)
-        return false;
+    u8 metadata_physical_class = metadata.physical_class;
+    u8 physical_reg_physical_class = physical.reg.physical_class;
+    u16 physical_width = physical.width;
+    u16 metadata_physical_width_flags = metadata.physical_width_flags;
+    u8 pattern_relative_width = pattern.relative_width;
+    u16 width_flags = buster_x86_metadata_emit_width_flags(width);
+    bool physical_has_symbol = physical.has_symbol;
+
+    bool address_generator = metadata_kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR;
+    // Five of the rejects below said the same thing: a metadata kind that
+    // names one physical kind rejects every other one.  XED's AGEN source
+    // operand (address-only forms such as LEA) is the sixth row: the public
+    // physical API spells that ModRM/SIB address as a memory operand, so it
+    // requires MEMORY exactly like OPERAND_MEMORY does, which is why the old
+    // body tested it twice.  `kind_pair_any` marks the kinds that constrain
+    // nothing.  The index is masked rather than bounds-checked because the
+    // table covers the whole 4-bit range the kind enum can occupy.
+    u8 required_physical_kind = buster_x86_metadata_required_physical_kind[metadata_kind & 15];
+    u32 kind_pair_reject = (u32)(required_physical_kind != BUSTER_X86_METADATA_REQUIRED_PHYSICAL_KIND_ANY) &
+                           (u32)(physical_kind != required_physical_kind);
+    bool b0 = (!address_generator && metadata_physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE && metadata_physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN && metadata_physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_ANY && metadata_physical_class != actual_class);
+    bool vector_register = physical_kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER && (physical_reg_physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM || physical_reg_physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM || physical_reg_physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM);
+    bool variable_encoded_width = physical_kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || physical_kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE || physical_kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE;
+    bool b1 = ((metadata_kind == BUSTER_X86_METADATA_OPERAND_RELATIVE || metadata_kind == BUSTER_X86_METADATA_OPERAND_ABSOLUTE) && physical_width && pattern_relative_width && physical_width != (u16)pattern_relative_width * 8);
     // Some imported vector forms annotate a vector register with its scalar
     // element width (for example the AVX2 gather rows), while other rows use
     // the architectural vector width.  The physical class already carries
@@ -3020,25 +3046,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
     // an element width, not a request for an 8-bit physical register.  Keep
     // the architectural class and width validation, but do not compare the
     // element qualifier with the physical k-register width.
-    bool architectural_mask_register = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                                       physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
+    bool architectural_mask_register = physical_kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER && physical_reg_physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
     // A symbolic immediate carries an explicit requested field width.  Keep
     // that width authoritative during source selection: otherwise PUSH's
     // imm32 spelling is indistinguishable from its shorter imm8 sibling and
     // the shortest-form tie breaker silently truncates the relocation field.
     // Numeric immediates remain variable-width so value fitting can select the
     // canonical shortest encoding.
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical.has_symbol && width &&
-        metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
-        metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY &&
-        !(metadata.physical_width_flags & buster_x86_metadata_emit_width_flags(width)))
-        return false;
-    if (architectural_mask_register && width && width != 64) return false;
-    if (!address_generator && !architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
-        metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
-        !(metadata.physical_width_flags & buster_x86_metadata_emit_width_flags(width)))
-        return false;
-    return true;
+    bool b2 = (metadata_kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical_has_symbol && width && metadata_physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN && metadata_physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY && !(metadata_physical_width_flags & width_flags));
+    bool b3 = (architectural_mask_register && width && width != 64);
+    bool b4 = (!address_generator && !architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata_physical_width_flags && metadata_physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN && !(metadata_physical_width_flags & width_flags));
+
+    return !((kind_pair_reject | (u32)b0) | ((u32)b1 | (u32)b2) | ((u32)b3 | (u32)b4));
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX86MetadataOperand metadata,
@@ -9056,7 +9075,6 @@ BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_string(u64 hash, B
 
 BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_operand(u64 hash, BusterX86MetadataOperand value)
 {
-    u32 index = 0;
     hash = buster_x86_metadata_completion_digest_string(hash, value.atom);
     hash = buster_x86_metadata_completion_digest_string(hash, value.width);
     hash = buster_x86_metadata_completion_digest_byte(hash, value.slot);
@@ -9064,8 +9082,6 @@ BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_operand(u64 hash, 
     hash = buster_x86_metadata_completion_digest_byte(hash, value.kind);
     hash = buster_x86_metadata_completion_digest_byte(hash, value.access);
     hash = buster_x86_metadata_completion_digest_byte(hash, value.field_source);
-    for (; index < BUSTER_ARRAY_LENGTH(value.reserved); index += 1)
-        hash = buster_x86_metadata_completion_digest_byte(hash, value.reserved[index]);
     hash = buster_x86_metadata_completion_digest_byte(hash, value.physical_class);
     return buster_x86_metadata_completion_digest_u16(hash, value.physical_width_flags);
 }

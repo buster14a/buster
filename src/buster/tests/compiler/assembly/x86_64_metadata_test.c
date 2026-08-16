@@ -76,8 +76,6 @@ BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_operand(u64 hash, B
     hash = x86_64_metadata_test_completion_hash_byte(hash, value.kind);
     hash = x86_64_metadata_test_completion_hash_byte(hash, value.access);
     hash = x86_64_metadata_test_completion_hash_byte(hash, value.field_source);
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(value.reserved); index += 1)
-        hash = x86_64_metadata_test_completion_hash_byte(hash, value.reserved[index]);
     hash = x86_64_metadata_test_completion_hash_byte(hash, value.physical_class);
     return x86_64_metadata_test_completion_hash_u16(hash, value.physical_width_flags);
 }
@@ -2921,7 +2919,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     // The post-rebase coverage audit folds the canonical form dispositions
     // (including the baseline legacy-width and MMX rows) into this digest.
     // Keep the complete census tied to that current metadata snapshot.
-    bool completion_totals_match = completion.digest == UINT64_C(0xcbfbcf6712723dfa) &&
+    bool completion_totals_match = completion.digest == UINT64_C(0x6247277b270816d4) &&
                                    completion.form_count == 11013 && completion.normalized_count == 10607 &&
                                    completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&

@@ -348,7 +348,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, audit.entry_count == form_count);
     BUSTER_TEST(arguments, audit.normalized_entry_count == buster_x86_metadata_normalized_form_count());
     BUSTER_TEST(arguments, audit.emitted_count == 10607 && audit.blocked_count == 406);
-    BUSTER_TEST(arguments, buster_x86_metadata_coverage_digest(entries, audit.entry_count, form_count) == UINT64_C(0xcbfbcf6712723dfa));
+    BUSTER_TEST(arguments, buster_x86_metadata_coverage_digest(entries, audit.entry_count, form_count) == UINT64_C(0x6247277b270816d4));
     BUSTER_TEST(arguments, structural.structural_complete);
     BUSTER_TEST(arguments, structural.records_complete);
     BUSTER_TEST(arguments, structural.form_partition_complete);

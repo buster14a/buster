@@ -283,7 +283,6 @@ struct BusterX86MetadataOperand
     u8 kind;
     u8 access;
     u8 field_source;
-    u8 reserved[3];
     // These are normalized views derived from the imported XED operand
     // vocabulary.  A zero/UNKNOWN width is deliberate when the source token
     // is symbolic; callers can still match the physical class without
@@ -616,31 +615,33 @@ struct BusterX86MetadataPhysicalRegister
     u16 width;
     u8 physical_class;
     bool high_byte;
-    u8 reserved[3];
 };
 
 typedef struct BusterX86MetadataPhysicalMemory BusterX86MetadataPhysicalMemory;
 struct BusterX86MetadataPhysicalMemory
 {
-    BusterX86MetadataPhysicalRegister base;
-    BusterX86MetadataPhysicalRegister index;
     s64 displacement;
     s64 addend;
     String8 symbol;
-    u8 address_size;
-    u8 scale;
-    u8 segment;
-    bool has_base;
-    bool has_index;
-    bool has_displacement;
-    bool rip_relative;
-    bool has_symbol;
-    bool has_segment;
-    bool vsib;
+    BusterX86MetadataPhysicalRegister base;
+    BusterX86MetadataPhysicalRegister index;
     // Source-level aggregate qualifiers (xmmword/ymmword/zmmword) are
     // distinct from the scalar element width used by the encoding schema.
     u16 source_width;
-    u8 reserved[1];
+    u8 address_size;
+    u8 scale;
+    u8 segment;
+    struct
+    {
+        u8 has_base:1;
+        u8 has_index:1;
+        u8 has_displacement:1;
+        u8 rip_relative:1;
+        u8 has_symbol:1;
+        u8 has_segment:1;
+        u8 vsib:1;
+        u8 reserved:1;
+    };
 };
 
 typedef struct BusterX86MetadataPhysicalOperand BusterX86MetadataPhysicalOperand;
@@ -648,22 +649,30 @@ struct BusterX86MetadataPhysicalOperand
 {
     BusterX86MetadataPhysicalOperandKind kind;
     u16 width;
-    u8 reserved[1];
-    BusterX86MetadataPhysicalRegister reg;
-    BusterX86MetadataPhysicalMemory memory;
+    struct
+    {
+        u8 has_symbol:1;
+        u8 has_value:1;
+        u8 has_unsigned_value:1;
+        u8 reserved:5;
+    };
+    union
+    {
+        BusterX86MetadataPhysicalRegister reg;
+        BusterX86MetadataPhysicalMemory memory;
+    };
     // For immediate/relative/absolute operands, value is a signed
     // mathematical value when has_value is true.  Unsigned encodings may
     // instead use unsigned_value with has_unsigned_value true; that field is
     // a complete u64 bit pattern and is not obtained by converting through
     // s64.  A symbol is the third, mutually exclusive, value state.
-    s64 value;
-    u64 unsigned_value;
-    s64 addend;
+    union
+    {
+        s64 value;
+        u64 unsigned_value;
+        s64 addend;
+    };
     String8 symbol;
-    bool has_symbol;
-    bool has_value;
-    bool has_unsigned_value;
-    u8 reserved2[5];
 };
 
 typedef enum BusterX86MetadataRoundingMode
