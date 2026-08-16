@@ -73,7 +73,8 @@ BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
-BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
+BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                CDeclaration* declaration, CTypeId inherited_base);
 BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);

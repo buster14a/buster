@@ -653,6 +653,13 @@ struct CDeclaration
     CSourceLocation location;
     u32 token_start;
     u32 token_count;
+    // The one declarator this declaration owns out of a comma-separated list,
+    // initializer included and the separating ',' or ';' excluded. Zero count
+    // means the declaration was not split and owns its whole token range;
+    // token_start/token_count always span the declaration specifiers, which
+    // every declarator of the list shares.
+    u32 declarator_start;
+    u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
     u32 parameter_start;
@@ -669,7 +676,10 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
-    u8 reserved;
+    // Set on the second and later declarators of a list: the specifiers were
+    // already parsed for the first one, so base_type is supplied rather than
+    // recomputed.
+    bool is_declarator_continuation;
 };
 
 typedef struct CDeferredStaticAssert CDeferredStaticAssert;
@@ -732,6 +742,10 @@ struct CParserDeclaration
     CSourceLocation location;
     u32 token_start;
     u32 token_count;
+    // See CDeclaration: one declarator of a comma-separated list, or a zero
+    // count when the declaration was not split.
+    u32 declarator_start;
+    u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
     u32 name_token;
@@ -745,7 +759,8 @@ struct CParserDeclaration
     bool is_constexpr;
     bool is_variadic;
     bool seen_equal;
-    u8 reserved[3];
+    bool is_declarator_continuation;
+    u8 reserved[2];
 };
 
 typedef struct CParserResult CParserResult;

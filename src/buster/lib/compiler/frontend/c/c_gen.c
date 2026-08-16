@@ -24192,8 +24192,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration 
 
 BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
 {
-    u32 start = declaration.token_start;
-    u32 end = start + declaration.token_count;
+    // A declarator split out of a comma-separated list owns only its own
+    // segment; scanning the whole declaration would hand it the initializer of
+    // an earlier declarator.
+    u32 start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+    u32 end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count
+                                           : declaration.token_start + declaration.token_count;
     u32 depth = 0;
     for (u32 index = start; index < end; index += 1)
     {

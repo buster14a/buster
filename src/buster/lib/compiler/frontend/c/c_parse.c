@@ -2,9 +2,13 @@
 // passes over the preprocessed token stream, entered through c_parse_ast and
 // c_analyze_semantics at the bottom of the file (c_parse runs both):
 // - c_parse_ast is one linear scan that splits the stream into top-level
-//   CDeclaration records — token extents, the name token, the body range,
-//   and typedef/constexpr/variadic flags — by delimiter counting alone. It
-//   builds no tree; every later consumer re-walks token ranges.
+//   CParserDeclaration records — token extents, the name token, the body
+//   range, and typedef/constexpr/variadic flags — by delimiter counting
+//   alone. It builds no tree; every later consumer re-walks token ranges.
+//   One record is one declarator, not one declaration: a comma-separated
+//   list is split into a record per declarator, each keeping the shared
+//   specifiers in token_start/token_count and its own declarator segment in
+//   declarator_start/declarator_count.
 // - c_analyze_semantics sizes its tables from a token census, then builds
 //   the CParseResult the lowering stage consumes: interned types, entities,
 //   scopes, and diagnostics.
@@ -3574,8 +3578,9 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
         {
             continue;
         }
-        u32 start = declaration.token_start;
-        u32 end = start + declaration.token_count;
+        u32 start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+        u32 end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count
+                                               : declaration.token_start + declaration.token_count;
         u32 initializer = end;
         u32 depth = 0;
         for (u32 index = start; index < end; index += 1)
@@ -6723,10 +6728,16 @@ BUSTER_C_INTERNAL bool c_parse_auto_type_token_in_declaration(CPreprocessResult 
     return false;
 }
 
+// `inherited_base` carries the declaration specifiers already parsed for the
+// first declarator of a comma-separated list; it is invalid for every other
+// declaration, which parses its own specifiers. Reusing the type matters
+// beyond the saved work: "struct { int x; } a, b;" must give a and b the one
+// anonymous type, not one per declarator.
 BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                  CDeclaration* declaration)
+                                                  CDeclaration* declaration, CTypeId inherited_base)
 {
-    u32 end = declaration->token_start + declaration->token_count;
+    u32 end = declaration->declarator_count ? declaration->declarator_start + declaration->declarator_count
+                                            : declaration->token_start + declaration->token_count;
     u32 auto_declaration_end = declaration->body_start ? declaration->body_start - 1 : end;
     u32 auto_token_index = UINT32_MAX;
     if (c_parse_auto_type_token_in_declaration(preprocess, declaration->token_start, auto_declaration_end, &auto_token_index))
@@ -6744,8 +6755,9 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
         return;
     }
     u32 declarator_end = declaration->body_start ? declaration->body_start - 1 : end;
+    u32 name_search_start = declaration->declarator_count ? declaration->declarator_start : declaration->token_start;
     u32 name_index = declarator_end;
-    for (u32 index = declaration->token_start; index < declarator_end; index += 1)
+    for (u32 index = name_search_start; index < declarator_end; index += 1)
     {
         if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), declaration->name))
         {
@@ -6774,8 +6786,16 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
         declaration->alignment_count = 0;
     }
     u32 declarator_start = declaration->token_start;
-    CTypeId base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
-    base = c_parse_apply_vector_attribute(result, preprocess, base, declaration->token_start, name_index);
+    CTypeId base = inherited_base;
+    if (base.value == C_ID_UNDERLYING_INVALID)
+    {
+        base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
+        base = c_parse_apply_vector_attribute(result, preprocess, base, declaration->token_start, name_index);
+    }
+    else
+    {
+        declarator_start = declaration->declarator_start;
+    }
     if (base.value == C_ID_UNDERLYING_INVALID)
     {
         return;
@@ -10020,8 +10040,11 @@ BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessRes
 
 BUSTER_C_INTERNAL void c_parser_parse_declaration_expression(CPreprocessResult preprocess, CParserDeclaration* declaration)
 {
-    u32 start = declaration->token_start;
-    u32 end = start + declaration->token_count;
+    // A declarator split out of a list owns only its own initializer; an
+    // unsplit declaration owns its whole range.
+    u32 start = declaration->declarator_count ? declaration->declarator_start : declaration->token_start;
+    u32 end = declaration->declarator_count ? declaration->declarator_start + declaration->declarator_count
+                                            : declaration->token_start + declaration->token_count;
     if (declaration->kind == C_PARSER_DECLARATION_STATIC_ASSERT && start + 1 < end &&
         c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
@@ -10077,6 +10100,104 @@ BUSTER_C_INTERNAL void c_parser_parse_declaration_expression(CPreprocessResult p
             return;
         }
     }
+}
+
+// One declarator of a file-scope comma-separated list. `start`/`count` cover
+// the segment between two top-level separators; for the first declarator that
+// range still carries the declaration specifiers, which is why the name scan
+// below is the same last-identifier rule the whole-declaration scan uses.
+typedef struct CParserDeclarator CParserDeclarator;
+struct CParserDeclarator
+{
+    u32 name_token;
+    u32 function_name_token;
+    bool seen_equal;
+    bool is_variadic;
+};
+
+BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    CParserDeclarator declarator = {
+        .name_token = C_ID_UNDERLYING_INVALID,
+        .function_name_token = C_ID_UNDERLYING_INVALID,
+    };
+    u32 delimiter_count = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            bool keyword = c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect);
+            if (!delimiter_count && !declarator.seen_equal && !keyword)
+            {
+                declarator.name_token = index;
+            }
+            else if (declarator.name_token == C_ID_UNDERLYING_INVALID && !keyword)
+            {
+                declarator.name_token = index;
+            }
+        }
+        declarator.is_variadic |= c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
+        if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+        {
+            declarator.seen_equal = true;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index > start &&
+                preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), preprocess.dialect) &&
+                !declarator.seen_equal && declarator.function_name_token == C_ID_UNDERLYING_INVALID)
+            {
+                u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
+                if (c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
+                {
+                    declarator.name_token = parenthesized_name_token;
+                }
+                else
+                {
+                    declarator.function_name_token = index - 1;
+                    declarator.name_token = declarator.function_name_token;
+                }
+            }
+            delimiter_count += 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            delimiter_count -= delimiter_count != 0;
+        }
+    }
+    return declarator;
+}
+
+// End of the declarator that begins at `start`: the first top-level ',' or the
+// end of the declarator list. Delimiters keep an aggregate body, a parameter
+// list, an array bound, and a braced initializer from being read as separators.
+BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 delimiter_count = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            delimiter_count += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            delimiter_count -= delimiter_count != 0;
+        }
+        else if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            return index;
+        }
+    }
+    return end;
 }
 
 CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
@@ -10230,37 +10351,87 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                                       : c_parse_type_only_declaration(preprocess, start, index) ? C_PARSER_DECLARATION_TYPE
                                       : name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_OBJECT
                                                                                : C_PARSER_DECLARATION_UNKNOWN;
-        CParserDeclaration* declaration = arena_allocate(arena, CParserDeclaration, 1);
-        *declaration = (CParserDeclaration){
-            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
-            .token_start = start,
-            .token_count = index - start,
-            .body_start = body_start,
-            .body_token_count = body_token_count,
-            .name_token = name_token,
-            .function_name_token = function_name_token,
-            .kind = kind,
-            .is_definition = body_start != 0 || (kind == C_PARSER_DECLARATION_OBJECT && seen_equal),
-            .is_typedef = is_typedef,
-            .is_constexpr = is_constexpr,
-            .is_variadic = is_variadic,
-            .seen_equal = seen_equal,
-        };
-        c_parser_parse_declaration_expression(preprocess, declaration);
-        if (kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
+        // A declarator list binds one name per declarator, but the scan above
+        // tracks only the first: it stops updating name_token at the first
+        // top-level comma. Split the declaration so every declarator gets its
+        // own segment, its own name and its own initializer, the way the
+        // block-scope path in c_parse_local_declarations already does. The
+        // declaration specifiers stay shared through token_start/token_count,
+        // which is what the storage-class and attribute scans read.
+        u32 declarator_list_end = index;
+        if (declarator_list_end > start && c_token_is_punctuator(&preprocess.tokens[declarator_list_end - 1], C_PUNCTUATOR_SEMICOLON))
         {
-            c_parser_parse_function_body(arena, preprocess, declaration);
+            declarator_list_end -= 1;
         }
-        if (result.last_declaration)
+        bool split_declarators = seen_declarator_comma && !body_start && kind != C_PARSER_DECLARATION_STATIC_ASSERT &&
+                                 kind != C_PARSER_DECLARATION_ASSEMBLY && kind != C_PARSER_DECLARATION_TYPE;
+        u32 segment_start = start;
+        bool continuation = false;
+        while (true)
         {
-            result.last_declaration->next = declaration;
+            u32 segment_end = split_declarators ? c_parser_declarator_list_segment_end(preprocess, segment_start, declarator_list_end)
+                                                : declarator_list_end;
+            CParserDeclaration* declaration = arena_allocate(arena, CParserDeclaration, 1);
+            *declaration = (CParserDeclaration){
+                .location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+                .token_start = start,
+                .token_count = index - start,
+                .declarator_start = split_declarators ? segment_start : 0,
+                .declarator_count = split_declarators ? segment_end - segment_start : 0,
+                .body_start = body_start,
+                .body_token_count = body_token_count,
+                .name_token = name_token,
+                .function_name_token = function_name_token,
+                .kind = kind,
+                .is_definition = body_start != 0 || (kind == C_PARSER_DECLARATION_OBJECT && seen_equal),
+                .is_typedef = is_typedef,
+                .is_constexpr = is_constexpr,
+                .is_variadic = is_variadic,
+                .seen_equal = seen_equal,
+                .is_declarator_continuation = continuation,
+            };
+            if (split_declarators)
+            {
+                CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+                declaration->name_token = declarator.name_token;
+                declaration->function_name_token = declarator.function_name_token;
+                declaration->seen_equal = declarator.seen_equal;
+                declaration->is_variadic = declarator.is_variadic;
+                declaration->kind = is_typedef                                                   ? C_PARSER_DECLARATION_TYPEDEF
+                                    : declarator.function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
+                                    : declarator.name_token != C_ID_UNDERLYING_INVALID          ? C_PARSER_DECLARATION_OBJECT
+                                                                                                : C_PARSER_DECLARATION_UNKNOWN;
+                declaration->is_definition = declaration->kind == C_PARSER_DECLARATION_OBJECT && declarator.seen_equal;
+            }
+            c_parser_parse_declaration_expression(preprocess, declaration);
+            if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
+            {
+                c_parser_parse_function_body(arena, preprocess, declaration);
+            }
+            if (result.last_declaration)
+            {
+                result.last_declaration->next = declaration;
+            }
+            else
+            {
+                result.first_declaration = declaration;
+            }
+            result.last_declaration = declaration;
+            result.declaration_count += 1;
+            if (!split_declarators || segment_end >= declarator_list_end)
+            {
+                break;
+            }
+            // An empty trailing segment ("int a, ;") would otherwise be emitted
+            // with a zero declarator count, which reads as an unsplit
+            // declaration owning the whole range.
+            segment_start = segment_end + 1;
+            if (segment_start >= declarator_list_end)
+            {
+                break;
+            }
+            continuation = true;
         }
-        else
-        {
-            result.first_declaration = declaration;
-        }
-        result.last_declaration = declaration;
-        result.declaration_count += 1;
     }
     return result;
 }
@@ -10290,10 +10461,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     u32 identifier_count = 0;
     u32 semicolon_count = 0;
     u32 comma_count = 0;
+    u32 declarator_list_comma_count = 0;
     u32 open_parenthesis_count = 0;
     u32 open_bracket_count = 0;
     u32 open_brace_count = 0;
     u32 for_count = 0;
+    u32 brace_depth = 0;
     u32 type_delimiter_depth = 0;
     u32 maximum_delimiter_depth = 0;
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
@@ -10311,6 +10484,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
         {
             comma_count += 1;
+            // An upper bound on the declarations a file-scope declarator list
+            // adds, since each split declarator becomes its own CDeclaration.
+            // Only brace depth gates it: c_parse_ast diagnoses every brace
+            // imbalance and c_analyze_semantics returns before this capacity is
+            // used, while a stray '(' inside a function body goes undiagnosed
+            // and would hide the file-scope commas that follow it. Counting
+            // parameter-list and attribute commas here is the price of a bound
+            // that can only ever be too large.
+            declarator_list_comma_count += brace_depth == 0;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -10327,12 +10509,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             open_brace_count += 1;
+            brace_depth += 1;
             type_delimiter_depth += 1;
             maximum_delimiter_depth = BUSTER_MAX(maximum_delimiter_depth, type_delimiter_depth);
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
                  c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
         {
+            brace_depth -= brace_depth != 0 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
             type_delimiter_depth -= type_delimiter_depth != 0;
         }
     }
@@ -10392,7 +10576,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         .mutation_capacity = type_mutation_capacity,
         .expression_task_capacity = expression_task_capacity,
     };
-    result.declaration_capacity = semicolon_count + open_brace_count + 1;
+    result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
     result.type_capacity = token_count * 2 + 1;
     result.parameter_capacity = comma_count + open_parenthesis_count + 1;
     result.member_capacity = identifier_count + semicolon_count + 1;
@@ -10461,6 +10645,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         .token_start = 0,
         .token_end = UINT32_MAX,
     };
+    CTypeId declarator_list_base = C_TYPE_ID_INVALID;
     for (CParserDeclaration* syntax_declaration = syntax.first_declaration; syntax_declaration; syntax_declaration = syntax_declaration->next)
     {
         u32 start = syntax_declaration->token_start;
@@ -10499,9 +10684,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             .location = location,
             .token_start = start,
             .token_count = index - start,
+            .declarator_start = syntax_declaration->declarator_start,
+            .declarator_count = syntax_declaration->declarator_count,
             .body_start = body_start,
             .body_token_count = body_count,
             .type = C_TYPE_ID_INVALID,
+            .base_type = C_TYPE_ID_INVALID,
             .entity = C_ENTITY_ID_INVALID,
             .scope = C_SCOPE_ID_INVALID,
             .syntax_declaration = syntax_declaration,
@@ -10510,10 +10698,19 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             .is_definition = syntax_declaration->is_definition,
             .is_variadic = variadic,
             .is_constexpr = is_constexpr,
+            .is_declarator_continuation = syntax_declaration->is_declarator_continuation,
         };
         if (!static_assertion && !global_assembly)
         {
-            c_parse_declaration_type(&machine, &result, preprocess, declaration);
+            // Declarators split out of one list share the specifiers the first
+            // of them parsed. The syntax list keeps them consecutive, so the
+            // leader's base type is still the one in hand.
+            CTypeId inherited_base = declaration->is_declarator_continuation ? declarator_list_base : C_TYPE_ID_INVALID;
+            c_parse_declaration_type(&machine, &result, preprocess, declaration, inherited_base);
+            if (!declaration->is_declarator_continuation)
+            {
+                declarator_list_base = declaration->base_type;
+            }
             if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < result.type_count)
             {
                 CTypeId object_type = C_TYPE_ID_INVALID;
@@ -10704,87 +10901,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                      .value = 0,
                                  },
                                  entity);
-        if (kind == C_DECLARATION_TYPEDEF)
-        {
-            u32 declaration_end = declaration->token_start + declaration->token_count;
-            u32 segment_start = declaration_end;
-            u32 delimiter_depth = 0;
-            for (u32 token_index = declaration->token_start; token_index < declaration_end; token_index += 1)
-            {
-                CToken token = preprocess.tokens[token_index];
-                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                    c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                {
-                    delimiter_depth += 1;
-                }
-                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                {
-                    delimiter_depth -= delimiter_depth != 0;
-                }
-                else if (!delimiter_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-                {
-                    segment_start = token_index + 1;
-                    break;
-                }
-            }
-            CTypeId alias_base = declaration->base_type;
-            while (segment_start < declaration_end)
-            {
-                u32 segment_end = segment_start;
-                delimiter_depth = 0;
-                while (segment_end < declaration_end)
-                {
-                    CToken token = preprocess.tokens[segment_end];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                        c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        delimiter_depth += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-                    {
-                        delimiter_depth -= delimiter_depth != 0;
-                    }
-                    else if (!delimiter_depth && (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON)))
-                    {
-                        break;
-                    }
-                    segment_end += 1;
-                }
-                u32 name_index = segment_start;
-                while (name_index < segment_end && preprocess.tokens[name_index].kind != C_TOKEN_IDENTIFIER)
-                {
-                    name_index += 1;
-                }
-                u32 declarator_index = segment_start;
-                CTypeId alias_type = c_parse_pointer_chain(&result, preprocess, alias_base, &declarator_index, name_index);
-                if (name_index < segment_end && declarator_index == name_index)
-                {
-                    u32 suffix_index = c_parse_skip_attributes(preprocess, name_index + 1, segment_end);
-                    alias_type = c_parse_array_suffixes(&result, preprocess, alias_type, &suffix_index, segment_end);
-                    suffix_index = c_parse_skip_attributes(preprocess, suffix_index, segment_end);
-                    String8 alias_name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]);
-                    if (suffix_index == segment_end && alias_type.value != C_ID_UNDERLYING_INVALID &&
-                        c_parse_lookup_entity(&result, (CScopeId){.value = 0}, alias_name).value == C_ID_UNDERLYING_INVALID)
-                    {
-                        CEntityId alias_entity = {.value = result.entity_count};
-                        BUSTER_CHECK(result.entity_count < result.entity_capacity);
-                        result.entities[result.entity_count++] = (CEntity){
-                            .name = alias_name,
-                            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[name_index]),
-                            .type = alias_type,
-                            .scope = {.value = 0},
-                            .next_in_scope = C_ENTITY_ID_INVALID,
-                            .declaration_index = result.declaration_count - 1,
-                            .kind = C_ENTITY_TYPEDEF,
-                        };
-                        c_parse_scope_add_entity(&result, (CScopeId){.value = 0}, alias_entity);
-                    }
-                }
-                segment_start = segment_end + 1;
-            }
-        }
     }
     if (result.enum_member_count)
     {
