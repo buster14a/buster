@@ -1,3 +1,14 @@
+// External GPU shader-pipeline orchestration. The driver hands this module
+// a shader compile request; gpu_target_parse classifies the target string
+// (SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, DXIL), and the
+// gpu_plan_* family builds a deterministic command plan — discovered
+// external tools, temporary files this module owns and deletes, and
+// expected artifacts — that execution then runs and validates. Everything
+// external stays external: the plans invoke installed toolchains
+// (clang/llc, spirv tools, metal, dxc) as subprocesses, adding no linked or
+// vendored dependency to the executable, and a missing tool or malformed
+// artifact is a structured error, not a crash.
+
 #include <buster/lib/compiler/gpu/gpu.h>
 
 #include <buster/lib/arena.h>

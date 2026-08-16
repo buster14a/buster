@@ -1,3 +1,19 @@
+// The Clang-like `ide cc` driver: two public calls (driver.h) split
+// argument parsing from execution. compiler_driver_parse_arguments turns
+// argv into a CompilerDriverInvocation — dialect, target/CPU/features,
+// inputs classified as C source, objects, or archives, and every output
+// mode — rejecting unknown languages and retired options explicitly
+// rather than guessing. compiler_driver_execute_invocation then runs the
+// selected pipeline: compiler_driver_execute_c_single carries a C input
+// through preprocess, parse, lowering, codegen, and object/executable
+// output (with -emit-llvm, Wasm64, and eBPF as alternate emissions), the
+// dynamic-library plumbing around compiler_driver_dynamic_libraries
+// resolves import libraries for hosted links, and
+// compiler_driver_execute_gpu isolates the external shader-toolchain
+// orchestration in gpu.h. compiler_prewarm at the top fills every lazily
+// built compile-path table on one thread before parallel lanes run
+// (AGENTS.md).
+
 #include <buster/lib/compiler/driver/driver.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>

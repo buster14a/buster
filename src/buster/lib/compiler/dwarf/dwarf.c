@@ -1,3 +1,14 @@
+// DWARF emission from the canonical debug model. dwarf_build at the bottom
+// chooses between two generators: dwarf_build_model, the current one,
+// walks the DebugModule type/scope/location records and emits
+// .debug_abbrev/.debug_info/.debug_line and friends through the dwarf_model_*
+// family, while dwarf_build_legacy remains for the callers that still
+// produce the older flat function records. The dwarf_emit_* primitives at
+// the top are the shared byte/LEB128 writers, and dwarf_cfi_* translates
+// codegen unwind actions into CFI. Relocations against code addresses are
+// recorded through dwarf_model_relocation rather than patched, so the
+// object writer and linker place the final values.
+
 #include <buster/lib/compiler/dwarf/dwarf.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/debug/debug.h>

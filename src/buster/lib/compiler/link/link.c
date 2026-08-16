@@ -1,3 +1,15 @@
+// The linker. Two public steps (link.h): link_objects merges ObjectFiles —
+// section merging, symbol resolution, relocation rebasing — into one
+// combined ObjectFile, and link_native_executable lays that file out as a
+// runnable image, dispatching near the bottom to one writer per
+// target/format family: static and dynamic ELF64 for x86-64 and AArch64,
+// hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
+// writers share the helpers above them — AArch64 branch range checks and
+// veneers, ELF .eh_frame table construction, PE export/import plumbing,
+// CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
+// ids — but each owns its image layout whole, because the formats agree
+// on almost nothing.
+
 #include <buster/lib/compiler/link/link.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>

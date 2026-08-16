@@ -1,5 +1,10 @@
 #pragma once
 
+// The linker's public API: link_objects merges ObjectFiles into one, and
+// link_native_executable lays the merged file out as a runnable image —
+// static/dynamic ELF64 (x86-64, AArch64, Android), hosted PE64,
+// imports-free UEFI PE64, and Mach-O.
+
 #include <buster/lib/compiler/object/object.h>
 
 typedef enum LinkError

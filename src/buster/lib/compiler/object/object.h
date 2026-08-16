@@ -1,5 +1,11 @@
 #pragma once
 
+// Format-neutral object model: the ObjectFile shape shared by the ELF64,
+// COFF, and Mach-O readers/writers, the codegen-module converter, archive
+// reading, the disassembly printer, and in-process execution of a linked
+// object. Readers bounds-check hostile input and return an invalid file
+// rather than crashing.
+
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/dwarf/dwarf.h>
 #include <buster/lib/compiler/codeview/codeview.h>

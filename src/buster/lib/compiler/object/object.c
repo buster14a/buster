@@ -1,3 +1,30 @@
+// The format-neutral object model and its three on-disk formats. An
+// ObjectFile is the shared in-memory shape — sections, symbols,
+// relocations, debug payloads — that codegen output is converted into
+// (object_from_canonical_codegen_module), textual disassembly is printed
+// from (object_print_assembly), and ELF64/COFF/Mach-O are read into and
+// written from. Readers treat input as hostile: every offset, count, and
+// string is bounds-checked before use, and malformed bytes produce an
+// invalid ObjectFile, never a crash — object_fuzz_test_input keeps that
+// honest.
+//
+// Layout, in file order; each anchor is a definition to search for:
+//   object_buffer_write .. object_writer_capacity  append-only write buffer
+//   object_assembly_append_*                       the disassembly printer
+//                                                  (x86 and AArch64 operand
+//                                                  and relocation rendering)
+//   object_read_u16 .. object_read_string_checked  checked reading primitives
+//   object_read_elf64, object_read_coff,           the three format readers
+//   object_read_mach_o64, object_read              and their dispatcher
+//   object_bytes_are_object, object_archive_read   archives and detection
+//   object_symbol_name_slot                        symbol-name interning
+//   object_windows_x64_unwind_build                Windows unwind info from
+//                                                  codegen unwind actions
+//   object_relocation_kind_from_codegen            codegen -> format
+//                                                  relocation mapping
+//   object_write_elf64, object_write_coff,         the three format writers
+//   object_write_mach_o64, object_write            and their dispatcher
+
 #include <buster/lib/compiler/object/object.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>

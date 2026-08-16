@@ -1,3 +1,17 @@
+// Canonical typed IR construction, ABI classification, and validation
+// (model.h owns the record shapes, ir.h the API). The construction
+// functions (ir_program_initialize, ir_program_add_*, ir_module_add_*,
+// ir_function_add_*) are thin capacity-checked appends; the substance here
+// is what sits between the frontend and the backends: source-map lookup
+// and canonical source recovery for diagnostics, label-provenance
+// propagation for computed goto (ir_label_provenance_*), the per-target
+// ABI classification the frontend and codegen both consume
+// (ir_system_v_abi_classes, ir_homogeneous_float_abi,
+// ir_classify_abi_value, ir_prepare_program_abi), and the module validator
+// (ir_validate_canonical_module) that every producer runs before machine
+// selection or Wasm emission so a diagnosed frontend failure cannot leak a
+// half-built function into codegen.
+
 #include <buster/lib/compiler/ir/ir.h>
 
 #include <buster/lib/file.h>

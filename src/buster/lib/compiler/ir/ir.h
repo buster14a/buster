@@ -1,5 +1,10 @@
 #pragma once
 
+// Canonical typed IR API over the record shapes in model.h: program/module/
+// function construction, ABI classification, label-provenance queries,
+// validation (run it before machine selection or Wasm emission), and
+// printing. Everything is arena-owned and integer-ID based.
+
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>

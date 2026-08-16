@@ -1,5 +1,14 @@
 #pragma once
 
+// Record shapes of the canonical typed IR: the format-neutral types,
+// values, instructions, blocks, functions, symbols, globals, and source
+// ranges every frontend lowers into and every backend consumes. Everything
+// is integer-ID based and arena-owned; the typed wrappers below exist so a
+// type id cannot be handed where a value id belongs. This layer is shared:
+// frontend entity ids, parser pointers, and language-specific sentinels
+// must not appear here (AGENTS.md). Construction and validation live in
+// ir.h/ir.c.
+
 #include <buster/lib/base.h>
 
 typedef u32 IrIdUnderlying;
