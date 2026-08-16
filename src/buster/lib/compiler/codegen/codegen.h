@@ -218,11 +218,13 @@ typedef enum CodegenModuleRelocationKind
 
 struct CodegenModuleRelocation
 {
-    IrSymbolId symbol;
+    // The wide member leads so the record packs to 32 bytes; `source` is
+    // stored as u8 for the same reason (the enum has four values).
     s64 addend;
+    IrSymbolId symbol;
     u32 offset;
-    CodegenModuleRelocationSource source;
     IrBlockId label_block;
+    u8 source;
     bool aarch64;
     bool absolute;
     bool label_address;
@@ -238,20 +240,21 @@ struct CodegenModuleRelocation
 };
 
 BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_SOURCE_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 40);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 0);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 8);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 16);
+BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 8);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 12);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 16);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 20);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 24);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 28);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 29);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 30);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 31);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 32);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 33);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 34);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 21);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 22);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 23);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 24);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 25);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 26);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 27);
 
 typedef struct CodegenModuleDataRelocation CodegenModuleDataRelocation;
 struct CodegenModuleDataRelocation

@@ -26,7 +26,7 @@ BUSTER_CT_CHECK(sizeof(MachineUse) == 8);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
 BUSTER_CT_CHECK(sizeof(MachineLocationSegment) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 96);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 20);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);

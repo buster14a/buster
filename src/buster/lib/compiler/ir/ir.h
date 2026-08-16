@@ -317,13 +317,17 @@ struct IrValue
 {
     IrTypeId canonical_type;
     IrInstructionId definition;
-    IrValueCategory category;
     u32 alignment;
+    // IrValueCategory; u8 keeps the record at 16 bytes (one million-plus
+    // instances per compile).
+    u8 category;
     bool is_read_only;
     bool points_to_read_only;
     bool is_volatile;
-    u8 reserved[1];
 };
+
+BUSTER_CT_CHECK((u32)IR_VALUE_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK(sizeof(IrValue) == 16);
 
 // Label metadata is populated only for values involved in address-of-label
 // provenance tracking, so it lives in a sparse per-function side table
