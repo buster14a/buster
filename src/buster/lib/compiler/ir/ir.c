@@ -522,7 +522,7 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, 
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool valid = instruction->canonical_type.value < program->types.count && ir_type_from_id(&program->types, instruction->canonical_type)->kind == IR_TYPE_VOID &&
                  instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                 extra.label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                 extra.label_name_count == (instruction->target_count ? (u32)(instruction->target_count - 1) : 0) &&
                  (!extra.label_name_count || extra.label_names) && extra.operand_name_count == instruction->operand_count &&
                  (!extra.operand_name_count || extra.operand_names) && (!extra.clobber_count || extra.clobbers) &&
                  instruction->result.value == IR_ID_UNDERLYING_INVALID;

@@ -3541,7 +3541,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     {
         u32 condition_register;
         if (!machine_x64_operand_register(selector, instruction->operands[0], &condition_register) || !instruction->target_count ||
-            instruction->target_count != instruction->immediate_count + 1 || instruction->immediate_count > UINT16_MAX || !instruction->immediates)
+            instruction->target_count != instruction->immediate_count + 1 || !instruction->immediates)
         {
             return false;
         }
