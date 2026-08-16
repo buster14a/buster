@@ -895,7 +895,15 @@ struct MachineTargetDescription
     u64 vector_allocatable_mask;
     // Full-width vector register copy, coalescible like `copy_opcode`.
     u16 vector_copy_opcode;
-    u8 reserved[2];
+    // Prologue order: the callee-saved pushes precede the frame-pointer
+    // establishment rather than following it. That is the Win64 prologue
+    // Windows unwinding is defined over — its codes restore a pushed register
+    // off the stack pointer they are recovered with, and only a push
+    // described before UWOP_SET_FPREG is guaranteed to be reached with that
+    // pointer already correct. The frame slots stay at negative offsets from
+    // the frame pointer either way; only the saves move above it.
+    u8 saves_precede_frame_pointer;
+    u8 reserved[1];
     // The fixed vector scratch per operand slot, the MIR_STACK counterpart
     // of `slot_scratch` for vector-class operand slots.
     u8 vector_slot_scratch[4];
@@ -973,7 +981,15 @@ struct MachineFunction
     u32 switch_case_count;
     u32 line_mark_count;
     u32 va_arg_count;
-    u32 reserved;
+    // Fixed outgoing argument area, in bytes, or zero for a function whose
+    // calls need none. Win64 owns its callees' shadow space and stack
+    // arguments in its own frame rather than pushing them, so the stack
+    // pointer never moves inside the body and the unwind codes describe the
+    // frame at every instruction. The area is a stack slot like any other,
+    // pinned by the placement to the bottom of the frame so its base is
+    // exactly the stack pointer a call sees.
+    u32 outgoing_bytes;
+    u32 outgoing_slot;
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or
@@ -1309,6 +1325,9 @@ BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info,
 BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot);
 BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
+// The Win64 register file: the same allocatable set with RSI and RDI moved
+// into the callee-saved half, and only the volatile vector registers.
+BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64_windows(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
 BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);

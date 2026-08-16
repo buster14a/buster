@@ -223,6 +223,20 @@ every optimization level, including the default and `-O0`, while
 diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
 `-fregister-allocator=<mode>`; when several allocator-affecting options are
 present, the last one wins.
+The allocators run on x86-64 under both System V and Win64, and on AArch64
+everywhere but the PE-unwind targets, which still take the canonical path
+whole. Win64 differs from System V in the file it allocates — RSI and RDI are
+callee-saved there, so the allocator has seven callee-saved registers instead
+of five and the vector class keeps only the volatile ZMMs — and in how a call
+is built: the outgoing arguments and the callee's shadow space are written
+into a fixed area at the bottom of the frame instead of pushed, because the
+stack pointer must not move inside the body of a function whose unwind data
+can only carry a frame-pointer offset up to 240 bytes. Its prologue pushes the
+callee-saved registers before establishing the frame pointer for the same
+reason. Shapes the Win64 subset does not build yet — variadic definitions and
+calls, 128-bit integers, vector signatures, indirect (non 1/2/4/8-byte)
+aggregate arguments, and dynamic stack allocation — fall back per function,
+which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `-emit-llvm` emits binary LLVM bitcode directly from canonical typed IR for C
 inputs. It writes `<input>.bc` by default, accepts `-o` for a single
 input, and rejects native objects, archives, libraries, frameworks, linker

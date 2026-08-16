@@ -6653,6 +6653,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // allocator modes reserve room for its worst-case chunk count.
         u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 8u : windows_aarch64 ? 6u : 5u) + stack_action_capacity +
                                      (target.cpu_arch == CPU_ARCH_AARCH64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE ? 20u : 0u);
+        // The x86-64 machine prologue allocates a page per action whatever the
+        // ABI, while the canonical Windows prologue takes the whole frame in
+        // one; it also pushes up to seven callee-saved registers under Win64
+        // beside the frame-pointer pair. Both counts are the machine path's
+        // own, so they are taken as a floor rather than replacing the
+        // canonical sizing that the fallback below still needs.
+        if (target.cpu_arch == CPU_ARCH_X86_64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+        {
+            u32 machine_unwind_action_capacity = 9u + frame_size / 4096u + (frame_size % 4096u != 0);
+            unwind_action_capacity = BUSTER_MAX(unwind_action_capacity, machine_unwind_action_capacity);
+        }
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;
         *descriptor = (CodegenFunctionDescriptor){
@@ -6678,8 +6689,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool machine_function_emitted = false;
         if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
              options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
-            ((target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V) ||
-             (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
+            (target.cpu_arch == CPU_ARCH_X86_64 || (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
         {
             bool label_address_target = false;
             for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
@@ -6885,48 +6895,45 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (encoded_fits)
                     {
+                        // The encoder pushes the placement's callee-saved
+                        // registers in ascending order — RBX, R12-R15 under
+                        // System V, gaining RSI and RDI under Win64 — and
+                        // orders them against the frame-pointer establishment
+                        // the way the target description asks. Win64 puts them
+                        // first: its unwind codes restore a pushed register
+                        // off the stack pointer they are recovered with, which
+                        // only holds while the pushes precede UWOP_SET_FPREG,
+                        // and this path's calls move RSP in the body. The
+                        // legacy eight push in one byte, the extended file in
+                        // two, and the frame-pointer move is three, which is
+                        // what makes each action's offset exact.
+                        bool machine_saves_first = result.abi == CODEGEN_ABI_X86_64_WINDOWS;
                         bool machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBP, 0);
-                        machine_unwind_valid =
-                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
-                            machine_unwind_valid;
-                        // Callee-saved pushes follow the frame-pointer setup
-                        // in the encoder's fixed RBX, R14, R15 order; RBX
-                        // pushes in one byte, the extended pair in two.
-                        u32 machine_prologue_cursor = 4;
-                        if (placement.callee_saved_mask & (1u << X64_REGISTER_RBX))
+                        u32 machine_prologue_cursor = 1;
+                        if (!machine_saves_first)
                         {
-                            machine_prologue_cursor += 1;
+                            machine_prologue_cursor += 3;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBX, 0) &&
+                                                                                CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
                                                    machine_unwind_valid;
                         }
-                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R12))
+                        for (u32 machine_saved_register = 0; machine_saved_register < 16u; machine_saved_register += 1)
                         {
-                            machine_prologue_cursor += 2;
+                            if (!(placement.callee_saved_mask & (1ull << machine_saved_register)))
+                            {
+                                continue;
+                            }
+                            machine_prologue_cursor += machine_saved_register < 8u ? 1u : 2u;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R12, 0) &&
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, (u8)machine_saved_register, 0) &&
                                                    machine_unwind_valid;
                         }
-                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R13))
+                        if (machine_saves_first)
                         {
-                            machine_prologue_cursor += 2;
+                            machine_prologue_cursor += 3;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R13, 0) &&
-                                                   machine_unwind_valid;
-                        }
-                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R14))
-                        {
-                            machine_prologue_cursor += 2;
-                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R14, 0) &&
-                                                   machine_unwind_valid;
-                        }
-                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R15))
-                        {
-                            machine_prologue_cursor += 2;
-                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R15, 0) &&
+                                                                                CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
                                                    machine_unwind_valid;
                         }
                         // One allocation action per emitted chunk, at the
@@ -7009,6 +7016,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             continue;
         }
         result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
+        // A machine attempt that bailed after describing part of its prologue
+        // leaves those actions behind; the canonical prologue below describes
+        // the frame it actually emits, so the fallback starts from an empty
+        // description rather than appending to a foreign one.
+        descriptor->unwind_action_count = 0;
+        descriptor->epilog_count = 0;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             BusterX86MetadataPhysicalOperand push_rbp = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBP, 64);

@@ -1508,6 +1508,12 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
     {
+        // The outgoing argument area is placed at the bottom of the frame
+        // below, where a call's stack pointer lands on its base.
+        if (function->outgoing_bytes && slot_index == function->outgoing_slot)
+        {
+            continue;
+        }
         // The frame base is sixteen-aligned, so a slot whose start offset is
         // a multiple of its alignment is aligned in memory.
         u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
@@ -1635,7 +1641,11 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     // subtract it back out when sizing the post-save allocation, then add
     // eight bytes for odd push parity to restore the System V call boundary
     // before any nested call.
-    placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u);
+    placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+    if (function->outgoing_bytes)
+    {
+        placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
+    }
     placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
     placement.edit_count = edits.total_count;
     machine_stream_flatten(&edits, placement.edits);

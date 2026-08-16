@@ -1989,11 +1989,21 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
     {
+        // The outgoing argument area is placed at the bottom of the frame
+        // below, where a call's stack pointer lands on its base.
+        if (function->outgoing_bytes && slot_index == function->outgoing_slot)
+        {
+            continue;
+        }
         u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
         running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
         placement.stack_slot_offsets[slot_index] = running;
     }
-    placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u);
+    placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+    if (function->outgoing_bytes)
+    {
+        placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
+    }
     placement.valid = true;
     return placement;
 }

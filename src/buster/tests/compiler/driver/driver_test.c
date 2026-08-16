@@ -3690,6 +3690,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conversions_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The calling-convention fixture runs natively, so the host's own ABI and
+    // register allocator are executed rather than only inspected: on a
+    // Windows runner that is the Win64 positional register assignment, the
+    // shadow space below the outgoing stack arguments, and the callee-saved
+    // file the allocator binds across the calls inside it.
+    String8 c_call_abi_path = buster_test_temporary_path(arguments->arena, S8("buster-c-call-abi"), S8(""));
+    String8 c_call_abi_command_line[] = {
+        S8("-o"),
+        c_call_abi_path,
+        S8("tests/basic_c_call_abi.c"),
+    };
+    CompilerDriverResult c_call_abi = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_abi_command_line)));
+    BUSTER_TEST(arguments, c_call_abi.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_call_abi.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, c_call_abi.codegen_statistics.fallback_function_count < c_call_abi.codegen_statistics.function_count);
+        String8 c_call_abi_arguments[] = {
+            c_call_abi_path,
+        };
+        ProcessSpawnResult c_call_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_abi_arguments), (SliceString8){0}, (SliceString8){0},
+                                                               (ProcessSpawnOptions){
+                                                                   .use_process_environment = true,
+                                                               });
+        BUSTER_TEST(arguments, c_call_abi_spawn.handle != 0);
+        if (c_call_abi_spawn.handle)
+        {
+            ProcessWaitResult c_call_abi_wait = os_process_wait_sync(arguments->arena, c_call_abi_spawn);
+            BUSTER_TEST(arguments, c_call_abi_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 conversion_cross_targets[] = {
         S8("aarch64-unknown-linux-gnu"),
         S8("x86_64-pc-windows-msvc"),
@@ -3733,9 +3764,22 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, found_float_add);
     }
+    // The assertions below are the canonical Windows frame contract: one
+    // fixed prologue allocation that also covers the outgoing argument area,
+    // and no stack adjustment anywhere in the body. The machine path pushes
+    // its outgoing arguments instead — sound under the frame register its
+    // unwind data establishes, but a different shape — so this block names
+    // the canonical emitter explicitly and the machine modes are covered by
+    // their own block below.
     String8 c_float_abi_windows_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-abi-windows"), S8(".obj"));
     String8 c_float_abi_windows_command_line[] = {
-        S8("-c"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), c_float_abi_windows_path, S8("tests/basic_c_float_abi.c"),
+        S8("-c"),
+        S8("-target"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("-fno-register-allocator"),
+        S8("-o"),
+        c_float_abi_windows_path,
+        S8("tests/basic_c_float_abi.c"),
     };
     CompilerDriverResult c_float_abi_windows = compiler_driver_execute_invocation(
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_abi_windows_command_line)));
@@ -3991,6 +4035,62 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, unwind_allocation_count_matches);
         BUSTER_TEST(arguments, found_load_xmm0);
         BUSTER_TEST(arguments, found_indirect_second_part);
+    }
+    // The machine register allocators on Win64: every mode must select part
+    // of the fixture, and the unwind data it writes for those functions must
+    // decode as a well-formed record establishing a frame register — the
+    // machine prologue pushes RSI and RDI beside the System V file, and its
+    // page-chunked allocation emits one action per chunk where the canonical
+    // Windows prologue emits one for the whole frame.
+    String8 windows_machine_modes[] = {
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    String8 windows_machine_sources[] = {
+        S8("tests/basic_c_float_abi.c"),
+        S8("tests/basic_c_call_abi.c"),
+    };
+    for (u32 windows_machine_source = 0; windows_machine_source < BUSTER_ARRAY_LENGTH(windows_machine_sources); windows_machine_source += 1)
+    {
+        for (u32 windows_machine_index = 0; windows_machine_index < BUSTER_ARRAY_LENGTH(windows_machine_modes); windows_machine_index += 1)
+        {
+            TemporalArena windows_machine_temporary = scratch_begin(&arguments->arena, 1);
+            String8 windows_machine_path = buster_test_temporary_path(windows_machine_temporary.arena, S8("buster-c-windows-machine"), S8(".obj"));
+            String8 windows_machine_command_line[] = {
+                S8("-c"),
+                S8("-target"),
+                S8("x86_64-pc-windows-msvc"),
+                windows_machine_modes[windows_machine_index],
+                S8("-o"),
+                windows_machine_path,
+                windows_machine_sources[windows_machine_source],
+            };
+            CompilerDriverResult windows_machine = compiler_driver_execute_invocation(
+                windows_machine_temporary.arena,
+                compiler_driver_parse_arguments(windows_machine_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_machine_command_line)));
+            BUSTER_TEST(arguments, windows_machine.error == COMPILER_DRIVER_ERROR_NONE);
+            if (windows_machine.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, windows_machine.has_object);
+                BUSTER_TEST(arguments, windows_machine.codegen_statistics.function_count != 0);
+                BUSTER_TEST(arguments, windows_machine.codegen_statistics.fallback_function_count < windows_machine.codegen_statistics.function_count);
+                if (windows_machine.has_object)
+                {
+                    // A frame register is not asserted: Win64 can only record one
+                    // for a frame of at most 240 bytes, and the machine path does
+                    // not need it. Its calls write the outgoing area in the frame
+                    // instead of pushing, so the stack pointer never moves inside
+                    // the body and the push and allocation codes alone describe
+                    // every instruction.
+                    bool windows_machine_frame_register = false;
+                    BUSTER_TEST(arguments, compiler_driver_test_windows_x64_unwind_records(&windows_machine.object, &windows_machine_frame_register));
+                    BUSTER_TEST(arguments, windows_machine.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
+                    BUSTER_TEST(arguments, windows_machine.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
+                }
+            }
+            scratch_end(windows_machine_temporary);
+        }
     }
     Arena* c_asm_conflicts[] = {
         arguments->arena,
