@@ -1,3 +1,16 @@
+// AArch64 encoding over the generated Arm metadata. This file is the
+// bridge between the packed, pointer-free generated tables
+// (aarch64-canonical-decoder / aarch64-assembly, included below) and every
+// consumer that wants real 32-bit instruction words: mnemonic and form
+// lookup (buster_aarch64_metadata_*), feature-predicate gating against the
+// Apple M1 profile, the fixed-row spellings, the GPR and scalar-integer
+// recipe encoders (a64_arm_m1_*_encode) with logical-immediate and
+// PC-relative materialization, field-level raw encode/decode
+// (a64_generated_raw_*, buster_aarch64_canonical_field), and the typed
+// decoders that recover operands from words for the differential tests.
+// Encoders validate operands and constraints before emitting; an
+// unencodable request returns false rather than a wrong word.
+
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/string.h>
 #include <buster/lib/os.h>

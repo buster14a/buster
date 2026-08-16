@@ -1,3 +1,41 @@
+// The standalone textual assembler: assembly_encode at the bottom takes
+// x86-64 (AT&T or Intel) or AArch64 source and returns encoded bytes,
+// symbols, relocations, and diagnostics. Two phases over an
+// AssemblyBuilder sized from the line count: assembly_source_parse turns
+// each statement into an AssemblyInstruction — labels, directives,
+// expressions, and operands resolved — and assembly_instructions_emit
+// sizes and encodes them, laying out symbols and relocations and
+// range-checking branches. Unknown or malformed input is a diagnostic,
+// never a guess.
+//
+// Instruction knowledge is table-driven, not hand-coded per mnemonic: x86
+// selection and encoding go through the generated metadata
+// (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
+// assembly_x86_instruction_size/encode paths covering the legacy subset
+// and every prefix family up to EVEX/APX; AArch64 parsing walks the
+// generated syntax templates and semantic tables (aarch64_syntax.h,
+// aarch64_*_semantics.h) and encodes through aarch64_encoding.h.
+//
+// Layout, in file order; each anchor is a definition to search for:
+//   assembly_space .. assembly_symbol_intern       builder plumbing, labels,
+//                                                  symbol interning
+//   assembly_expression_parse,                     constant/symbol expression
+//   assembly_expression_merge                      evaluation
+//   assembly_register_parse,                       operand parsing for both
+//   assembly_x86_memory_parse_intel                dialects and both targets
+//   assembly_aarch64_*                             AArch64 operand forms,
+//                                                  system registers, SIMD
+//                                                  spellings, row selection
+//   assembly_x86_vector_form ..                    x86 form classification
+//   assembly_x86_instruction_size                  and instruction sizing/
+//                                                  encoding
+//   assembly_x86_metadata_*                        metadata-driven selection
+//                                                  and emission
+//   assembly_instruction_parse,                    statement recognition and
+//   assembly_source_parse                          the parse phase driver
+//   assembly_relocation_append,                    the emit phase and the
+//   assembly_instructions_emit, assembly_encode    public entry point
+
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>

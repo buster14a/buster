@@ -1,5 +1,14 @@
 #pragma once
 
+// Public view of the generated x86-64 instruction metadata: typed accessors
+// over the pointer-free tables in generated/x86_64-assembly.generated.h,
+// plus form selection (queries and source forms), operand/attribute
+// classification, and the emitter that encodes a selected form into bytes.
+// The implementation decodes the tables once into flat caches and
+// prevalidates every record — see the notes at the top of
+// x86_64_metadata.c, and call buster_x86_metadata_prewarm before reading
+// from parallel lanes.
+
 #include <buster/lib/base.h>
 
 #define BUSTER_X86_METADATA_MAX_OPERAND_SHAPE 32

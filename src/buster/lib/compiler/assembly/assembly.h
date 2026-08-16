@@ -1,5 +1,10 @@
 #pragma once
 
+// Public API of the standalone textual assembler. assembly_encode takes
+// x86-64 (AT&T or Intel) or AArch64 source text and returns encoded bytes,
+// symbols, relocations, and structured diagnostics; nothing here depends on
+// the C frontend or canonical IR.
+
 #include <buster/lib/arena.h>
 #include <buster/lib/target.h>
 
