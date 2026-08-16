@@ -785,13 +785,13 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
         {
             continue;
         }
-        if (emitted_line_count && entry->file + 1 == current_file && entry->line == current_line && entry->column == current_column)
+        if (emitted_line_count && (u32)(entry->file + 1) == current_file && entry->line == current_line && entry->column == current_column)
         {
             continue;
         }
-        if (entry->file + 1 != current_file)
+        if ((u32)(entry->file + 1) != current_file)
         {
-            current_file = entry->file + 1;
+            current_file = (u32)(entry->file + 1);
             dwarf_emit_u8(&line, DW_LNS_SET_FILE);
             dwarf_emit_uleb128(&line, current_file);
         }
