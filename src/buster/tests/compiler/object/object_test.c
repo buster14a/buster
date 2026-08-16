@@ -317,9 +317,9 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 40);
+    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 32);
     BUSTER_TEST(arguments, BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 34);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 27);
     BUSTER_TEST(arguments, CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
     typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
     struct CodegenRelocationKindExpectation
