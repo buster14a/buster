@@ -448,18 +448,41 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
         String8 source_file;
         String8 owner_symbol;
     };
-#define MACHINE_TEST_CONSUMER_SITE_ROW(source_file_value, owner_symbol_value) \
-    {S8_INITIALIZER(source_file_value), S8_INITIALIZER(owner_symbol_value)},
+    // Consumers are kept as migration anchors for the source audit, but are
+    // not counted as authorities: their bodies must route instruction
+    // construction through one of the metadata entry points.
     static MachineX64ConsumerSite const consumers[] = {
-        MACHINE_X86_64_METADATA_CONSUMER_SITES(MACHINE_TEST_CONSUMER_SITE_ROW)
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_metadata_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_instructions_emit")},
+        {S8_INITIALIZER("src/buster/lib/x86_64.c"), S8_INITIALIZER("x86_64_encode_register_operation")},
+        {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_emit_thunks")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_build_elf_entry_stub")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_build_pe_entry_stub")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_elf64_x86_64")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_elf64_x86_64_dynamic")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_pe64")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_mach_o64")},
     };
-#undef MACHINE_TEST_CONSUMER_SITE_ROW
-#define MACHINE_TEST_NEUTRAL_SITE_ROW(class_value, source_file_value, owner_symbol_value) \
-    {S8_INITIALIZER(source_file_value), S8_INITIALIZER(owner_symbol_value)},
     static MachineX64NeutralSite const neutral_sites[] = {
-        MACHINE_X86_64_NEUTRAL_PATCH_SITES(MACHINE_TEST_NEUTRAL_SITE_ROW)
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
+        {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_local_relocation")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_address_difference")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_write_u16")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_write_u32")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_write_u32_be")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_write_u64")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_elf64_x86_64")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_elf64_x86_64_dynamic")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_mach_o64")},
+        {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_emit_thunks")},
+        {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_apply_relocations")},
+        {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_apply_aarch64_mach_page_relocation")},
     };
-#undef MACHINE_TEST_NEUTRAL_SITE_ROW
     static MachineX64SourceFile const files[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), MACHINE_X64_SOURCE_ARCH_UNKNOWN},
@@ -1019,7 +1042,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // contract independent from exact encoding, selection, and scheduling
     // tables, and audit every current opcode so a newly added row cannot
     // silently inherit NONE.
-    MachineEmitRecipeId sample_recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 37);
+    MachineEmitRecipeId sample_recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 37;
     BUSTER_TEST(arguments, machine_emit_recipe_is_valid(sample_recipe));
     BUSTER_TEST(arguments, machine_emit_recipe_category(sample_recipe) == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY);
     BUSTER_TEST(arguments, machine_emit_recipe_index(sample_recipe) == 37);

@@ -235,6 +235,77 @@ BUSTER_GLOBAL_LOCAL u32 machine_schedule_block_excess(MachineFunction* function,
     return excess;
 }
 
+// The bucket queue the block scheduler drives, gathered so growth evaluation
+// and the push that depends on it can be ordinary functions. Everything here
+// is per-block scratch owned by machine_schedule_function; the queue only
+// borrows it for the length of one block.
+typedef struct MachineScheduleQueue MachineScheduleQueue;
+struct MachineScheduleQueue
+{
+    MachineFunction* function;
+    u32 block_first_instruction;
+    u32 const* unit_first_rows;
+    u32 const* unit_row_counts;
+    u32 const* demand_epochs;
+    u32 demand_epoch;
+    u32* unit_seqs;
+    u32* entry_units;
+    u32* entry_seqs;
+    u32* entry_next;
+    u32 entry_capacity;
+    u32 entry_count;
+    // Buckets span growth -16..+16 (a unit reads and writes at most eight
+    // operand slots); the minimum bucket is exact because every growth change
+    // re-pushes its unit eagerly.
+    u32 bucket_heads[33];
+    u32 minimum_bucket;
+    bool overflow;
+};
+
+// How many more values stay live once this unit is placed: every operand it
+// defines that something below already demands is retired, and every operand
+// it uses that nothing below demands yet is newly born.
+BUSTER_GLOBAL_LOCAL s32 machine_schedule_queue_growth(MachineScheduleQueue const* queue, u32 candidate_unit)
+{
+    s32 growth = 0;
+    u32 candidate_first = queue->unit_first_rows[candidate_unit];
+    for (u32 row = 0; row < queue->unit_row_counts[candidate_unit]; row += 1)
+    {
+        MachineInstruction* instruction = queue->function->instructions + queue->block_first_instruction + candidate_first + row;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        {
+            if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                continue;
+            }
+            u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            bool demanded = queue->demand_epochs[virtual_register] == queue->demand_epoch;
+            growth -= (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && demanded;
+            growth += (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && !demanded;
+        }
+    }
+    return growth;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_schedule_queue_push(MachineScheduleQueue* queue, u32 pushed_unit)
+{
+    if (queue->entry_count == queue->entry_capacity)
+    {
+        queue->overflow = true;
+        return;
+    }
+    u32 bucket = (u32)(BUSTER_MAX(BUSTER_MIN(machine_schedule_queue_growth(queue, pushed_unit), 16), -16) + 16);
+    queue->unit_seqs[pushed_unit] += 1;
+    queue->entry_units[queue->entry_count] = pushed_unit;
+    queue->entry_seqs[queue->entry_count] = queue->unit_seqs[pushed_unit];
+    queue->entry_next[queue->entry_count] = queue->bucket_heads[bucket];
+    queue->bucket_heads[bucket] = queue->entry_count + 1;
+    queue->entry_count += 1;
+    queue->minimum_bucket = BUSTER_MIN(queue->minimum_bucket, bucket);
+}
+
 MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function)
 {
     MachineScheduleResult result = {
@@ -642,85 +713,45 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             slot_touch_offsets[slot_index] = slot_touch_offsets[slot_index - 1];
         }
         slot_touch_offsets[0] = 0;
-        // The bucket queue. Buckets span growth −16..+16 (a unit reads and
-        // writes at most eight operand slots); the minimum bucket is exact
-        // because every growth change re-pushes its unit eagerly.
-        u32 bucket_heads[33];
-        for (u32 bucket_index = 0; bucket_index < 33; bucket_index += 1)
-        {
-            bucket_heads[bucket_index] = 0;
-        }
         for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
         {
             unit_seqs[unit_index] = 0;
             unit_states[unit_index] = 0;
         }
-        u32 entry_count = 0;
-        u32 minimum_bucket = 33;
         u32 demand_epoch = function->block_count * 2 + block_index + 1;
-        bool queue_overflow = false;
-#define MACHINE_SCHEDULE_GROWTH(candidate_unit, growth_output)                                                                                                 \
-    do                                                                                                                                                         \
-    {                                                                                                                                                          \
-        s32 computed_growth = 0;                                                                                                                               \
-        u32 candidate_first = unit_first_rows[candidate_unit];                                                                                                 \
-        for (u32 growth_row = 0; growth_row < unit_row_counts[candidate_unit]; growth_row += 1)                                                                      \
-        {                                                                                                                                                      \
-            MachineInstruction* growth_instruction = function->instructions + block->first_instruction + candidate_first + growth_row;                           \
-            MachineOpcodeInfo const* growth_info = machine_opcode_info(growth_instruction->opcode);                                                            \
-            for (u32 growth_slot = 0; growth_slot < growth_info->operand_count; growth_slot += 1)                                                                                   \
-            {                                                                                                                                                  \
-                if (machine_ref_kind(growth_instruction->operands[growth_slot]) != MACHINE_REF_VIRTUAL_REGISTER)                                                       \
-                {                                                                                                                                              \
-                    continue;                                                                                                                                  \
-                }                                                                                                                                              \
-                u32 growth_register = machine_ref_payload(growth_instruction->operands[growth_slot]);                                                                 \
-                u32 growth_role = growth_info->operand_info[growth_slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);                                                   \
-                bool growth_demanded = demand_epochs[growth_register] == demand_epoch;                                                                         \
-                computed_growth -= (growth_role == MACHINE_OPERAND_ROLE_DEFINE || growth_role == MACHINE_OPERAND_ROLE_USE_DEFINE) && growth_demanded;           \
-                computed_growth += (growth_role == MACHINE_OPERAND_ROLE_USE || growth_role == MACHINE_OPERAND_ROLE_USE_DEFINE) && !growth_demanded;             \
-            }                                                                                                                                                  \
-        }                                                                                                                                                      \
-        growth_output = computed_growth;                                                                                                                       \
-    } while (0)
-#define MACHINE_SCHEDULE_PUSH(pushed_unit)                                                                                                                     \
-    do                                                                                                                                                         \
-    {                                                                                                                                                          \
-        if (entry_count == entry_capacity)                                                                                                                     \
-        {                                                                                                                                                      \
-            queue_overflow = true;                                                                                                                             \
-            break;                                                                                                                                             \
-        }                                                                                                                                                      \
-        s32 pushed_growth;                                                                                                                                     \
-        MACHINE_SCHEDULE_GROWTH(pushed_unit, pushed_growth);                                                                                                   \
-        u32 pushed_bucket = (u32)(BUSTER_MAX(BUSTER_MIN(pushed_growth, 16), -16) + 16);                                                                        \
-        unit_seqs[pushed_unit] += 1;                                                                                                                           \
-        entry_units[entry_count] = pushed_unit;                                                                                                                \
-        entry_seqs[entry_count] = unit_seqs[pushed_unit];                                                                                                      \
-        entry_next[entry_count] = bucket_heads[pushed_bucket];                                                                                                 \
-        bucket_heads[pushed_bucket] = entry_count + 1;                                                                                                         \
-        entry_count += 1;                                                                                                                                      \
-        minimum_bucket = BUSTER_MIN(minimum_bucket, pushed_bucket);                                                                                            \
-    } while (0)
+        MachineScheduleQueue queue = {
+            .function = function,
+            .block_first_instruction = block->first_instruction,
+            .unit_first_rows = unit_first_rows,
+            .unit_row_counts = unit_row_counts,
+            .demand_epochs = demand_epochs,
+            .demand_epoch = demand_epoch,
+            .unit_seqs = unit_seqs,
+            .entry_units = entry_units,
+            .entry_seqs = entry_seqs,
+            .entry_next = entry_next,
+            .entry_capacity = entry_capacity,
+            .minimum_bucket = 33,
+        };
         for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
         {
             if (!successor_remaining[unit_index])
             {
                 unit_states[unit_index] = 1;
-                MACHINE_SCHEDULE_PUSH(unit_index);
+                machine_schedule_queue_push(&queue, unit_index);
             }
         }
         u32 out_row = block_rows;
         u32 emitted_units = 0;
-        while (minimum_bucket < 33 && !queue_overflow)
+        while (queue.minimum_bucket < 33 && !queue.overflow)
         {
-            u32 entry_slot = bucket_heads[minimum_bucket];
+            u32 entry_slot = queue.bucket_heads[queue.minimum_bucket];
             if (!entry_slot)
             {
-                minimum_bucket += 1;
+                queue.minimum_bucket += 1;
                 continue;
             }
-            bucket_heads[minimum_bucket] = entry_next[entry_slot - 1];
+            queue.bucket_heads[queue.minimum_bucket] = entry_next[entry_slot - 1];
             u32 unit_index = entry_units[entry_slot - 1];
             if (unit_states[unit_index] != 1 || entry_seqs[entry_slot - 1] != unit_seqs[unit_index])
             {
@@ -776,7 +807,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         {
                             if (unit_states[touch_units[touch_index]] == 1)
                             {
-                                MACHINE_SCHEDULE_PUSH(touch_units[touch_index]);
+                                machine_schedule_queue_push(&queue, touch_units[touch_index]);
                             }
                         }
                     }
@@ -797,11 +828,9 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             for (u32 push_index = 0; push_index < newly_ready_count; push_index += 1)
             {
                 unit_states[newly_ready[push_index]] = 1;
-                MACHINE_SCHEDULE_PUSH(newly_ready[push_index]);
+                machine_schedule_queue_push(&queue, newly_ready[push_index]);
             }
         }
-#undef MACHINE_SCHEDULE_PUSH
-#undef MACHINE_SCHEDULE_GROWTH
         // A cycle would leave units unemitted; the dependence relation is
         // acyclic by construction, but an unexpected shape falls back to
         // source order rather than corrupting the block.

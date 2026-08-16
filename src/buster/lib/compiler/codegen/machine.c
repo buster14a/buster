@@ -71,8 +71,6 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 // them keeps vector values clear of rows that scribble the low XMM file.
 #define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
 #define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
-#define MACHINE_RESOURCE_FLAGS_MASK MACHINE_RESOURCE_BIT(MACHINE_RESOURCE_FLAGS)
-#define MACHINE_RESOURCE_NZCV_MASK MACHINE_RESOURCE_BIT(MACHINE_RESOURCE_NZCV)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -80,7 +78,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_MOVE(name_literal)                                                                                                                        \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
-        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_READ_MODIFY(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
@@ -94,7 +92,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
         .tied_pair = (u8)(1u | (2u << 4)),                                                                                                                     \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
         .schedule_class = (schedule), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                    \
-        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER),                                                                                    \
+        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER,                                                                                    \
     }
 #define MACHINE_INFO_FINALIZE(flags, effect, memslot, schedule)                                                                                                \
     .attributes = (flags), .memory_effect = (effect), .memory_operand = (memslot), .schedule_class = (schedule),                                              \
@@ -128,27 +126,27 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_A64_THREE_ADDRESS(name_literal, schedule)                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
         .schedule_class = (schedule),                                                                                                                          \
     }
 #define MACHINE_INFO_THREE_ADDRESS_CONSTRAINED(name_literal)                                                                                                   \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_EXPANDS, .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_PSEUDO),\
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_EXPANDS, .form_set = MACHINE_OPCODE_FORM_SET_PSEUDO,\
         .expansion_recipe = MACHINE_OPCODE_EXPANSION_PSEUDO, .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                    \
     }
 #define MACHINE_INFO_A64_COMPARE(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE, .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,                                             \
-        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_UNARY_READ_MODIFY(name_literal)                                                                                                           \
     {                                                                                                                                                          \
@@ -175,7 +173,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,                                       \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD, .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER),                                     \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD, .form_set = MACHINE_OPCODE_FORM_SET_REGISTER,                                     \
         .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                                                   \
     }
 #define MACHINE_INFO_STORE_POINTER(name_literal)                                                                                                               \
@@ -755,17 +753,13 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
 // operand and hazard fields.  The low index is target-local; values are kept
 // target-local within each category so a future generated projection can
 // replace this audit table without changing MachineOpcode identities.
-#define MACHINE_RECIPE_DIRECT(index) MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, (index))
-#define MACHINE_RECIPE_FAMILY(index) MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, (index))
-#define MACHINE_RECIPE_EXPANSION(index) MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION, (index))
-
 BUSTER_CT_CHECK(MACHINE_X64_VBINARY - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
 
 BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_registry[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
 #define MACHINE_X64_REGISTRY_ROW(opcode_value, category_value, index_value, status_value) \
     [opcode_value - MACHINE_X64_MOV_RI] = { \
         .opcode = opcode_value, \
-        .recipe = MACHINE_RECIPE_##category_value(index_value), \
+        .recipe = (MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_##category_value##_BASE + index_value), \
         .producer_ordinal = (u16)(opcode_value - MACHINE_X64_MOV_RI), \
         .producer_status = MACHINE_X64_EMIT_PRODUCER_STATUS_##status_value, \
     },
@@ -776,27 +770,113 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 5u);
 BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
+// Canonical x86 authority records.  These rows name only the metadata module
+// entry points that own instruction bytes.  Codegen, assembly, JIT, and link
+// callers are consumers of this authority, never independent authorities.
 BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
     machine_x86_64_canonical_authority_sites[MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT] = {
-#define MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW(kind_value, source_file_value, owner_symbol_value) \
-    { \
-        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_##kind_value, \
-        .source_file = S8_INITIALIZER(source_file_value), \
-        .owner_symbol = S8_INITIALIZER(owner_symbol_value), \
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_encode"),
     },
-    MACHINE_X86_64_CANONICAL_AUTHORITY_SITES(MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW)
-#undef MACHINE_X64_CANONICAL_AUTHORITY_SITE_ROW
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_form"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_EXACT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_form_exact"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_EXACT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_exact_query"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_EXACT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_exact_machine"),
+    },
 };
 
+// Neutral patch records are intentionally not instruction authorities.  They
+// may write relocation fields, displacements, target payloads, or object/data
+// records after metadata has emitted the instruction bytes.  Keep these rows
+// explicit so a new byte write cannot hide a second encoder.
 BUSTER_GLOBAL_LOCAL MachineX64NeutralPatchSite const machine_x86_64_neutral_patch_sites[MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT] = {
-#define MACHINE_X64_NEUTRAL_PATCH_SITE_ROW(class_value, source_file_value, owner_symbol_value) \
-    { \
-        .patch_class = MACHINE_X64_NEUTRAL_PATCH_##class_value, \
-        .source_file = S8_INITIALIZER(source_file_value), \
-        .owner_symbol = S8_INITIALIZER(owner_symbol_value), \
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
+        .owner_symbol = S8_INITIALIZER("codegen_emit_global_assembly"),
     },
-    MACHINE_X86_64_NEUTRAL_PATCH_SITES(MACHINE_X64_NEUTRAL_PATCH_SITE_ROW)
-#undef MACHINE_X64_NEUTRAL_PATCH_SITE_ROW
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
+        .owner_symbol = S8_INITIALIZER("codegen_generate_canonical_module_attempt"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_RELOCATION,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"),
+        .owner_symbol = S8_INITIALIZER("assembly_x86_metadata_local_relocation"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_address_difference"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_write_u16"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_write_u32"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_write_u32_be"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_write_u64"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_native_executable_elf64_x86_64"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_native_executable_elf64_x86_64_dynamic"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/link/link.c"),
+        .owner_symbol = S8_INITIALIZER("link_native_executable_mach_o64"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"),
+        .owner_symbol = S8_INITIALIZER("jit_emit_thunks"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_RELOCATION,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"),
+        .owner_symbol = S8_INITIALIZER("jit_apply_relocations"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_RELOCATION,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"),
+        .owner_symbol = S8_INITIALIZER("jit_apply_aarch64_mach_page_relocation"),
+    },
 };
 
 BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHINE_OPCODE_COUNT] = {
@@ -804,88 +884,82 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_OPCODE_SKELETON_NOP] = MACHINE_EMIT_RECIPE_NONE,
     [MACHINE_OPCODE_SKELETON_COPY] = MACHINE_EMIT_RECIPE_NONE,
     [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_EMIT_RECIPE_NONE,
-#define MACHINE_X64_RECIPE_ROW(opcode, category, index, status) [opcode] = MACHINE_RECIPE_##category(index),
+#define MACHINE_X64_RECIPE_ROW(opcode, category, index, status) [opcode] = MACHINE_EMIT_RECIPE_##category##_BASE + index,
     MACHINE_X86_64_EMIT_REGISTRY(MACHINE_X64_RECIPE_ROW)
 #undef MACHINE_X64_RECIPE_ROW
-#define A64_DIRECT(opcode, index) [opcode] = MACHINE_RECIPE_DIRECT(index),
-    A64_DIRECT(MACHINE_A64_MOV_RR, 0)
-    A64_DIRECT(MACHINE_A64_MOV32_RR, 1)
-    A64_DIRECT(MACHINE_A64_SXTB, 2)
-    A64_DIRECT(MACHINE_A64_SXTH, 3)
-    A64_DIRECT(MACHINE_A64_SXTW, 4)
-    A64_DIRECT(MACHINE_A64_UXTB, 5)
-    A64_DIRECT(MACHINE_A64_UXTH, 6)
-    A64_DIRECT(MACHINE_A64_ADD32, 7)
-    A64_DIRECT(MACHINE_A64_ADD64, 8)
-    A64_DIRECT(MACHINE_A64_SUB32, 9)
-    A64_DIRECT(MACHINE_A64_SUB64, 10)
-    A64_DIRECT(MACHINE_A64_AND32, 11)
-    A64_DIRECT(MACHINE_A64_AND64, 12)
-    A64_DIRECT(MACHINE_A64_ORR32, 13)
-    A64_DIRECT(MACHINE_A64_ORR64, 14)
-    A64_DIRECT(MACHINE_A64_EOR32, 15)
-    A64_DIRECT(MACHINE_A64_EOR64, 16)
-    A64_DIRECT(MACHINE_A64_MUL32, 17)
-    A64_DIRECT(MACHINE_A64_MUL64, 18)
-    A64_DIRECT(MACHINE_A64_SDIV32, 19)
-    A64_DIRECT(MACHINE_A64_SDIV64, 20)
-    A64_DIRECT(MACHINE_A64_UDIV32, 21)
-    A64_DIRECT(MACHINE_A64_UDIV64, 22)
-    A64_DIRECT(MACHINE_A64_LSL32, 23)
-    A64_DIRECT(MACHINE_A64_LSL64, 24)
-    A64_DIRECT(MACHINE_A64_ASR32, 25)
-    A64_DIRECT(MACHINE_A64_ASR64, 26)
-    A64_DIRECT(MACHINE_A64_LSR32, 27)
-    A64_DIRECT(MACHINE_A64_NEG32, 28)
-    A64_DIRECT(MACHINE_A64_NEG64, 29)
-    A64_DIRECT(MACHINE_A64_NOT32, 30)
-    A64_DIRECT(MACHINE_A64_NOT64, 31)
-    A64_DIRECT(MACHINE_A64_CMP32, 32)
-    A64_DIRECT(MACHINE_A64_CMP64, 33)
-    A64_DIRECT(MACHINE_A64_CMP_ZERO, 34)
-    A64_DIRECT(MACHINE_A64_CSET, 35)
-    A64_DIRECT(MACHINE_A64_LOAD_FRAME, 36)
-    A64_DIRECT(MACHINE_A64_LOAD_FRAME32, 37)
-    A64_DIRECT(MACHINE_A64_STORE_FRAME8, 38)
-    A64_DIRECT(MACHINE_A64_STORE_FRAME16, 39)
-    A64_DIRECT(MACHINE_A64_STORE_FRAME32, 40)
-    A64_DIRECT(MACHINE_A64_STORE_FRAME64, 41)
-    A64_DIRECT(MACHINE_A64_LOAD_PTR8, 42)
-    A64_DIRECT(MACHINE_A64_LOAD_PTR16, 43)
-    A64_DIRECT(MACHINE_A64_LOAD_PTR32, 44)
-    A64_DIRECT(MACHINE_A64_LOAD_PTR64, 45)
-    A64_DIRECT(MACHINE_A64_STORE_PTR8, 46)
-    A64_DIRECT(MACHINE_A64_STORE_PTR16, 47)
-    A64_DIRECT(MACHINE_A64_STORE_PTR32, 48)
-    A64_DIRECT(MACHINE_A64_STORE_PTR64, 49)
-    A64_DIRECT(MACHINE_A64_B, 50)
-#undef A64_DIRECT
-#define A64_FAMILY(opcode, index) [opcode] = MACHINE_RECIPE_FAMILY(index),
-    A64_FAMILY(MACHINE_A64_LEA_OFFSET, 0)
-    A64_FAMILY(MACHINE_A64_READ_SP, 1)
-    A64_FAMILY(MACHINE_A64_WRITE_SP, 2)
-#undef A64_FAMILY
-#define A64_EXPANSION(opcode, index) [opcode] = MACHINE_RECIPE_EXPANSION(index),
-    A64_EXPANSION(MACHINE_A64_MOV_RI, 0)
-    A64_EXPANSION(MACHINE_A64_SREM32, 1)
-    A64_EXPANSION(MACHINE_A64_SREM64, 2)
-    A64_EXPANSION(MACHINE_A64_UREM32, 3)
-    A64_EXPANSION(MACHINE_A64_UREM64, 4)
-    A64_EXPANSION(MACHINE_A64_LEA_FRAME, 5)
-    A64_EXPANSION(MACHINE_A64_COPY_FRAME_FROM_FRAME, 6)
-    A64_EXPANSION(MACHINE_A64_COPY_FRAME_FROM_PTR, 7)
-    A64_EXPANSION(MACHINE_A64_COPY_PTR_FROM_FRAME, 8)
-    A64_EXPANSION(MACHINE_A64_BCC, 9)
-    A64_EXPANSION(MACHINE_A64_RET, 10)
-    A64_EXPANSION(MACHINE_A64_FMOV_TO_VEC, 11)
-    A64_EXPANSION(MACHINE_A64_FMOV_FROM_VEC, 12)
-    A64_EXPANSION(MACHINE_A64_BRK, 13)
-    A64_EXPANSION(MACHINE_A64_UDF, 14)
-    A64_EXPANSION(MACHINE_A64_CALL_DIRECT, 15)
-    A64_EXPANSION(MACHINE_A64_CALL_INDIRECT, 16)
-    A64_EXPANSION(MACHINE_A64_LEA_SYMBOL, 17)
-    A64_EXPANSION(MACHINE_A64_LSR64, 18)
-#undef A64_EXPANSION
+    [MACHINE_A64_MOV_RR] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 0,
+    [MACHINE_A64_MOV32_RR] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 1,
+    [MACHINE_A64_SXTB] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 2,
+    [MACHINE_A64_SXTH] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 3,
+    [MACHINE_A64_SXTW] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 4,
+    [MACHINE_A64_UXTB] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 5,
+    [MACHINE_A64_UXTH] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 6,
+    [MACHINE_A64_ADD32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 7,
+    [MACHINE_A64_ADD64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 8,
+    [MACHINE_A64_SUB32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 9,
+    [MACHINE_A64_SUB64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 10,
+    [MACHINE_A64_AND32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 11,
+    [MACHINE_A64_AND64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 12,
+    [MACHINE_A64_ORR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 13,
+    [MACHINE_A64_ORR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 14,
+    [MACHINE_A64_EOR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 15,
+    [MACHINE_A64_EOR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 16,
+    [MACHINE_A64_MUL32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 17,
+    [MACHINE_A64_MUL64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 18,
+    [MACHINE_A64_SDIV32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 19,
+    [MACHINE_A64_SDIV64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 20,
+    [MACHINE_A64_UDIV32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 21,
+    [MACHINE_A64_UDIV64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 22,
+    [MACHINE_A64_LSL32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 23,
+    [MACHINE_A64_LSL64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 24,
+    [MACHINE_A64_ASR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 25,
+    [MACHINE_A64_ASR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 26,
+    [MACHINE_A64_LSR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 27,
+    [MACHINE_A64_NEG32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 28,
+    [MACHINE_A64_NEG64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 29,
+    [MACHINE_A64_NOT32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 30,
+    [MACHINE_A64_NOT64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 31,
+    [MACHINE_A64_CMP32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 32,
+    [MACHINE_A64_CMP64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 33,
+    [MACHINE_A64_CMP_ZERO] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 34,
+    [MACHINE_A64_CSET] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 35,
+    [MACHINE_A64_LOAD_FRAME] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 36,
+    [MACHINE_A64_LOAD_FRAME32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 37,
+    [MACHINE_A64_STORE_FRAME8] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 38,
+    [MACHINE_A64_STORE_FRAME16] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 39,
+    [MACHINE_A64_STORE_FRAME32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 40,
+    [MACHINE_A64_STORE_FRAME64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 41,
+    [MACHINE_A64_LOAD_PTR8] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 42,
+    [MACHINE_A64_LOAD_PTR16] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 43,
+    [MACHINE_A64_LOAD_PTR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 44,
+    [MACHINE_A64_LOAD_PTR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 45,
+    [MACHINE_A64_STORE_PTR8] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 46,
+    [MACHINE_A64_STORE_PTR16] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 47,
+    [MACHINE_A64_STORE_PTR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 48,
+    [MACHINE_A64_STORE_PTR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 49,
+    [MACHINE_A64_B] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 50,
+    [MACHINE_A64_LEA_OFFSET] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 0,
+    [MACHINE_A64_READ_SP] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 1,
+    [MACHINE_A64_WRITE_SP] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 2,
+    [MACHINE_A64_MOV_RI] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 0,
+    [MACHINE_A64_SREM32] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 1,
+    [MACHINE_A64_SREM64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 2,
+    [MACHINE_A64_UREM32] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 3,
+    [MACHINE_A64_UREM64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 4,
+    [MACHINE_A64_LEA_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 5,
+    [MACHINE_A64_COPY_FRAME_FROM_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 6,
+    [MACHINE_A64_COPY_FRAME_FROM_PTR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 7,
+    [MACHINE_A64_COPY_PTR_FROM_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 8,
+    [MACHINE_A64_BCC] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 9,
+    [MACHINE_A64_RET] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 10,
+    [MACHINE_A64_FMOV_TO_VEC] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 11,
+    [MACHINE_A64_FMOV_FROM_VEC] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 12,
+    [MACHINE_A64_BRK] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 13,
+    [MACHINE_A64_UDF] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 14,
+    [MACHINE_A64_CALL_DIRECT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 15,
+    [MACHINE_A64_CALL_INDIRECT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 16,
+    [MACHINE_A64_LEA_SYMBOL] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 17,
+    [MACHINE_A64_LSR64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 18,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

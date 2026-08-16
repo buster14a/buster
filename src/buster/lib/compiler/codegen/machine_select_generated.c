@@ -12,13 +12,20 @@ struct MachineSelectionGeneratedRule
     MachineSelectionRuleMatch match;
 };
 
-#define MACHINE_SELECTION_GENERATED_RULE(rule_id, name_literal, rank_value, fast_value, quality_value, match_value) \
-    [rule_id] = {.id = rule_id, .name = S8_INITIALIZER(name_literal), .rank = rank_value, .fast_legal = (fast_value) != 0, \
-            .quality_legal = (quality_value) != 0, .match = match_value},
+// The rule rows themselves.  Ranks are dense and ascending except for the
+// fallback, which sorts last by construction.
 BUSTER_GLOBAL_LOCAL MachineSelectionGeneratedRule const machine_selection_generated_rules[MACHINE_SELECTION_RULE_COUNT] = {
-    MACHINE_SELECTION_RULE_SCHEMA(MACHINE_SELECTION_GENERATED_RULE)
+    [MACHINE_SELECTION_RULE_CONSTANT] = {.id = MACHINE_SELECTION_RULE_CONSTANT, .name = S8_INITIALIZER("constant"), .rank = 0u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_CONSTANT},
+    [MACHINE_SELECTION_RULE_LOCAL] = {.id = MACHINE_SELECTION_RULE_LOCAL, .name = S8_INITIALIZER("local"), .rank = 1u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_LOCAL},
+    [MACHINE_SELECTION_RULE_MEMORY] = {.id = MACHINE_SELECTION_RULE_MEMORY, .name = S8_INITIALIZER("memory"), .rank = 2u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_MEMORY},
+    [MACHINE_SELECTION_RULE_ADDRESS] = {.id = MACHINE_SELECTION_RULE_ADDRESS, .name = S8_INITIALIZER("address"), .rank = 3u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_ADDRESS},
+    [MACHINE_SELECTION_RULE_ARITHMETIC] = {.id = MACHINE_SELECTION_RULE_ARITHMETIC, .name = S8_INITIALIZER("arithmetic"), .rank = 4u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_ARITHMETIC},
+    [MACHINE_SELECTION_RULE_CALL] = {.id = MACHINE_SELECTION_RULE_CALL, .name = S8_INITIALIZER("call"), .rank = 5u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_CALL},
+    [MACHINE_SELECTION_RULE_CONTROL] = {.id = MACHINE_SELECTION_RULE_CONTROL, .name = S8_INITIALIZER("control"), .rank = 6u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_CONTROL},
+    [MACHINE_SELECTION_RULE_VECTOR] = {.id = MACHINE_SELECTION_RULE_VECTOR, .name = S8_INITIALIZER("vector"), .rank = 7u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_VECTOR},
+    [MACHINE_SELECTION_RULE_SCALAR] = {.id = MACHINE_SELECTION_RULE_SCALAR, .name = S8_INITIALIZER("scalar"), .rank = 8u, .fast_legal = true, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_SCALAR},
+    [MACHINE_SELECTION_RULE_LEGACY_FALLBACK] = {.id = MACHINE_SELECTION_RULE_LEGACY_FALLBACK, .name = S8_INITIALIZER("legacy-fallback"), .rank = 255u, .fast_legal = false, .quality_legal = true, .match = MACHINE_SELECTION_RULE_MATCH_FALLBACK},
 };
-#undef MACHINE_SELECTION_GENERATED_RULE
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_generated_opcode_is_constant(IrOpcode opcode)
 {

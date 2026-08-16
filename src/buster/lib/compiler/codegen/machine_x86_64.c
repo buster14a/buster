@@ -5146,191 +5146,191 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant machine_x64_exact_recipe_varian
 // REG/R for the two-address ALU forms).
 BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT] = {
     [0] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 0),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 0,
         .key = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP,
         .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [1] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 1),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 1,
         .key = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {32, 32},
     },
     [2] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 2),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 2,
         .key = {MACHINE_X64_MOVSX8_RR_EXACT_FORM_ID, UINT64_C(0x60113253679881a6)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 8},
     },
     [3] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 3),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 3,
         .key = {MACHINE_X64_MOVSX16_RR_EXACT_FORM_ID, UINT64_C(0x1ea1a0d40c380394)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 16},
     },
     [4] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 4),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 4,
         .key = {MACHINE_X64_MOVSX32_RR_EXACT_FORM_ID, UINT64_C(0xacab1d188d386b1e)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 32},
     },
     [5] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 5),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 5,
         .key = {MACHINE_X64_MOVZX8_RR_EXACT_FORM_ID, UINT64_C(0xa9d675ab86fb1641)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 8},
     },
     [6] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 6),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 6,
         .key = {MACHINE_X64_MOVZX16_RR_EXACT_FORM_ID, UINT64_C(0xb25b807d6d5747b3)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 16},
     },
     [7] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 7),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 7,
         .key = {MACHINE_X64_ADD_RR_EXACT_FORM_ID, UINT64_C(0xf0743d28f1fbad54)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [8] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 8),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 8,
         .key = {MACHINE_X64_ADD_RR_EXACT_FORM_ID, UINT64_C(0xf0743d28f1fbad54)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [9] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 9),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 9,
         .key = {MACHINE_X64_SUB_RR_EXACT_FORM_ID, UINT64_C(0x240ef104bd0b9756)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [10] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 10),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 10,
         .key = {MACHINE_X64_SUB_RR_EXACT_FORM_ID, UINT64_C(0x240ef104bd0b9756)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [11] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 11),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 11,
         .key = {MACHINE_X64_AND_RR_EXACT_FORM_ID, UINT64_C(0x65889d347cd743a9)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [12] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 12),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 12,
         .key = {MACHINE_X64_AND_RR_EXACT_FORM_ID, UINT64_C(0x65889d347cd743a9)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [13] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 13),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 13,
         .key = {MACHINE_X64_OR_RR_EXACT_FORM_ID, UINT64_C(0x7f76bb71727dbfaa)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [14] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 14),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 14,
         .key = {MACHINE_X64_OR_RR_EXACT_FORM_ID, UINT64_C(0x7f76bb71727dbfaa)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [15] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 15),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 15,
         .key = {MACHINE_X64_XOR_RR_EXACT_FORM_ID, UINT64_C(0x915fb23b51f8b7d1)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [16] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 16),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 16,
         .key = {MACHINE_X64_XOR_RR_EXACT_FORM_ID, UINT64_C(0x915fb23b51f8b7d1)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [17] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 17),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 17,
         .key = {MACHINE_X64_IMUL_RR_EXACT_FORM_ID, UINT64_C(0x8ad1b7f99185b8ea)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {32, 32},
     },
     [18] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 18),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 18,
         .key = {MACHINE_X64_IMUL_RR_EXACT_FORM_ID, UINT64_C(0x8ad1b7f99185b8ea)},
         .operand_count = 2, .operand_slots = {0, 2}, .operand_widths = {64, 64},
     },
     [19] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 19),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 19,
         .key = {MACHINE_X64_NEG_R_EXACT_FORM_ID, UINT64_C(0x10bbcf6d744b04f9)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {32},
     },
     [20] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 20),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 20,
         .key = {MACHINE_X64_NEG_R_EXACT_FORM_ID, UINT64_C(0x10bbcf6d744b04f9)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [21] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 21),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 21,
         .key = {MACHINE_X64_NOT_R_EXACT_FORM_ID, UINT64_C(0xbd007ad8742aadfc)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {32},
     },
     [22] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 22),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 22,
         .key = {MACHINE_X64_NOT_R_EXACT_FORM_ID, UINT64_C(0xbd007ad8742aadfc)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [23] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 23),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 23,
         .key = {MACHINE_X64_BSF_RR_EXACT_FORM_ID, UINT64_C(0x047fe78cb986f7d1)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {32, 32},
     },
     [24] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 24),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 24,
         .key = {MACHINE_X64_BSF_RR_EXACT_FORM_ID, UINT64_C(0x047fe78cb986f7d1)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [25] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 25),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 25,
         .key = {MACHINE_X64_BSR_RR_EXACT_FORM_ID, UINT64_C(0x7c13390dbcf0139e)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {32, 32},
     },
     [26] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 26),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 26,
         .key = {MACHINE_X64_BSR_RR_EXACT_FORM_ID, UINT64_C(0x7c13390dbcf0139e)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [27] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 27),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 27,
         .key = {MACHINE_X64_POPCNT_RR_EXACT_FORM_ID, UINT64_C(0xb971fc2e8a6cb1bc)},
         .features = machine_x64_popcnt_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_popcnt_features),
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {32, 32},
     },
     [28] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 28),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 28,
         .key = {MACHINE_X64_POPCNT_RR_EXACT_FORM_ID, UINT64_C(0xb971fc2e8a6cb1bc)},
         .features = machine_x64_popcnt_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_popcnt_features),
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [32] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 32),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 32,
         .key = {MACHINE_X64_JMP_EXACT_FORM_ID, UINT64_C(0xab9c4b53fce14f6e)},
         .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP,
         .operand_slots = {0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO}, .operand_widths = {32},
     },
     [33] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 33),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 33,
         .key = {MACHINE_X64_SHIFT_LEFT_R_EXACT_FORM_ID, UINT64_C(0xe73cf970ddf68ce2)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {32},
     },
     [34] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 34),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 34,
         .key = {MACHINE_X64_SHIFT_LEFT_R_EXACT_FORM_ID, UINT64_C(0xe73cf970ddf68ce2)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [35] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 35),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 35,
         .key = {MACHINE_X64_SHIFT_ARITHMETIC_R_EXACT_FORM_ID, UINT64_C(0xa64cc273e7d95e92)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {32},
     },
     [36] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 36),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 36,
         .key = {MACHINE_X64_SHIFT_ARITHMETIC_R_EXACT_FORM_ID, UINT64_C(0xa64cc273e7d95e92)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [37] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 37),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 37,
         .key = {MACHINE_X64_SHIFT_RIGHT_R_EXACT_FORM_ID, UINT64_C(0x1fb65789e301333f)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {32},
     },
     [38] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 38),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 38,
         .key = {MACHINE_X64_SHIFT_RIGHT_R_EXACT_FORM_ID, UINT64_C(0x1fb65789e301333f)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [39] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 39),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 39,
         .key = {MACHINE_X64_LEA_SYMBOL_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE,
         .operand_slots = {0, 0},
@@ -5338,21 +5338,21 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
         .operand_widths = {64, 64},
     },
     [40] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 40),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 40,
         .key = {MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID, UINT64_C(0x7bd465046ab10c4f)},
         .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features),
         .operand_count = 2, .operand_slots = {0, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {128, 64},
     },
     [41] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 41),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 41,
         .key = {MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID, UINT64_C(0x3698d9bff62c4360)},
         .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features),
         .operand_count = 2, .operand_slots = {0, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD}, .operand_widths = {64, 128},
     },
     [42] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 42),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 42,
         .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0, 0},
@@ -5360,38 +5360,38 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
         .operand_widths = {64, 64},
     },
     [43] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 43),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 43,
         .key = {MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID, UINT64_C(0x849cc7557c589605)},
         .operand_count = 1, .operand_slots = {0}, .operand_widths = {64},
     },
     [44] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 44),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 44,
         .key = {MACHINE_X64_ADD_RSP_EXACT_FORM_ID, UINT64_C(0xcebed63a599832c0)},
         .operand_count = 2, .operand_slots = {0, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_FIXED_RSP, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {64, 32},
     },
     [29] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 29),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 29,
         .key = {MACHINE_X64_CMP_RR_EXACT_FORM_ID, UINT64_C(0xa381563e623950cd)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {32, 32},
     },
     [30] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 30),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 30,
         .key = {MACHINE_X64_CMP_RR_EXACT_FORM_ID, UINT64_C(0xa381563e623950cd)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [31] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 31),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 31,
         .key = {MACHINE_X64_TEST_RR_EXACT_FORM_ID, UINT64_C(0x29ceea139128c1a6)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_widths = {64, 64},
     },
     [45] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 45),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 45,
         .key = {MACHINE_X64_MFENCE_EXACT_FORM_ID, UINT64_C(0x8deb7f066b773767)},
         .features = machine_x64_sse2_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_sse2_features),
     },
     [46] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 46),
+        .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 46,
         .key = {MACHINE_X64_INT3_EXACT_FORM_ID, UINT64_C(0x11eeb10ba44771fd)},
     },
 };
@@ -5486,7 +5486,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_vbinary_varia
 
 BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
     [0] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 0),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 0,
         .key = {MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID, UINT64_C(0x2a2535c90ada7adc)},
         .operand_count = 2,
         .operand_slots = {0, 0},
@@ -5497,7 +5497,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .variants = machine_x64_mov_ri_variants,
     },
     [1] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 1),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 1,
         .key = {MACHINE_X64_LEA_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5505,7 +5505,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [2] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 2),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 2,
         .key = {MACHINE_X64_ADD_IMMEDIATE8_EXACT_FORM_ID, UINT64_C(0xc4d75f09ceeb4f69)},
         .operand_count = 2,
         .operand_slots = {0, 0},
@@ -5516,7 +5516,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .variants = machine_x64_add_imm_variants,
     },
     [3] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 3),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 3,
         .key = {MACHINE_X64_IMUL_IMMEDIATE8_EXACT_FORM_ID, UINT64_C(0xcc57ef111fd55ec5)},
         .operand_count = 3,
         .operand_slots = {0, 1, 0},
@@ -5527,7 +5527,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .variants = machine_x64_imul_imm_variants,
     },
     [4] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 4),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 4,
         .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5536,7 +5536,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [5] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 5),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 5,
         .key = {MACHINE_X64_MOV_MEMORY8_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5545,7 +5545,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {8, 8},
     },
     [6] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 6),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 6,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5554,7 +5554,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {16, 16},
     },
     [7] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 7),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 7,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5563,7 +5563,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {32, 32},
     },
     [8] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 8),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 8,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5572,7 +5572,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [9] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 9),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 9,
         .key = {MACHINE_X64_MOVZX_MEMORY8_EXACT_FORM_ID, UINT64_C(0x6d04093431c32330)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5580,7 +5580,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 8},
     },
     [10] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 10),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 10,
         .key = {MACHINE_X64_MOVZX_MEMORY16_EXACT_FORM_ID, UINT64_C(0xa910655fd16f6729)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5588,7 +5588,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 16},
     },
     [11] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 11),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 11,
         .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5596,7 +5596,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {32, 32},
     },
     [12] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 12),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 12,
         .key = {MACHINE_X64_MOV_MEMORY_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5604,7 +5604,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [13] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 13),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 13,
         .key = {MACHINE_X64_MOV_MEMORY8_EXACT_FORM_ID, UINT64_C(0xe7a77cae08617d2d)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5612,7 +5612,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {8, 8},
     },
     [14] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 14),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 14,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5620,7 +5620,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {16, 16},
     },
     [15] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 15),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 15,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5628,7 +5628,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {32, 32},
     },
     [16] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 16),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 16,
         .key = {MACHINE_X64_MOV_MEMORY_FULL_EXACT_FORM_ID, UINT64_C(0xa4ef94df2e338694)},
         .operand_count = 2,
         .operand_slots = {0, 1},
@@ -5636,7 +5636,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [17] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 17),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 17,
         .key = {MACHINE_X64_LEA_EXACT_FORM_ID, UINT64_C(0x0b357f27b62f3409)},
         .operand_count = 2,
         .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
@@ -5645,78 +5645,78 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_widths = {64, 64},
     },
     [18] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 18),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 18,
         .key = {MACHINE_X64_PUSH_FRAME_EXACT_FORM_ID, UINT64_C(0x18f2cf99c5297c27)},
         .operand_count = 1, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
         .operand_slots = {0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD}, .operand_widths = {64},
     },
     [19] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 19),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 19,
         .key = {MACHINE_X64_VMOV_RR_EXACT_FORM_ID, UINT64_C(0xea537c4b94111b09)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [20] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 20),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 20,
         .key = {MACHINE_X64_VLOAD_EXACT_FORM_ID, UINT64_C(0x62bba0430900201e)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT}, .operand_widths = {512, 8},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [21] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 21),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 21,
         .key = {MACHINE_X64_VSTORE_EXACT_FORM_ID, UINT64_C(0xa3f8bbb35dcafc20)},
         .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [22] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 22),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 22,
         .key = {MACHINE_X64_VLOAD_EXACT_FORM_ID, UINT64_C(0x62bba0430900201e)}, .operand_count = 2, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO}, .operand_widths = {512, 8},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [23] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 23),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 23,
         .key = {MACHINE_X64_VSTORE_EXACT_FORM_ID, UINT64_C(0xa3f8bbb35dcafc20)}, .operand_count = 2, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {8, 512},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [24] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 24),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 24,
         .key = {MACHINE_X64_VPSLLD_EXACT_FORM_ID, UINT64_C(0x47cd9f2fa72e4408)}, .operand_count = 3, .operand_slots = {0, 1, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {512, 512, 8},
         .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
     },
     [25] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 25),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 25,
         .key = {MACHINE_X64_VPADDB_EXACT_FORM_ID, UINT64_C(0x9fc171a572e6eeae)}, .operand_count = 3, .operand_slots = {0, 1, 2},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512, 512},
         .variant_count = MACHINE_X64_VBINARY_VARIANT_COUNT, .variant_selector = MACHINE_X64_EXACT_VARIANT_VBINARY, .variants = machine_x64_vbinary_variants,
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [32] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 32), .key = {MACHINE_X64_VSPLATB_EXACT_FORM_ID, UINT64_C(0x5db141a5417ed3f6)},
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 32, .key = {MACHINE_X64_VSPLATB_EXACT_FORM_ID, UINT64_C(0x5db141a5417ed3f6)},
         .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {512, 32},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
     [33] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 33), .key = {MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID, UINT64_C(0x61fc34c1d8f6da45)},
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 33, .key = {MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID, UINT64_C(0x61fc34c1d8f6da45)},
         .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {512, 512, 512, 8},
         .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
     },
     [34] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 34), .key = {MACHINE_X64_XCHG_EXACT_FORM_ID, UINT64_C(0x100612d3d9f27042)},
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 34, .key = {MACHINE_X64_XCHG_EXACT_FORM_ID, UINT64_C(0x100612d3d9f27042)},
         .operand_count = 2, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
     },
     [35] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 35), .key = {MACHINE_X64_CMPXCHG_EXACT_FORM_ID, UINT64_C(0x46a888e2c049f87a)},
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 35, .key = {MACHINE_X64_CMPXCHG_EXACT_FORM_ID, UINT64_C(0x46a888e2c049f87a)},
         .operand_count = 2, .operand_slots = {1, 3}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
     },
     [46] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 46), .key = {MACHINE_X64_SUB_RSP_EXACT_FORM_ID, UINT64_C(0xb9527cc38accf111)},
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 46, .key = {MACHINE_X64_SUB_RSP_EXACT_FORM_ID, UINT64_C(0xb9527cc38accf111)},
         .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_FIXED_RSP, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {64, 32},
     },
 };
@@ -6093,28 +6093,28 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpmovzxbd_s
     {.step_count = 2, .steps = machine_x64_vpmovzxbd_q_steps},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_table[MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT] = {
-    [26] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 26), .variant_count = 1, .variants = machine_x64_cvt_f32_f64_sequence_variants},
-    [27] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 27), .variant_count = 1, .variants = machine_x64_cvt_f64_f32_sequence_variants},
-    [28] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 28), .variant_count = 1, .variants = machine_x64_cvt_i64_f32_sequence_variants},
-    [29] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 29), .variant_count = 1, .variants = machine_x64_cvt_i64_f64_sequence_variants},
-    [30] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 30), .variant_count = 1, .variants = machine_x64_cvt_f32_i64_sequence_variants},
-    [31] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 31), .variant_count = 1, .variants = machine_x64_cvt_f64_i64_sequence_variants},
-    [36] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 36), .variant_count = 1, .variants = machine_x64_vload_ptr_masked_sequence_variants},
-    [37] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 37), .variant_count = 1, .variants = machine_x64_vstore_ptr_masked_sequence_variants},
-    [38] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 38), .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
-    [39] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 39), .variant_count = 3, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
-    [40] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 40), .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
-    [41] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 41), .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
-    [42] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 42), .variant_count = 1, .variants = machine_x64_vcompressb_sequence_variants},
-    [43] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 43), .variant_count = 4, .variants = machine_x64_vpmovzxbd_sequence_variants},
+    [26] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 26, .variant_count = 1, .variants = machine_x64_cvt_f32_f64_sequence_variants},
+    [27] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 27, .variant_count = 1, .variants = machine_x64_cvt_f64_f32_sequence_variants},
+    [28] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 28, .variant_count = 1, .variants = machine_x64_cvt_i64_f32_sequence_variants},
+    [29] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 29, .variant_count = 1, .variants = machine_x64_cvt_i64_f64_sequence_variants},
+    [30] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 30, .variant_count = 1, .variants = machine_x64_cvt_f32_i64_sequence_variants},
+    [31] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 31, .variant_count = 1, .variants = machine_x64_cvt_f64_i64_sequence_variants},
+    [36] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 36, .variant_count = 1, .variants = machine_x64_vload_ptr_masked_sequence_variants},
+    [37] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 37, .variant_count = 1, .variants = machine_x64_vstore_ptr_masked_sequence_variants},
+    [38] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 38, .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
+    [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 3, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
+    [40] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 40, .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
+    [41] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 41, .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
+    [42] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 42, .variant_count = 1, .variants = machine_x64_vcompressb_sequence_variants},
+    [43] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 43, .variant_count = 4, .variants = machine_x64_vpmovzxbd_sequence_variants},
     [35] = {
-        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 35),
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 35,
         .variant_count = 1, .variants = machine_x64_cmpxchg_sequence_variants,
     },
-    [44] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 44), .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
-    [45] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45), .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
-    [47] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 47), .variant_count = 16, .variants = machine_x64_setcc_sequence_variants},
-    [48] = {.recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 48), .variant_count = 16, .variants = machine_x64_jcc_sequence_variants},
+    [44] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 44, .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
+    [45] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 45, .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
+    [47] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 47, .variant_count = 16, .variants = machine_x64_setcc_sequence_variants},
+    [48] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 48, .variant_count = 16, .variants = machine_x64_jcc_sequence_variants},
 };
 
 // DIRECT recipe index -> compact unique exact-plan identity.  Width variants
@@ -6704,42 +6704,65 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_displacement_class(BusterX86Me
     return 3;
 }
 
+// The mnemonics the shape signature distinguishes, and the small dense id each
+// one folds to. Every row that is not listed hashes as 0, which only widens the
+// shape key's collision domain and never changes what is emitted.
+typedef struct MachineX64ShapeMnemonic MachineX64ShapeMnemonic;
+struct MachineX64ShapeMnemonic
+{
+    String8 name;
+    u8 id;
+};
+
+// Rows are grouped by length, ascending, and the span table below indexes
+// straight into each group -- this stands in for the length test that opened
+// every arm of the per-character compare ladder this replaced. Keep both in
+// step when editing: adding a row means bumping every later span bound.
+BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] = {
+    {S8_INITIALIZER("JB"), 7},          {S8_INITIALIZER("JZ"), 11},         {S8_INITIALIZER("OR"), 14},
+    {S8_INITIALIZER("ADD"), 1},         {S8_INITIALIZER("AND"), 2},         {S8_INITIALIZER("CDQ"), 3},
+    {S8_INITIALIZER("CMP"), 4},         {S8_INITIALIZER("CQO"), 5},         {S8_INITIALIZER("DIV"), 6},
+    {S8_INITIALIZER("JMP"), 8},         {S8_INITIALIZER("JNS"), 9},         {S8_INITIALIZER("JNZ"), 10},
+    {S8_INITIALIZER("LEA"), 12},        {S8_INITIALIZER("MOV"), 13},        {S8_INITIALIZER("POP"), 15},
+    {S8_INITIALIZER("RET"), 16},        {S8_INITIALIZER("SHR"), 17},        {S8_INITIALIZER("SUB"), 18},
+    {S8_INITIALIZER("UD2"), 19},        {S8_INITIALIZER("XOR"), 20},        {S8_INITIALIZER("CALL"), 21},
+    {S8_INITIALIZER("IDIV"), 23},       {S8_INITIALIZER("JNBE"), 24},       {S8_INITIALIZER("MOVQ"), 25},
+    {S8_INITIALIZER("PUSH"), 26},       {S8_INITIALIZER("TEST"), 33},       {S8_INITIALIZER("ADDSD"), 27},
+    {S8_INITIALIZER("ADDSS"), 28},      {S8_INITIALIZER("MOVSD"), 29},      {S8_INITIALIZER("MOVZX"), 30},
+    {S8_INITIALIZER("SUBSD"), 31},      {S8_INITIALIZER("SUBSS"), 32},      {S8_INITIALIZER("CMPXCHG"), 34},
+    {S8_INITIALIZER("UCOMISD"), 35},    {S8_INITIALIZER("UCOMISS"), 36},    {S8_INITIALIZER("CVTSI2SD"), 37},
+    {S8_INITIALIZER("CVTSI2SS"), 38},   {S8_INITIALIZER("VMOVDQU8"), 39},   {S8_INITIALIZER("CVTTSD2SI"), 40},
+    {S8_INITIALIZER("CVTTSS2SI"), 41},  {S8_INITIALIZER("CMPXCHG16B"), 42}, {S8_INITIALIZER("VZEROUPPER"), 43},
+};
+
+#define MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH 2u
+#define MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH 10u
+
+// First row of each length, indexed by length - 2, with a closing bound. There
+// are no six-character rows, so that span is empty.
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 20, 26, 32, 32, 35, 38, 40, 42};
+
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 42);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
+                MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
+
 BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_mnemonic_id(String8 mnemonic)
 {
-    char8 const* p = mnemonic.pointer;
-    u64 n = mnemonic.length;
-#define M3(a, b, c, id) if (n == 3 && p[0] == (a) && p[1] == (b) && p[2] == (c)) return (id)
-#define M2(a, b, id) if (n == 2 && p[0] == (a) && p[1] == (b)) return (id)
-#define M4(a, b, c, d, id) if (n == 4 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d)) return (id)
-#define M5(a, b, c, d, e, id) if (n == 5 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e)) return (id)
-#define M7(a, b, c, d, e, f, g, id) \
-    if (n == 7 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g)) return (id)
-#define M8(a, b, c, d, e, f, g, h, id) \
-    if (n == 8 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g) && p[7] == (h)) return (id)
-#define M9(a, b, c, d, e, f, g, h, i, id) \
-    if (n == 9 && p[0] == (a) && p[1] == (b) && p[2] == (c) && p[3] == (d) && p[4] == (e) && p[5] == (f) && p[6] == (g) && p[7] == (h) && p[8] == (i)) return (id)
-    M2('J', 'B', 7); M2('J', 'Z', 11);
-    M3('A', 'D', 'D', 1); M3('A', 'N', 'D', 2); M3('C', 'D', 'Q', 3); M3('C', 'M', 'P', 4); M3('C', 'Q', 'O', 5);
-    M3('D', 'I', 'V', 6); M3('J', 'M', 'P', 8); M3('J', 'N', 'S', 9); M3('J', 'N', 'Z', 10); M3('L', 'E', 'A', 12);
-    M3('M', 'O', 'V', 13); M2('O', 'R', 14); M3('P', 'O', 'P', 15); M3('R', 'E', 'T', 16); M3('S', 'H', 'R', 17);
-    M3('S', 'U', 'B', 18); M3('U', 'D', '2', 19); M3('X', 'O', 'R', 20);
-    M4('C', 'A', 'L', 'L', 21); M4('I', 'D', 'I', 'V', 23); M4('J', 'N', 'B', 'E', 24); M4('M', 'O', 'V', 'Q', 25);
-    M4('P', 'U', 'S', 'H', 26); M4('T', 'E', 'S', 'T', 33);
-    M5('A', 'D', 'D', 'S', 'D', 27); M5('A', 'D', 'D', 'S', 'S', 28); M5('M', 'O', 'V', 'S', 'D', 29);
-    M5('M', 'O', 'V', 'Z', 'X', 30); M5('S', 'U', 'B', 'S', 'D', 31); M5('S', 'U', 'B', 'S', 'S', 32);
-    M7('C', 'M', 'P', 'X', 'C', 'H', 'G', 34); M7('U', 'C', 'O', 'M', 'I', 'S', 'D', 35); M7('U', 'C', 'O', 'M', 'I', 'S', 'S', 36);
-    M8('C', 'V', 'T', 'S', 'I', '2', 'S', 'D', 37); M8('C', 'V', 'T', 'S', 'I', '2', 'S', 'S', 38);
-    M8('V', 'M', 'O', 'V', 'D', 'Q', 'U', '8', 39);
-    M9('C', 'V', 'T', 'T', 'S', 'D', '2', 'S', 'I', 40); M9('C', 'V', 'T', 'T', 'S', 'S', '2', 'S', 'I', 41);
-#undef M2
-    if (n == 10 && p[0] == 'C' && p[1] == 'M' && p[2] == 'P' && p[3] == 'X' && p[4] == 'C' && p[5] == 'H' && p[6] == 'G' && p[7] == '1' && p[8] == '6' && p[9] == 'B') return 42;
-    if (n == 10 && p[0] == 'V' && p[1] == 'Z' && p[2] == 'E' && p[3] == 'R' && p[4] == 'O' && p[5] == 'U' && p[6] == 'P' && p[7] == 'P' && p[8] == 'E' && p[9] == 'R') return 43;
-#undef M3
-#undef M4
-#undef M5
-#undef M7
-#undef M8
-#undef M9
+    if (mnemonic.length < MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH || mnemonic.length > MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH)
+    {
+        return 0;
+    }
+    u32 span = (u32)mnemonic.length - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH;
+    // The first byte rejects all but a couple of rows in the widest span, so
+    // the full compare runs about once per lookup rather than once per row.
+    for (u32 row = machine_x64_shape_mnemonic_spans[span]; row < machine_x64_shape_mnemonic_spans[span + 1]; row += 1)
+    {
+        if (machine_x64_shape_mnemonics[row].name.pointer[0] == mnemonic.pointer[0] &&
+            string_equal(machine_x64_shape_mnemonics[row].name, mnemonic))
+        {
+            return machine_x64_shape_mnemonics[row].id;
+        }
+    }
     return 0;
 }
 
@@ -7866,29 +7889,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     // multiple canonical forms.  The first variant is the fixed/default path;
     // callers can extend this switch without changing MachineInstruction.
     u32 variant_index = 0;
-    if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 39))
+    if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 39)
     {
         variant_index = payload < sequence->variant_count ? payload : UINT32_MAX;
     }
-    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 44))
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 44)
     {
         u32 operation = payload & 0xffu;
         u32 operation_index = operation == 0x58u ? 0 : operation == 0x5cu ? 1 : operation == 0x59u ? 2 : operation == 0x5eu ? 3 : UINT32_MAX;
         variant_index = operation_index == UINT32_MAX ? UINT32_MAX : operation_index + ((payload & 0x100u) ? 4u : 0u);
     }
-    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45))
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 45)
     {
         u32 condition = payload & 0xfu;
         u32 condition_index = condition == 4 ? 0 : condition == 5 ? 1 : condition == 2 ? 2 : condition == 6 ? 3 : condition == 7 ? 4 : condition == 3 ? 5 : UINT32_MAX;
         variant_index = condition_index == UINT32_MAX ? UINT32_MAX : condition_index + ((payload & 0x100u) ? 6u : 0u);
     }
-    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 43))
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 43)
     {
         u32 quarter = payload & 0xffu;
         variant_index = quarter < sequence->variant_count ? quarter : UINT32_MAX;
     }
-    else if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 47) ||
-             sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 48))
+    else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 47 ||
+             sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 48)
     {
         variant_index = (payload & 0xfu) < sequence->variant_count ? payload & 0xfu : UINT32_MAX;
     }
@@ -7998,7 +8021,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
         }
         BusterX86MetadataMachineExactToken step_token =
             entry->sequence_tokens[variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index];
-        if (sequence->recipe == MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 45) &&
+        if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 45 &&
             (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_PARITY_ONLY) && parity_mode != 1)
         {
             step_valid = step_valid && machine_x64_fcmp_alternate_tokens_valid;

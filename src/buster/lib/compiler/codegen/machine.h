@@ -216,8 +216,19 @@ typedef enum MachineEmitRecipeCategory
 #define MACHINE_EMIT_RECIPE_INDEX_MASK ((MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_INDEX_LIMIT - 1u))
 #define MACHINE_EMIT_RECIPE_INVALID ((MachineEmitRecipeId)UINT16_MAX)
 #define MACHINE_EMIT_RECIPE_NONE ((MachineEmitRecipeId)0)
-#define MACHINE_EMIT_RECIPE_MAKE(category, index)                                                                                                               \
-    ((MachineEmitRecipeId)((((MachineEmitRecipeId)(category)) << MACHINE_EMIT_RECIPE_CATEGORY_SHIFT) | ((MachineEmitRecipeId)(index) & MACHINE_EMIT_RECIPE_INDEX_MASK)))
+
+// A recipe is written as its category's base plus the target-local index, so
+// every identity stays a constant expression the recipe tables can hold in
+// static storage. Categories occupy the two high bits, which is why the base
+// and the index simply add. These are object-like constants and not
+// enumerators because the shift is derived from sizeof, and an enumerator
+// whose initializer contains sizeof is currently folded wrong by this
+// compiler's own C frontend -- which self-hosting would then bake into the
+// recipe tables.
+#define MACHINE_EMIT_RECIPE_DIRECT_BASE ((MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT << MACHINE_EMIT_RECIPE_CATEGORY_SHIFT))
+#define MACHINE_EMIT_RECIPE_FAMILY_BASE ((MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY << MACHINE_EMIT_RECIPE_CATEGORY_SHIFT))
+#define MACHINE_EMIT_RECIPE_EXPANSION_BASE ((MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION << MACHINE_EMIT_RECIPE_CATEGORY_SHIFT))
+
 BUSTER_CT_CHECK(MACHINE_EMIT_RECIPE_CATEGORY_COUNT <= (1u << MACHINE_EMIT_RECIPE_CATEGORY_BITS));
 BUSTER_CT_CHECK(MACHINE_EMIT_RECIPE_INDEX_BITS < 16u);
 
@@ -696,9 +707,32 @@ typedef MachineResource MachineImplicitResource;
 #define MACHINE_IMPLICIT_RESOURCE_CONTROL MACHINE_RESOURCE_CONTROL
 #define MACHINE_IMPLICIT_RESOURCE_COUNT MACHINE_RESOURCE_COUNT
 
-#define MACHINE_OPCODE_FORM_BIT(form) ((u16)(1u << (form)))
-#define MACHINE_OPCODE_FORM_SET(form) MACHINE_OPCODE_FORM_BIT(form)
-#define MACHINE_RESOURCE_BIT(resource) (1ull << (resource))
+// The bit each form and each resource occupies in `MachineOpcodeInfo`'s
+// `form_set` and implicit-resource masks.  Both are spelled as enumerators
+// rather than a shift over the position enum because every use is a constant
+// initializer in the opcode table, where a named bit reads better than the
+// shift that produced it.
+typedef enum MachineOpcodeFormSet
+{
+    MACHINE_OPCODE_FORM_SET_NONE = 1u << MACHINE_OPCODE_FORM_NONE,
+    MACHINE_OPCODE_FORM_SET_REGISTER = 1u << MACHINE_OPCODE_FORM_REGISTER,
+    MACHINE_OPCODE_FORM_SET_REGISTER_IMMEDIATE = 1u << MACHINE_OPCODE_FORM_REGISTER_IMMEDIATE,
+    MACHINE_OPCODE_FORM_SET_MEMORY = 1u << MACHINE_OPCODE_FORM_MEMORY,
+    MACHINE_OPCODE_FORM_SET_BRANCH = 1u << MACHINE_OPCODE_FORM_BRANCH,
+    MACHINE_OPCODE_FORM_SET_CALL = 1u << MACHINE_OPCODE_FORM_CALL,
+    MACHINE_OPCODE_FORM_SET_PSEUDO = 1u << MACHINE_OPCODE_FORM_PSEUDO,
+} MachineOpcodeFormSet;
+
+typedef enum MachineResourceMask
+{
+    MACHINE_RESOURCE_NONE_MASK = 1u << MACHINE_RESOURCE_NONE,
+    MACHINE_RESOURCE_FLAGS_MASK = 1u << MACHINE_RESOURCE_FLAGS,
+    MACHINE_RESOURCE_NZCV_MASK = 1u << MACHINE_RESOURCE_NZCV,
+    MACHINE_RESOURCE_STACK_POINTER_MASK = 1u << MACHINE_RESOURCE_STACK_POINTER,
+    MACHINE_RESOURCE_FP_ENVIRONMENT_MASK = 1u << MACHINE_RESOURCE_FP_ENVIRONMENT,
+    MACHINE_RESOURCE_VECTOR_STATE_MASK = 1u << MACHINE_RESOURCE_VECTOR_STATE,
+    MACHINE_RESOURCE_CONTROL_MASK = 1u << MACHINE_RESOURCE_CONTROL,
+} MachineResourceMask;
 
 // One source mark per lowered IR instruction: the machine row where its
 // rows begin and the canonical source position, consumed by the encoder's
