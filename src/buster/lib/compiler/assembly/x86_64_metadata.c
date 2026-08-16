@@ -8493,50 +8493,63 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86Meta
         .form_id = UINT32_MAX,
     };
     BusterX86MetadataExactPlanRecord const* record = buster_x86_metadata_machine_exact_plan_record(token);
-    if (!record)
+    if (record)
+    {
+        result.form_id = record->identity.form_id;
+        result.stable_hash = record->identity.stable_hash;
+        if (!((query.operand_count && !query.operands) || query.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY ||
+                (query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations) ||
+                query.mask_register_plus_one > 8 || (query.zeroing && !query.mask_register_plus_one)))
+        {
+            bool has_mask_register = query.mask_register_plus_one != 0;
+            u8 mask_register = has_mask_register ? (u8)(query.mask_register_plus_one - 1) : 0;
+            u16 decorator_flags = has_mask_register ? BUSTER_X86_METADATA_DECORATOR_MASK : 0;
+            if (query.zeroing) decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ZEROING;
+
+            BusterX86MetadataEmitQuery normalized = {
+                .physical = {
+                    .mnemonic = buster_x86_metadata_string_span(record->form->iclass),
+                    .operands = query.operands,
+                    .operand_count = query.operand_count,
+                    .attributes = {
+                        .decorator_flags = decorator_flags,
+                        .mask_register = mask_register,
+                        .has_mask_register = has_mask_register,
+                        .zeroing = query.zeroing,
+                        .lock = query.force_lock,
+                    },
+                    .address_size = 64,
+                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                    .include_privileged = false,
+                    .include_not64 = false,
+                    .include_implicit = false,
+                    .source_semantics = false,
+                },
+                .output = query.output,
+                .output_capacity = query.output_capacity,
+                .relocations = query.relocations,
+                .relocation_capacity = query.relocation_capacity,
+            };
+
+            BusterX86MetadataEmitResult fast_result = result;
+            bool use_fast_result = buster_x86_metadata_emit_machine_fast(normalized.physical, record->form, record, &fast_result, query.output, query.output_capacity, query.force_disp32);
+
+            if (use_fast_result)
+            {
+                result = fast_result;
+            }
+            else
+            {
+                result = buster_x86_metadata_emit_form_with_form(normalized, record->form, false, record, &token, query.force_disp32, false);
+            }
+        }
+    }
+    else
     {
         result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
-        return result;
     }
-    result.form_id = record->identity.form_id;
-    result.stable_hash = record->identity.stable_hash;
-    if ((query.operand_count && !query.operands) || query.operand_count > BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY ||
-        (query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations) ||
-        query.mask_register_plus_one > 8 || (query.zeroing && !query.mask_register_plus_one))
-        return result;
-    bool has_mask_register = query.mask_register_plus_one != 0;
-    u8 mask_register = has_mask_register ? (u8)(query.mask_register_plus_one - 1) : 0;
-    u16 decorator_flags = has_mask_register ? BUSTER_X86_METADATA_DECORATOR_MASK : 0;
-    if (query.zeroing) decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ZEROING;
-    BusterX86MetadataEmitQuery normalized = {
-        .physical = {
-            .mnemonic = buster_x86_metadata_string_span(record->form->iclass),
-            .operands = query.operands,
-            .operand_count = query.operand_count,
-            .attributes = {
-                .decorator_flags = decorator_flags,
-                .mask_register = mask_register,
-                .has_mask_register = has_mask_register,
-                .zeroing = query.zeroing,
-                .lock = query.force_lock,
-            },
-            .address_size = 64,
-            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-            .include_privileged = false,
-            .include_not64 = false,
-            .include_implicit = false,
-            .source_semantics = false,
-        },
-        .output = query.output,
-        .output_capacity = query.output_capacity,
-        .relocations = query.relocations,
-        .relocation_capacity = query.relocation_capacity,
-    };
-    BusterX86MetadataEmitResult fast_result = result;
-    if (buster_x86_metadata_emit_machine_fast(normalized.physical, record->form, record, &fast_result, query.output,
-                                               query.output_capacity, query.force_disp32))
-        return fast_result;
-    return buster_x86_metadata_emit_form_with_form(normalized, record->form, false, record, &token, query.force_disp32, false);
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86MetadataForm form)
