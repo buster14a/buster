@@ -929,19 +929,10 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_reference(DwarfModelWriter* writer, u32 tar
 
 BUSTER_GLOBAL_LOCAL u32 dwarf_model_file(DebugModel* model, DebugSourceLocation location, u32 file_count)
 {
+    (void)model;
     if (location.source < file_count)
     {
         return location.source + 1;
-    }
-    if (model && model->source_count)
-    {
-        for (u32 index = 0; index < model->source_count && index < file_count; index += 1)
-        {
-            if (string_equal(model->source_paths[index], location.path))
-            {
-                return index + 1;
-            }
-        }
     }
     return 1;
 }

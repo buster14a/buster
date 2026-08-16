@@ -154,7 +154,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {
             .name = S8("value"),
             .type = 0,
-            .declaration = {.path = S8("model.c"), .source = 0, .line = 2, .column = 5},
+            .declaration = {.source = 0, .line = 2, .column = 5},
             .locations = model_locations,
             .location_count = BUSTER_ARRAY_LENGTH(model_locations),
             .local = {.value = 0},
@@ -173,7 +173,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     DebugFunction model_functions[] = {
         {
             .name = S8("model_function"),
-            .declaration = {.path = S8("model.c"), .source = 0, .line = 1, .column = 1},
+            .declaration = {.source = 0, .line = 1, .column = 1},
             .symbol = {.value = 0},
             .type = 1,
             .scope = 0,
@@ -183,7 +183,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     DebugInlineSite model_inline_sites[] = {
         {
             .function = model_functions,
-            .call_site = {.path = S8("model.c"), .source = 0, .line = 8, .column = 9},
+            .call_site = {.source = 0, .line = 8, .column = 9},
             .start = 4,
             .end = 20,
             .has_ranges = true,

@@ -539,7 +539,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         {
             .name = S8("parameter"),
             .type = 0,
-            .declaration = {.path = S8("model.c"), .source = 0, .line = 2, .column = 3},
+            .declaration = {.source = 0, .line = 2, .column = 3},
             .locations = dwarf_locations,
             .location_count = BUSTER_ARRAY_LENGTH(dwarf_locations),
             .kind = DEBUG_VARIABLE_PARAMETER,
@@ -557,7 +557,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     DebugFunction dwarf_functions[] = {
         {
             .name = S8("debug_function"),
-            .declaration = {.path = S8("model.c"), .source = 0, .line = 1},
+            .declaration = {.source = 0, .line = 1},
             .symbol = {.value = 0},
             .type = 1,
             .scope = 0,
@@ -567,7 +567,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     DebugInlineSite dwarf_inline_sites[] = {
         {
             .function = dwarf_functions,
-            .call_site = {.path = S8("model.c"), .source = 0, .line = 9, .column = 2},
+            .call_site = {.source = 0, .line = 9, .column = 2},
             .start = 4,
             .end = 20,
             .has_ranges = true,

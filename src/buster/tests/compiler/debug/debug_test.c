@@ -74,11 +74,11 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
         .variables = arena_allocate(arguments->arena, DebugVariable, 4),
     };
     DebugScopeId function_scope = debug_scope_add(arguments->arena, &scope_model, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_FUNCTION,
-                                                   (DebugSourceLocation){.path = S8("source.c"), .line = 4}, 0, 40, 4);
+                                                   (DebugSourceLocation){.line = 4}, 0, 40, 4);
     DebugScopeId lexical_scope = debug_scope_add(arguments->arena, &scope_model, function_scope, DEBUG_SCOPE_LEXICAL,
-                                                  (DebugSourceLocation){.path = S8("source.c"), .line = 6}, 8, 32, 4);
+                                                  (DebugSourceLocation){.line = 6}, 8, 32, 4);
     DebugVariableId scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, scope_model.scopes + lexical_scope,
-                                                         S8("value"), 0, (DebugSourceLocation){.path = S8("source.c"), .line = 7},
+                                                         S8("value"), 0, (DebugSourceLocation){.line = 7},
                                                          DEBUG_VARIABLE_LOCAL, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 8, 32);
     BUSTER_TEST(arguments, function_scope == 0 && lexical_scope == 1);
     BUSTER_TEST(arguments, scope_variable == 0 && scope_model.scopes[lexical_scope].variable_count == 1);

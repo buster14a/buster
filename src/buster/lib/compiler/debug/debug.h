@@ -35,16 +35,22 @@ typedef enum DebugTypeKind
     DEBUG_TYPE_COUNT,
 } DebugTypeKind;
 
+// Embedded in every debug type, field, variable, scope, and function row,
+// so it is 20 bytes: the file is named by `source` (an index into the
+// model's source_paths) rather than a per-record copy of the path, and
+// offset/length are u32 like the IrSourceRange they come from. `line == 0`
+// means the record carries no declaration.
 typedef struct DebugSourceLocation DebugSourceLocation;
 struct DebugSourceLocation
 {
-    String8 path;
     u32 source;
     u32 line;
     u32 column;
-    u64 offset;
-    u64 length;
+    u32 offset;
+    u32 length;
 };
+
+BUSTER_CT_CHECK(sizeof(DebugSourceLocation) == 20);
 
 typedef struct DebugTypeField DebugTypeField;
 struct DebugTypeField

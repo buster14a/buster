@@ -203,7 +203,7 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
         {
             .name = S8("value"),
             .type = 0,
-            .declaration = {.path = files[0], .source = 0, .line = 4, .column = 5},
+            .declaration = {.source = 0, .line = 4, .column = 5},
             .locations = model_locations,
             .location_count = BUSTER_ARRAY_LENGTH(model_locations),
             .kind = DEBUG_VARIABLE_PARAMETER,
@@ -221,14 +221,14 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
     DebugFunction model_functions[] = {
         {
             .name = S8("main"),
-            .declaration = {.path = files[0], .source = 0, .line = 3, .column = 1},
+            .declaration = {.source = 0, .line = 3, .column = 1},
             .type = 1,
             .scope = 0,
             .code_size = 0x100,
         },
         {
             .name = S8("helper"),
-            .declaration = {.path = files[1], .source = 1, .line = 9, .column = 1},
+            .declaration = {.source = 1, .line = 9, .column = 1},
             .type = 1,
             .scope = 0,
             .code_offset = 0x100,

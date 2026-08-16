@@ -12,6 +12,7 @@ BUSTER_GLOBAL_LOCAL String8 debug_string(Arena* arena, String8 string)
 // declaration site that reaches a DWARF DIE or a CodeView record.
 BUSTER_GLOBAL_LOCAL DebugSourceLocation debug_source_from_ir(Arena* arena, IrProgram* program, IrSourceRange range)
 {
+    (void)arena;
     IrSourcePosition position = ir_source_position(program, range);
     DebugSourceLocation result = {
         .line = position.line ? position.line : 1,
@@ -22,7 +23,6 @@ BUSTER_GLOBAL_LOCAL DebugSourceLocation debug_source_from_ir(Arena* arena, IrPro
     if (program && range.source.value < program->sources.count)
     {
         result.source = range.source.value;
-        result.path = debug_string(arena, program->sources.sources[range.source.value].path);
     }
     return result;
 }
@@ -423,11 +423,9 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
 
 BUSTER_GLOBAL_LOCAL DebugSourceLocation debug_function_declaration(Arena* arena, DebugModelInput* input, DebugFunctionSeed* seed)
 {
-    if (seed->declaration.path.length)
+    if (seed->declaration.line)
     {
-        DebugSourceLocation result = seed->declaration;
-        result.path = debug_string(arena, result.path);
-        return result;
+        return seed->declaration;
     }
     if (input->program && seed->symbol.value < input->program->symbols.count)
     {
@@ -495,10 +493,6 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         .line = 1,
         .column = 1,
     };
-    if (result.source_count)
-    {
-        root_declaration.path = result.source_paths[0];
-    }
     result.root_scope = debug_scope_add(arena, &result, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_LEXICAL, root_declaration, 0, 1, variable_capacity);
 
     for (u32 type_index = 0; type_index < result.type_count; type_index += 1)
@@ -577,9 +571,9 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
             .code_size = seed->code_size,
             .variable_start = result.variable_count,
         };
-        if (!function->name.length)
+        if (!function->name.length && declaration.source < result.source_count)
         {
-            function->name = debug_string(arena, declaration.path);
+            function->name = result.source_paths[declaration.source];
         }
         function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
                                           function->code_offset + function->code_size, variable_capacity);
