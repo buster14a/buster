@@ -3,6 +3,14 @@
 #include <buster/lib/base.h>
 #include <buster/lib/target.h>
 
+// Architectural immediate limits shared by every A64 emitter: ADD/SUB and
+// scaled LDR/STR unsigned immediates are 12 bits, and the largest single SP
+// adjustment that keeps the stack 16-byte aligned is that limit rounded
+// down to 16. Capacity computations that count adjustment chunks must use
+// the same constants as the emitters that produce them.
+#define A64_IMM12_MAX 4095u
+#define A64_SP_ADJUST_CHUNK (A64_IMM12_MAX & ~15u)
+
 // Exact architectural forms used at the AArch64 MC boundary. These IDs are
 // deliberately distinct from MachineOpcode: machine rows may still be
 // pseudos or semantic operations, while every value here denotes one real

@@ -4,6 +4,15 @@
 // rest of the compiler is the canonical IR model; all temporary vectors and
 // encoded bytes belong to the caller supplied arena.
 
+// Linear-memory layout policy: static data starts one 64 KiB region above
+// address zero, and the shadow stack gets its own 64 KiB above the data.
+// The equal values are coincidence, not a shared constant.
+enum
+{
+    WASM64_DATA_BASE = 0x10000,
+    WASM64_STACK_SIZE = 0x10000,
+};
+
 typedef enum Wasm64ValType
 {
     WASM64_VALTYPE_INVALID = 0,
@@ -937,7 +946,7 @@ static bool wasm64_collect_data(Wasm64Context* context)
     {
         context->symbol_data_indices[symbol_index] = UINT32_MAX;
     }
-    context->data_cursor = 0x10000;
+    context->data_cursor = WASM64_DATA_BASE;
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
@@ -983,7 +992,7 @@ static bool wasm64_collect_data(Wasm64Context* context)
         }
     }
     wasm64_align_cursor(&context->data_cursor, 16);
-    context->stack_base = context->data_cursor + 0x10000;
+    context->stack_base = context->data_cursor + WASM64_STACK_SIZE;
     if (context->stack_base < context->data_cursor)
     {
         wasm64_fail(context, WASM64_ERROR_ENCODING, wasm64_s8("Wasm64 memory layout overflow"), 0, 0, 0, IR_SYMBOL_ID_INVALID);

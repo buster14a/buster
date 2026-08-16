@@ -2845,7 +2845,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_immediate(MachineA64Encoder* encoder, 
 BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_unsigned_memory(MachineA64Encoder* encoder, u32 register_number, u32 base_register,
                                                                     u32 offset, u32 size, bool store)
 {
-    if (!encoder || (size != 1 && size != 2 && size != 4 && size != 8) || offset % size || offset / size > 4095)
+    if (!encoder || (size != 1 && size != 2 && size != 4 && size != 8) || offset % size || offset / size > A64_IMM12_MAX)
     {
         if (encoder)
         {
@@ -2891,7 +2891,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
         return;
     }
     u32 base_register = MACHINE_A64_X28;
-    if (offset / scale > 4095)
+    if (offset / scale > A64_IMM12_MAX)
     {
         machine_a64_emit_immediate(encoder, MACHINE_A64_X16, offset);
         machine_a64_emit(encoder, 0x8b000000 | (MACHINE_A64_X16 << 16) | (base_register << 5) | MACHINE_A64_X16);
@@ -2912,7 +2912,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_load(MachineA64Encoder* encoder,
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_pointer_memory(MachineA64Encoder* encoder, u32 register_number, u32 base_register, u32 offset, u32 size, bool store)
 {
     u32 scale = size;
-    if ((size != 1 && size != 2 && size != 4 && size != 8) || offset % scale || offset / scale > 4095)
+    if ((size != 1 && size != 2 && size != 4 && size != 8) || offset % scale || offset / scale > A64_IMM12_MAX)
     {
         encoder->error = true;
         return;
@@ -3570,7 +3570,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     // Per-row worst-case byte budget: constants and remainders expand, the
     // epilogue carries the frame release, everything else is one word plus
     // slack for large-offset frame addressing.
-    u32 frame_chunk_words = frame_total / 4080 + 1;
+    u32 frame_chunk_words = frame_total / A64_SP_ADJUST_CHUNK + 1;
     u64 capacity64 = 64 + (u64)frame_chunk_words * 8 + (u64)push_count * 4;
     for (u32 capacity_index = 0; capacity_index < function->instruction_count; capacity_index += 1)
     {
@@ -3635,7 +3635,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     u32 frame_remaining = frame_total;
     while (frame_remaining)
     {
-        u32 frame_chunk = BUSTER_MIN(frame_remaining, 4080u);
+        u32 frame_chunk = BUSTER_MIN(frame_remaining, A64_SP_ADJUST_CHUNK);
         machine_a64_emit(&encoder, 0xd10003ff | (frame_chunk << 10));
         machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
         frame_remaining -= frame_chunk;
@@ -3806,7 +3806,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // the destination as its own scratch.
                 u32 frame_offset = machine_a64_frame_offset(
                     frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
-                if (frame_offset <= 4095)
+                if (frame_offset <= A64_IMM12_MAX)
                 {
                     u32 fields[] = {operand_registers[0], MACHINE_A64_X28, frame_offset};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
@@ -3822,7 +3822,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_LEA_OFFSET:
             {
                 u32 displacement = instruction->payload;
-                if (displacement <= 4095)
+                if (displacement <= A64_IMM12_MAX)
                 {
                     u32 fields[] = {operand_registers[0], operand_registers[1], displacement};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
@@ -3976,7 +3976,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 u32 release_remaining = frame_total;
                 while (release_remaining)
                 {
-                    u32 release_chunk = BUSTER_MIN(release_remaining, 4080u);
+                    u32 release_chunk = BUSTER_MIN(release_remaining, A64_SP_ADJUST_CHUNK);
                     u32 fields[] = {MACHINE_A64_SP, MACHINE_A64_SP, release_chunk};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
                     release_remaining -= release_chunk;

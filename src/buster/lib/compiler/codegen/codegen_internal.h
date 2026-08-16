@@ -90,6 +90,11 @@ typedef IrAbiValue CodegenCanonicalAbiValue;
 // the alignment an outgoing-argument area gets for free.
 #define CODEGEN_X64_STACK_ALIGNMENT 16
 
+// The guard-page interval stack growth must touch: chunked RSP adjustments,
+// probe loops, and the unwind-action capacity that counts those chunks all
+// derive from this one value.
+#define CODEGEN_X64_STACK_PROBE_PAGE 4096u
+
 typedef struct CodegenCanonicalCallArgument CodegenCanonicalCallArgument;
 struct CodegenCanonicalCallArgument
 {

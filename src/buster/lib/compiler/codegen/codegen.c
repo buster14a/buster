@@ -135,6 +135,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 }
 
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/object/object.h>
@@ -1988,7 +1989,7 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_float_bits(X64Builder* builder, X64Regis
 BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor, u32 action_capacity,
                                                           u32 function_offset)
 {
-    if (!buffer || size <= 4096)
+    if (!buffer || size <= CODEGEN_X64_STACK_PROBE_PAGE)
     {
         return false;
     }
@@ -2009,7 +2010,7 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, 
     };
     BusterX86MetadataPhysicalOperand sub_r11_operands[2] = {
         codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
-        codegen_canonical_x64_metadata_immediate(4096, 32),
+        codegen_canonical_x64_metadata_immediate(CODEGEN_X64_STACK_PROBE_PAGE, 32),
     };
     BusterX86MetadataPhysicalOperand cmp_operands[2] = {
         codegen_canonical_x64_metadata_gpr(X64_REGISTER_R11, 64),
@@ -2577,7 +2578,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_store_offset(CodegenBuffer* buffer, u32 source
 void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size)
 {
     u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
-    if (offset % scale || offset / scale > 4095)
+    if (offset % scale || offset / scale > A64_IMM12_MAX)
     {
         buffer->error = CODEGEN_ERROR_CAPACITY;
         return;
@@ -2588,7 +2589,7 @@ void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u
 void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size)
 {
     u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
-    if (offset % scale || offset / scale > 4095)
+    if (offset % scale || offset / scale > A64_IMM12_MAX)
     {
         buffer->error = CODEGEN_ERROR_CAPACITY;
         return;
@@ -2639,7 +2640,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_constant_compact(CodegenBuffer* buffer, u32 ta
 BUSTER_GLOBAL_LOCAL bool a64_emit_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
                                                              CodegenFunctionDescriptor* descriptor, u32 action_capacity)
 {
-    if (size <= 4080 || size % 16)
+    if (size <= A64_SP_ADJUST_CHUNK || size % 16)
     {
         return false;
     }
@@ -2718,7 +2719,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_stack_address(CodegenBuffer* buffer, u32 targe
     a64_emit_instruction_word(buffer, 0x910003e0 | target);
     while (offset)
     {
-        u32 chunk = BUSTER_MIN(offset, 4095);
+        u32 chunk = BUSTER_MIN(offset, A64_IMM12_MAX);
         a64_emit_instruction_word(buffer, 0x91000000 | target | (target << 5) | (chunk << 10));
         offset -= chunk;
     }
@@ -2790,7 +2791,7 @@ void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address
         buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
         return;
     }
-    if (offset / scale > 4095)
+    if (offset / scale > A64_IMM12_MAX)
     {
         codegen_canonical_a64_base_address(buffer, target, address, offset);
         address = target;
@@ -2808,7 +2809,7 @@ void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 addres
         buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
         return;
     }
-    if (offset / scale > 4095)
+    if (offset / scale > A64_IMM12_MAX)
     {
         u32 scratch = 16;
         if (scratch == source || scratch == address)
@@ -3649,7 +3650,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuf
     }
     while (byte_count)
     {
-        u32 chunk = BUSTER_MIN(byte_count, 4080u);
+        u32 chunk = BUSTER_MIN(byte_count, A64_SP_ADJUST_CHUNK);
         codegen_emit_u32(buffer, (subtract ? 0xd10003ff : 0x910003ff) | (chunk << 10));
         if (subtract && descriptor &&
             !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
@@ -3699,7 +3700,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuf
     }
     while (byte_count)
     {
-        u32 chunk = BUSTER_MIN(byte_count, 4096u);
+        u32 chunk = BUSTER_MIN(byte_count, CODEGEN_X64_STACK_PROBE_PAGE);
         BusterX86MetadataPhysicalOperand subtract_operands[2] = {
             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
             codegen_canonical_x64_metadata_immediate(chunk, chunk <= INT8_MAX ? 8 : 32),
@@ -3760,7 +3761,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_emit_return(CodegenBuffer* buffer
 
 void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
 {
-    if (byte_offset <= 4095)
+    if (byte_offset <= A64_IMM12_MAX)
     {
         codegen_emit_u32(buffer, 0x91000000 | (byte_offset << 10) | (base_register << 5) | register_number);
         return;
@@ -5606,7 +5607,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_memory_operation_base(CodegenBuff
     {
         return false;
     }
-    bool indirect = offset / scale > 4095;
+    bool indirect = offset / scale > A64_IMM12_MAX;
     if (indirect)
     {
         codegen_canonical_a64_base_address(buffer, 16, base_register, offset);
@@ -5778,7 +5779,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_memory_operation_base(Codeg
     {
         return false;
     }
-    bool indirect = offset / scale > 4095;
+    bool indirect = offset / scale > A64_IMM12_MAX;
     if (indirect)
     {
         codegen_canonical_a64_base_address(buffer, 16, base_register, offset);
@@ -6399,7 +6400,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 aligned_argument_capacity += (slot_size / 8) * 15 + 32;
             }
         }
-        u64 probe_count = (function_value_bytes + 4079) / 4080;
+        u64 probe_count = (function_value_bytes + A64_SP_ADJUST_CHUNK - 1) / A64_SP_ADJUST_CHUNK;
         stack_probe_capacity += probe_count * 11;
     }
     u32 debug_location_capacity = (u32)debug_location_capacity_64;
@@ -6829,9 +6830,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         u32 canonical_x64_frame_base_offset = windows_dynamic_stack ? frame_size : 0;
         u32 stack_action_count = target.cpu_arch == CPU_ARCH_X86_64
-                                     ? result.abi == CODEGEN_ABI_X86_64_WINDOWS ? (frame_size != 0) : frame_size / 4096 + (frame_size % 4096 != 0)
-                                     : frame_size / 4080 + (frame_size % 4080 != 0);
-        u32 stack_action_capacity = windows_aarch64 ? (frame_size > 4080 ? 14u : stack_action_count * 2) : stack_action_count;
+                                     ? result.abi == CODEGEN_ABI_X86_64_WINDOWS ? (frame_size != 0) : frame_size / CODEGEN_X64_STACK_PROBE_PAGE + (frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0)
+                                     : frame_size / A64_SP_ADJUST_CHUNK + (frame_size % A64_SP_ADJUST_CHUNK != 0);
+        u32 stack_action_capacity = windows_aarch64 ? (frame_size > A64_SP_ADJUST_CHUNK ? 14u : stack_action_count * 2) : stack_action_count;
         // x86_64 holds the frame-pointer pair, up to five machine-path
         // callee-saved pushes, and the stack allocation. The AArch64
         // machine path sizes its own frame after this allocation, so the
@@ -6846,7 +6847,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // canonical sizing that the fallback below still needs.
         if (target.cpu_arch == CPU_ARCH_X86_64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
         {
-            u32 machine_unwind_action_capacity = 9u + frame_size / 4096u + (frame_size % 4096u != 0);
+            u32 machine_unwind_action_capacity = 9u + frame_size / CODEGEN_X64_STACK_PROBE_PAGE + (frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0);
             unwind_action_capacity = BUSTER_MAX(unwind_action_capacity, machine_unwind_action_capacity);
         }
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
@@ -7005,7 +7006,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_frame_remaining = machine_frame_total;
                         while (machine_frame_remaining)
                         {
-                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, 4080u);
+                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, A64_SP_ADJUST_CHUNK);
                             machine_prologue_cursor += 4;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
                                                                                 CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_chunk) &&
@@ -7127,7 +7128,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_frame_remaining = placement.frame_size;
                         while (machine_frame_remaining)
                         {
-                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, 4096u);
+                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, CODEGEN_X64_STACK_PROBE_PAGE);
                             machine_prologue_cursor += machine_frame_chunk <= INT8_MAX ? 4u : 7u;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
                                                                                 CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_chunk) &&
@@ -7537,11 +7538,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         };
                         BusterX86MetadataPhysicalOperand stack_compare_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                            codegen_canonical_x64_metadata_immediate(CODEGEN_X64_STACK_PROBE_PAGE, 32),
                         };
                         BusterX86MetadataPhysicalOperand stack_sub_rsp_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
-                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                            codegen_canonical_x64_metadata_immediate(CODEGEN_X64_STACK_PROBE_PAGE, 32),
                         };
                         BusterX86MetadataPhysicalOperand stack_test_operands[2] = {
                             codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RSP, 8, 0),
@@ -7549,7 +7550,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         };
                         BusterX86MetadataPhysicalOperand stack_sub_rax_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                            codegen_canonical_x64_metadata_immediate(4096, 32),
+                            codegen_canonical_x64_metadata_immediate(CODEGEN_X64_STACK_PROBE_PAGE, 32),
                         };
                         BusterX86MetadataPhysicalOperand stack_sub_rsp_rax_operands[2] = {
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
@@ -13930,7 +13931,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             return result;
                         }
                         u64 field_offset = aggregate->fields[field_index].offset;
-                        if (field_offset <= 4095)
+                        if (field_offset <= A64_IMM12_MAX)
                         {
                             codegen_emit_u32(&buffer, 0x91000129 | ((u32)field_offset << 10));
                         }
@@ -14350,7 +14351,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             return result;
                         }
                         u32 overflow_offset = 16 + stack_parts * 8;
-                        if (overflow_offset > 4095)
+                        if (overflow_offset > A64_IMM12_MAX)
                         {
                             result.error = CODEGEN_ERROR_CAPACITY;
                             return result;

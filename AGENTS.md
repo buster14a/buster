@@ -503,6 +503,16 @@ history.
 
 ## Core rules
 
+- **Code must stay human-maintainable.** Every major file opens with an
+  orientation header — what it owns, its entry points, and, for large files,
+  a layout map anchored to greppable definition names, never line numbers.
+  Update the header in the same change that moves what it describes. A value
+  that must agree across several sites (a chunk size that a capacity
+  computation and an emitter both depend on, a limit one file checks and
+  another file exploits) is a named constant, not a respelled literal; a
+  genuinely one-off format field keeps its literal with a comment naming it.
+  Comments state constraints the code cannot show; a claim that has not been
+  verified against the code does not get written down.
 - `BUSTER_F_DECL` belongs on header declarations only. In a `.c` file, a
   module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
   already declares carries no macro at all — the header declaration is what

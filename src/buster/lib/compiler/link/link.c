@@ -1720,16 +1720,27 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
     };
 }
 
+// ELF64 format facts shared by every ELF executable writer below. Each
+// writer keeps only its own policy counts (base program-header count,
+// dynamic-entry count) local, so a writer that grows cannot silently
+// diverge from the format sizes the others rely on.
+enum
+{
+    ELF_HEADER_SIZE = 64,
+    ELF_PROGRAM_HEADER_SIZE = 56,
+    ELF_PAGE_SIZE = 4096,
+    ELF_MACHINE_X86_64 = 62,
+    ELF_MACHINE_AARCH64 = 183,
+    ELF_SYMBOL_SIZE = 24,
+    ELF_RELOCATION_SIZE = 24,
+    ELF_DYNAMIC_SIZE = 16,
+    ELF_PLT_ENTRY_SIZE = 16,
+    ELF_GOT_RESERVED_COUNT = 3,
+};
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
-    enum
-    {
-        ELF_HEADER_SIZE = 64,
-        ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_PAGE_SIZE = 4096,
-        ELF_MACHINE_X86_64 = 62,
-    };
     u8 entry_stub[64] = {0};
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
@@ -1958,16 +1969,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     NativeExecutableLinkResult result = {0};
     enum
     {
-        ELF_HEADER_SIZE = 64,
-        ELF_PROGRAM_HEADER_SIZE = 56,
         ELF_BASE_PROGRAM_HEADER_COUNT = 7,
-        ELF_PAGE_SIZE = 4096,
-        ELF_MACHINE_X86_64 = 62,
-        ELF_SYMBOL_SIZE = 24,
-        ELF_RELOCATION_SIZE = 24,
-        ELF_DYNAMIC_SIZE = 16,
-        ELF_PLT_ENTRY_SIZE = 16,
-        ELF_GOT_RESERVED_COUNT = 3,
     };
     u8 entry_stub[64] = {0};
     u32 entry_stub_size = 0;
@@ -2436,13 +2438,6 @@ BUSTER_GLOBAL_LOCAL void link_pe_section_header(u8* bytes, u64 offset, char cons
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
-    enum
-    {
-        ELF_HEADER_SIZE = 64,
-        ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_PAGE_SIZE = 4096,
-        ELF_MACHINE_AARCH64 = 183,
-    };
     static u32 const entry_stub[] = {
         0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0xd2800ba8, 0xd4000001, 0xd4200000,
     };
@@ -2691,13 +2686,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
 {
     enum
     {
-        ELF_HEADER_SIZE = 64,
-        ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_DYNAMIC_SIZE = 16,
         ELF_DYNAMIC_COUNT = 12,
-        ELF_RELOCATION_SIZE = 24,
-        ELF_PLT_ENTRY_SIZE = 16,
-        ELF_GOT_RESERVED_COUNT = 3,
     };
     static u32 const entry_stub[] = {
         0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0xd2800ba8, 0xd4000001, 0xd4200000,
@@ -2908,9 +2897,22 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     return result;
 }
 
+// PE32+ format facts shared by the hosted and UEFI writers, and the hosted
+// writer's stack/heap policy (written into the optional header at offsets
+// 72..96 as reserve/commit pairs). Each writer keeps its own section-kind
+// list local — the two images carry different section sets.
 enum
 {
+    PE_OFFSET = 0x80,
+    PE_COFF_HEADER_SIZE = 20,
+    PE_OPTIONAL_HEADER_SIZE = 240,
+    PE_SECTION_HEADER_SIZE = 40,
+    PE_FILE_ALIGNMENT = 0x200,
+    PE_SECTION_ALIGNMENT = 0x1000,
     LINK_PE_STACK_RESERVE = 8 * 1024 * 1024,
+    LINK_PE_STACK_COMMIT = 4096,
+    LINK_PE_HEAP_RESERVE = 1024 * 1024,
+    LINK_PE_HEAP_COMMIT = 4096,
 };
 
 BUSTER_GLOBAL_LOCAL String8 link_pe_pdb_path(Arena* arena, String8 executable_path)
@@ -3007,10 +3009,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     NativeExecutableLinkResult result = {0};
     enum
     {
-        PE_OFFSET = 0x80,
-        PE_COFF_HEADER_SIZE = 20,
-        PE_OPTIONAL_HEADER_SIZE = 240,
-        PE_SECTION_HEADER_SIZE = 40,
         PE_SECTION_TEXT = 0,
         PE_SECTION_READ_ONLY_DATA,
         PE_SECTION_DATA,
@@ -3021,8 +3019,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         PE_SECTION_IMPORT,
         PE_SECTION_DEBUG,
         PE_SECTION_COUNT,
-        PE_FILE_ALIGNMENT = 0x200,
-        PE_SECTION_ALIGNMENT = 0x1000,
         PE_IMPORT_DESCRIPTOR_SIZE = 20,
         PE_IMAGE_BASE_LOW = 0x40000000,
         PE_IMAGE_BASE_HIGH = 1,
@@ -3839,9 +3835,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     link_write_u16(bytes, optional + 68, 3);
     link_write_u16(bytes, optional + 70, 0x100);
     link_write_u64(bytes, optional + 72, LINK_PE_STACK_RESERVE);
-    link_write_u64(bytes, optional + 80, 4096);
-    link_write_u64(bytes, optional + 88, 1024 * 1024);
-    link_write_u64(bytes, optional + 96, 4096);
+    link_write_u64(bytes, optional + 80, LINK_PE_STACK_COMMIT);
+    link_write_u64(bytes, optional + 88, LINK_PE_HEAP_RESERVE);
+    link_write_u64(bytes, optional + 96, LINK_PE_HEAP_COMMIT);
     link_write_u32(bytes, optional + 108, 16);
     link_write_u32(bytes, optional + 120, import_section_rva + (u32)import_descriptor_offset);
     link_write_u32(bytes, optional + 124, (u32)(import_descriptor_count * PE_IMPORT_DESCRIPTOR_SIZE));
@@ -4067,12 +4063,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     NativeExecutableLinkResult result = {0};
     enum
     {
-        PE_OFFSET = 0x80,
-        PE_COFF_HEADER_SIZE = 20,
-        PE_OPTIONAL_HEADER_SIZE = 240,
-        PE_SECTION_HEADER_SIZE = 40,
-        PE_FILE_ALIGNMENT = 0x200,
-        PE_SECTION_ALIGNMENT = 0x1000,
         PE_SECTION_TEXT = 0,
         PE_SECTION_READ_ONLY_DATA,
         PE_SECTION_DATA,
@@ -4711,6 +4701,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     link_write_u32(bytes, optional + 60, (u32)header_size);
     link_write_u16(bytes, optional + 68, 10);
     link_write_u16(bytes, optional + 70, 0x8160);
+    // Stack/heap reserve+commit quads. Firmware provides the real stack, so
+    // these are nominal; they are deliberately smaller than the hosted
+    // writer's LINK_PE_* policy above.
     link_write_u64(bytes, optional + 72, 1024 * 1024);
     link_write_u64(bytes, optional + 80, 4096);
     link_write_u64(bytes, optional + 88, 1024 * 1024);
@@ -5847,9 +5840,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
 {
     enum
     {
-        ELF_HEADER_SIZE = 64,
-        ELF_PROGRAM_HEADER_SIZE = 56,
-        ELF_DYNAMIC_SIZE = 16,
         ELF_DYNAMIC_COUNT = 12,
     };
     static char8 const interpreter[] = "/system/bin/linker64";
