@@ -2214,7 +2214,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_giant_literal(Arena* arena, u64 spelling_leng
     for (u64 index = 0; index + 4 < content_length; index += 997)
     {
         content[index] = '\\';
-        content[index + 1] = (index / 997) % 2 ? '\\' : delimiter;
+        content[index + 1] = (char8)((index / 997) % 2 ? '\\' : delimiter);
     }
     content[content_length - 2] = '\\';
     content[content_length - 1] = delimiter;
@@ -2374,7 +2374,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         u64 escaped_length = 0;
         for (u64 index = 0; index < inner.length; index += 1)
         {
-            escaped_length += 1 + (inner.pointer[index] == '"' || inner.pointer[index] == '\\');
+            escaped_length += 1 + (u64)(inner.pointer[index] == '"' || inner.pointer[index] == '\\');
         }
         char8* expected_bytes = arena_allocate(arena, char8, escaped_length + 2);
         u64 output = 0;
