@@ -181,6 +181,7 @@ BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* are
         return result;
     }
     u32 ordinal = 0;
+    u32 promotable_candidate_count = 0;
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
@@ -231,6 +232,7 @@ BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* are
                 IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
                 result.value_promotable_local_widths[value_index] = local_type ? (u8)local_type->layout.size : 0;
                 result.value_flags[value_index] |= MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL;
+                promotable_candidate_count += 1;
             }
             if (function->values[value_index].is_read_only)
             {
@@ -276,23 +278,27 @@ BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* are
         }
     }
     result.ordinal_count = ordinal;
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    // Any use other than a non-volatile, same-width load/store place makes
+    // taking the address observable and therefore disqualifies promotion.
+    // This is intentionally conservative and shared by both targets;
+    // target-specific vector/ABI details remain in selectors.  One pass over
+    // every operand decides it for all candidates at once: asking the same
+    // question per candidate rescanned the whole function once per local that
+    // survived, which is quadratic in a function's size.
+    if (promotable_candidate_count)
     {
-        if ((result.value_flags[value_index] & MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL) == 0)
-        {
-            continue;
-        }
-        u32 local_width = result.value_promotable_local_widths[value_index];
-        // Any use other than a non-volatile, same-width load/store place
-        // makes taking the address observable and therefore disqualifies
-        // promotion.  This is intentionally conservative and shared by both
-        // targets; target-specific vector/ABI details remain in selectors.
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = function->instructions + instruction_index;
+            if (!instruction->operands)
+            {
+                continue;
+            }
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
-                if (!instruction->operands || instruction->operands[operand_index].value != value_index)
+                u32 value_index = instruction->operands[operand_index].value;
+                if (value_index >= function->value_count ||
+                    (result.value_flags[value_index] & MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL) == 0)
                 {
                     continue;
                 }
@@ -306,18 +312,14 @@ BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* are
                                                         ? function->values[instruction->operands[1].value].canonical_type
                                                         : IR_TYPE_ID_INVALID;
                     IrType* access_type = ir_type_from_id(&program->types, access_type_id);
-                    legal_place = access_type && access_type->layout.resolved && access_type->layout.size == local_width;
+                    legal_place = access_type && access_type->layout.resolved &&
+                                  access_type->layout.size == result.value_promotable_local_widths[value_index];
                 }
                 if (!legal_place)
                 {
                     result.value_flags[value_index] &= (u8)~MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL;
                     result.value_promotable_local_widths[value_index] = 0;
-                    break;
                 }
-            }
-            if ((result.value_flags[value_index] & MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL) == 0)
-            {
-                break;
             }
         }
     }
