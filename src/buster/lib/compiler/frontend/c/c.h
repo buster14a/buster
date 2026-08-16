@@ -118,16 +118,22 @@ typedef struct CToken CToken;
 struct CToken
 {
     u32 offset;
-    u32 length;
     // For C_TOKEN_IDENTIFIER tokens, the symbol id the preprocessor's intern
     // pass assigned (0 = uninterned; consumers must keep a spelling-based
     // fallback for synthesized and test-built tokens). The symbol travels
     // with the spelling: every site that respells a token must re-intern.
     u32 symbol;
-    // Dead space: the #pragma pack alignment moved to the preprocess
-    // result's change list (see CPackAlignment); the field holds the row
-    // until the 12-byte narrowing lands and is 0 on every token.
-    u16 pack_alignment;
+    // Spelling byte count, or C_TOKEN_LENGTH_OVERSIZED when the spelling is
+    // 0xFFFF bytes or longer. The sentinel is only ever stored for
+    // terminated string and character literals — the one token shape that
+    // can legitimately grow that large — whose exact length c_token_length
+    // re-derives by walking the spelling to its closing delimiter, which is
+    // the spelling's own last byte, so the scan never reads past it and is
+    // safe on raw source text and packed synthesized copies alike. Every
+    // other oversized shape is diagnosed and clamped at creation. Read the
+    // field through c_token_length (or c_token_spelling): summing or
+    // indexing the raw field would treat the sentinel as 65535.
+    u16 length;
     // A CTokenKind.
     u8 kind;
     // A CPunctuator, narrowed to a byte.  It is C_PUNCTUATOR_NONE on every
@@ -136,7 +142,9 @@ struct CToken
     u8 punctuator;
 };
 
-BUSTER_CT_CHECK(sizeof(CToken) == 16);
+#define C_TOKEN_LENGTH_OVERSIZED UINT16_MAX
+
+BUSTER_CT_CHECK(sizeof(CToken) == 12);
 BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(C_TOKEN_KIND_COUNT <= UINT8_MAX);
 
@@ -174,6 +182,10 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
     C_DIAGNOSTIC_PREPROCESSOR_ERROR,
     C_DIAGNOSTIC_PREPROCESSOR_WARNING,
+    // An identifier or preprocessing number of 0xFFFF bytes or more: the
+    // token length field cannot represent it and only literals carry the
+    // oversized escape, so the token is diagnosed and its length clamped.
+    C_DIAGNOSTIC_TOKEN_TOO_LONG,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -936,6 +948,9 @@ BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics co
 BUSTER_F_DECL u64 c_source_metrics_code_bytes(CSourceMetrics metrics);
 // The spelling of a token relative to its owning result's spelling base.
 BUSTER_F_DECL String8 c_token_spelling(char8 const* spelling_base, CToken token);
+// The spelling byte count: the length field, or the re-derived exact length
+// when the field holds C_TOKEN_LENGTH_OVERSIZED.
+BUSTER_F_DECL u64 c_token_length(char8 const* spelling_base, CToken token);
 // The #pragma pack alignment in effect at a final-stream token index: the
 // greatest pack_changes entry at or before it, 0 (natural alignment) before
 // the first entry or when the result carries no list.

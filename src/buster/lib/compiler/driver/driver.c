@@ -1777,7 +1777,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
         {
-            capacity += preprocess.tokens[index].length + 1;
+            capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 1;
         }
     }
     char8* text = arena_allocate(arena, char8, capacity);

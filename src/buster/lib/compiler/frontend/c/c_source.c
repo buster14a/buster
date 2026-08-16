@@ -98,11 +98,78 @@ BUSTER_C_INTERNAL u32 c_space_offset(CSpellingSpace const* space, char8 const* p
     return (u32)(pointer - space->base);
 }
 
+// Exact byte length of the literal spelling starting at `spelling`:
+// optional encoding prefix, opening delimiter, escape-aware body, closing
+// delimiter. The body loop mirrors the lexer's literal scan byte for byte —
+// escape pairs skip two — so a spelling the lexer closed re-measures to the
+// same length. `limit` bounds the scan for creation-time validation of a
+// possibly unterminated spelling; a validated spelling passes UINT64_MAX
+// because its closing delimiter, the spelling's own last byte, stops the
+// scan. Returns 0 when no delimiter opens at the start.
+BUSTER_C_INTERNAL u64 c_token_literal_scan_length(char8 const* spelling, u64 limit)
+{
+    u64 cursor = 0;
+    char8 delimiter = 0;
+    if (limit && (spelling[0] == '"' || spelling[0] == '\''))
+    {
+        delimiter = spelling[0];
+        cursor = 1;
+    }
+    else if (limit >= 3 && spelling[0] == 'u' && spelling[1] == '8' && (spelling[2] == '"' || spelling[2] == '\''))
+    {
+        delimiter = spelling[2];
+        cursor = 3;
+    }
+    else if (limit >= 2 && (spelling[0] == 'u' || spelling[0] == 'U' || spelling[0] == 'L') && (spelling[1] == '"' || spelling[1] == '\''))
+    {
+        delimiter = spelling[1];
+        cursor = 2;
+    }
+    else
+    {
+        return 0;
+    }
+    while (cursor < limit)
+    {
+        char8 character = spelling[cursor];
+        if (character == delimiter)
+        {
+            return cursor + 1;
+        }
+        cursor += character == '\\' && cursor + 1 < limit ? 2 : 1;
+    }
+    return 0;
+}
+
+// The cold half of c_token_length: the field carries the sentinel, so the
+// exact length is re-derived from the spelling. Creation only ever stores
+// the sentinel for terminated string and character literals (see CToken).
+BUSTER_C_INTERNAL u64 c_token_length_oversized(char8 const* spelling_base, CToken token)
+{
+    BUSTER_CHECK(token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL);
+    u64 length = c_token_literal_scan_length(spelling_base + token.offset, UINT64_MAX);
+    BUSTER_CHECK(length >= C_TOKEN_LENGTH_OVERSIZED);
+    return length;
+}
+
+u64 c_token_length(char8 const* spelling_base, CToken token)
+{
+    return token.length != C_TOKEN_LENGTH_OVERSIZED ? token.length : c_token_length_oversized(spelling_base, token);
+}
+
+// The u16 the length field stores for a spelling of `length` bytes. The
+// caller owns the sentinel invariant: a spelling at or past the sentinel
+// must be a terminated literal, or must be diagnosed and clamped instead.
+BUSTER_C_SHARED u16 c_token_length_field(u64 length)
+{
+    return length < C_TOKEN_LENGTH_OVERSIZED ? (u16)length : C_TOKEN_LENGTH_OVERSIZED;
+}
+
 String8 c_token_spelling(char8 const* spelling_base, CToken token)
 {
     return (String8){
         .pointer = (char8*)spelling_base + token.offset,
-        .length = token.length,
+        .length = c_token_length(spelling_base, token),
     };
 }
 
@@ -111,11 +178,14 @@ String8 c_token_spelling(char8 const* spelling_base, CToken token)
 // must resolve through the shared base like any lexed token.
 BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CTokenKind kind, CPunctuator punctuator)
 {
+    // The sentinel is only valid on terminated literals; no other caller
+    // synthesizes a spelling anywhere near it.
+    BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
     char8* copy = c_space_allocate(space, text.length);
     memcpy(copy, text.pointer, text.length);
     return (CToken){
         .offset = c_space_offset(space, copy),
-        .length = (u32)text.length,
+        .length = c_token_length_field(text.length),
         .kind = (u8)kind,
         .punctuator = (u8)punctuator,
     };
@@ -752,11 +822,29 @@ BUSTER_C_INTERNAL bool c_source_metrics_file_first(Arena* arena, CSourceMetricsF
     return true;
 }
 
+// The cold tail of c_token_push: the item is 0xFFFF bytes or longer. A
+// terminated literal — the scan bounded by the item's extent reproduces the
+// exact length, which certifies both termination and escape parity — stores
+// the sentinel c_token_length re-derives from. Everything else (an
+// unterminated literal, an identifier or number the call site diagnoses)
+// clamps to the largest direct length; the stream already carries an error
+// diagnostic in every clamping case, so the lie never reaches a compile
+// that succeeds, and a clamped read stays inside the real spelling.
+BUSTER_C_INTERNAL u16 c_token_push_long_length(CTranslatedSource translated, u64 start, u64 end, CTokenKind kind)
+{
+    u64 length = end - start;
+    bool literal = kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL;
+    bool exact = literal && c_token_literal_scan_length(translated.source.pointer + start, length) == length;
+    return exact ? C_TOKEN_LENGTH_OVERSIZED : C_TOKEN_LENGTH_OVERSIZED - 1;
+}
+
 BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource translated, u64 start, u64 end, CTokenKind kind, CPunctuator punctuator)
 {
+    u64 length = end - start;
+    u16 stored = length < C_TOKEN_LENGTH_OVERSIZED ? (u16)length : c_token_push_long_length(translated, start, end, kind);
     result->tokens[result->token_count++] = (CToken){
         .offset = translated.translated_offset + (u32)start,
-        .length = (u32)(end - start),
+        .length = stored,
         .kind = (u8)kind,
         .punctuator = (u8)punctuator,
     };
@@ -1099,6 +1187,11 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         u64 start = offset;
         offset = c_identifier_run_end(translated.source, offset + 1);
         c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
+        if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
+        {
+            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
+                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("identifier exceeds 65534 bytes"));
+        }
         return offset;
     }
     if (c_ascii_digit(character) || (character == '.' && offset + 1 < translated.source.length && c_ascii_digit(translated.source.pointer[offset + 1])))
@@ -1117,6 +1210,11 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
             offset += 1;
         }
         c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        if (BUSTER_UNLIKELY(offset - start >= C_TOKEN_LENGTH_OVERSIZED))
+        {
+            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
+                              C_DIAGNOSTIC_TOKEN_TOO_LONG, S8("preprocessing number exceeds 65534 bytes"));
+        }
         return offset;
     }
     CPunctuator punctuator = C_PUNCTUATOR_NONE;
@@ -1157,7 +1255,7 @@ BUSTER_C_INTERNAL void c_lex_scalar(CLexState* state)
 // vpcompressb pulls start and end positions of an iota vector through the
 // token-boundary masks, a byte subtract yields all lengths, and the kind and
 // punctuator vectors compress by the same starts mask before widening
-// interleaved stores write the 16-byte CToken rows eight at a time.
+// interleaved stores write the 12-byte CToken rows eight at a time.
 //
 // Windows always begin at an item boundary, so no lexer state crosses a
 // window: the item touching a window's last byte is deferred and rescanned by
@@ -1319,21 +1417,25 @@ BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lookahead_mask(u64 remaining, u64 
     return c_lex_lane_mask(remaining > ahead ? remaining - ahead : 0);
 }
 
-// Eight finished rows: the compressed start, length, kind and punctuator bytes
-// widen to 64-bit halves, OR together into the two quadwords of a CToken, and
-// two vpermi2q interleave them into 128 contiguous bytes.  symbol and
-// pack_alignment are zero at lex time and fall out of the shift pattern.
+// Eight finished rows: the compressed start, length, kind and punctuator
+// bytes widen to 32-bit lanes (masked, so lanes 8..15 stay zero), the
+// metadata dword assembles as length | kind<<16 | punctuator<<24, and two
+// vpermi2d interleave offsets, zero symbol dwords and metadata into the 24
+// dwords of eight 12-byte CToken rows — 64 stored bytes plus a 32-byte
+// tail, no slop. The symbol dword is zero at lex time and comes from the
+// offset vector's masked-off upper lanes.
 BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, __m512i starts, __m512i lengths, __m512i kinds, __m512i punctuators, __m512i base,
                                                         __m512i index_low, __m512i index_high)
 {
-    __m512i start_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(starts));
-    __m512i length_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(lengths));
-    __m512i kind_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(kinds));
-    __m512i punctuator_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(punctuators));
-    __m512i low = _mm512_or_si512(_mm512_add_epi64(start_wide, base), _mm512_slli_epi64(length_wide, 32));
-    __m512i high = _mm512_or_si512(_mm512_slli_epi64(kind_wide, 48), _mm512_slli_epi64(punctuator_wide, 56));
-    _mm512_storeu_si512((__m512i*)(out + 0), _mm512_permutex2var_epi64(low, index_low, high));
-    _mm512_storeu_si512((__m512i*)(out + 4), _mm512_permutex2var_epi64(low, index_high, high));
+    __m512i start_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(starts));
+    __m512i length_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(lengths));
+    __m512i kind_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(kinds));
+    __m512i punctuator_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(punctuators));
+    __m512i offsets = _mm512_maskz_add_epi32(0x00FF, start_wide, base);
+    __m512i metadata = _mm512_or_si512(length_wide, _mm512_or_si512(_mm512_slli_epi32(kind_wide, 16), _mm512_slli_epi32(punctuator_wide, 24)));
+    u32* dwords = (u32*)out;
+    _mm512_storeu_si512((__m512i*)dwords, _mm512_permutex2var_epi32(offsets, index_low, metadata));
+    _mm256_storeu_si256((__m256i*)(dwords + 16), _mm512_castsi512_si256(_mm512_permutex2var_epi32(offsets, index_high, metadata)));
 }
 
 BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
@@ -1357,8 +1459,8 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
     const __m512i nfa_third_high = _mm512_load_si512((const __m512i*)(c_lex_nfa_third + 64));
     const __m512i iota = _mm512_load_si512((const __m512i*)c_lex_iota);
     const __m512i rotate_eight = _mm512_load_si512((const __m512i*)c_lex_rotate_eight);
-    const __m512i row_index_low = _mm512_setr_epi64(0, 8, 1, 9, 2, 10, 3, 11);
-    const __m512i row_index_high = _mm512_setr_epi64(4, 12, 5, 13, 6, 14, 7, 15);
+    const __m512i row_index_low = _mm512_setr_epi32(0, 8, 16, 1, 9, 17, 2, 10, 18, 3, 11, 19, 4, 12, 20, 5);
+    const __m512i row_index_high = _mm512_setr_epi32(13, 21, 6, 14, 22, 7, 15, 23, 0, 0, 0, 0, 0, 0, 0, 0);
 
     u64 offset = 0;
     while (offset < source.length)
@@ -1752,7 +1854,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             __m512i punctuator_ids = _mm512_maskz_compress_epi8((__mmask64)start_mask, punctuator_vector);
 
             CToken* out = result->tokens + result->token_count;
-            __m512i base = _mm512_set1_epi64((s64)(u64)((u64)translated_offset + offset));
+            __m512i base = _mm512_set1_epi32((s32)(u32)((u64)translated_offset + offset));
             // Eight rows per pass, tail rows included: the token array carries
             // eight slots of slack and the next window overwrites them.  The
             // first pass is unconditional on purpose — guarding it on a
@@ -2913,7 +3015,10 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
         .token =
             {
                 .offset = c_space_offset(space, spelling),
-                .length = (u32)output,
+                // Every interior quote and backslash was escaped above, so
+                // the closing quote terminates the literal exactly and an
+                // oversized result satisfies the sentinel's contract.
+                .length = c_token_length_field(output),
                 .kind = C_TOKEN_STRING_LITERAL,
             },
         .location = location,
@@ -2946,7 +3051,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             .token =
                 {
                     .offset = c_space_offset(space, digits + 10 - length),
-                    .length = length,
+                    .length = (u16)length,
                     .kind = C_TOKEN_PREPROCESSING_NUMBER,
                 },
             .location = location,
@@ -2974,7 +3079,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
         .token =
             {
                 .offset = c_space_offset(space, quoted),
-                .length = (u32)output,
+                .length = c_token_length_field(output),
                 .kind = C_TOKEN_STRING_LITERAL,
             },
         .location = location,
@@ -3102,7 +3207,11 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                                                           .pointer = joined,
                                                           .length = joined_length,
                                                       });
-        bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE && lex.tokens[0].length == joined_length;
+        // The oversized-token diagnostics count here: a pasted identifier or
+        // number past the length field's reach fails as an invalid paste
+        // instead of storing a sentinel only literals may carry.
+        bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE &&
+                           c_token_length(lex.spelling_base, lex.tokens[0]) == joined_length;
         CToken pasted_shape = paste_valid ? lex.tokens[0] : (CToken){0};
         scratch_end(paste_temporary);
         if (!paste_valid)
@@ -3116,7 +3225,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             .token =
                 {
                     .offset = c_space_offset(space, joined),
-                    .length = (u32)joined_length,
+                    .length = c_token_length_field(joined_length),
                     .kind = pasted_shape.kind,
                     .punctuator = pasted_shape.punctuator,
                 },
@@ -3144,7 +3253,11 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
     if (string_equal(macro->name, S8("_Pragma")))
     {
         String8 first_spelling = token_count == 1 ? c_token_spelling(base, tokens[0].token) : (String8){0};
-        if (token_count == 1 && tokens[0].token.kind == C_TOKEN_STRING_LITERAL && first_spelling.length >= 2)
+        // Text past the length field's reach stays length 0 like any other
+        // malformed operand: the marker is dropped, and no real pragma body
+        // approaches 64 KB.
+        if (token_count == 1 && tokens[0].token.kind == C_TOKEN_STRING_LITERAL && first_spelling.length >= 2 &&
+            first_spelling.length - 2 < C_TOKEN_LENGTH_OVERSIZED)
         {
             String8 inner = {
                 .pointer = first_spelling.pointer + 1,
@@ -3162,16 +3275,16 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
             }
             spelling[output] = 0;
             result.token.offset = c_space_offset(space, spelling);
-            result.token.length = (u32)output;
+            result.token.length = (u16)output;
         }
         return result;
     }
     u64 length = 0;
     for (u64 token_index = 0; token_index < token_count; token_index += 1)
     {
-        length += tokens[token_index].token.length + (token_index != 0);
+        length += c_token_length(base, tokens[token_index].token) + (token_index != 0);
     }
-    if (length)
+    if (length && length < C_TOKEN_LENGTH_OVERSIZED)
     {
         char8* spelling = c_space_allocate(space, length + 1);
         u64 output = 0;
@@ -3187,7 +3300,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
         }
         spelling[output] = 0;
         result.token.offset = c_space_offset(space, spelling);
-        result.token.length = (u32)output;
+        result.token.length = (u16)output;
     }
     return result;
 }
@@ -4454,7 +4567,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(Arena* arena, CPreproc
     u64 foreign_length = 0;
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
     {
-        foreign_length += node->token.foreign ? node->token.token.length : 0;
+        foreign_length += node->token.foreign ? c_token_length(space->base, node->token.token) : 0;
     }
     char8* copy = foreign_length ? c_space_allocate(space, foreign_length) : 0;
     bool run_open = false;
@@ -4531,7 +4644,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_message_from_tokens(Arena* arena, char8 c
     {
         if (tokens[token_index].kind != C_TOKEN_PRAGMA)
         {
-            length += tokens[token_index].length;
+            length += c_token_length(base, tokens[token_index]);
             message_token_count += 1;
         }
     }
@@ -4991,7 +5104,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
         u64 length = 0;
         for (u32 index = 1; index + 1 < token_count; index += 1)
         {
-            length += tokens[index].length;
+            length += c_token_length(base, tokens[index]);
         }
         char8* name = arena_allocate(arena, char8, length + 1);
         u64 output = 0;
@@ -6227,7 +6340,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.preprocessed.tokens = output_count;
     for (u64 token_index = 0; token_index < output_count; token_index += 1)
     {
-        result.preprocessed.bytes += result.tokens[token_index].length;
+        result.preprocessed.bytes += c_token_length(space->base, result.tokens[token_index]);
     }
     result.preprocessed.spelling_bytes = space->used;
     result.files = file_table.files;

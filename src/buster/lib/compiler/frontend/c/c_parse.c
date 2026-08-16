@@ -800,7 +800,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 u64 bound_spelling_capacity = 0;
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
-                    bound_spelling_capacity += preprocess.tokens[bound.token_start + bound_index].length + 21;
+                    bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[bound.token_start + bound_index]) + 21;
                 }
                 CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
@@ -1746,26 +1746,26 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER)
     {
         CTypeKind kind = C_TYPE_INT;
-        bool hexadecimal =
-            first.length >= 2 && c_token_spelling(preprocess.spelling_base, first).pointer[0] == '0' && (c_token_spelling(preprocess.spelling_base, first).pointer[1] == 'x' || c_token_spelling(preprocess.spelling_base, first).pointer[1] == 'X');
+        String8 first_spelling = c_token_spelling(preprocess.spelling_base, first);
+        bool hexadecimal = first_spelling.length >= 2 && first_spelling.pointer[0] == '0' && (first_spelling.pointer[1] == 'x' || first_spelling.pointer[1] == 'X');
         bool floating = false;
-        for (u64 index = 0; index < first.length; index += 1)
+        for (u64 index = 0; index < first_spelling.length; index += 1)
         {
-            u8 byte = c_token_spelling(preprocess.spelling_base, first).pointer[index];
+            u8 byte = first_spelling.pointer[index];
             floating |= byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
         }
         if (floating)
         {
-            u8 suffix = c_token_spelling(preprocess.spelling_base, first).pointer[first.length - 1];
+            u8 suffix = first_spelling.pointer[first_spelling.length - 1];
             kind = suffix == 'f' || suffix == 'F' ? C_TYPE_FLOAT : suffix == 'l' || suffix == 'L' ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
         }
         else
         {
             bool is_unsigned = false;
             u32 long_count = 0;
-            for (u64 index = first.length; index != 0; index -= 1)
+            for (u64 index = first_spelling.length; index != 0; index -= 1)
             {
-                u8 byte = c_token_spelling(preprocess.spelling_base, first).pointer[index - 1];
+                u8 byte = first_spelling.pointer[index - 1];
                 if (byte == 'u' || byte == 'U')
                 {
                     is_unsigned = true;
@@ -2291,7 +2291,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
     u64 evaluation_spelling_capacity = 0;
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
     {
-        evaluation_spelling_capacity += preprocess.tokens[start + 2 + expression_index].length + 21;
+        evaluation_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[start + 2 + expression_index]) + 21;
     }
     CSpellingSpace evaluation_space = c_space_local(arena, evaluation_spelling_capacity);
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
@@ -6283,7 +6283,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                 u64 enum_spelling_capacity = 0;
                 for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
                 {
-                    enum_spelling_capacity += preprocess.tokens[expression_start + expression_index].length + 21;
+                    enum_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[expression_start + expression_index]) + 21;
                 }
                 CSpellingSpace enum_space = c_space_local(temporary.arena, enum_spelling_capacity);
                 for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
@@ -7777,9 +7777,10 @@ BUSTER_C_INTERNAL bool c_parse_integer_expression_is_unsigned(CParseResult* resu
         CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            for (u64 byte_index = 0; byte_index < token.length; byte_index += 1)
+            String8 token_spelling = c_token_spelling(preprocess.spelling_base, token);
+            for (u64 byte_index = 0; byte_index < token_spelling.length; byte_index += 1)
             {
-                char8 byte = c_token_spelling(preprocess.spelling_base, token).pointer[byte_index];
+                char8 byte = token_spelling.pointer[byte_index];
                 if (byte == 'u' || byte == 'U')
                 {
                     return true;

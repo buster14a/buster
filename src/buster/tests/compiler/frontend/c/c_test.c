@@ -2462,6 +2462,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         arena->position = position;
     }
 
+    // Only terminated literals carry the length escape: an identifier or a
+    // preprocessing number at the sentinel is a hard implementation limit,
+    // diagnosed at lex time, and both lexer paths must agree on that too.
+    {
+        u64 run_length = 65535;
+        char8* identifier_bytes = arena_allocate(arena, char8, run_length);
+        char8* number_bytes = arena_allocate(arena, char8, run_length);
+        for (u64 index = 0; index < run_length; index += 1)
+        {
+            identifier_bytes[index] = (char8)('a' + index % 26);
+            number_bytes[index] = (char8)('0' + index % 10);
+        }
+        String8 identifier_source = {identifier_bytes, run_length};
+        String8 number_source = {number_bytes, run_length};
+        CLexResult identifier_lex = c_lex(arena, identifier_source);
+        BUSTER_TEST(arguments, identifier_lex.diagnostic_count == 1);
+        BUSTER_TEST(arguments, identifier_lex.diagnostic_count == 1 && identifier_lex.diagnostics[0].kind == C_DIAGNOSTIC_TOKEN_TOO_LONG);
+        BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, identifier_source));
+        CLexResult number_lex = c_lex(arena, number_source);
+        BUSTER_TEST(arguments, number_lex.diagnostic_count == 1);
+        BUSTER_TEST(arguments, number_lex.diagnostic_count == 1 && number_lex.diagnostics[0].kind == C_DIAGNOSTIC_TOKEN_TOO_LONG);
+        BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, number_source));
+        arena->position = position;
+    }
+
+    // Pasting two identifiers whose join crosses the sentinel relexes with
+    // the too-long diagnostic, so the paste fails as invalid instead of
+    // storing a sentinel only literals may carry.
+    {
+        u64 half_length = 40000;
+        char8* half = arena_allocate(arena, char8, half_length);
+        for (u64 index = 0; index < half_length; index += 1)
+        {
+            half[index] = (char8)('a' + index % 26);
+        }
+        String8 half_identifier = {half, half_length};
+        String8 source_parts[] = {
+            S8("#define GLUE(a, b) a##b\n"
+               "int GLUE("),
+            half_identifier,
+            S8(", "),
+            half_identifier,
+            S8(");\n"),
+        };
+        String8 source = c_test_concatenate(arena, source_parts, BUSTER_ARRAY_LENGTH(source_parts));
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){0});
+        BUSTER_TEST(arguments, preprocess.error_count == 1);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count >= 1 && preprocess.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_TOKEN_PASTE);
+        arena->position = position;
+    }
+
     return result;
 }
 

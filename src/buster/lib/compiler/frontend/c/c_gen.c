@@ -1492,7 +1492,7 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
     return (IrSourceRange){
         .source = {.value = c_preprocess_token_source(&builder->preprocess, token, &builder->location_cursor)},
         .offset = token.offset,
-        .length = token.length,
+        .length = (u32)c_token_length(builder->preprocess.spelling_base, token),
     };
 }
 
@@ -1509,9 +1509,10 @@ BUSTER_C_INTERNAL CToken c_ir_space_name_token(CIntegerIrBuilder* builder, Strin
 {
     char8 const* base = builder->preprocess.spelling_base;
     BUSTER_CHECK(name.pointer >= base && (u64)(name.pointer - base) + name.length <= (u64)UINT32_MAX);
+    BUSTER_CHECK(name.length < C_TOKEN_LENGTH_OVERSIZED);
     return (CToken){
         .offset = (u32)(name.pointer - base),
-        .length = (u32)name.length,
+        .length = (u16)name.length,
         .kind = C_TOKEN_IDENTIFIER,
     };
 }
@@ -6298,7 +6299,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, 
     // source range.
     String8 quoted = string_format(builder->arena, S8("\"{S8}\""), builder->function->name);
     CToken quoted_token = {
-        .length = (u32)quoted.length,
+        .length = c_token_length_field(quoted.length),
         .kind = C_TOKEN_STRING_LITERAL,
     };
     CPreprocessResult quoted_preprocess = {
@@ -16926,7 +16927,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
         result->suffix_sizes = arena_allocate(builder->arena, IrValueId, result->dimension_count + 1);
         memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
         memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
-        state->source = c_ir_source_range(c_ir_token_location(builder, state->token), state->token.length);
+        state->source = c_ir_source_range(c_ir_token_location(builder, state->token), c_token_length(builder->preprocess.spelling_base, state->token));
         state->dimension = 0;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
@@ -17990,9 +17991,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             IrTypeId candidate = builder->s32_type;
-            if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
+            String8 number_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+            if (c_ir_number_is_float(number_spelling))
             {
-                char8 suffix = token.length ? c_token_spelling(builder->preprocess.spelling_base, token).pointer[token.length - 1] : 0;
+                char8 suffix = number_spelling.length ? number_spelling.pointer[number_spelling.length - 1] : 0;
                 candidate = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
             }
             else
@@ -18017,8 +18019,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
         if (token.kind == C_TOKEN_CHARACTER_LITERAL)
         {
+            String8 character_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
             u64 opening = 0;
-            while (opening < token.length && c_token_spelling(builder->preprocess.spelling_base, token).pointer[opening] != '\'')
+            while (opening < character_spelling.length && character_spelling.pointer[opening] != '\'')
             {
                 opening += 1;
             }
@@ -24855,8 +24858,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                                                                                  .element_count = element_count,
                                                                      });
                 String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
-                IrSourceRange source =
-                    c_ir_source_range(c_preprocess_token_location(&preprocess, preprocess.tokens[literal_index]), preprocess.tokens[literal_index].length);
+                IrSourceRange source = c_ir_source_range(c_preprocess_token_location(&preprocess, preprocess.tokens[literal_index]),
+                                                         c_token_length(preprocess.spelling_base, preprocess.tokens[literal_index]));
                 IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
                                                                                .name = literal_name,
                                                                                .link_name = literal_name,
@@ -29366,7 +29369,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
     u64 bound_spelling_capacity = 0;
     for (u32 index = bound.token_start; index < end; index += 1)
     {
-        bound_spelling_capacity += preprocess.tokens[index].length + 21;
+        bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 21;
     }
     CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
     for (u32 index = bound.token_start; index < end; index += 1)
