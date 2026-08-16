@@ -1663,6 +1663,9 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     {
         return placement;
     }
+    // Pushes that precede the frame pointer sit between it and the caller's
+    // frame, so every incoming stack argument is that much further up.
+    placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
     placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
     placement.edit_count = edits.total_count;
     machine_stream_flatten(&edits, placement.edits);

@@ -59,6 +59,11 @@ static Trio trio_return(int a)
 // Enough simultaneously live values to force callee-saved bindings across the
 // calls it makes, so a caller that failed to preserve one is caught by the
 // sums rather than by luck.
+static int six(int a, int b, int c, int d, int e, int f)
+{
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6;
+}
+
 static int pressure(int a, int b, int c, int d)
 {
     int x0 = a + 1;
@@ -73,6 +78,27 @@ static int pressure(int a, int b, int c, int d)
     s += eight_integers(x6, x7, x0, x1, x2, x3, x4, x5);
     s += mixed(x0, x1, x2, x3, x4, x5);
     return s + x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
+}
+
+// A callee that both takes stack arguments and holds enough live values to
+// bind callee-saved registers. Where the prologue pushes those before it
+// establishes the frame pointer, as Win64's does, the incoming arguments sit
+// above the saves rather than a fixed sixteen bytes up — reading them at the
+// System V distance lands inside the saved registers instead.
+static int wide_under_pressure(int a, int b, int c, int d, int e, int f, int g, int h)
+{
+    int x0 = a + 1;
+    int x1 = b + 2;
+    int x2 = c + 3;
+    int x3 = d + 4;
+    int x4 = e + 5;
+    int x5 = f + 6;
+    int x6 = g + 7;
+    int x7 = h + 8;
+    int s = six(x0, x1, x2, x3, x4, x5);
+    s += six(x6, x7, x0, x1, x2, x3);
+    s += six(x4, x5, x6, x7, x0, x1);
+    return s + x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + e + f + g + h;
 }
 
 int main(void)
@@ -116,6 +142,10 @@ int main(void)
     if (keep != 9000)
     {
         return 8;
+    }
+    if (wide_under_pressure(1, 2, 3, 4, 5, 6, 7, 8) != 600)
+    {
+        return 9;
     }
     return 0;
 }

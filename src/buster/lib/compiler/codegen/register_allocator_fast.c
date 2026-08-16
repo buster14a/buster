@@ -2017,6 +2017,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     {
         return placement;
     }
+    // See machine_stack_placement_build: the saves the Win64 prologue pushes
+    // before the frame pointer lie between it and the incoming arguments.
+    placement.incoming_base = description->saves_precede_frame_pointer ? 8u * push_count : 0u;
     placement.valid = true;
     return placement;
 }

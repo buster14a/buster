@@ -7804,7 +7804,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             operands[operand_index] = machine_x64_exact_memory_operand(operand_registers[operand_slot], width, (s64)(s32)payload, false);
             break;
         case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
-            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + payload, width, force_disp32);
+            // Incoming arguments: past the saved frame pointer and return
+            // address, plus whatever the prologue pushed below the frame
+            // pointer before establishing it.
+            operands[operand_index] =
+                machine_x64_exact_rbp_memory_operand(16u + (placement ? placement->incoming_base : 0u) + payload, width, force_disp32);
             break;
         case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
             if (!instruction || !placement || operand_slot >= 4 || machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)

@@ -1152,6 +1152,13 @@ struct MachineStackPlacement
     u32* stack_slot_offsets;
     u32 edit_count;
     u32 frame_size;
+    // Distance from the frame pointer to the caller's stack frame, beyond the
+    // saved frame pointer and return address every x86-64 frame carries. It is
+    // the callee-saved save area wherever the prologue pushes those registers
+    // before establishing the frame pointer (Win64), because the frame pointer
+    // then lands below them; zero where they are pushed after it, which is
+    // what leaves the incoming arguments a fixed sixteen bytes away.
+    u32 incoming_base;
     // Scratch register per operand slot for every instruction, packed four
     // u8 per instruction, parallel to the instruction array.
     u8* operand_registers;
