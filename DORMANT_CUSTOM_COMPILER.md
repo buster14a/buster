@@ -544,7 +544,16 @@ history.
   Lemire's simdjson kernels — process data in blocks, classify with tables and
   bitmasks, iterate set bits — over per-element branching, and shape data the
   way Casey Muratori advocates: flat index-linked arrays in arenas transformed
-  by batch passes, not pointer graphs walked element-at-a-time. Parallel
+  by batch passes, not pointer graphs walked element-at-a-time. Wojciech
+  Muła's notes (`http://0x80.pl/notesen.html`; fetch over plain HTTP — the
+  host's HTTPS certificate is broken) are the project-endorsed catalogue of
+  these kernel shapes: before writing a byte- or word-granularity loop, check
+  whether one of his notes already solves it branchless with masks, `vpshufb`
+  or `vpermb` lookups, `vpternlogd`, or compaction. Start from "Modern
+  perfect hashing for strings", "SIMD-ized check which bytes are in a set",
+  "AVX512VBMI — remove spaces from text", "AVX512VBMI2 and packed varuint
+  format", "Parsing decimal numbers" parts 1–2, "SIMD-friendly algorithms
+  for substring searching", and "AVX-512 conflict detection". Parallel
   stages must stay deterministic — write results into slots indexed by work
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count. `lane_run` keeps a persistent worker gang
