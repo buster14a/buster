@@ -1689,7 +1689,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     continue;
                 }
                 u32 destination = operand_registers[slot];
-                if (destination == UINT32_MAX)
+                if (destination == UINT8_MAX)
                 {
                     continue;
                 }
