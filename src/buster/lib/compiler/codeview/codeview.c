@@ -1,3 +1,8 @@
+// CodeView emission from the canonical debug model: the .debug$S symbol
+// and .debug$T type streams a COFF object carries for Windows debuggers,
+// built from DebugModule records. pdb.c packages these streams into a
+// standalone PDB at link time.
+
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/string.h>
 

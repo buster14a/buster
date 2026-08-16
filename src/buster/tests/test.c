@@ -1,3 +1,13 @@
+// Test registration and the in-process runner. test_descriptors is the
+// single table every module test registers in — a new test pair adds its
+// row here in registration order, its sources to CMakeLists.txt, and its
+// includes below (AGENTS.md). library_tests runs the table, prints the
+// TEST_MODULE_TIMING lines the test_timing_summary diagnostic consumes,
+// and honors BUSTER_TEST_JOBS. A descriptor marked table_audit runs only
+// on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
+// on) — reserve that flag for results that are a pure function of the
+// generated tables and repository source.
+
 #include <buster/tests/test.h>
 
 #include <buster/lib/os.h>

@@ -1,3 +1,12 @@
+// The `ide` executable: a headless compiler driver (`ide cc` ->
+// run_c_compiler -> the compiler_driver_* API in driver.h), test runner
+// (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
+// (`ide bench`, the BENCH_C_FRONTEND line), fuzz entrypoint, and x86-64
+// completion census. The name is retained for build-script compatibility.
+// The BUSTER_UNITY_BUILD include block below is the list AGENTS.md's
+// module-adding rule appends to; forgetting a module there breaks
+// optimized Release builds.
+
 #define BUSTER_USE_GRAPHICS 0
 
 #include <buster/lib/base.h>

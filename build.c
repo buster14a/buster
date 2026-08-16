@@ -1,3 +1,28 @@
+// The native build driver. build.sh/build.ps1 bootstrap this file with tcc
+// into build/build; from then on it owns every workflow — CMake generation,
+// Ninja builds, the self-hosting fixed point, the combination matrix, the
+// diagnostics summaries, and the metadata importers that write the
+// generated assembly tables. Policy lives here, not in shell or CMake
+// (AGENTS.md: one persistent native process over chains of subprocesses).
+// Commands dispatch from process_arguments near the bottom; the
+// build_command_names table there is the authoritative list.
+//
+// Regions, in file order; each anchor is a definition to search for:
+//   instruction_counter_open                     STEP_INSTRUCTIONS hardware
+//                                                counters (Linux only)
+//   build_artifact_fanout_*, self_host_*         self-host stages, stage
+//                                                comparison, and the
+//                                                provenance-checked artifact
+//                                                fan-out worker
+//   clang_analyze_*, cmake_profile_summary_*,    diagnostics: analyzer runs
+//   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
+//   test_timing_summary_*                        summaries
+//   matrix_superbuild_*                          the test_all_combinations
+//                                                superbuild scheduler
+//   xed_import_*, assembly_import_*              x86 metadata importer (XED)
+//   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
+//   process_arguments, main                      command dispatch
+
 #define BUSTER_UNITY_BUILD 1
 #define BUSTER_SINGLE_THREADED 1
 #include <buster/lib/base.h>

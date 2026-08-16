@@ -1,3 +1,8 @@
+// PDB writing: packages the CodeView streams codeview.c produced into the
+// MSF container Windows debuggers load — superblock, free-page maps,
+// directory, and the fixed DBI/TPI/IPI/info streams — for the PE linker's
+// /debug output.
+
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
