@@ -2192,6 +2192,279 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
     return result;
 }
 
+// A quoted literal of exactly `spelling_length` bytes, delimiters included,
+// with escaped delimiters and escaped backslashes strewn through the body so
+// any escape-aware rescan of the spelling is exercised, and the final escape
+// pair flush against the closing delimiter. `decoded_out`, when given,
+// receives the byte sequence the literal decodes to. The generator must
+// produce text the lexer closes exactly at the last byte, so escape pairs
+// stay clear of the tail where an overlap could end the literal early.
+BUSTER_GLOBAL_LOCAL String8 c_test_giant_literal(Arena* arena, u64 spelling_length, char8 delimiter, String8* decoded_out)
+{
+    BUSTER_CHECK(spelling_length >= 8);
+    char8* spelling = arena_allocate(arena, char8, spelling_length);
+    u64 content_length = spelling_length - 2;
+    char8* content = spelling + 1;
+    spelling[0] = delimiter;
+    spelling[spelling_length - 1] = delimiter;
+    for (u64 index = 0; index < content_length; index += 1)
+    {
+        content[index] = (char8)('A' + index % 26);
+    }
+    for (u64 index = 0; index + 4 < content_length; index += 997)
+    {
+        content[index] = '\\';
+        content[index + 1] = (index / 997) % 2 ? '\\' : delimiter;
+    }
+    content[content_length - 2] = '\\';
+    content[content_length - 1] = delimiter;
+    if (decoded_out)
+    {
+        char8* decoded = arena_allocate(arena, char8, content_length);
+        u64 decoded_length = 0;
+        for (u64 index = 0; index < content_length; index += 1)
+        {
+            if (content[index] == '\\')
+            {
+                index += 1;
+            }
+            decoded[decoded_length++] = content[index];
+        }
+        *decoded_out = (String8){decoded, decoded_length};
+    }
+    return (String8){spelling, spelling_length};
+}
+
+BUSTER_GLOBAL_LOCAL String8 c_test_concatenate(Arena* arena, String8* parts, u64 part_count)
+{
+    u64 length = 0;
+    for (u64 index = 0; index < part_count; index += 1)
+    {
+        length += parts[index].length;
+    }
+    char8* bytes = arena_allocate(arena, char8, length);
+    u64 output = 0;
+    for (u64 index = 0; index < part_count; index += 1)
+    {
+        memcpy(bytes + output, parts[index].pointer, parts[index].length);
+        output += parts[index].length;
+    }
+    return (String8){bytes, length};
+}
+
+BUSTER_GLOBAL_LOCAL CToken c_test_find_token_kind(CToken* tokens, u64 token_count, CTokenKind kind, bool* found)
+{
+    for (u64 index = 0; index < token_count; index += 1)
+    {
+        if (tokens[index].kind == kind)
+        {
+            *found = true;
+            return tokens[index];
+        }
+    }
+    *found = false;
+    return (CToken){0};
+}
+
+// Tokens whose spellings reach and cross 0xFFFF bytes: the fixtures for the
+// CToken u16 length escape. Every length assertion goes through
+// c_token_spelling, never the raw field, so the same fixtures hold before
+// and after the field narrows. Covered: the boundary spelling lengths just
+// below, at, and above the escape through lex, preprocess, parse and IR
+// decode; the SIMD/scalar lexer differential over each; a >64 KB character
+// literal; an unterminated >64 KB literal (both lexer paths must agree on
+// it); and the two synthesized-spelling producers of oversized string
+// literals, stringify (#) and token paste (##).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+
+    u64 boundary_lengths[] = {65534, 65535, 65536, 70003};
+    for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(boundary_lengths); case_index += 1)
+    {
+        u64 spelling_length = boundary_lengths[case_index];
+        String8 decoded = {0};
+        String8 literal = c_test_giant_literal(arena, spelling_length, '"', &decoded);
+        String8 source_parts[] = {S8("static const char big[] = "), literal, S8(";\n")};
+        String8 source = c_test_concatenate(arena, source_parts, BUSTER_ARRAY_LENGTH(source_parts));
+
+        CLexResult lex = c_lex(arena, source);
+        BUSTER_TEST(arguments, lex.diagnostic_count == 0);
+        bool lex_found = false;
+        CToken lex_token = c_test_find_token_kind(lex.tokens, lex.token_count, C_TOKEN_STRING_LITERAL, &lex_found);
+        BUSTER_TEST(arguments, lex_found);
+        if (lex_found)
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, lex_token), literal);
+        }
+        BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lower = c_test_lower_source(arena, source, S8("oversized-literal.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0);
+        bool preprocessed_found = false;
+        CToken preprocessed_token = c_test_find_token_kind(preprocess.tokens, preprocess.token_count, C_TOKEN_STRING_LITERAL, &preprocessed_found);
+        BUSTER_TEST(arguments, preprocessed_found);
+        if (preprocessed_found)
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocessed_token), literal);
+        }
+        IrGlobal* big_global = 0;
+        if (lower.program && lower.program->modules[0].global_count == 1)
+        {
+            big_global = lower.program->modules[0].globals;
+        }
+        BUSTER_TEST(arguments, big_global && big_global->bytes.pointer && big_global->bytes.length == decoded.length + 1);
+        if (big_global && big_global->bytes.pointer && big_global->bytes.length == decoded.length + 1)
+        {
+            BUSTER_TEST(arguments, memcmp(big_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
+            BUSTER_TEST(arguments, big_global->bytes.pointer[decoded.length] == 0);
+        }
+        arena->position = position;
+    }
+
+    // A >64 KB character literal only has to lex: its spelling and the
+    // escape-aware close must survive, and both lexer paths must agree.
+    {
+        String8 character_literal = c_test_giant_literal(arena, 70001, '\'', 0);
+        CLexResult lex = c_lex(arena, character_literal);
+        BUSTER_TEST(arguments, lex.diagnostic_count == 0);
+        bool found = false;
+        CToken token = c_test_find_token_kind(lex.tokens, lex.token_count, C_TOKEN_CHARACTER_LITERAL, &found);
+        BUSTER_TEST(arguments, found);
+        if (found)
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, token), character_literal);
+        }
+        BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, character_literal));
+        arena->position = position;
+    }
+
+    // An unterminated >64 KB string literal: the token cannot report its true
+    // length once the field narrows, so the only stable contracts are the
+    // diagnostic and the two lexer paths agreeing byte for byte.
+    {
+        u64 body_length = 70000;
+        char8* bytes = arena_allocate(arena, char8, body_length + 2);
+        bytes[0] = '"';
+        for (u64 index = 0; index < body_length; index += 1)
+        {
+            bytes[1 + index] = (char8)('a' + index % 26);
+        }
+        bytes[body_length + 1] = '\n';
+        String8 source = {bytes, body_length + 2};
+        CLexResult lex = c_lex(arena, source);
+        BUSTER_TEST(arguments, lex.diagnostic_count == 1);
+        BUSTER_TEST(arguments, lex.diagnostic_count == 1 && lex.diagnostics[0].kind == C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL);
+        BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+        arena->position = position;
+    }
+
+    // Stringify: # over a giant string-literal argument escapes its quotes
+    // and backslashes, so the synthesized spelling is oversized even before
+    // the argument is. Decoding the stringified literal must give back the
+    // argument's spelling exactly.
+    {
+        String8 inner = c_test_giant_literal(arena, 70003, '"', 0);
+        u64 escaped_length = 0;
+        for (u64 index = 0; index < inner.length; index += 1)
+        {
+            escaped_length += 1 + (inner.pointer[index] == '"' || inner.pointer[index] == '\\');
+        }
+        char8* expected_bytes = arena_allocate(arena, char8, escaped_length + 2);
+        u64 output = 0;
+        expected_bytes[output++] = '"';
+        for (u64 index = 0; index < inner.length; index += 1)
+        {
+            if (inner.pointer[index] == '"' || inner.pointer[index] == '\\')
+            {
+                expected_bytes[output++] = '\\';
+            }
+            expected_bytes[output++] = inner.pointer[index];
+        }
+        expected_bytes[output++] = '"';
+        String8 expected = {expected_bytes, output};
+        String8 source_parts[] = {
+            S8("#define STR(x) #x\n"
+               "static const char stringified[] = STR("),
+            inner,
+            S8(");\n"),
+        };
+        String8 source = c_test_concatenate(arena, source_parts, BUSTER_ARRAY_LENGTH(source_parts));
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lower = c_test_lower_source(arena, source, S8("oversized-stringify.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0);
+        bool found = false;
+        CToken token = c_test_find_token_kind(preprocess.tokens, preprocess.token_count, C_TOKEN_STRING_LITERAL, &found);
+        BUSTER_TEST(arguments, found);
+        if (found)
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), expected);
+        }
+        IrGlobal* stringified_global = 0;
+        if (lower.program && lower.program->modules[0].global_count == 1)
+        {
+            stringified_global = lower.program->modules[0].globals;
+        }
+        BUSTER_TEST(arguments, stringified_global && stringified_global->bytes.pointer && stringified_global->bytes.length == inner.length + 1);
+        if (stringified_global && stringified_global->bytes.pointer && stringified_global->bytes.length == inner.length + 1)
+        {
+            BUSTER_TEST(arguments, memcmp(stringified_global->bytes.pointer, inner.pointer, inner.length) == 0);
+        }
+        arena->position = position;
+    }
+
+    // Token paste: u8 ## "..." runs the join-and-relex path with an
+    // oversized result whose relexed length must agree with the join.
+    {
+        String8 decoded = {0};
+        String8 literal = c_test_giant_literal(arena, 70003, '"', &decoded);
+        String8 expected_parts[] = {S8("u8"), literal};
+        String8 expected = c_test_concatenate(arena, expected_parts, BUSTER_ARRAY_LENGTH(expected_parts));
+        String8 source_parts[] = {
+            S8("#define GLUE(a, b) a##b\n"
+               "static const char glued[] = GLUE(u8, "),
+            literal,
+            S8(");\n"),
+        };
+        String8 source = c_test_concatenate(arena, source_parts, BUSTER_ARRAY_LENGTH(source_parts));
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lower = c_test_lower_source(arena, source, S8("oversized-paste.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0);
+        bool found = false;
+        CToken token = c_test_find_token_kind(preprocess.tokens, preprocess.token_count, C_TOKEN_STRING_LITERAL, &found);
+        BUSTER_TEST(arguments, found);
+        if (found)
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), expected);
+        }
+        IrGlobal* glued_global = 0;
+        if (lower.program && lower.program->modules[0].global_count == 1)
+        {
+            glued_global = lower.program->modules[0].globals;
+        }
+        BUSTER_TEST(arguments, glued_global && glued_global->bytes.pointer && glued_global->bytes.length == decoded.length + 1);
+        if (glued_global && glued_global->bytes.pointer && glued_global->bytes.length == decoded.length + 1)
+        {
+            BUSTER_TEST(arguments, memcmp(glued_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
+        }
+        arena->position = position;
+    }
+
+    return result;
+}
+
 // Source measurement, checked against counts done by hand on the fixtures
 // below. The two partitions are asserted on every fixture: they are what makes
 // the numbers add up rather than merely look plausible.
@@ -8530,6 +8803,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
+    c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
