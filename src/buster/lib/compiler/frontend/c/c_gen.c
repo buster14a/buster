@@ -1959,7 +1959,7 @@ BUSTER_C_INTERNAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrT
         .canonical_local = IR_LOCAL_ID_INVALID,
         .next = IR_INSTRUCTION_ID_INVALID,
         .result = IR_VALUE_ID_INVALID,
-        .opcode = opcode,
+        .opcode = (u8)opcode,
         .conversion_operation = IR_CONVERSION_COUNT,
         .unary_operation = IR_UNARY_COUNT,
         .memory_order = IR_MEMORY_ORDER_COUNT,
@@ -3187,7 +3187,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, I
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_BINARY, type);
     instruction.operands = operands;
     instruction.operand_count = 2;
-    instruction.binary_operation = operation;
+    instruction.binary_operation = (u8)operation;
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
@@ -3345,7 +3345,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builde
     IrInstruction cast = c_ir_instruction_initialize(IR_OPCODE_CAST, target_type);
     cast.operands = operands;
     cast.operand_count = 1;
-    cast.conversion_operation = operation;
+    cast.conversion_operation = (u8)operation;
     cast.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, cast, cast_source);
     builder->function->values[result.value].definition = id;
@@ -9757,7 +9757,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 IrSourceRange instruction_source = source;
                 IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_FENCE, builder->void_type);
-                instruction.memory_order = order;
+                instruction.memory_order = (u8)order;
                 instruction.atomic_signal_fence = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE;
                 c_ir_append_instruction(builder, instruction, instruction_source);
                 selected->result = c_ir_emit_integer_value(builder, 0, false, token);
@@ -9882,8 +9882,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.operands[1] = expected;
                 instruction.operands[2] = desired;
                 instruction.operand_count = 3;
-                instruction.memory_order = order;
-                instruction.failure_memory_order = failure_order;
+                instruction.memory_order = (u8)order;
+                instruction.failure_memory_order = (u8)failure_order;
                 instruction.result = observed;
                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                 builder->function->values[observed.value].definition = id;
@@ -9915,7 +9915,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
                 instruction.operands[0] = place;
                 instruction.operand_count = 1;
-                instruction.memory_order = order;
+                instruction.memory_order = (u8)order;
                 instruction.result = selected->result;
                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                 builder->function->values[selected->result.value].definition = id;
@@ -9968,7 +9968,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.operands[0] = place;
                     instruction.operands[1] = value;
                     instruction.operand_count = 2;
-                    instruction.memory_order = order;
+                    instruction.memory_order = (u8)order;
                     c_ir_append_instruction(builder, instruction, instruction_source);
                     selected->result = c_ir_emit_integer_value(builder, 0, false, token);
                 }
@@ -9987,8 +9987,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     instruction.operands[0] = place;
                     instruction.operands[1] = value;
                     instruction.operand_count = 2;
-                    instruction.memory_order = order;
-                    instruction.atomic_operation = operation;
+                    instruction.memory_order = (u8)order;
+                    instruction.atomic_operation = (u8)operation;
                     instruction.result = selected->result;
                     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                     builder->function->values[selected->result.value].definition = id;
@@ -10142,7 +10142,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
                 instruction.operands[0] = operand;
                 instruction.operand_count = 1;
-                instruction.unary_operation = selected->builtin_unary;
+                instruction.unary_operation = (u8)selected->builtin_unary;
                 instruction.result = result;
                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                 builder->function->values[result.value].definition = id;
@@ -11392,8 +11392,8 @@ BUSTER_C_INTERNAL bool c_ir_apply_vector_operation(CIntegerIrBuilder* builder, I
     IrInstruction instruction = c_ir_instruction_initialize(unary != IR_UNARY_COUNT ? IR_OPCODE_UNARY : IR_OPCODE_BINARY, result_type);
     instruction.operands = operands;
     instruction.operand_count = operand_count;
-    instruction.unary_operation = unary;
-    instruction.binary_operation = binary;
+    instruction.unary_operation = (u8)unary;
+    instruction.binary_operation = (u8)binary;
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
@@ -12222,8 +12222,8 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
     IrInstruction instruction = c_ir_instruction_initialize(unary != IR_UNARY_COUNT ? IR_OPCODE_UNARY : IR_OPCODE_BINARY, result_type);
     instruction.operands = operands;
     instruction.operand_count = operand_count;
-    instruction.unary_operation = unary;
-    instruction.binary_operation = binary;
+    instruction.unary_operation = (u8)unary;
+    instruction.binary_operation = (u8)binary;
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
@@ -12317,7 +12317,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         instruction.operands = operands;
         instruction.operand_count = 2;
         instruction.memory_order = IR_MEMORY_ORDER_SEQUENTIAL;
-        instruction.atomic_operation = atomic_operation;
+        instruction.atomic_operation = (u8)atomic_operation;
         instruction.result = previous;
         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
         builder->function->values[previous.value].definition = id;
@@ -13031,13 +13031,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
         }
         if (task.kind == C_IR_ZERO_TASK_COMPLETE)
         {
+            if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
+            {
+                builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
+                return IR_VALUE_ID_INVALID;
+            }
             IrValueId aggregate = c_ir_add_result(builder, task.type);
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
             IrInstruction instruction = c_ir_instruction_initialize((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, task.type);
             instruction.operands = task.operands;
             instruction.operand_count = task.operand_count;
             instruction.immediates = task.fields;
-            instruction.immediate_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : task.operand_count;
+            instruction.immediate_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : (u16)task.operand_count;
             instruction.result = aggregate;
             IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction, instruction_source);
             builder->function->values[aggregate.value].definition = instruction_id;
@@ -13807,6 +13812,10 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         goto c_ir_compound_literal_failed;
     }
+    if (type->kind != IR_TYPE_ARRAY && operand_count > UINT16_MAX)
+    {
+        goto c_ir_compound_literal_failed;
+    }
     IrValueId result = c_ir_add_result(builder, type_id);
     IrSourceRange instruction_source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
     IrInstruction instruction = c_ir_instruction_initialize(type->kind == IR_TYPE_ARRAY ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
@@ -13815,7 +13824,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     if (type->kind != IR_TYPE_ARRAY)
     {
         instruction.immediates = fields;
-        instruction.immediate_count = operand_count;
+        instruction.immediate_count = (u16)operand_count;
     }
     instruction.result = result;
     IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction, instruction_source);
@@ -16351,9 +16360,13 @@ BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcod
     }
     if (target_count)
     {
+        if (target_count > UINT16_MAX)
+        {
+            return false;
+        }
         instruction.targets = arena_allocate(builder->arena, IrBlockId, target_count);
         memcpy(instruction.targets, targets, sizeof(IrBlockId) * target_count);
-        instruction.target_count = target_count;
+        instruction.target_count = (u16)target_count;
     }
     if (c_ir_append_instruction(builder, instruction, instruction_source).value == IR_ID_UNDERLYING_INVALID)
     {
@@ -16431,7 +16444,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     IrInstruction comparison = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->bool_type);
     comparison.operands = operands;
     comparison.operand_count = 2;
-    comparison.binary_operation = operation;
+    comparison.binary_operation = (u8)operation;
     comparison.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, comparison, comparison_source);
     builder->function->values[result.value].definition = id;
@@ -20171,6 +20184,10 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValue
     {
         value_count += !cases[index].is_default;
     }
+    if (value_count >= UINT16_MAX)
+    {
+        return false;
+    }
     IrSourceRange instruction_source = source;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SWITCH, builder->void_type);
     instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
@@ -20189,8 +20206,8 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch(CIntegerIrBuilder* builder, IrValue
         }
     }
     instruction.targets[value_count] = default_block;
-    instruction.target_count = value_count + 1;
-    instruction.immediate_count = value_count;
+    instruction.target_count = (u16)(value_count + 1);
+    instruction.immediate_count = (u16)value_count;
     if (c_ir_append_instruction(builder, instruction, instruction_source).value == IR_ID_UNDERLYING_INVALID)
     {
         return false;
@@ -21552,10 +21569,14 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
         .pointer = (char8*)assembly.pointer,
         .length = assembly.length,
     };
+    if (state->operand_count > UINT16_MAX)
+    {
+        return false;
+    }
     instruction.operands = state->operands;
     instruction.operand_count = state->operand_count;
     instruction.immediates = state->constraints;
-    instruction.immediate_count = state->operand_count;
+    instruction.immediate_count = (u16)state->operand_count;
     if (!c_ir_inline_assembly_template_names_valid(builder, state, assembly_literal))
     {
         return false;
@@ -21610,10 +21631,14 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
                 }
             }
         }
+        if (state->label_count >= UINT16_MAX)
+        {
+            return false;
+        }
         instruction.targets = arena_allocate(builder->arena, IrBlockId, state->label_count + 1);
         instruction.targets[0] = fallthrough;
         memcpy(instruction.targets + 1, edge_targets, sizeof(IrBlockId) * state->label_count);
-        instruction.target_count = state->label_count + 1;
+        instruction.target_count = (u16)(state->label_count + 1);
         IrInstructionId goto_assembly = c_ir_append_instruction(builder, instruction, instruction_source);
         if (goto_assembly.value == IR_ID_UNDERLYING_INVALID)
         {

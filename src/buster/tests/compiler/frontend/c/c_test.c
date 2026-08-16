@@ -8104,7 +8104,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_local_transport(UnitTestArg
                 {
                     positive_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == 0;
                     negative_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == UINT64_C(0x8000);
-                    IrSourceRange constant_source = ir_instruction_canonical_source(function, instruction->id);
+                    IrSourceRange constant_source = ir_instruction_canonical_source(function, ir_instruction_self_id(function, instruction));
                     located_constant_count += constant_source.length != 0;
                 }
             }
@@ -10100,7 +10100,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 if (asm_goto)
                 {
                     BUSTER_TEST(arguments, asm_goto->target_count == 2);
-                    BUSTER_TEST(arguments, ir_instruction_extra(labels_function, asm_goto->id).literal.length == 0);
+                    BUSTER_TEST(arguments, ir_instruction_extra(labels_function, ir_instruction_self_id(labels_function, asm_goto)).literal.length == 0);
                 }
                 BUSTER_TEST(arguments, ir_validate_canonical_module(labels_lowered.program, labels_module).error == IR_VALIDATION_NONE);
                 if (indirect_branch)
@@ -10125,9 +10125,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     IrValidationResult invalid_target = ir_validate_canonical_module(labels_lowered.program, labels_module);
                     BUSTER_TEST(arguments, invalid_target.error != IR_VALIDATION_NONE);
                     indirect_branch->targets[0] = saved_target;
-                    if (indirect_branch->target_count < UINT32_MAX)
+                    if (indirect_branch->target_count < UINT16_MAX)
                     {
-                        u32 saved_target_count = indirect_branch->target_count;
+                        u16 saved_target_count = indirect_branch->target_count;
                         IrBlockId* saved_targets = indirect_branch->targets;
                         IrBlockId* extra_targets = arena_allocate(labels_temporary.arena, IrBlockId, saved_target_count + 1);
                         memcpy(extra_targets, saved_targets, sizeof(IrBlockId) * saved_target_count);
@@ -10321,7 +10321,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count)
                     {
                         inline_goto_count += 1;
-                        IrInstructionExtra instruction_extra = ir_instruction_extra(function, instruction->id);
+                        IrInstructionExtra instruction_extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                         if (instruction_extra.literal.length && instruction_extra.literal.pointer[instruction_extra.literal.length - 1] == '2')
                         {
                             numeric_asm = instruction;
@@ -10338,7 +10338,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("named_asm_operand")))
                     {
                         named_operand_asm = instruction;
-                        named_operand_asm_extra = ir_instruction_extra(function, instruction->id);
+                        named_operand_asm_extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("outputs_only_asm")))
                     {
@@ -10427,7 +10427,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 if (set_function)
                 {
                     IrBlockId* saved_targets = set_valued_indirect->targets;
-                    u32 saved_target_count = set_valued_indirect->target_count;
+                    u16 saved_target_count = set_valued_indirect->target_count;
                     set_valued_indirect->target_count = 1;
                     IrValidationResult missing_successor = ir_validate_canonical_module(label_flow_lowered.program, module);
                     BUSTER_TEST(arguments, missing_successor.error != IR_VALIDATION_NONE);
@@ -10455,7 +10455,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                         extra_target = saved_targets[0];
                     }
                     set_valued_indirect->targets[saved_target_count] = extra_target;
-                    set_valued_indirect->target_count = saved_target_count + 1;
+                    set_valued_indirect->target_count = (u16)(saved_target_count + 1);
                     IrValidationResult extra_successor = ir_validate_canonical_module(label_flow_lowered.program, module);
                     BUSTER_TEST(arguments, extra_successor.error != IR_VALIDATION_NONE);
                     set_valued_indirect->targets = saved_targets;
@@ -11233,7 +11233,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     break;
                 }
             }
-            IrInstructionExtra assembly_extra = assembly ? ir_instruction_extra(function, assembly->id) : (IrInstructionExtra){0};
+            IrInstructionExtra assembly_extra = assembly ? ir_instruction_extra(function, ir_instruction_self_id(function, assembly)) : (IrInstructionExtra){0};
             BUSTER_TEST(arguments, assembly && assembly_extra.operand_name_count == 2);
             if (assembly && assembly_extra.operand_name_count == 2)
             {
@@ -11289,7 +11289,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 else if (string_equal(function->name, S8("named_tied")))
                 {
                     named_tied_assembly = first_assembly;
-                    named_tied_extra = first_assembly ? ir_instruction_extra(function, first_assembly->id) : (IrInstructionExtra){0};
+                    named_tied_extra = first_assembly ? ir_instruction_extra(function, ir_instruction_self_id(function, first_assembly)) : (IrInstructionExtra){0};
                 }
                 else if (string_equal(function->name, S8("many_tied")))
                 {

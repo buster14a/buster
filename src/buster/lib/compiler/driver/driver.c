@@ -2291,7 +2291,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             if (code.failed_instruction.value < failed_function->instruction_count)
             {
                 IrInstruction* failed_instruction = &failed_function->instructions[code.failed_instruction.value];
-                IrSourceRange failed_source = failed_function->instruction_canonical_sources[failed_instruction->id.value];
+                IrSourceRange failed_source = failed_function->instruction_canonical_sources[code.failed_instruction.value];
                 IrSourcePosition failed_position = ir_source_position(lowered.program, failed_source);
                 source_line = failed_position.line;
                 source_column = failed_position.column;

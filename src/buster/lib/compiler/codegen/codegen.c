@@ -775,7 +775,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         {
             continue;
         }
-        IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+        IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
         if ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers))
         {
             return false;
@@ -6564,7 +6564,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = function->instructions + instruction_index;
-                IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+                IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                 if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
                     ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers)))
                 {
@@ -6812,7 +6812,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     // This pass runs before the emitting one that keeps the
                     // failing instruction up to date, so it has to name its own
                     // call or the diagnostic blames whatever ran last.
-                    result.failed_instruction = instruction->id;
+                    result.failed_instruction = (IrInstructionId){.value = instruction_index};
                     result.failed_opcode = instruction->opcode;
                     result.error = call_error;
                     return result;
@@ -12686,7 +12686,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                     {
-                        IrInstructionExtra asm_extra = ir_instruction_extra(function, instruction->id);
+                        IrInstructionExtra asm_extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                         bool cpuid = string_equal(asm_extra.literal, S8("cpuid"));
                         bool xgetbv = string_equal(asm_extra.literal, S8("xgetbv"));
                         bool undefined = string_equal(asm_extra.literal, S8("ud2"));
@@ -15225,7 +15225,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                     {
-                        IrInstructionExtra asm_extra = ir_instruction_extra(function, instruction->id);
+                        IrInstructionExtra asm_extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                         bool empty = !asm_extra.literal.length;
                         bool brk = string_equal(asm_extra.literal, S8("brk #0"));
                         u32 nop_count = codegen_canonical_a64_nop_count(asm_extra.literal);

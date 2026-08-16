@@ -354,7 +354,7 @@ static void wasm64_fail(Wasm64Context* context, Wasm64ErrorCode code, String8 me
     context->error.diagnostic = message;
     context->error.function = function ? function->id : IR_FUNCTION_ID_INVALID;
     context->error.block = block ? block->id : IR_BLOCK_ID_INVALID;
-    context->error.instruction = instruction ? instruction->id : IR_INSTRUCTION_ID_INVALID;
+    context->error.instruction = instruction && function ? ir_instruction_self_id(function, instruction) : IR_INSTRUCTION_ID_INVALID;
     context->error.symbol = symbol;
     context->error.opcode = instruction ? instruction->opcode : IR_OPCODE_COUNT;
 }
@@ -981,9 +981,9 @@ static bool wasm64_collect_data(Wasm64Context* context)
                                 0, instruction, IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                String8 literal = ir_instruction_extra(function, instruction->id).literal;
+                String8 literal = ir_instruction_extra(function, ir_instruction_self_id(function, instruction)).literal;
                 wasm64_align_cursor(&context->data_cursor, 1);
-                Wasm64StringRecord record = {.function = function, .instruction = instruction->id, .literal = literal, .offset = context->data_cursor};
+                Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
                 context->data_cursor += literal.length + 1;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
@@ -2181,7 +2181,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, instruction->id);
+        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, ir_instruction_self_id(emitter->function, instruction));
         if (!record)
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 string data record"), emitter->function, block, instruction,

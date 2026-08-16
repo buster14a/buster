@@ -70,10 +70,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* are
                                                                                          .immediates = immediates,
                                                                                          .canonical_type = f80,
                                                                                          .targets = targets,
-                                                                                         .target_count = target_count,
+                                                                                         .target_count = (u16)target_count,
                                                                                          .result = value,
                                                                                          .opcode = IR_OPCODE_CONSTANT_FLOAT,
-                                                                                         .immediate_count = immediate_count,
+                                                                                         .immediate_count = (u16)immediate_count,
                                                                                          .next = IR_INSTRUCTION_ID_INVALID,
                                                                                      },
                                                                         (IrSourceRange){0})

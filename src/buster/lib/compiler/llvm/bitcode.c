@@ -278,7 +278,7 @@ static void llvm_bc_fail(LlvmBcContext* context, LlvmBitcodeErrorCode code, Stri
     context->error.diagnostic = message;
     context->error.function = function ? function->id : IR_FUNCTION_ID_INVALID;
     context->error.block = block ? block->id : IR_BLOCK_ID_INVALID;
-    context->error.instruction = instruction ? instruction->id : IR_INSTRUCTION_ID_INVALID;
+    context->error.instruction = instruction && function ? ir_instruction_self_id(function, instruction) : IR_INSTRUCTION_ID_INVALID;
     context->error.symbol = symbol;
     context->error.opcode = instruction ? instruction->opcode : IR_OPCODE_COUNT;
 }
@@ -1085,12 +1085,12 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                 {
                     continue;
                 }
-                IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+                IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
                 llvm_bc_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1,
                                     sizeof(*context->strings), BUSTER_ALIGN_OF(LlvmBcString));
                 LlvmBcString* string = context->strings + context->string_count;
                 *string = (LlvmBcString){.function = function,
-                                         .instruction = instruction->id,
+                                         .instruction = ir_instruction_self_id(function, instruction),
                                          .result = instruction->result,
                                          .bytes = extra.literal,
                                          .global_index = context->global_count};
@@ -1857,7 +1857,7 @@ static bool llvm_bc_assign_alias(LlvmBcContext* context, LlvmBcFunction* record,
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        LlvmBcString* string = llvm_bc_string_for_instruction(context, function, instruction->id);
+        LlvmBcString* string = llvm_bc_string_for_instruction(context, function, ir_instruction_self_id(function, instruction));
         if (string && string->global_index < context->global_count)
         {
             value = context->globals[string->global_index].value_id;
@@ -2537,7 +2537,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
                                      u32* current_value_id)
 {
     IrFunction* function = record->function;
-    u32 expected_count = record->emitted_counts[instruction->id.value];
+    u32 expected_count = record->emitted_counts[ir_instruction_self_id(function, instruction).value];
     u32 initial_value_id = *current_value_id;
     u64 operands[24];
     u32 count = 0;

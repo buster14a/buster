@@ -519,7 +519,7 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
 
 BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
 {
-    IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool valid = instruction->canonical_type.value < program->types.count && ir_type_from_id(&program->types, instruction->canonical_type)->kind == IR_TYPE_VOID &&
                  instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
                  extra.label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
@@ -2205,7 +2205,7 @@ u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction)
 
 bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
 {
-    IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     if (!instruction || !target_index_out || !literal.pointer || !prefix.pointer || literal.length <= prefix.length || instruction->target_count < 2)
     {
         return false;
@@ -3015,6 +3015,15 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
     return id;
 }
 
+IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* instruction)
+{
+    if (!function || !instruction || instruction < function->instructions || instruction >= function->instructions + function->instruction_count)
+    {
+        return IR_INSTRUCTION_ID_INVALID;
+    }
+    return (IrInstructionId){.value = (IrIdUnderlying)(instruction - function->instructions)};
+}
+
 IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source)
 {
     if (!arena || !function)
@@ -3044,7 +3053,6 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
     IrInstructionId id = {
         .value = function->instruction_count++,
     };
-    instruction.id = id;
     function->instructions[id.value] = instruction;
     if (function->instruction_canonical_sources)
     {

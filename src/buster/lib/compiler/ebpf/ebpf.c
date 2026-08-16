@@ -444,7 +444,7 @@ static void ebpf_fail(EbpfContext* context, EbpfErrorCode code, String8 message,
     context->error.diagnostic = message;
     context->error.function = function ? function->id : IR_FUNCTION_ID_INVALID;
     context->error.block = block ? block->id : IR_BLOCK_ID_INVALID;
-    context->error.instruction = instruction ? instruction->id : IR_INSTRUCTION_ID_INVALID;
+    context->error.instruction = instruction && function ? ir_instruction_self_id(function, instruction) : IR_INSTRUCTION_ID_INVALID;
     context->error.symbol = symbol;
     context->error.opcode = instruction ? instruction->opcode : IR_OPCODE_COUNT;
 }
@@ -922,7 +922,7 @@ static void ebpf_fe_emit_value(EbpfFunctionEmitter* emitter, u8 destination, IrV
     break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        EbpfStringRecord* string = ebpf_string_find(emitter->context, emitter->function, definition->id);
+        EbpfStringRecord* string = ebpf_string_find(emitter->context, emitter->function, ir_instruction_self_id(emitter->function, definition));
         if (!string)
         {
             ebpf_fail(emitter->context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("missing eBPF string literal record"), emitter->function, 0,
@@ -2181,7 +2181,7 @@ static bool ebpf_collect_strings(EbpfContext* context)
                 {
                     continue;
                 }
-                String8 literal = ir_instruction_extra(function, instruction->id).literal;
+                String8 literal = ir_instruction_extra(function, ir_instruction_self_id(function, instruction)).literal;
                 EbpfSection* section = ebpf_section_get(context, S8(".rodata"), EBPF_SHT_PROGBITS, EBPF_SHF_ALLOC, 1, 0);
                 if (!section)
                 {
@@ -2204,7 +2204,7 @@ static bool ebpf_collect_strings(EbpfContext* context)
                 ebpf_vector_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1,
                                     sizeof(*context->strings));
                 context->strings[context->string_count++] =
-                    (EbpfStringRecord){.function = function, .instruction = instruction->id, .section = section, .literal = literal,
+                    (EbpfStringRecord){.function = function, .instruction = ir_instruction_self_id(function, instruction), .section = section, .literal = literal,
                                        .offset = offset, .symbol_key = key};
                 context->stats.data_bytes += literal.length + 1;
             }

@@ -8,12 +8,10 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 
     IrType types[3] = {0};
     types[0] = (IrType){
-        .id = {.value = 0},
         .kind = IR_TYPE_VOID,
         .layout = {.resolved = true},
     };
     types[1] = (IrType){
-        .id = {.value = 1},
         .kind = IR_TYPE_INTEGER,
         .layout = {.size = 4, .alignment = 4, .resolved = true},
         .bit_width = 32,
@@ -32,7 +30,6 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
             .name = S8("main"),
             .link_name = S8("main"),
             .type = {.value = 2},
-            .id = {.value = 0},
             .kind = IR_SYMBOL_FUNCTION,
             .linkage = IR_LINKAGE_EXTERNAL,
             .is_definition = true,
@@ -44,7 +41,6 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     instructions[0] = (IrInstruction){
         .immediates = constant_immediates,
         .canonical_type = {.value = 1},
-        .id = {.value = 0},
         .next = {.value = 1},
         .result = {.value = 0},
         .opcode = IR_OPCODE_CONSTANT_INTEGER,
@@ -56,7 +52,6 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     instructions[1] = (IrInstruction){
         .operands = return_operands,
         .canonical_type = {.value = 0},
-        .id = {.value = 1},
         .next = IR_INSTRUCTION_ID_INVALID,
         .result = IR_VALUE_ID_INVALID,
         .opcode = IR_OPCODE_RETURN,
@@ -76,7 +71,6 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
         {
             .first_instruction = {.value = 0},
             .last_instruction = {.value = 1},
-            .id = {.value = 0},
             .terminated = true,
             .sealed = true,
         },
@@ -86,7 +80,6 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
             .name = S8("main"),
             .symbol = {.value = 0},
             .canonical_type = {.value = 2},
-            .id = {.value = 0},
             .entry = {.value = 0},
             .blocks = blocks,
             .instructions = instructions,

@@ -392,6 +392,16 @@ struct IrInstructionExtra
     u32 reserved;
 };
 
+// The instruction array is the largest thing a compile allocates per
+// function (over a million rows on the self-host unit), so the row is kept
+// to exactly one cache line. Three deliberate narrowings pay for that:
+// the operation/order enums are stored as u8 with their COUNT values as
+// per-field "not this kind" sentinels (each enum is checked <= UINT8_MAX
+// below), target/immediate counts are u16 (producers with unbounded case
+// or initializer counts must diagnose overflow instead of truncating), and
+// the row's own id is gone — ir_function_add_instruction has always stored
+// row `n` at instructions[n], so ir_instruction_self_id recovers it from
+// the row's address.
 typedef struct IrInstruction IrInstruction;
 struct IrInstruction
 {
@@ -401,29 +411,33 @@ struct IrInstruction
     IrTypeId canonical_type;
     IrSymbolId symbol;
     IrLocalId canonical_local;
-    IrInstructionId id;
     IrInstructionId next;
     IrValueId result;
-    IrOpcode opcode;
-    IrConversionOperation conversion_operation;
-    IrUnaryOperation unary_operation;
-    IrBinaryOperation binary_operation;
-    IrMemoryOrder memory_order;
-    IrMemoryOrder failure_memory_order;
-    IrAtomicOperation atomic_operation;
     u32 operand_count;
-    u32 target_count;
-    u32 immediate_count;
+    u16 target_count;
+    u16 immediate_count;
+    u8 opcode;
+    u8 conversion_operation;
+    u8 unary_operation;
+    u8 binary_operation;
+    u8 memory_order;
+    u8 failure_memory_order;
+    u8 atomic_operation;
     bool immediate_is_negative;
     bool atomic_signal_fence;
     bool volatile_access;
-    // An IrSimdOperation, narrowed into the padding the row already carried:
-    // the instruction array is the largest thing a compile allocates per
-    // function, so a bounded enum pays for itself in bytes, not in a field.
+    // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
 };
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_CONVERSION_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_UNARY_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_BINARY_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_MEMORY_ORDER_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 
 typedef struct IrBlock IrBlock;
 struct IrBlock
@@ -641,6 +655,10 @@ BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrG
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
 BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source);
+// The id ir_function_add_instruction assigned to this row: its index in the
+// function's instruction array. The row stopped storing it when the record
+// was packed to one cache line.
+BUSTER_F_DECL IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* instruction);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value);
