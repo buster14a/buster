@@ -18,9 +18,46 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-16d` (Linux x86_64, Zen 4 7940HS; **the `2026-08-16c` shrink batch
+lands** — eight of the survey's nine candidates, one deferred). Same-source
+A/B, both compilers clang-built Release compiling the post-change unity TU
+with `-g`: instructions 16.4429 G -> 16.4741 G (**+0.19%**), L1d misses
+244.5 M -> 216.9 M (**-11.3%**), LLC misses -13%, wall 1936 ms -> 1897 ms
+median-of-3 (**-2.0%**), cycles -0.8%. The instructions-for-misses trade is
+the same shape CToken 48 -> 16 paid in PR 221. `test_self_host` fixed point
+holds; Release `test_all` 308,781 assertions green; Win64 `-g` fixtures run
+under wine.
+
+**What landed.** `IrInstruction` 96 -> 64 (one cache line: id dropped —
+always its array index, `ir_instruction_self_id` recovers it by pointer
+difference; seven enums as u8 behind CT range checks; target/immediate
+counts u16 with the switch/computed-goto/inline-asm/aggregate lowerings
+failing their existing error paths at 64K+ instead of truncating).
+`DebugSourceLocation` 48 -> 20 (the embedded `String8 path` was a per-record
+interned copy of what `source` already names; offset/length u64 -> u32;
+`line == 0` is the no-declaration signal) — shrinks DebugType 176 -> 144,
+DebugVariable 120 -> 96, DebugTypeField 96 -> 64, DebugScope 88 -> 56 and
+deletes one `debug_string` per record. Entity lookup buckets sized from
+interned names instead of identifier tokens (3 x 8 MB memset per parse ->
+~1.5 MB total). Line rows 16 -> 12 (source/column u16, saturated in
+`codegen_record_line`). `CodegenModuleRelocation` 40 -> 32 (addend first,
+source as u8). `IrValue` 20 -> 16 (category as u8).
+
+**Not taken, and why.** `CType`/`IrType`: every safe narrowing lands in
+align-8 padding (the records stay 80/128; reaching 72/120 needs u16
+member/enum counts that could silently overflow on generated code, or a
+~30-site `IrType.id` removal, for ~2.8 MB tables). Relocation 32 -> 24
+means finishing the documented kind migration that retires the six legacy
+bools — 113 consumer sites, its own change. `CToken` 16 -> 12 is deferred
+with a design note: lexed token offsets can point at raw source text, not
+only the writable spelling space, so the u16-length escape needs an
+offset-keyed side table (or unconditional length array) and dedicated
+64 KB-token fixtures before it can be trusted — token spelling identity
+feeds the fixed point.
+
 `2026-08-16c` (Linux x86_64, Zen 4 7940HS; **struct-size / cache-behavior
-survey** — measurement only, nothing landed; ranked shrink candidates for the
-bulk-allocated compiler structs). Baseline for the workload surveyed: clang
+survey** — measurement only, ranked shrink candidates for the
+bulk-allocated compiler structs; the entry above records the landing). Baseline for the workload surveyed: clang
 Release `ide` compiling the unity self-host TU with `-g` runs 16.42 G
 instructions / 6.42 G cycles (IPC 2.56), 5.90 G L1d loads with **244.9 M L1d
 misses (4.1%)**, 15.6 M LLC misses, 1.7 M dTLB misses, peak RSS 1.31 GB.
