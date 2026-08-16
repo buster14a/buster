@@ -1004,7 +1004,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             }
             u64 size = 0;
             u32 alignment = 1;
-            u32 pack_alignment = type.definition_start < preprocess.token_count ? preprocess.tokens[type.definition_start].pack_alignment : 0;
+            u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
             bool fields_resolved = true;
             bool aggregate_provisional = false;
             u64 bit_field_unit_bits = 0;

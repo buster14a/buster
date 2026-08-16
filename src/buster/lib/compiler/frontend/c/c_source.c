@@ -3267,9 +3267,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             c_macro_expansion_task_push(arena, &parent->top, (CPpToken){0}, macro, C_MACRO_EXPANSION_ENABLE);
             for (u32 replacement_index = replacement_count; replacement_index; replacement_index -= 1)
             {
-                CPpToken replacement = replacement_tokens[replacement_index - 1];
-                replacement.token.pack_alignment = invocation.token.pack_alignment;
-                c_macro_expansion_task_push(arena, &parent->top, replacement, 0, C_MACRO_EXPANSION_TOKEN);
+                c_macro_expansion_task_push(arena, &parent->top, replacement_tokens[replacement_index - 1], 0, C_MACRO_EXPANSION_TOKEN);
             }
             context = parent;
             continue;
@@ -3343,9 +3341,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
         c_macro_expansion_task_push(arena, &context->top, (CPpToken){0}, macro, C_MACRO_EXPANSION_ENABLE);
         for (u32 replacement_index = replacement_count; replacement_index; replacement_index -= 1)
         {
-            CPpToken replacement = replacement_tokens[replacement_index - 1];
-            replacement.token.pack_alignment = token.token.pack_alignment;
-            c_macro_expansion_task_push(arena, &context->top, replacement, 0, C_MACRO_EXPANSION_TOKEN);
+            c_macro_expansion_task_push(arena, &context->top, replacement_tokens[replacement_index - 1], 0, C_MACRO_EXPANSION_TOKEN);
         }
     }
     return false;
@@ -4139,6 +4135,64 @@ struct CPragmaPackStack
     u16 alignment;
 };
 
+// The pack change list under construction. Entries are appended lazily at
+// output-append time — the first token that lands after a state change
+// carries the new value's span start — so pragmas on directive lines and
+// _Pragma markers mid-expansion record through the same comparison, and
+// consecutive changes with no token between them collapse to one entry.
+typedef struct CPackAlignmentRecorder CPackAlignmentRecorder;
+struct CPackAlignmentRecorder
+{
+    Arena* arena;
+    CPackAlignment* changes;
+    u32 count;
+    u32 capacity;
+    u16 recorded;
+};
+
+BUSTER_C_INTERNAL void c_pack_alignment_record(CPackAlignmentRecorder* recorder, u64 token_index, u16 alignment)
+{
+    if (alignment == recorder->recorded)
+    {
+        return;
+    }
+    if (recorder->count == recorder->capacity)
+    {
+        u32 capacity = recorder->capacity ? recorder->capacity * 2 : 16;
+        CPackAlignment* changes = arena_allocate(recorder->arena, CPackAlignment, capacity);
+        if (recorder->count)
+        {
+            memcpy(changes, recorder->changes, sizeof(*changes) * recorder->count);
+        }
+        recorder->changes = changes;
+        recorder->capacity = capacity;
+    }
+    recorder->changes[recorder->count++] = (CPackAlignment){
+        .token_index = (u32)token_index,
+        .alignment = alignment,
+    };
+    recorder->recorded = alignment;
+}
+
+u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index)
+{
+    u32 low = 0;
+    u32 high = preprocess->pack_change_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (preprocess->pack_changes[middle].token_index <= token_index)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low ? preprocess->pack_changes[low - 1].alignment : 0;
+}
+
 typedef struct CPreprocessPragmaContext CPreprocessPragmaContext;
 struct CPreprocessPragmaContext
 {
@@ -4149,6 +4203,7 @@ struct CPreprocessPragmaContext
     CMacroPushMacro** macro_push_stack;
     CPragmaPackStack** pack_stack;
     u16* pack_alignment;
+    CPackAlignmentRecorder* pack_changes;
     String8* once_paths;
     u32* once_path_count;
     u32 once_path_capacity;
@@ -4412,7 +4467,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(Arena* arena, CPreproc
             continue;
         }
         CPpToken item = node->token;
-        item.token.pack_alignment = *context.pack_alignment;
+        c_pack_alignment_record(context.pack_changes, *output_count + count, *context.pack_alignment);
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
@@ -5600,6 +5655,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPragmaPackStack* pack_stack = 0;
     CMacroPushMacro* macro_push_stack = 0;
     u16 pack_alignment = 0;
+    CPackAlignmentRecorder pack_changes = {
+        .arena = arena,
+    };
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
     bool expansion_ok = true;
     CConditionalFrame* conditional = 0;
@@ -5636,6 +5694,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .macro_push_stack = &macro_push_stack,
         .pack_stack = &pack_stack,
         .pack_alignment = &pack_alignment,
+        .pack_changes = &pack_changes,
         .once_paths = once_paths,
         .once_path_count = &once_path_count,
         .once_path_capacity = (u32)BUSTER_MIN(source.length + 1, (u64)UINT32_MAX),
@@ -6085,7 +6144,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
             {
                 logical_tokens[logical_token_count] = lex.tokens[scan];
-                logical_tokens[logical_token_count].pack_alignment = pack_alignment;
                 logical_token_count += 1;
             }
         }
@@ -6112,6 +6170,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         {
             if (logical_token_count)
             {
+                // Pragmas cannot fire inside a text line on this path (only
+                // directive lines and _Pragma markers change pack state), so
+                // one sample covers the whole batch.
+                c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
                 c_preprocess_output_append_range(arena, &first_output_range, &last_output_range, logical_tokens, logical_token_count);
                 output_count += logical_token_count;
             }
@@ -6158,6 +6220,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .kind = C_TOKEN_END_OF_FILE,
     };
     result.token_count = output_index;
+    result.pack_changes = pack_changes.changes;
+    result.pack_change_count = pack_changes.count;
     // The stream is contiguous by now, so the spellings sum in one linear
     // pass rather than one add per token as the ranges were appended.
     result.preprocessed.tokens = output_count;

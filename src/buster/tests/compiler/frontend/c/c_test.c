@@ -2849,8 +2849,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         char8 const* token_spelling_base = pragma_pack.spelling_base;
         CToken token = pragma_pack.tokens[token_index];
-        packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Packed")) && token.pack_alignment == 4;
-        natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Natural")) && token.pack_alignment == 0;
+        packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Packed")) && c_preprocess_pack_alignment(&pragma_pack, token_index) == 4;
+        natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Natural")) && c_preprocess_pack_alignment(&pragma_pack, token_index) == 0;
     }
     BUSTER_TEST(arguments, packed_alignment_seen);
     BUSTER_TEST(arguments, natural_alignment_seen);
@@ -2929,9 +2929,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         char8 const* token_spelling_base = expanded_pragmas.spelling_base;
         CToken token = expanded_pragmas.tokens[token_index];
-        expanded_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedPacked")) && token.pack_alignment == 4;
-        expanded_inline_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedInlinePacked")) && token.pack_alignment == 8;
-        expanded_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedNatural")) && token.pack_alignment == 0;
+        expanded_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedPacked")) && c_preprocess_pack_alignment(&expanded_pragmas, token_index) == 4;
+        expanded_inline_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedInlinePacked")) && c_preprocess_pack_alignment(&expanded_pragmas, token_index) == 8;
+        expanded_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedNatural")) && c_preprocess_pack_alignment(&expanded_pragmas, token_index) == 0;
         restored_value_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("1"));
         restored_function_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("+"));
         BUSTER_TEST(arguments, token.kind != C_TOKEN_PRAGMA);
@@ -2968,8 +2968,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         char8 const* token_spelling_base = windows_pragmas.spelling_base;
         CToken token = windows_pragmas.tokens[token_index];
-        windows_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsPacked")) && token.pack_alignment == 2;
-        windows_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsNatural")) && token.pack_alignment == 0;
+        windows_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsPacked")) && c_preprocess_pack_alignment(&windows_pragmas, token_index) == 2;
+        windows_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsNatural")) && c_preprocess_pack_alignment(&windows_pragmas, token_index) == 0;
     }
     BUSTER_TEST(arguments, windows_packed_alignment_seen);
     BUSTER_TEST(arguments, windows_natural_alignment_seen);

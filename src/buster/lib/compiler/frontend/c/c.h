@@ -124,7 +124,9 @@ struct CToken
     // fallback for synthesized and test-built tokens). The symbol travels
     // with the spelling: every site that respells a token must re-intern.
     u32 symbol;
-    // The #pragma pack alignment in effect where the token was emitted.
+    // Dead space: the #pragma pack alignment moved to the preprocess
+    // result's change list (see CPackAlignment); the field holds the row
+    // until the 12-byte narrowing lands and is 0 on every token.
     u16 pack_alignment;
     // A CTokenKind.
     u8 kind;
@@ -382,6 +384,20 @@ struct CSourceMapRecovery
     u32 reserved;
 };
 
+// One entry of the #pragma pack change list: `alignment` is in effect for
+// every final-stream token from index `token_index` until the next entry.
+// The preprocessor appends an entry whenever the pack state at output-append
+// time differs from the last entry (a _Pragma can change it mid-expansion,
+// so the state is sampled as tokens land in the final stream, not at lex
+// time), which keeps the list sorted and deduplicated by construction;
+// c_preprocess_pack_alignment binary-searches it.
+typedef struct CPackAlignment CPackAlignment;
+struct CPackAlignment
+{
+    u32 token_index;
+    u32 alignment;
+};
+
 typedef struct CPreprocessResult CPreprocessResult;
 struct CPreprocessResult
 {
@@ -396,6 +412,9 @@ struct CPreprocessResult
     CSymbolTable* symbols;
     CDiagnostic* diagnostics;
     String8* files;
+    // Sorted (token index, alignment) spans replacing a per-token field;
+    // null with count 0 for hand-built results, which query as alignment 0.
+    CPackAlignment* pack_changes;
     Target target;
     TargetDataLayout data_layout;
     // Every file the preprocessor lexed, summed twice: once per inclusion,
@@ -412,6 +431,7 @@ struct CPreprocessResult
     u64 diagnostic_capacity;
     u32 file_count;
     CPreprocessDialect dialect;
+    u32 pack_change_count;
 };
 
 typedef u32 CIdUnderlying;
@@ -916,6 +936,10 @@ BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics co
 BUSTER_F_DECL u64 c_source_metrics_code_bytes(CSourceMetrics metrics);
 // The spelling of a token relative to its owning result's spelling base.
 BUSTER_F_DECL String8 c_token_spelling(char8 const* spelling_base, CToken token);
+// The #pragma pack alignment in effect at a final-stream token index: the
+// greatest pack_changes entry at or before it, 0 (natural alignment) before
+// the first entry or when the result carries no list.
+BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index);
 // On-demand line/column/file recovery. The lex variant serves standalone lex
 // results (file always 0) and advances the result's amortization cursor; the
 // preprocess variant binary-searches the source map and is safe on any token
