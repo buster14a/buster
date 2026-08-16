@@ -144,17 +144,12 @@ BUSTER_C_INTERNAL u64 c_token_literal_scan_length(char8 const* spelling, u64 lim
 // The cold half of c_token_length: the field carries the sentinel, so the
 // exact length is re-derived from the spelling. Creation only ever stores
 // the sentinel for terminated string and character literals (see CToken).
-BUSTER_C_INTERNAL u64 c_token_length_oversized(char8 const* spelling_base, CToken token)
+u64 c_token_length_oversized(char8 const* spelling_base, CToken token)
 {
     BUSTER_CHECK(token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL);
     u64 length = c_token_literal_scan_length(spelling_base + token.offset, UINT64_MAX);
     BUSTER_CHECK(length >= C_TOKEN_LENGTH_OVERSIZED);
     return length;
-}
-
-u64 c_token_length(char8 const* spelling_base, CToken token)
-{
-    return token.length != C_TOKEN_LENGTH_OVERSIZED ? token.length : c_token_length_oversized(spelling_base, token);
 }
 
 // The u16 the length field stores for a spelling of `length` bytes. The
@@ -163,14 +158,6 @@ u64 c_token_length(char8 const* spelling_base, CToken token)
 BUSTER_C_SHARED u16 c_token_length_field(u64 length)
 {
     return length < C_TOKEN_LENGTH_OVERSIZED ? (u16)length : C_TOKEN_LENGTH_OVERSIZED;
-}
-
-String8 c_token_spelling(char8 const* spelling_base, CToken token)
-{
-    return (String8){
-        .pointer = (char8*)spelling_base + token.offset,
-        .length = c_token_length(spelling_base, token),
-    };
 }
 
 // A token whose spelling is a fresh copy of `text` in the space; used for

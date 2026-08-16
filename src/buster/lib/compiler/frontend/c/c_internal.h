@@ -138,7 +138,6 @@ struct CSpellingSpace
 };
 BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
 BUSTER_C_EXTERN bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator);
-BUSTER_C_EXTERN String8 c_token_spelling(char8 const* spelling_base, CToken token);
 BUSTER_C_EXTERN u16 c_token_length_field(u64 length);
 BUSTER_C_EXTERN CToken c_space_token(CSpellingSpace* space, String8 text, CTokenKind kind, CPunctuator punctuator);
 BUSTER_C_EXTERN CToken c_space_retoken(CSpellingSpace* space, char8 const* from_base, CToken token);

@@ -946,11 +946,24 @@ BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics co
 // translated_bytes minus comments and whitespace: the bytes that became
 // tokens, literal spellings included.
 BUSTER_F_DECL u64 c_source_metrics_code_bytes(CSourceMetrics metrics);
+// The cold half of c_token_length: the exact byte count of a spelling whose
+// length field carries the sentinel, re-derived by the delimiter scan.
+BUSTER_F_DECL u64 c_token_length_oversized(char8 const* spelling_base, CToken token);
+// The spelling byte count: the field, or the oversized re-derivation. The
+// guard runs on every hot spelling read, so the fast path is inlined here —
+// left out of line, the call alone measured +4.5% of stage-1 instructions.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_token_length(char8 const* spelling_base, CToken token)
+{
+    return token.length != C_TOKEN_LENGTH_OVERSIZED ? token.length : c_token_length_oversized(spelling_base, token);
+}
 // The spelling of a token relative to its owning result's spelling base.
-BUSTER_F_DECL String8 c_token_spelling(char8 const* spelling_base, CToken token);
-// The spelling byte count: the length field, or the re-derived exact length
-// when the field holds C_TOKEN_LENGTH_OVERSIZED.
-BUSTER_F_DECL u64 c_token_length(char8 const* spelling_base, CToken token);
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE String8 c_token_spelling(char8 const* spelling_base, CToken token)
+{
+    return (String8){
+        .pointer = (char8*)spelling_base + token.offset,
+        .length = c_token_length(spelling_base, token),
+    };
+}
 // The #pragma pack alignment in effect at a final-stream token index: the
 // greatest pack_changes entry at or before it, 0 (natural alignment) before
 // the first entry or when the result carries no list.
