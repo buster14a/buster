@@ -1,3 +1,15 @@
+// Target-neutral machine-IR implementation and the front door of the
+// machine path (machine.h documents the representation). This file owns
+// what every backend shares — MachineRef/MachinePoint encoding, the
+// MachineOpcodeInfo metadata accessors, the chunked instruction stream and
+// function builder, frequency-class stamping, the verifier, the baseline
+// MIR_STACK placement, and replay serialization — and then includes the
+// implementation files at the bottom in the backend-implementation-file
+// pattern (selection facts, the x86-64 and AArch64 selectors/encoders,
+// scheduling, and the FAST/QUALITY register allocators), so none of those
+// are standalone translation units. machine_select_canonical_function at
+// the end is the entry point codegen.c calls.
+
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 

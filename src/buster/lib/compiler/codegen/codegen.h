@@ -1,5 +1,13 @@
 #pragma once
 
+// Public API of native code generation. The one producing entry point is
+// codegen_generate_canonical_module: canonical IR in, a CodegenModule of
+// code bytes, data images, relocations, unwind actions, and statistics out,
+// ready for the object writer or the JIT. Unsupported shapes come back as a
+// CodegenError naming the failing instruction — never as silently wrong
+// code. Call codegen_prewarm (or codegen_prewarm_for_target) on one thread
+// before generating from parallel lanes.
+
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/target.h>

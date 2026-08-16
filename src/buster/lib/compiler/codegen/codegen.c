@@ -1,3 +1,43 @@
+// Canonical-IR-to-native-code orchestration: one call to
+// codegen_generate_canonical_module near the bottom of the file turns an
+// IrModule into a CodegenModule — code bytes, global data images,
+// relocations, unwind actions, debug locations, and statistics — for x86-64
+// and AArch64. "Canonical" names the register-allocation-free baseline
+// emitter that keeps every value in its own frame slot; eligible functions
+// are routed through the machine path first (machine_select_canonical_-
+// function, then MIR_STACK/FAST/QUALITY placement and the machine encoder
+// in machine.c and its included backends), and any function the machine
+// subset cannot express falls back per function to the canonical emitter,
+// counted in statistics.fallback_opcode_counts.
+//
+// Nearly everything here sits under one function:
+// codegen_generate_canonical_module_attempt lays out global data (read-only
+// / writable / thread-local / zero-fill images plus initializer
+// relocations), then per function sizes the frame, tries the machine path,
+// and otherwise walks each block's instructions emitting native code
+// directly. codegen_generate_canonical_module wraps it in a retry loop that
+// grows the code-buffer capacity scale when an attempt runs out.
+//
+// The helper regions above it, in file order; anchors are definitions:
+//   codegen_inline_assembly_*                    GNU inline-assembly template
+//                                                resolution and mnemonic
+//                                                gating
+//   codegen_canonical_x64_metadata_*             x86 encoding through the
+//                                                assembly metadata tables,
+//                                                with per-run recipe and
+//                                                template caches
+//   codegen_abi_for_target, codegen_prewarm      ABI selection and the serial
+//                                                table prewarm (AGENTS.md)
+//   codegen_canonical_x64_f80_cache_*,           ABI classification: x87 f80
+//   codegen_canonical_aggregate_abi,             shapes, aggregate part
+//   codegen_canonical_x64_call_layout_cached     splitting, SysV and Win64
+//                                                call layout
+//   codegen_canonical_*_adjust_stack             frame setup and stack probes
+//   codegen_canonical_x64_evex_*,                AVX-512 SIMD emission for
+//   codegen_canonical_x64_simd_emit_*            IR_OPCODE_SIMD
+//   codegen_global_assembly_*                    module-level asm directives
+//   a64_emit_*, codegen_canonical_a64_*          AArch64 emission helpers
+
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
