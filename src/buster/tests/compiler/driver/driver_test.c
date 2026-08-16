@@ -4038,10 +4038,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     }
     // The machine register allocators on Win64: every mode must select part
     // of the fixture, and the unwind data it writes for those functions must
-    // decode as a well-formed record establishing a frame register — the
-    // machine prologue pushes RSI and RDI beside the System V file, and its
-    // page-chunked allocation emits one action per chunk where the canonical
-    // Windows prologue emits one for the whole frame.
+    // decode as a well-formed record — the machine prologue pushes RSI and
+    // RDI beside the System V file, and its page-chunked allocation emits one
+    // action per chunk where the canonical Windows prologue emits one for the
+    // whole frame. The record reader is x86-64-only, like every other caller
+    // of it, so the block follows it behind the same guard.
+#if BUSTER_CPU_ARCH_X86_64
     String8 windows_machine_modes[] = {
         S8("-fregister-allocator=mir-stack"),
         S8("-fregister-allocator=fast"),
@@ -4092,6 +4094,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(windows_machine_temporary);
         }
     }
+#endif
     Arena* c_asm_conflicts[] = {
         arguments->arena,
     };

@@ -1489,7 +1489,13 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     {
         push_count += (placement.callee_saved_mask >> physical_register) & 1u;
     }
-    u32 push_area = 8u * push_count;
+    // The callee-saved save area sits below the frame pointer only when the
+    // pushes follow it. Where they precede it — Win64 — the saves are at the
+    // frame pointer's positive offsets and every byte below it is frame, so
+    // reserving and then subtracting a save area would size the allocation
+    // short by exactly that many bytes and leave the deepest slots under the
+    // stack pointer, where the next call's shadow space overwrites them.
+    u32 push_area = function->target && function->target->saves_precede_frame_pointer ? 0u : 8u * push_count;
     u32 running = push_area;
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
@@ -1637,14 +1643,25 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         }
     }
     // The x86 prologue pushes every register named by the final clobber mask
-    // after establishing RBP. The save area was included in `running` above;
-    // subtract it back out when sizing the post-save allocation, then add
-    // eight bytes for odd push parity to restore the System V call boundary
-    // before any nested call.
+    // around establishing RBP. Where the pushes follow it, the save area was
+    // included in `running` above and is subtracted back out when sizing the
+    // post-save allocation; where they precede it, `push_area` is zero and
+    // the whole run is frame. Either way, add eight bytes for odd push parity
+    // to restore the call boundary before any nested call.
     placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
     if (function->outgoing_bytes)
     {
         placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
+    }
+    // Every offset handed out above is a distance below the frame pointer, and
+    // `running` is their maximum by construction. The allocation plus whatever
+    // save area really sits below the frame pointer must cover it, or the
+    // deepest values live under the stack pointer where the next call's shadow
+    // space and return address overwrite them. Refuse the placement instead:
+    // the function falls back to the canonical emitter rather than miscompile.
+    if (running > placement.frame_size + push_area)
+    {
+        return placement;
     }
     placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
     placement.edit_count = edits.total_count;

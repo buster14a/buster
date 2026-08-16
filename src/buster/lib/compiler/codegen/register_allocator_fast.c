@@ -1960,7 +1960,12 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     {
         push_count += (placement.callee_saved_mask >> physical_register) & 1u;
     }
-    u32 pool_base = 8 * push_count;
+    // Zero where the callee-saved pushes precede the frame pointer (Win64):
+    // the saves then live at the frame pointer's positive offsets, so no
+    // frame byte below it is reserved for them. See the frame-size note
+    // below — subtracting a save area that is not there sizes the allocation
+    // short and buries the deepest slots under the stack pointer.
+    u32 pool_base = description->saves_precede_frame_pointer ? 0u : 8 * push_count;
     u32 running = pool_base + 8 * pool_size;
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
@@ -1999,10 +2004,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
         placement.stack_slot_offsets[slot_index] = running;
     }
-    placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+    placement.frame_size = ((running - pool_base + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
     if (function->outgoing_bytes)
     {
         placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
+    }
+    // The deepest offset handed out must sit inside the allocation plus the
+    // save area that really lies below the frame pointer; see the same guard
+    // in machine_stack_placement_build. An invalid placement falls back to the
+    // canonical emitter, which is always sound.
+    if (running > placement.frame_size + pool_base)
+    {
+        return placement;
     }
     placement.valid = true;
     return placement;
