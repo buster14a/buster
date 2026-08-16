@@ -10415,7 +10415,16 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     result.entities = arena_allocate(arena, CEntity, result.entity_capacity);
     result.scopes = arena_allocate(arena, CScope, result.scope_capacity);
     result.deferred_static_asserts = arena_allocate(arena, CDeferredStaticAssert, result.deferred_static_assert_capacity);
-    u64 desired_lookup_bucket_count = (u64)result.entity_capacity * 2;
+    // The buckets bound distinct lookup *names*, not identifier-token
+    // occurrences: sizing off entity_capacity (one slot per identifier
+    // token) built three ~8 MB tables, memset per parse, for a few tens of
+    // thousands of entities. The interned-name count bounds the distinct
+    // keys instead; names interned on demand during the parse only deepen
+    // chains, never break lookups, because every table is chained through
+    // next_in_lookup/next_by_name. Hand-built inputs without a symbol table
+    // keep the token-derived bound.
+    u64 desired_lookup_bucket_count =
+        result.symbols ? ((u64)result.symbols->count + 1) * 2 : (u64)result.entity_capacity * 2;
     result.entity_lookup_bucket_count = 1;
     while ((u64)result.entity_lookup_bucket_count < desired_lookup_bucket_count && result.entity_lookup_bucket_count <= UINT32_MAX / 2)
     {
