@@ -2846,7 +2846,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
 // slot: ten semantic bytes followed by six zero bytes.  It is deliberately a
 // byte-level representation here; host long double has a different size and
 // alignment on some targets and must never participate in code generation.
-BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80(IrType* type)
+bool codegen_canonical_x64_type_is_f80(IrType* type)
 {
     return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.resolved && type->layout.size == 16 &&
            type->layout.alignment == 16;
@@ -3046,7 +3046,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_x87_shape_cached(Code
 
 // Direct callers outside module generation retain the old helper API.  They
 // pay one bounded cache build; canonical emission passes its reusable cache.
-BUSTER_F_DECL bool codegen_canonical_x64_type_contains_f80(IrProgram* program, IrTypeId type_id)
+bool codegen_canonical_x64_type_contains_f80(IrProgram* program, IrTypeId type_id)
 {
     TemporalArena temporary = scratch_begin(0, 0);
     CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(temporary.arena, program);
@@ -3055,7 +3055,7 @@ BUSTER_F_DECL bool codegen_canonical_x64_type_contains_f80(IrProgram* program, I
     return result;
 }
 
-BUSTER_F_DECL bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiValue const* abi)
+bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiValue const* abi)
 {
     if (!type || !abi || abi->memory || abi->indirect || abi->part_count != 2 || type->layout.size != 16)
     {
@@ -3168,7 +3168,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_x87_shape_cached(Code
     return codegen_canonical_x64_abi_is_f80_result(type, &result_abi);
 }
 
-BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id)
+bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id)
 {
     TemporalArena temporary = scratch_begin(0, 0);
     CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(temporary.arena, program);
@@ -3589,8 +3589,8 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
     return CODEGEN_ERROR_NONE;
 }
 
-BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                  CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
+CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                               CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
 {
     CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
     if (cache.allocation_failed)
@@ -3989,7 +3989,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
 // Raw x87 memory forms keep the backend independent of the host C ABI.  A
 // disp32 addressing form is used even for zero offsets: it makes RBP/R13 and
 // RSP/R12 unambiguous and keeps every frame access the same fixed shape.
-BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement)
+void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement)
 {
     BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_memory(base, 80, displacement);
     String8 features[] = {S8("sse2")};
@@ -3997,7 +3997,7 @@ BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool 
                                                         (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)});
 }
 
-BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement)
+void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement)
 {
     // xor scratch,scratch; [base+10] = scratch.w; [base+12] = scratch.d.
     // Keep RAX intact when it is the destination pointer: the indirect store
@@ -4017,8 +4017,8 @@ BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer,
     (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), dword_store, BUSTER_ARRAY_LENGTH(dword_store));
 }
 
-BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X64Register source_base, s32 source_displacement,
-                                                              X64Register destination_base, s32 destination_displacement, u32* x87_depth)
+bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X64Register source_base, s32 source_displacement,
+                                         X64Register destination_base, s32 destination_displacement, u32* x87_depth)
 {
     // Every copy is a bounded one-entry x87 stack transaction.  Keeping the
     // depth explicit catches an accidental future path that would leave a
@@ -4035,8 +4035,8 @@ BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X6
     return buffer->error == CODEGEN_ERROR_NONE;
 }
 
-BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffer, X64Register destination_base, s32 destination_displacement,
-                                                                   u32* x87_depth)
+bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffer, X64Register destination_base, s32 destination_displacement,
+                                              u32* x87_depth)
 {
     if (!x87_depth || *x87_depth == 0)
     {
@@ -4048,7 +4048,7 @@ BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffe
     return buffer->error == CODEGEN_ERROR_NONE;
 }
 
-BUSTER_F_DECL bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displacement, u64 significand, u16 sign_exponent)
+bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displacement, u64 significand, u16 sign_exponent)
 {
     BusterX86MetadataPhysicalOperand rax64 = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64);
     BusterX86MetadataPhysicalOperand rax32 = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);

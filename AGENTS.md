@@ -503,6 +503,11 @@ history.
 
 ## Core rules
 
+- `BUSTER_F_DECL` belongs on header declarations only. In a `.c` file, a
+  module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
+  already declares carries no macro at all — the header declaration is what
+  gives it internal linkage in the unity build.
+
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static form, scheduling,

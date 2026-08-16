@@ -58,7 +58,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .quality_pin_register_count = 9,
 };
 
-BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void)
+MachineTargetDescription const* machine_target_aarch64(void)
 {
     return &machine_aarch64_description;
 }
@@ -2930,8 +2930,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
                                                     MachineBuilderStream* epilogs);
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
-                                                         bool store, bool frame_relative, u32* byte_count, bool* error)
+bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
+                                           bool store, bool frame_relative, u32* byte_count, bool* error)
 {
     MachineA64Encoder encoder = {
         .bytes = bytes,
@@ -2956,8 +2956,8 @@ BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity
     return !encoder.error && !encoder.overflow;
 }
 
-BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacity, u16 opcode, u32 operand0, u32 operand1, u32 operand2,
-                                                          u32 payload, u32* byte_count, bool* error)
+bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacity, u16 opcode, u32 operand0, u32 operand1, u32 operand2,
+                                            u32 payload, u32* byte_count, bool* error)
 {
     MachineA64Encoder encoder = {
         .bytes = bytes,
@@ -2978,7 +2978,7 @@ BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacit
 // Test-only seam for the fixed-size position-independent transfer.  Keeping
 // this wrapper under BUSTER_INCLUDE_TESTS leaves the production API unchanged
 // while allowing sparse-layout tests to exercise arbitrary signed deltas.
-BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count)
+bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count)
 {
     return machine_a64_emit_long_branch_bytes(bytes, capacity, displacement, byte_count);
 }
@@ -2987,7 +2987,7 @@ BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s6
 // 0 = original direct encoding, 1 = inverse-cond skip + direct B (BCC only),
 // 2 = fixed ADR/MOV/ADD/BR transfer.  `displacement` is measured from the
 // conditional word; the short B sits four bytes later.
-BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 displacement)
+u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 displacement)
 {
     A64Opcode opcode = (A64Opcode)opcode_value;
     if ((u64)displacement & 3u)
@@ -3039,8 +3039,8 @@ BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 c
 // convergence/final-patch helper in virtual-count mode. No code bytes are
 // allocated; the helper still performs every checked range decision and
 // scratch-transfer validation on its bounded seven-word stack buffer.
-BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* sparse_fixups, u32 fixup_count,
-                                                 u32* final_code_size)
+bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* sparse_fixups, u32 fixup_count,
+                                   u32* final_code_size)
 {
     if (!arena || (!sparse_fixups && fixup_count) || !final_code_size || code_size < 4)
     {

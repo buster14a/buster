@@ -312,8 +312,8 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_fields_valid(Buster
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
-                                                                          u32 encoding_length)
+bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
+                                                           u32 encoding_length)
 {
     BusterAarch64SyntaxGeneratedRow row = {0};
     if (!buster_aarch64_syntax_generated_row_at(index, &row)) return false;
@@ -323,19 +323,19 @@ BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 ind
 }
 #endif
 
-BUSTER_F_DECL u32 buster_aarch64_syntax_schema_version(void)
+u32 buster_aarch64_syntax_schema_version(void)
 {
     return BUSTER_AARCH64_SYNTAX_GENERATED_SCHEMA_VERSION;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_string(u32 offset, u32 length, String8* result)
+bool buster_aarch64_syntax_string(u32 offset, u32 length, String8* result)
 {
     if (!result || !buster_aarch64_syntax_pool_range_valid(offset, length)) return false;
     *result = buster_aarch64_syntax_pool_string(offset, length);
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_node(u32 index, BusterAarch64SyntaxNode* result)
+bool buster_aarch64_syntax_node(u32 index, BusterAarch64SyntaxNode* result)
 {
     if (!result || !buster_aarch64_syntax_generated_node_valid(index)) return false;
     BusterAarch64SyntaxGeneratedNode node = {0};
@@ -357,7 +357,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_node(u32 index, BusterAarch64SyntaxNode
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_node_range_valid(u32 first, u32 count)
+bool buster_aarch64_syntax_node_range_valid(u32 first, u32 count)
 {
     return first <= BUSTER_AARCH64_SYNTAX_GENERATED_NODE_COUNT && count <= BUSTER_AARCH64_SYNTAX_GENERATED_NODE_COUNT - first;
 }
@@ -368,7 +368,7 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_child_range_valid(u32 first, u32 
            count <= BUSTER_AARCH64_SYNTAX_GENERATED_CHILD_INDEX_COUNT - first;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_node_child(BusterAarch64SyntaxNode node, u32 child_index, u32* result)
+bool buster_aarch64_syntax_node_child(BusterAarch64SyntaxNode node, u32 child_index, u32* result)
 {
     if (!result || child_index >= node.child_count || !buster_aarch64_syntax_child_range_valid(node.child_first, node.child_count)) return false;
     u32 index = 0;
@@ -378,7 +378,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_node_child(BusterAarch64SyntaxNode node
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_row(u32 index, BusterAarch64SyntaxRow* result)
+bool buster_aarch64_syntax_row(u32 index, BusterAarch64SyntaxRow* result)
 {
     if (!result || !buster_aarch64_syntax_generated_row_valid(index)) return false;
     BusterAarch64SyntaxGeneratedRow row = {0};
@@ -401,7 +401,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_row(u32 index, BusterAarch64SyntaxRow* 
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_range_at(u32 index, BusterAarch64SyntaxMnemonicRange* result)
+bool buster_aarch64_syntax_mnemonic_range_at(u32 index, BusterAarch64SyntaxMnemonicRange* result)
 {
     if (!result || index >= BUSTER_AARCH64_SYNTAX_GENERATED_MNEMONIC_RANGE_COUNT) return false;
     BusterAarch64SyntaxGeneratedMnemonicRange range = {0};
@@ -418,7 +418,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_range_at(u32 index, BusterAarc
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_lookup(String8 mnemonic, BusterAarch64SyntaxMnemonicRange* result)
+bool buster_aarch64_syntax_mnemonic_lookup(String8 mnemonic, BusterAarch64SyntaxMnemonicRange* result)
 {
     if (!result || !mnemonic.length || !mnemonic.pointer) return false;
     u32 low = 0;
@@ -454,7 +454,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_lookup(String8 mnemonic, Buste
     return false;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_candidate(BusterAarch64SyntaxMnemonicRange range, u32 index, u32* row_index)
+bool buster_aarch64_syntax_mnemonic_candidate(BusterAarch64SyntaxMnemonicRange range, u32 index, u32* row_index)
 {
     if (!row_index || range.candidate_first > BUSTER_AARCH64_SYNTAX_GENERATED_MNEMONIC_CANDIDATE_COUNT ||
         range.candidate_count > BUSTER_AARCH64_SYNTAX_GENERATED_MNEMONIC_CANDIDATE_COUNT - range.candidate_first ||
@@ -467,7 +467,7 @@ BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_candidate(BusterAarch64SyntaxM
     return true;
 }
 
-BUSTER_F_DECL BusterAarch64SyntaxCounts buster_aarch64_syntax_counts(void)
+BusterAarch64SyntaxCounts buster_aarch64_syntax_counts(void)
 {
     BusterAarch64SyntaxCounts result = {
         .row_count = BUSTER_AARCH64_SYNTAX_GENERATED_ROW_COUNT,
@@ -514,7 +514,7 @@ BUSTER_F_DECL BusterAarch64SyntaxCounts buster_aarch64_syntax_counts(void)
     return result;
 }
 
-BUSTER_F_DECL BusterAarch64SyntaxStats buster_aarch64_syntax_stats(void)
+BusterAarch64SyntaxStats buster_aarch64_syntax_stats(void)
 {
     return (BusterAarch64SyntaxStats){
         .generic_shape_count = BUSTER_AARCH64_SYNTAX_GENERATED_GENERIC_SHAPE_COUNT,
@@ -534,27 +534,27 @@ BUSTER_F_DECL BusterAarch64SyntaxStats buster_aarch64_syntax_stats(void)
     };
 }
 
-BUSTER_F_DECL String8 buster_aarch64_syntax_source_digest(void)
+String8 buster_aarch64_syntax_source_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_SOURCE_SHA256);
 }
-BUSTER_F_DECL String8 buster_aarch64_syntax_input_digest(void)
+String8 buster_aarch64_syntax_input_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_INPUT_DIGEST);
 }
-BUSTER_F_DECL String8 buster_aarch64_syntax_generic_shape_digest(void)
+String8 buster_aarch64_syntax_generic_shape_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_GENERIC_SHAPE_DIGEST);
 }
-BUSTER_F_DECL String8 buster_aarch64_syntax_generic_row_digest(void)
+String8 buster_aarch64_syntax_generic_row_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_GENERIC_ROW_DIGEST);
 }
-BUSTER_F_DECL String8 buster_aarch64_syntax_exact_shape_digest(void)
+String8 buster_aarch64_syntax_exact_shape_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_EXACT_SHAPE_DIGEST);
 }
-BUSTER_F_DECL String8 buster_aarch64_syntax_exact_row_digest(void)
+String8 buster_aarch64_syntax_exact_row_digest(void)
 {
     return S8(BUSTER_AARCH64_SYNTAX_GENERATED_EXACT_ROW_DIGEST);
 }
@@ -978,7 +978,7 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_process_task(BusterAarch64S
            buster_aarch64_syntax_match_process_node(machine, task.node_index, node);
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input, BusterAarch64SyntaxMatchResult* result)
+bool buster_aarch64_syntax_match_row(u32 row_index, String8 input, BusterAarch64SyntaxMatchResult* result)
 {
     BusterAarch64SyntaxRow row = {0};
     if (!buster_aarch64_syntax_row(row_index, &row) || (!input.pointer && input.length) ||
@@ -1211,14 +1211,14 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_row_mode(u32 row_index, Bus
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
-                                                    BusterAarch64SyntaxOutput* output)
+bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
+                                     BusterAarch64SyntaxOutput* output)
 {
     return buster_aarch64_syntax_print_row_mode(row_index, request, output, false);
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
-                                                             BusterAarch64SyntaxOutput* output)
+bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
+                                              BusterAarch64SyntaxOutput* output)
 {
     return buster_aarch64_syntax_print_row_mode(row_index, request, output, true);
 }
@@ -1278,7 +1278,7 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_row_lexical_mnemonic(BusterAarch6
     return token.length != 0;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_validate(void)
+bool buster_aarch64_syntax_validate(void)
 {
     BusterAarch64SyntaxCounts counts = buster_aarch64_syntax_counts();
     if (counts.row_count != BUSTER_AARCH64_SYNTAX_GENERATED_ROW_COUNT ||

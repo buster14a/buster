@@ -263,3 +263,10 @@ BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64S
                                                     BusterAarch64SyntaxOutput* output);
 BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                              BusterAarch64SyntaxOutput* output);
+
+#if BUSTER_INCLUDE_TESTS
+// Test-only seam over the generated-row field validator. It lets the row tests
+// perturb one encoding range without exposing the generated row layout.
+BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
+                                                                        u32 encoding_length);
+#endif

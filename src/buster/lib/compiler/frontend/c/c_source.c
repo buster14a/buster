@@ -367,7 +367,7 @@ BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offse
     return offset;
 }
 
-BUSTER_F_DECL bool c_test_translate_plain_run_paths_agree(String8 source)
+bool c_test_translate_plain_run_paths_agree(String8 source)
 {
     if (source.length && !source.pointer)
     {

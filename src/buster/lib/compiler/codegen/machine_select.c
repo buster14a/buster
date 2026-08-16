@@ -119,7 +119,7 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_local_type_promotable(IrProgram* prog
     return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
 }
 
-BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function)
+MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function)
 {
     MachineSelectionPrepass result = {
         .program = program,
@@ -327,30 +327,30 @@ BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* are
     return result;
 }
 
-BUSTER_F_DECL bool machine_selection_prepass_value_flag(MachineSelectionPrepass const* prepass, IrValueId value, MachineSelectionValueFlag flag)
+bool machine_selection_prepass_value_flag(MachineSelectionPrepass const* prepass, IrValueId value, MachineSelectionValueFlag flag)
 {
     return prepass && value.value < prepass->value_count && (prepass->value_flags[value.value] & (u8)flag) != 0;
 }
 
-BUSTER_F_DECL bool machine_selection_prepass_instruction_owned_by(MachineSelectionPrepass const* prepass, IrInstructionId instruction, u32 block_index)
+bool machine_selection_prepass_instruction_owned_by(MachineSelectionPrepass const* prepass, IrInstructionId instruction, u32 block_index)
 {
     return prepass && instruction.value < prepass->instruction_count && prepass->instruction_owner_blocks[instruction.value].value == block_index;
 }
 
-BUSTER_F_DECL MachineSelectionResultClass machine_selection_result_class(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
+MachineSelectionResultClass machine_selection_result_class(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
 {
     return prepass && instruction.value < prepass->instruction_count ? (MachineSelectionResultClass)prepass->instruction_result_classes[instruction.value]
                                                                        : MACHINE_SELECTION_RESULT_NONE;
 }
 
-BUSTER_F_DECL MachineSelectionSideEffect machine_selection_side_effects(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
+MachineSelectionSideEffect machine_selection_side_effects(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
 {
     return prepass && instruction.value < prepass->instruction_count ? (MachineSelectionSideEffect)prepass->instruction_side_effects[instruction.value]
                                                                        : MACHINE_SELECTION_SIDE_EFFECT_UNKNOWN;
 }
 
-BUSTER_F_DECL MachineSelectionRuleContext machine_selection_rule_context(MachineSelectionPrepass const* prepass, IrInstructionId instruction,
-                                                                          Target target)
+MachineSelectionRuleContext machine_selection_rule_context(MachineSelectionPrepass const* prepass, IrInstructionId instruction,
+                                                           Target target)
 {
     MachineSelectionRuleContext context = {.opcode = IR_OPCODE_COUNT, .target = target};
     if (!prepass || !prepass->function || instruction.value >= prepass->instruction_count)
@@ -377,7 +377,7 @@ BUSTER_F_DECL MachineSelectionRuleContext machine_selection_rule_context(Machine
     return context;
 }
 
-BUSTER_F_DECL void machine_selection_counters_reset(MachineSelectionCounters* counters)
+void machine_selection_counters_reset(MachineSelectionCounters* counters)
 {
     if (counters)
     {

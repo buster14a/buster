@@ -889,7 +889,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, I
     return true;
 }
 
-BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
+bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
     IrValue* value_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
     if (function && !function->label_metadata_count)
@@ -1452,7 +1452,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     return true;
 }
 
-BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
+bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
     IrValue* result_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
     if (!function || !result_slot)
@@ -1718,7 +1718,7 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
     }
 }
 
-BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter)
+bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter)
 {
     if (!function || !parameter || parameter->value.value >= function->value_count)
     {

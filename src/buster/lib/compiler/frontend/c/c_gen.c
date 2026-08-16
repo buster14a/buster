@@ -25167,13 +25167,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_relocation_capacity(CIntegerIrB
 
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type)
+u64 c_test_ir_initializer_slot_count(IrType* type)
 {
     return c_ir_constant_initializer_slot_count(type);
 }
 
-BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
-                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out)
+bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                             bool* old_tag_restored_out, bool* grown_tag_preserved_out)
 {
     if (!arena)
     {

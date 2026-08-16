@@ -4,41 +4,41 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
-BUSTER_F_DECL MachineRef machine_ref_make(MachineRefKind kind, u32 payload)
+MachineRef machine_ref_make(MachineRefKind kind, u32 payload)
 {
     BUSTER_CHECK(kind < MACHINE_REF_KIND_COUNT);
     BUSTER_CHECK(payload < MACHINE_REF_PAYLOAD_LIMIT);
     return ((u32)kind << MACHINE_REF_PAYLOAD_BITS) | payload;
 }
 
-BUSTER_F_DECL MachineRefKind machine_ref_kind(MachineRef ref)
+MachineRefKind machine_ref_kind(MachineRef ref)
 {
     return (MachineRefKind)(ref >> MACHINE_REF_PAYLOAD_BITS);
 }
 
-BUSTER_F_DECL u32 machine_ref_payload(MachineRef ref)
+u32 machine_ref_payload(MachineRef ref)
 {
     return ref & (MACHINE_REF_PAYLOAD_LIMIT - 1u);
 }
 
-BUSTER_F_DECL MachinePoint machine_point_make(u32 instruction_index, MachinePointPhase phase)
+MachinePoint machine_point_make(u32 instruction_index, MachinePointPhase phase)
 {
     BUSTER_CHECK(instruction_index < MACHINE_POINT_INSTRUCTION_LIMIT);
     BUSTER_CHECK(phase < MACHINE_POINT_PHASE_COUNT);
     return (instruction_index << MACHINE_POINT_PHASE_BITS) | (u32)phase;
 }
 
-BUSTER_F_DECL u32 machine_point_instruction(MachinePoint point)
+u32 machine_point_instruction(MachinePoint point)
 {
     return point >> MACHINE_POINT_PHASE_BITS;
 }
 
-BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
+MachinePointPhase machine_point_phase(MachinePoint point)
 {
     return (MachinePointPhase)(point & ((1u << MACHINE_POINT_PHASE_BITS) - 1u));
 }
 
-BUSTER_F_DECL MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmitRecipeId recipe)
+MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmitRecipeId recipe)
 {
     if (recipe == MACHINE_EMIT_RECIPE_INVALID)
     {
@@ -47,12 +47,12 @@ BUSTER_F_DECL MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmit
     return (MachineEmitRecipeCategory)(recipe >> MACHINE_EMIT_RECIPE_CATEGORY_SHIFT);
 }
 
-BUSTER_F_DECL u16 machine_emit_recipe_index(MachineEmitRecipeId recipe)
+u16 machine_emit_recipe_index(MachineEmitRecipeId recipe)
 {
     return (u16)(recipe & MACHINE_EMIT_RECIPE_INDEX_MASK);
 }
 
-BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
+bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 {
     MachineEmitRecipeCategory category = machine_emit_recipe_category(recipe);
     return category < MACHINE_EMIT_RECIPE_CATEGORY_COUNT &&
@@ -888,7 +888,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
 #undef A64_EXPANSION
 };
 
-BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
+MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
 {
     if (opcode >= MACHINE_OPCODE_COUNT)
     {
@@ -897,22 +897,22 @@ BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
     return machine_opcode_infos + opcode;
 }
 
-BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode)
+MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode)
 {
     return opcode < MACHINE_OPCODE_COUNT ? machine_opcode_emit_recipes[opcode] : MACHINE_EMIT_RECIPE_INVALID;
 }
 
-BUSTER_F_DECL u32 machine_x86_64_emit_registry_count(void)
+u32 machine_x86_64_emit_registry_count(void)
 {
     return MACHINE_X86_64_EMIT_REGISTRY_COUNT;
 }
 
-BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordinal)
+MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordinal)
 {
     return ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x86_64_emit_registry + ordinal : 0;
 }
 
-BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
+MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
 {
     if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
     {
@@ -922,27 +922,27 @@ BUSTER_F_DECL MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_fi
     return entry->opcode == opcode ? entry : 0;
 }
 
-BUSTER_F_DECL u32 machine_x86_64_canonical_authority_site_count(void)
+u32 machine_x86_64_canonical_authority_site_count(void)
 {
     return MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT;
 }
 
-BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_authority_site(u32 ordinal)
+MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_authority_site(u32 ordinal)
 {
     return ordinal < MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT ? machine_x86_64_canonical_authority_sites + ordinal : 0;
 }
 
-BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void)
+u32 machine_x86_64_neutral_patch_site_count(void)
 {
     return MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT;
 }
 
-BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal)
+MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal)
 {
     return ordinal < MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT ? machine_x86_64_neutral_patch_sites + ordinal : 0;
 }
 
-BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
+u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
 {
     if (!info)
     {
@@ -952,32 +952,32 @@ BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
     return forms;
 }
 
-BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info)
+MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info)
 {
     return info && info->schedule_class < MACHINE_SCHEDULE_CLASS_COUNT ? (MachineScheduleClass)info->schedule_class : MACHINE_SCHEDULE_CLASS_NONE;
 }
 
-BUSTER_F_DECL MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info)
+MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info)
 {
     return info && info->expansion_recipe < MACHINE_OPCODE_EXPANSION_COUNT ? (MachineOpcodeExpansion)info->expansion_recipe : MACHINE_OPCODE_EXPANSION_NONE;
 }
 
-BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info)
+MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info)
 {
     return info && info->memory_effect < MACHINE_MEMORY_EFFECT_COUNT ? (MachineMemoryEffect)info->memory_effect : MACHINE_MEMORY_EFFECT_NONE;
 }
 
-BUSTER_F_DECL MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info)
+MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info)
 {
     return info && info->bundle < MACHINE_BUNDLE_COUNT ? (MachineBundleKind)info->bundle : MACHINE_BUNDLE_NONE;
 }
 
-BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info)
+bool machine_opcode_is_memory(MachineOpcodeInfo const* info)
 {
     return machine_opcode_memory_effect(info) != MACHINE_MEMORY_EFFECT_NONE || (info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_MEMORY));
 }
 
-BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
+u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
 {
     if (!info || slot >= BUSTER_ARRAY_LENGTH(info->fixed_registers) || !(info->fixed_register_mask & (1u << slot)))
     {
@@ -986,7 +986,7 @@ BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u
     return info->fixed_registers[slot];
 }
 
-BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
+u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
 {
     if (!info || !info->memory_operand)
     {
@@ -996,7 +996,7 @@ BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
     return slot < info->operand_count ? slot : UINT32_MAX;
 }
 
-BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot)
+bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot)
 {
     if (!info || destination_slot >= 4 || source_slot >= 4)
     {
@@ -1007,18 +1007,18 @@ BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info,
     return encoded_destination != 0 && encoded_source != 0 && encoded_destination - 1u == destination_slot && encoded_source - 1u == source_slot;
 }
 
-BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot)
+bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot)
 {
     return info && slot < 8 && (info->early_clobber_mask & (1u << slot)) != 0;
 }
 
-BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
+bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
 {
     return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_set || info->fixed_register_mask ||
                     (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED));
 }
 
-BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size)
+void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size)
 {
     stream->first = 0;
     stream->last = 0;
@@ -1028,7 +1028,7 @@ BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 e
     stream->reserved = 0;
 }
 
-BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream)
+void* machine_stream_append(Arena* arena, MachineBuilderStream* stream)
 {
     MachineBuilderChunk* chunk = stream->last;
     if (!chunk || chunk->count == stream->chunk_capacity)
@@ -1054,7 +1054,7 @@ BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* st
     return row;
 }
 
-BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination)
+void machine_stream_flatten(MachineBuilderStream* stream, void* destination)
 {
     u64 offset = 0;
     for (MachineBuilderChunk* chunk = stream->first; chunk; chunk = chunk->next)
@@ -1065,7 +1065,7 @@ BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* de
     }
 }
 
-BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena)
+MachineFunctionBuilder machine_function_builder_begin(Arena* arena)
 {
     MachineFunctionBuilder builder = {
         .arena = arena,
@@ -1080,7 +1080,7 @@ BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena
     return builder;
 }
 
-BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register)
+u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register)
 {
     u32 index = builder->virtual_registers.total_count;
     MachineVirtualRegister* row = (MachineVirtualRegister*)machine_stream_append(builder->arena, &builder->virtual_registers);
@@ -1088,7 +1088,7 @@ BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* build
     return index;
 }
 
-BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
+u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
 {
     BUSTER_CHECK(!builder->block_is_open);
     builder->block_is_open = true;
@@ -1097,7 +1097,7 @@ BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
     return builder->open_block;
 }
 
-BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction)
+u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction)
 {
     BUSTER_CHECK(builder->block_is_open);
     u32 index = builder->instructions.total_count;
@@ -1110,7 +1110,7 @@ BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, M
     return index;
 }
 
-BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block)
+void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block)
 {
     BUSTER_CHECK(builder->block_is_open);
     block.first_instruction = builder->open_block_first_instruction;
@@ -1121,7 +1121,7 @@ BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, Ma
     builder->open_block = UINT32_MAX;
 }
 
-BUSTER_F_DECL u32 machine_builder_block_parameter(MachineFunctionBuilder* builder, MachineBlockParameter parameter)
+u32 machine_builder_block_parameter(MachineFunctionBuilder* builder, MachineBlockParameter parameter)
 {
     u32 index = builder->block_parameters.total_count;
     MachineBlockParameter* row = (MachineBlockParameter*)machine_stream_append(builder->arena, &builder->block_parameters);
@@ -1129,7 +1129,7 @@ BUSTER_F_DECL u32 machine_builder_block_parameter(MachineFunctionBuilder* builde
     return index;
 }
 
-BUSTER_F_DECL u32 machine_builder_edge_copy_source(MachineFunctionBuilder* builder, MachineRef source)
+u32 machine_builder_edge_copy_source(MachineFunctionBuilder* builder, MachineRef source)
 {
     u32 index = builder->edge_copy_sources.total_count;
     MachineRef* row = (MachineRef*)machine_stream_append(builder->arena, &builder->edge_copy_sources);
@@ -1137,7 +1137,7 @@ BUSTER_F_DECL u32 machine_builder_edge_copy_source(MachineFunctionBuilder* build
     return index;
 }
 
-BUSTER_F_DECL u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
+u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
 {
     u32 index = builder->edges.total_count;
     MachineEdge* row = (MachineEdge*)machine_stream_append(builder->arena, &builder->edges);
@@ -1145,7 +1145,7 @@ BUSTER_F_DECL u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineE
     return index;
 }
 
-BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder)
+MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder)
 {
     BUSTER_CHECK(!builder->block_is_open);
     BUSTER_CHECK(builder->edges.total_count == 0 || builder->edges.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
@@ -1185,7 +1185,7 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // pathological nest inside the u16 the block row carries.
 #define MACHINE_FREQUENCY_CLASS_LIMIT 8u
 
-BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function)
+void machine_function_stamp_frequency_classes(MachineFunction* function)
 {
     u32 block_count = function->block_count;
     if (!block_count)
@@ -1287,7 +1287,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, Mac
     return false;
 }
 
-BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function)
+MachineVerifyResult machine_verify_function(MachineFunction* function)
 {
     MachineVerifyResult result = {0};
     if (!function)
@@ -1687,7 +1687,7 @@ struct MachineReplayHeader
 };
 BUSTER_CT_CHECK(sizeof(MachineReplayHeader) == 32);
 
-BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function)
+ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function)
 {
     if ((function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
         (function->block_count && !function->blocks) || (function->edge_count && !function->edges) ||
@@ -1757,7 +1757,7 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
     };
 }
 
-BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function)
+bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function)
 {
     if (!function || (!bytes.pointer && bytes.length) || bytes.length < sizeof(MachineReplayHeader))
     {
@@ -1835,7 +1835,7 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
 #include <buster/lib/compiler/codegen/register_allocator_fast.c>
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 
-BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
     if (target.cpu_arch == CPU_ARCH_AARCH64)
     {

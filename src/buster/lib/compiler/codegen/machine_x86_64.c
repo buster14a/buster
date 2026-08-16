@@ -170,7 +170,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     .vector_slot_scratch = {MACHINE_X64_ZMM0, MACHINE_X64_ZMM1, MACHINE_X64_ZMM2, MACHINE_X64_ZMM3},
 };
 
-BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void)
+MachineTargetDescription const* machine_target_x86_64(void)
 {
     return &machine_x86_64_description;
 }
@@ -6488,7 +6488,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataE
 // opcode map is published even when one key is stale: its exact-required bits
 // remain set, while the affected descriptor/plan entries stay invalid so the
 // worker lane fails closed rather than falling through to handwritten bytes.
-BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
+void machine_x86_64_exact_prewarm(void)
 {
     if (machine_x64_exact_opcode_map_ready) return;
     BUSTER_CHECK_SERIAL_INITIALIZATION();
@@ -6509,7 +6509,7 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void)
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_F_DECL MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
+MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
 {
     machine_x86_64_exact_prewarm();
     MachineX64ExactMapAudit result = {.valid = machine_x64_exact_opcode_map_ready};
@@ -7204,7 +7204,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_F_DECL MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
+MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void)
 {
     machine_x86_64_exact_prewarm();
     return (MachineX64MetadataShapeCacheAudit){

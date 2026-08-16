@@ -3,9 +3,6 @@
 
 #if BUSTER_INCLUDE_TESTS
 
-BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
-                                                                          u32 encoding_length);
-
 typedef struct Aarch64SyntaxTestRows Aarch64SyntaxTestRows;
 struct Aarch64SyntaxTestRows
 {

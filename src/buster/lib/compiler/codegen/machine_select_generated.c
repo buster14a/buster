@@ -85,8 +85,8 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_generated_matches(MachineSelectionGen
     return false;
 }
 
-BUSTER_F_DECL MachineSelectionDecision machine_selection_rule_select(MachineSelectionRuleContext context, MachineSelectionMode mode,
-                                                                      MachineSelectionCounters* counters)
+MachineSelectionDecision machine_selection_rule_select(MachineSelectionRuleContext context, MachineSelectionMode mode,
+                                                       MachineSelectionCounters* counters)
 {
     MachineSelectionDecision decision = {
         .mode = mode < MACHINE_SELECTION_MODE_COUNT ? mode : MACHINE_SELECTION_MODE_FAST,
