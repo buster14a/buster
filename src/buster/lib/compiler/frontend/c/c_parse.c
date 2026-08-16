@@ -1,3 +1,56 @@
+// Parsing and semantic analysis, the second stage of the frontend. Two
+// passes over the preprocessed token stream, entered through c_parse_ast and
+// c_analyze_semantics at the bottom of the file (c_parse runs both):
+// - c_parse_ast is one linear scan that splits the stream into top-level
+//   CDeclaration records — token extents, the name token, the body range,
+//   and typedef/constexpr/variadic flags — by delimiter counting alone. It
+//   builds no tree; every later consumer re-walks token ranges.
+// - c_analyze_semantics sizes its tables from a token census, then builds
+//   the CParseResult the lowering stage consumes: interned types, entities,
+//   scopes, and diagnostics.
+//
+// Types and declarators are parsed by CTypeParseMachine (types in
+// c_internal.h), an explicit frame stack in place of recursion: each
+// CTypeParseFrameKind has a c_type_parse_*_step function dispatched by
+// c_type_parse_machine_run. Speculative parses record every published-type
+// mutation (c_type_parse_record_mutation) so c_type_parse_rollback can
+// restore the shared type table after a failed attempt.
+//
+// Layout, in file order; each anchor is a definition to search for:
+//   c_parse_token_class_compute,                  keyword and token
+//   c_parse_position_index_build                  classification, the
+//                                                 matching-delimiter index
+//   c_parse_builtin_type_layout,                  target-dependent type
+//   c_parse_type_layout                           sizes/alignments, aggregate
+//                                                 and bit-field layout
+//   c_parse_direct_expression_type ..             expression typing without
+//   c_parse_conditional_expression_type           lowering (usual arithmetic
+//                                                 conversions, precedence)
+//   c_parse_static_assert_evaluate                _Static_assert, including
+//                                                 deferral past unresolved
+//                                                 array bounds
+//   c_parse_initializer_designator,               initializer shapes and
+//   c_parse_infer_initializer_array_count_core    array-bound inference
+//   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
+//   c_parse_primitive_type                        construction, attributes
+//   c_type_parse_alignment_step ..                the type-parse machine
+//   c_type_parse_machine_run                      steps
+//   c_parse_scalar_type_core_begin,               declarators: pointers,
+//   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
+//   c_parse_validate_constexpr_declaration,       constexpr, type
+//   c_parse_types_compatible                      compatibility
+//   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
+//   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
+//                                                 entity lookup
+//   c_parse_local_declarations                    block-scope declarations,
+//                                                 auto inference, local
+//                                                 functions
+//   c_parse_label_address_prefix,                 statement boundaries, asm
+//   c_parse_statement_end                         goto, label addresses
+//   c_parse_bind_function_body                    binds body identifiers to
+//                                                 entities, indexes scopes
+//   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
+
 #include "c_internal.h"
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)

@@ -1,3 +1,41 @@
+// Source loading, lexing, and preprocessing — the first stage of the
+// frontend, entered through c_preprocess near the bottom of the file. It
+// turns a root file into the flat CToken stream every later stage walks:
+// translation (line splices and carriage returns folded out), lexing,
+// directive handling, include resolution (real files and the builtin
+// resource headers), macro expansion, and the source metrics behind the
+// SOURCE table. c_prewarm at the bottom fills the lazily built tables on
+// one thread before any parallel phase reads them (AGENTS.md).
+//
+// Layout, in file order; each anchor is a definition to search for:
+//   c_space_local .. c_space_retoken           spelling spaces: append-only
+//                                              storage token spellings point
+//                                              into
+//   c_source_map_append, c_lex_token_location  location checkpoints (see
+//                                              CTranslatedSource below)
+//   c_identifier_start ..                      character classes and the
+//   c_literal_plain_run_end                    prewarmed run tables
+//   c_translate_source                         phase-1/2 translation with
+//                                              SWAR/AVX-512/scalar variants
+//                                              kept in differential agreement
+//   c_source_metrics_add                       the SOURCE table counters
+//   c_lex_scan_one, c_lex_scalar               the scalar lexer
+//   c_lex_compact                              the SIMD lexer (Validark
+//                                              method, AGENTS.md); c_lex
+//                                              dispatches, c_lex_reference is
+//                                              the differential baseline
+//   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
+//   c_macro_invocation_arguments ..            macro expansion: arguments,
+//   c_preprocess_expand                        stringify, paste, rescan
+//   c_conditional_* ,                          #if evaluation including
+//   c_integer_expression_evaluate              __has_* feature tests
+//   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
+//   c_include_read .. c_include_name           include resolution and the
+//                                              builtin resource headers
+//   c_preprocess_define_directive              #define parsing
+//   c_preprocess                               the stage driver
+//   c_prewarm                                  serial table prewarm
+
 #include "c_internal.h"
 
 // Locations are recorded as checkpoints instead of one entry per translated

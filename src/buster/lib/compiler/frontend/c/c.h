@@ -1,5 +1,13 @@
 #pragma once
 
+// Public API of the C frontend. The pipeline is three stage functions, each
+// consuming the previous stage's result: c_preprocess (tokens), c_parse_ast
+// plus c_analyze_semantics (declarations, types, entities, scopes; c_parse
+// runs both), and c_lower_to_ir via c_analyze (canonical IR). Results
+// reference earlier-stage storage — callers keep the translation-unit arena
+// alive until every downstream consumer is done. Invalid input reports
+// CDiagnostic rows; assertions are reserved for internal invariants.
+
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>

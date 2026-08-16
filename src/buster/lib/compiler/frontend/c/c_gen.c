@@ -1,3 +1,57 @@
+// C -> canonical IR lowering, the third stage of the frontend. The entry
+// point is c_lower_to_ir at the bottom of the file: it sizes and fills one
+// IrProgram from the preprocessed token stream and the parser's entities,
+// scopes, and types, lowering every function body and global initializer.
+// There is no AST — lowering re-walks token ranges directly, resolving
+// identifiers through the parse result's scopes and answering structure
+// questions from a prebuilt matching-delimiter index
+// (c_ir_build_delimiter_index).
+//
+// Source-dependent recursion is forbidden (AGENTS.md), so anything that
+// would recurse runs on an explicit machine owned by CIntegerIrBuilder:
+// - CIrLowerMachine is the frame stack for statements and expressions.
+//   Each CIrLowerFrameKind pairs a *_step function (advance the frame one
+//   CIrLowerFrameStage) with a *_frame_push adapter, both dispatched by
+//   c_ir_lower_dispatch. c_ir_lower_body_advance walks statements through
+//   a CIrBodyTask list; c_ir_lower_expression_core_step evaluates
+//   expressions shunting-yard style over value and operator stacks. A new
+//   construct means a new frame kind, its step, its push adapter, and a
+//   dispatch case.
+// - CIrQueryMachine answers compile-time questions the walk hits
+//   mid-expression — sizeof, type names, array bounds, offsetof, type
+//   prediction, null-pointer-constant tests (the c_ir_query_* entry
+//   points). A query that needs a sub-query suspends through CIrQueryResume
+//   and resumes past its finished prefix instead of re-evaluating it.
+// - Calls are discovered and lowered before the surrounding expression
+//   consumes their values (c_ir_prepare_calls_discover,
+//   c_ir_emit_prepared_call_step), so the expression machine sees each
+//   call — builtins included — as one already-computed value.
+//
+// Layout, in file order; each anchor is a definition to search for:
+//   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
+//                                                 and derived-type interning
+//   c_ir_function_signature                       signatures and ABI limits
+//   CIntegerIrBuilder                             per-module lowering state
+//   c_ir_label_metadata_*                         label provenance needed by
+//                                                 computed goto
+//   c_ir_emit_local .. c_ir_emit_parameter        place/value emission
+//                                                 primitives
+//   c_ir_float_parse, c_ir_ieee_from_rational,    literals: exact rational ->
+//   c_ir_ext80_*, c_ir_decode_quoted              IEEE/x87 conversion, string
+//                                                 and character decoding
+//   c_ir_build_function_name_index                call-target resolution
+//   CIrLowerFrameKind .. c_ir_lower_dispatch      the lowering machines
+//   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_cleanup_*                                __attribute__((cleanup))
+//   c_ir_inline_assembly_*                        GNU inline assembly
+//   c_ir_lower_body_advance                       the statement walker
+//   c_ir_constant_initializer_*, c_ir_infer_*     static initializer bytes,
+//                                                 relocations, and array-bound
+//                                                 inference
+//   c_ir_constant_apply_*, c_ir_constant_evaluate constant-expression
+//                                                 evaluator (128-bit integers)
+//   c_ir_global_initializer, c_lower_to_ir        globals and the driver
+
 #include "c_internal.h"
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
