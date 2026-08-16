@@ -136,14 +136,20 @@ struct CodegenDataRelocation
     CodegenDataRelocationKind kind;
 };
 
+// Hundreds of thousands of rows per compile, so the record is 12 bytes:
+// source and column are u16, saturated by codegen_record_line (a compile
+// with 64K+ files degrades to file 0, and no consumer distinguishes
+// columns past 64K).
 typedef struct CodegenLineEntry CodegenLineEntry;
 struct CodegenLineEntry
 {
     u32 code_offset;
-    u32 source;
     u32 line;
-    u32 column;
+    u16 source;
+    u16 column;
 };
+
+BUSTER_CT_CHECK(sizeof(CodegenLineEntry) == 12);
 
 struct CodegenFunction
 {

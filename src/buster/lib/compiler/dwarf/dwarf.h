@@ -29,14 +29,18 @@ struct DwarfFunction
     u32 line;
 };
 
+// Mirrors CodegenLineEntry's 12-byte shape; file and column arrive already
+// saturated to u16 by codegen_record_line.
 typedef struct DwarfLineEntry DwarfLineEntry;
 struct DwarfLineEntry
 {
     u32 code_offset;
-    u32 file;
     u32 line;
-    u32 column;
+    u16 file;
+    u16 column;
 };
+
+BUSTER_CT_CHECK(sizeof(DwarfLineEntry) == 12);
 
 // Address relocations are 64-bit slots that must receive the address of the
 // object's text base plus the addend. Non-address relocations are 32-bit slots

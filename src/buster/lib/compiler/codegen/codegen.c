@@ -2363,19 +2363,23 @@ void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u3
     {
         return;
     }
+    // The 12-byte record stores these as u16; saturate rather than truncate
+    // so an overflowing source cannot alias an unrelated file.
+    u16 stored_source = source <= UINT16_MAX ? (u16)source : 0;
+    u16 stored_column = column <= UINT16_MAX ? (u16)column : UINT16_MAX;
     if (*count)
     {
         CodegenLineEntry* last = entries + (*count - 1);
-        if (last->code_offset == code_offset || (last->source == source && last->line == line && last->column == column))
+        if (last->code_offset == code_offset || (last->source == stored_source && last->line == line && last->column == stored_column))
         {
             return;
         }
     }
     entries[*count] = (CodegenLineEntry){
         .code_offset = code_offset,
-        .source = source,
+        .source = stored_source,
         .line = line,
-        .column = column,
+        .column = stored_column,
     };
     *count += 1;
 }
