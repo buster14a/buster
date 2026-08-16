@@ -6463,7 +6463,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_machine_fast_prepare(BusterX86Metad
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
-    BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form, BusterX86MetadataExactPlanRecord const* plan,
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm const* form, BusterX86MetadataExactPlanRecord const* plan,
     BusterX86MetadataEmitResult* result, u8* output, u32 output_capacity, bool force_disp32)
 {
     if (!plan || (plan->machine_fast_kind != BUSTER_X86_METADATA_MACHINE_FAST_SCALAR &&
@@ -6657,8 +6657,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     {
         BusterX86MetadataPhysicalMemory memory = memory_binding->memory;
         bool simple_address = memory.base.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
-                              memory.base.width == 64 && !memory.base.high_byte && !form.displacement_scale &&
-                              !(form.displacement_width && !form.relocation_base);
+                              memory.base.width == 64 && !memory.base.high_byte && !form->displacement_scale &&
+                              !(form->displacement_width && !form->relocation_base);
         if (simple_address)
         {
             u8 base = (u8)(memory.base.index & 7);
@@ -6710,7 +6710,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
                 address_ready = false;
         }
         if (!address_ready)
-            address_ready = buster_x86_metadata_emit_address(memory, form, *plan->pattern, force_disp32, &address);
+            address_ready = buster_x86_metadata_emit_address(memory, *form, *plan->pattern, force_disp32, &address);
     }
     if (has_memory && !address_ready)
     {
@@ -6737,9 +6737,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             break;
         }
     }
-    bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
+    bool x87_form = buster_x86_metadata_string_input_equal(form->extension.offset, S8("X87"));
     bool x87_no_operand_size_override = x87_form ||
-                                        (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FISTTP")) &&
+                                        (buster_x86_metadata_string_input_equal(form->iclass.offset, S8("FISTTP")) &&
                                          data_width == 16);
     bool rex_w = plan->pattern->w != 0;
     bool needs_low_byte_rex = false;
@@ -6752,9 +6752,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
         if (physical.reg.width == 8 && !physical.reg.high_byte && physical.reg.index >= 4 && physical.reg.index < 8)
             needs_low_byte_rex = true;
     }
-    if (form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY && query.source_semantics &&
-        (buster_x86_metadata_block_memory_source_authoritative(form, query) ||
-         buster_x86_metadata_aggregate_memory_source_authoritative(form, query)))
+    if (form->encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY && query.source_semantics &&
+        (buster_x86_metadata_block_memory_source_authoritative(*form, query) ||
+         buster_x86_metadata_aggregate_memory_source_authoritative(*form, query)))
         rex_w = false;
     // Signed variable immediates use the form's fixed width for 32/64-bit
     // scalar data, but the generic transform narrows them to the data width
@@ -6765,9 +6765,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     if (has_memory) has_b = memory_binding->memory.has_base && (memory_binding->memory.base.index & 8) != 0;
     else if (rm_binding && rm_binding->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) has_b = (rm_binding->reg.index & 8) != 0;
     bool needs_rex = rex_w || has_r || has_b || needs_low_byte_rex;
-    u8 mandatory_prefix = plan->pattern->mandatory_prefix ? plan->pattern->mandatory_prefix : form.mandatory_prefix;
+    u8 mandatory_prefix = plan->pattern->mandatory_prefix ? plan->pattern->mandatory_prefix : form->mandatory_prefix;
     bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_no_operand_size_override &&
-                                 (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
+                                 (form->prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
 
     u8 bytes[16] = {0};
     u32 byte_count = 0;
@@ -6822,7 +6822,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     {
         u8 width = plan->pattern->immediate_count ? plan->pattern->immediate_widths[0] : plan->pattern->immediate_width;
         bool signed_immediate = plan->pattern->immediate_count ? plan->pattern->immediate_signeds[0] : plan->pattern->immediate_signed;
-        if (!width) width = form.immediate_width;
+        if (!width) width = form->immediate_width;
         if (!width) width = immediate_binding->width == 8 ? 1 : 4;
         if (!width || width > 8) return false;
         if (!immediate_binding->has_symbol &&
@@ -8533,7 +8533,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86Meta
         .relocation_capacity = query.relocation_capacity,
     };
     BusterX86MetadataEmitResult fast_result = result;
-    if (buster_x86_metadata_emit_machine_fast(normalized.physical, *record->form, record, &fast_result, query.output,
+    if (buster_x86_metadata_emit_machine_fast(normalized.physical, record->form, record, &fast_result, query.output,
                                                query.output_capacity, query.force_disp32))
         return fast_result;
     return buster_x86_metadata_emit_form_with_form(normalized, record->form, false, record, &token, query.force_disp32, false);
