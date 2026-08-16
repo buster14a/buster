@@ -6763,11 +6763,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
             if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
             {
-                MachineStackPlacement placement =
-                    options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST    ? machine_fast_placement_build(machine_scratch.arena, &selected.function)
-                    : options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY
-                        ? machine_quality_placement_build(machine_scratch.arena, &selected.function)
-                        : machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                MachineStackPlacement placement;
+
+                switch (options.register_allocator)
+                {
+                    break; case CODEGEN_REGISTER_ALLOCATOR_FAST: placement = machine_fast_placement_build(machine_scratch.arena, &selected.function);
+                    break; case CODEGEN_REGISTER_ALLOCATOR_QUALITY: placement = machine_quality_placement_build(machine_scratch.arena, &selected.function);
+                    break; default: placement = machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                }
+
                 // Stage-9 scheduling, QUALITY only: reorder rows within
                 // over-pressured blocks to sink definitions toward their
                 // first use, then keep whichever form places cheaper. The
@@ -6812,9 +6816,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 if (placement.valid)
                 {
-                    MachineEncodeResult encoded = target.cpu_arch == CPU_ARCH_AARCH64
-                                                      ? machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement)
-                                                      : machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                    MachineEncodeResult encoded;
+
+                    switch (target.cpu_arch)
+                    {
+                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement);
+                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                        break; default: {}
+                    }
+
                     // Keep exact-form telemetry even when the encoder fails;
                     // the function may still fall back to the canonical path.
                     result.statistics.exact_attempts += encoded.exact_attempts;
