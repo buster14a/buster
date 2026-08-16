@@ -1068,7 +1068,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             CodegenModule small_module = codegen_generate_canonical_module(
                 small_canonical_arena, canonical_program, &empty_module, canonical_windows_target,
                 (CodegenModuleOptions){
-                    .lane_count = 1,
                     .assume_validated = true,
                 });
             BUSTER_TEST(arguments, small_module.error == CODEGEN_ERROR_NONE);
@@ -1077,44 +1076,42 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenModule canonical_windows_module = codegen_generate_canonical_module(arguments->arena, canonical_program, canonical_module,
                                                                                     canonical_windows_target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, canonical_windows_module.error == CODEGEN_ERROR_NONE);
-        // Function workers may complete in any order, but the stable merge
-        // must make the complete COFF/CodeView/unwind artifact independent of
-        // lane width. Debug output is the strongest aggregate oracle because
-        // it also consumes line rows, location seeds, descriptors, symbols,
-        // and relocation order.
-        CodegenModule canonical_windows_serial = codegen_generate_canonical_module(
+        // Generating the same module twice must produce the same complete
+        // COFF/CodeView/unwind artifact. Debug output is the strongest
+        // aggregate oracle because it also consumes line rows, location seeds,
+        // descriptors, symbols, and relocation order, so a value read before it
+        // was written shows up here rather than as a rare mismatch downstream.
+        CodegenModule canonical_windows_first = codegen_generate_canonical_module(
             arguments->arena, canonical_program, canonical_module, canonical_windows_target,
             (CodegenModuleOptions){
-                .lane_count = 1,
                 .debug_info = true,
                 .assume_validated = true,
             });
-        CodegenModule canonical_windows_parallel = codegen_generate_canonical_module(
+        CodegenModule canonical_windows_second = codegen_generate_canonical_module(
             arguments->arena, canonical_program, canonical_module, canonical_windows_target,
             (CodegenModuleOptions){
-                .lane_count = 3,
                 .debug_info = true,
                 .assume_validated = true,
             });
-        BUSTER_TEST(arguments, canonical_windows_serial.error == CODEGEN_ERROR_NONE);
-        BUSTER_TEST(arguments, canonical_windows_parallel.error == CODEGEN_ERROR_NONE);
-        if (canonical_windows_serial.error == CODEGEN_ERROR_NONE && canonical_windows_parallel.error == CODEGEN_ERROR_NONE)
+        BUSTER_TEST(arguments, canonical_windows_first.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, canonical_windows_second.error == CODEGEN_ERROR_NONE);
+        if (canonical_windows_first.error == CODEGEN_ERROR_NONE && canonical_windows_second.error == CODEGEN_ERROR_NONE)
         {
-            ObjectFile serial_object =
-                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_serial, canonical_windows_target);
-            ObjectFile parallel_object =
-                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_parallel, canonical_windows_target);
-            ObjectArtifact serial_artifact = object_write(arguments->arena, &serial_object, object_format_for_target(canonical_windows_target));
-            ObjectArtifact parallel_artifact = object_write(arguments->arena, &parallel_object, object_format_for_target(canonical_windows_target));
-            BUSTER_TEST(arguments, serial_artifact.error == OBJECT_ERROR_NONE);
-            BUSTER_TEST(arguments, parallel_artifact.error == OBJECT_ERROR_NONE);
-            BUSTER_TEST(arguments, serial_artifact.bytes.length == parallel_artifact.bytes.length);
-            if (serial_artifact.bytes.length == parallel_artifact.bytes.length)
+            ObjectFile first_object =
+                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_first, canonical_windows_target);
+            ObjectFile second_object =
+                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_second, canonical_windows_target);
+            ObjectArtifact first_artifact = object_write(arguments->arena, &first_object, object_format_for_target(canonical_windows_target));
+            ObjectArtifact second_artifact = object_write(arguments->arena, &second_object, object_format_for_target(canonical_windows_target));
+            BUSTER_TEST(arguments, first_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, second_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, first_artifact.bytes.length == second_artifact.bytes.length);
+            if (first_artifact.bytes.length == second_artifact.bytes.length)
             {
-                BUSTER_TEST(arguments, memcmp(serial_artifact.bytes.pointer, parallel_artifact.bytes.pointer, serial_artifact.bytes.length) == 0);
+                BUSTER_TEST(arguments, memcmp(first_artifact.bytes.pointer, second_artifact.bytes.pointer, first_artifact.bytes.length) == 0);
             }
-            BUSTER_TEST(arguments, canonical_windows_serial.statistics.function_count == canonical_windows_parallel.statistics.function_count);
-            BUSTER_TEST(arguments, canonical_windows_serial.statistics.code_bytes == canonical_windows_parallel.statistics.code_bytes);
+            BUSTER_TEST(arguments, canonical_windows_first.statistics.function_count == canonical_windows_second.statistics.function_count);
+            BUSTER_TEST(arguments, canonical_windows_first.statistics.code_bytes == canonical_windows_second.statistics.code_bytes);
         }
         IrFunction* layout_mix_function = codegen_test_c_function_find(canonical_module, S8("layout_mix"));
         IrFunction* leaf_layout_function = codegen_test_c_function_find(canonical_module, S8("leaf_layout"));
@@ -1870,36 +1867,34 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         IrProgram* deterministic_program = deterministic_merge_ir.program;
         IrModule* deterministic_module = deterministic_program->modules;
         BUSTER_TEST(arguments, ir_validate_canonical_module(deterministic_program, deterministic_module).error == IR_VALIDATION_NONE);
-        CodegenModule deterministic_serial = codegen_generate_canonical_module(
+        CodegenModule deterministic_first = codegen_generate_canonical_module(
             arguments->arena, deterministic_program, deterministic_module, target,
             (CodegenModuleOptions){
-                .lane_count = 1,
                 .debug_info = true,
                 .assume_validated = true,
             });
-        CodegenModule deterministic_parallel = codegen_generate_canonical_module(
+        CodegenModule deterministic_second = codegen_generate_canonical_module(
             arguments->arena, deterministic_program, deterministic_module, target,
             (CodegenModuleOptions){
-                .lane_count = 3,
                 .debug_info = true,
                 .assume_validated = true,
             });
-        BUSTER_TEST(arguments, deterministic_serial.error == CODEGEN_ERROR_NONE);
-        BUSTER_TEST(arguments, deterministic_parallel.error == CODEGEN_ERROR_NONE);
-        BUSTER_TEST(arguments, deterministic_serial.code.length >= 4096);
-        if (deterministic_serial.error == CODEGEN_ERROR_NONE && deterministic_parallel.error == CODEGEN_ERROR_NONE)
+        BUSTER_TEST(arguments, deterministic_first.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, deterministic_second.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, deterministic_first.code.length >= 4096);
+        if (deterministic_first.error == CODEGEN_ERROR_NONE && deterministic_second.error == CODEGEN_ERROR_NONE)
         {
-            ObjectFile serial_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_serial, target);
-            ObjectFile parallel_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_parallel, target);
+            ObjectFile first_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_first, target);
+            ObjectFile second_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_second, target);
             ObjectFormat format = object_format_for_target(target);
-            ObjectArtifact serial_artifact = object_write(arguments->arena, &serial_object, format);
-            ObjectArtifact parallel_artifact = object_write(arguments->arena, &parallel_object, format);
-            BUSTER_TEST(arguments, serial_artifact.error == OBJECT_ERROR_NONE);
-            BUSTER_TEST(arguments, parallel_artifact.error == OBJECT_ERROR_NONE);
-            BUSTER_TEST(arguments, serial_artifact.bytes.length == parallel_artifact.bytes.length);
-            if (serial_artifact.bytes.length == parallel_artifact.bytes.length)
+            ObjectArtifact first_artifact = object_write(arguments->arena, &first_object, format);
+            ObjectArtifact second_artifact = object_write(arguments->arena, &second_object, format);
+            BUSTER_TEST(arguments, first_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, second_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, first_artifact.bytes.length == second_artifact.bytes.length);
+            if (first_artifact.bytes.length == second_artifact.bytes.length)
             {
-                BUSTER_TEST(arguments, memcmp(serial_artifact.bytes.pointer, parallel_artifact.bytes.pointer, serial_artifact.bytes.length) == 0);
+                BUSTER_TEST(arguments, memcmp(first_artifact.bytes.pointer, second_artifact.bytes.pointer, first_artifact.bytes.length) == 0);
             }
         }
     }
@@ -1940,7 +1935,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             CodegenModule f80_native_codegen = codegen_generate_canonical_module(
                 arguments->arena, f80_native_program, f80_native_module, target,
                 (CodegenModuleOptions){
-                    .lane_count = 1,
                     .assume_validated = true,
                 });
             BUSTER_TEST(arguments, f80_native_codegen.error == CODEGEN_ERROR_NONE);

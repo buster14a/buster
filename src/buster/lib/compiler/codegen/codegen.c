@@ -1292,7 +1292,7 @@ BUSTER_GLOBAL_LOCAL CodegenX64TemplateCacheEntry* codegen_canonical_x64_template
     // home slot: the two halves of the key are independent hashes, so this
     // spreads eviction across the window instead of letting one slot absorb
     // every conflict, and it stays a pure function of the key, which the
-    // byte-identical fixed point requires at any lane count.
+    // byte-identical fixed point requires.
     u32 victim = (home + (u32)(guard & (CODEGEN_X64_TEMPLATE_PROBE_WINDOW - 1u))) & cache->template_mask;
     CodegenX64TemplateCacheEntry* entry = cache->templates + victim;
     entry->signature = signature;
@@ -1757,10 +1757,10 @@ void codegen_prewarm(void)
 }
 
 // x86 metadata and exact machine plans are only needed by x86 codegen.  Keep
-// their serial preparation beside the target-aware entry points so AArch64
-// (and any other non-x86 caller) does not pay the full x86 table decode.  The
-// machine encoder and ordinary x86 assembly both read these tables from worker
-// lanes, so the complete preparation must finish before their lane_run.
+// their preparation beside the target-aware entry points so AArch64 (and any
+// other non-x86 caller) does not pay the full x86 table decode.  The machine
+// encoder and ordinary x86 assembly both read these tables while emitting, so
+// the complete preparation must finish before a module is generated.
 void codegen_prewarm_for_target(Target target)
 {
     codegen_prewarm();
@@ -1768,8 +1768,8 @@ void codegen_prewarm_for_target(Target target)
     {
         return;
     }
-    // Exact machine emission reads metadata tables from worker lanes without
-    // synchronization, so initialize them on the caller before any lane_run.
+    // Exact machine emission reads these tables without ever filling them, so
+    // they are initialized here rather than on first use during emission.
     buster_x86_metadata_prewarm();
     machine_x86_64_exact_prewarm();
 }
@@ -2825,57 +2825,6 @@ void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u32* value_stor
 
 
 
-BUSTER_GLOBAL_LOCAL void codegen_function_descriptor_copy(Arena* arena, CodegenFunctionDescriptor* destination,
-                                                           CodegenFunctionDescriptor const* source, u32 code_offset);
-BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count);
-
-Arena* codegen_worker_arena_create(u64 reserved_size, u64 granularity)
-{
-    return arena_create((ArenaCreation){
-        .reserved_size = reserved_size,
-        .granularity = granularity,
-        // A caller may deliberately use a small arena to exercise an empty or
-        // capacity-limited module. Creating the parallel scaffolding must not
-        // reject a reservation the public serial entry point already accepts.
-        .initial_size = BUSTER_MIN(BUSTER_KB(64), reserved_size),
-        .flags.no_pool = true,
-    });
-}
-
-BUSTER_GLOBAL_LOCAL bool codegen_worker_arena_reset(Arena** arena, u64 reserved_size, u64 granularity)
-{
-    // Rewind ordinary functions without a syscall. An outlier that committed
-    // substantial transient storage is unmapped so all lanes do not retain
-    // their respective high-water marks until the module merge.
-    if ((*arena)->os_position <= BUSTER_MB(16))
-    {
-        arena_reset_to_start(*arena);
-        return true;
-    }
-    BUSTER_CHECK(arena_destroy(*arena, 1));
-    *arena = codegen_worker_arena_create(reserved_size, granularity);
-    return *arena != 0;
-}
-
-BUSTER_GLOBAL_LOCAL void codegen_fragment_arena_align(Arena* arena)
-{
-    // Each exact fragment consumes a 64-byte-rounded extent. Consequently the
-    // shared arena's total footprint is independent of mutex acquisition order
-    // even though workers finish in an intentionally nondeterministic order.
-    arena_allocate_bytes(arena, 0, 64);
-}
-
-BUSTER_GLOBAL_LOCAL ByteSlice codegen_fragment_bytes_copy(Arena* arena, ByteSlice source)
-{
-    ByteSlice result = {.length = source.length};
-    if (source.length)
-    {
-        result.pointer = arena_allocate(arena, u8, source.length);
-        memcpy(result.pointer, source.pointer, source.length);
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_register_is_64_bit(IrProgram* program, IrTypeId type_id)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -2954,7 +2903,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_f80_cache_arena_capacity(Arena* a
 }
 
 // A type graph is shared by every function in a canonical module.  Classify it
-// once, iteratively, and let every worker read the immutable result.  Pointer
+// once, iteratively, and read the immutable result per function.  Pointer
 // and function referents are not part of a value representation; vectors are
 // included because an element type still contributes to the value's shape.
 BUSTER_GLOBAL_LOCAL CodegenCanonicalX64F80Cache codegen_canonical_x64_f80_cache_initialize(Arena* arena, IrProgram* program)
@@ -6054,30 +6003,21 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_value_is_global_place(IrFunction* fun
     return definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
 }
 
-typedef struct CodegenCanonicalFragmentInfo CodegenCanonicalFragmentInfo;
-struct CodegenCanonicalFragmentInfo
-{
-    u32* block_offsets;
-    u32 block_count;
-};
-
-// One generation of the module into a code buffer reserved at `capacity_scale`
-// times the flat estimate below. Everything it produces comes out of `arena`,
-// so a caller that does not like the answer can rewind and ask again; the
-// target, the program ABI and the IR validation are its caller's business and
-// are not repeated per attempt.
+// One generation of the whole module -- globals, functions and global assembly
+// -- into a code buffer reserved at `capacity_scale` times the flat estimate
+// below. Everything it produces comes out of `arena`, so a caller that does not
+// like the answer can rewind and ask again; the target, the program ABI and the
+// IR validation are its caller's business and are not repeated per attempt.
 BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program,
                                                                            CodegenCanonicalX64F80Cache const* f80_cache, IrModule* module,
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
-                                                                           bool* code_buffer_exhausted, bool allow_unresolved_label_addresses,
-                                                                           CodegenCanonicalFragmentInfo* fragment_info,
+                                                                           bool* code_buffer_exhausted,
                                                                            CodegenX64MetadataCache* x64_metadata_cache)
 {
     CodegenModule result = {
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
     };
-    BUSTER_CHECK(!fragment_info || module->function_count <= 1);
     result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
     u64 read_only_capacity = 0;
     u64 writable_capacity = 0;
@@ -7266,11 +7206,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         u32 branch_patch_capacity = function->instruction_count * 2;
         u32* block_offsets = arena_allocate(arena, u32, function->block_count);
-        if (fragment_info)
-        {
-            fragment_info->block_offsets = block_offsets;
-            fragment_info->block_count = function->block_count;
-        }
         CCanonicalBranchPatch* branch_patches = arena_allocate(arena, CCanonicalBranchPatch, branch_patch_capacity);
         u32 branch_patch_count = 0;
 #define C_BRANCH_PATCH_PUSH(...)                                                                                                                               \
@@ -15581,7 +15516,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                (s32)canonical_x64_frame_base_offset, debug_location_capacity);
         }
     }
-    for (u32 relocation_index = 0; !allow_unresolved_label_addresses && relocation_index < result.relocation_count; relocation_index += 1)
+    for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
     {
         if (result.relocations[relocation_index].label_address)
         {
@@ -15617,571 +15552,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_function_descriptor_copy(Arena* arena, CodegenFunctionDescriptor* destination,
-                                                           CodegenFunctionDescriptor const* source, u32 code_offset)
-{
-    *destination = *source;
-    destination->code_offset += code_offset;
-    destination->unwind_actions = 0;
-    destination->epilog_offsets = 0;
-    if (source->unwind_action_count)
-    {
-        destination->unwind_actions = arena_allocate(arena, CodegenUnwindAction, source->unwind_action_count);
-        memcpy(destination->unwind_actions, source->unwind_actions, sizeof(*destination->unwind_actions) * source->unwind_action_count);
-    }
-    if (source->epilog_count)
-    {
-        destination->epilog_offsets = arena_allocate(arena, u32, source->epilog_count);
-        memcpy(destination->epilog_offsets, source->epilog_offsets, sizeof(*destination->epilog_offsets) * source->epilog_count);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, CodegenStatistics source)
-{
-    destination->instruction_count += source.instruction_count;
-    destination->value_count += source.value_count;
-    destination->stack_value_bytes += source.stack_value_bytes;
-    destination->stack_frame_bytes += source.stack_frame_bytes;
-    destination->code_bytes += source.code_bytes;
-    destination->native_vector_operation_count += source.native_vector_operation_count;
-    destination->split_vector_operation_count += source.split_vector_operation_count;
-    destination->vzeroupper_count += source.vzeroupper_count;
-    destination->forwarded_wide_vector_load_count += source.forwarded_wide_vector_load_count;
-    destination->simd_operation_count += source.simd_operation_count;
-    destination->function_count += source.function_count;
-    destination->maximum_stack_frame_bytes = BUSTER_MAX(destination->maximum_stack_frame_bytes, source.maximum_stack_frame_bytes);
-    // Register-allocator accounting is per function, so it accumulates the
-    // same way the rest does; a lane that never ran the machine path simply
-    // contributes zeroes.
-    destination->fallback_function_count += source.fallback_function_count;
-    for (u32 reason = 0; reason <= IR_OPCODE_COUNT; reason += 1)
-    {
-        destination->fallback_opcode_counts[reason] += source.fallback_opcode_counts[reason];
-    }
-    destination->fallback_verify_count += source.fallback_verify_count;
-    destination->fallback_placement_count += source.fallback_placement_count;
-    destination->fallback_encode_count += source.fallback_encode_count;
-    destination->allocator_reload_count += source.allocator_reload_count;
-    destination->allocator_spill_count += source.allocator_spill_count;
-    destination->allocator_copy_count += source.allocator_copy_count;
-    destination->allocator_boundary_spill_count += source.allocator_boundary_spill_count;
-    destination->allocator_boundary_reload_count += source.allocator_boundary_reload_count;
-    destination->allocator_boundary_copy_count += source.allocator_boundary_copy_count;
-    destination->allocator_rematerialize_count += source.allocator_rematerialize_count;
-    destination->allocator_pinned_register_count += source.allocator_pinned_register_count;
-    destination->allocator_split_register_count += source.allocator_split_register_count;
-    destination->allocator_scheduled_function_count += source.allocator_scheduled_function_count;
-    destination->allocator_schedule_kept_count += source.allocator_schedule_kept_count;
-    destination->exact_attempts += source.exact_attempts;
-    destination->exact_successes += source.exact_successes;
-    destination->exact_failures += source.exact_failures;
-}
-
-BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count)
-{
-#if BUSTER_SINGLE_THREADED
-    BUSTER_UNUSED(options);
-    BUSTER_UNUSED(function_count);
-    return 1;
-#else
-    u64 result = options.lane_count ? options.lane_count : os_get_logical_thread_count();
-    // Matrix test processes are already admitted under this CPU quota.
-    // Compiler-internal lanes share it instead of multiplying it, including
-    // tests that request an otherwise-exact comparison width.
-    String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
-    if (jobs_text.length)
-    {
-        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
-        if (parsed.length == jobs_text.length && parsed.value)
-        {
-            result = BUSTER_MIN(result, parsed.value);
-        }
-    }
-    result = BUSTER_MAX(result, (u64)1);
-    return BUSTER_MIN(result, (u64)BUSTER_MAX(function_count, 1u));
-#endif
-}
-
-typedef struct CodegenCanonicalFragment CodegenCanonicalFragment;
-struct CodegenCanonicalFragment
-{
-    CodegenModule module;
-    CodegenCanonicalFragmentInfo info;
-};
-
-typedef struct CodegenCanonicalParallelState CodegenCanonicalParallelState;
-struct CodegenCanonicalParallelState
-{
-    Arena* arena;
-    Arena* fragment_arena;
-    OsMutexHandle* fragment_mutex;
-    IrProgram* program;
-    CodegenCanonicalX64F80Cache const* f80_cache;
-    IrModule* module;
-    CodegenCanonicalFragment* fragments;
-    // One pointer per lane rather than one strided block.  The cache is larger
-    // than 64 KiB, which is where the AArch64 backend used to stop being able
-    // to index an array; it now materializes an arbitrary stride, so this is
-    // no longer forced.  Keep it anyway: it costs nothing measurable and the
-    // indexed stride stays eight bytes however far the cache grows.
-    CodegenX64MetadataCache** x64_metadata_caches;
-    AtomicU64 take_index;
-    AtomicU64 worker_arena_failures;
-    CodegenModule result;
-    Target target;
-    CodegenModuleOptions options;
-    u64 assembly_capacity;
-    u64 assembly_alignment_capacity;
-    u64 worker_arena_reserve;
-    u64 worker_arena_granularity;
-};
-
-BUSTER_GLOBAL_LOCAL void codegen_canonical_fragment_compact(Arena* arena, CodegenCanonicalFragment* destination, CodegenModule source,
-                                                             CodegenCanonicalFragmentInfo source_info)
-{
-    destination->module = source;
-    destination->module.ir_module = 0;
-    destination->module.code = (ByteSlice){0};
-    destination->module.read_only_data = (ByteSlice){0};
-    destination->module.writable_data = (ByteSlice){0};
-    destination->module.thread_local_data = (ByteSlice){0};
-    destination->module.entries = 0;
-    destination->module.functions = 0;
-    destination->module.globals = 0;
-    destination->module.relocations = 0;
-    destination->module.data_relocations = 0;
-    destination->module.line_entries = 0;
-    destination->module.debug_locations = 0;
-    destination->info = (CodegenCanonicalFragmentInfo){.block_count = source_info.block_count};
-    if (source.error != CODEGEN_ERROR_NONE)
-    {
-        return;
-    }
-
-    destination->module.code = codegen_fragment_bytes_copy(arena, source.code);
-    destination->module.read_only_data = codegen_fragment_bytes_copy(arena, source.read_only_data);
-    destination->module.writable_data = codegen_fragment_bytes_copy(arena, source.writable_data);
-    destination->module.thread_local_data = codegen_fragment_bytes_copy(arena, source.thread_local_data);
-    if (source.entry_count)
-    {
-        destination->module.entries = arena_allocate(arena, CodegenModuleEntry, source.entry_count);
-        memcpy(destination->module.entries, source.entries, sizeof(*source.entries) * source.entry_count);
-    }
-    if (source.function_count)
-    {
-        destination->module.functions = arena_allocate(arena, CodegenFunctionDescriptor, source.function_count);
-        for (u32 descriptor_index = 0; descriptor_index < source.function_count; descriptor_index += 1)
-        {
-            codegen_function_descriptor_copy(arena, destination->module.functions + descriptor_index, source.functions + descriptor_index, 0);
-        }
-    }
-    if (source.global_count)
-    {
-        destination->module.globals = arena_allocate(arena, CodegenModuleGlobal, source.global_count);
-        memcpy(destination->module.globals, source.globals, sizeof(*source.globals) * source.global_count);
-    }
-    if (source.relocation_count)
-    {
-        destination->module.relocations = arena_allocate(arena, CodegenModuleRelocation, source.relocation_count);
-        memcpy(destination->module.relocations, source.relocations, sizeof(*source.relocations) * source.relocation_count);
-    }
-    if (source.data_relocation_count)
-    {
-        destination->module.data_relocations = arena_allocate(arena, CodegenModuleDataRelocation, source.data_relocation_count);
-        memcpy(destination->module.data_relocations, source.data_relocations,
-               sizeof(*source.data_relocations) * source.data_relocation_count);
-    }
-    if (source.line_entry_count)
-    {
-        destination->module.line_entries = arena_allocate(arena, CodegenLineEntry, source.line_entry_count);
-        memcpy(destination->module.line_entries, source.line_entries, sizeof(*source.line_entries) * source.line_entry_count);
-    }
-    if (source.debug_location_count)
-    {
-        destination->module.debug_locations = arena_allocate(arena, DebugLocationSeed, source.debug_location_count);
-        memcpy(destination->module.debug_locations, source.debug_locations, sizeof(*source.debug_locations) * source.debug_location_count);
-    }
-    if (source_info.block_count)
-    {
-        destination->info.block_offsets = arena_allocate(arena, u32, source_info.block_count);
-        memcpy(destination->info.block_offsets, source_info.block_offsets, sizeof(*source_info.block_offsets) * source_info.block_count);
-    }
-}
-
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_merge_add_u32(u32 value, u32 addend, u32* result)
-{
-    if (value > UINT32_MAX - addend)
-    {
-        return false;
-    }
-    *result = value + addend;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParallelState* state)
-{
-    CodegenModule result = state->result;
-    result.ir_module = state->module;
-    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
-    {
-        CodegenModule* fragment = &state->fragments[function_index].module;
-        if (fragment->error != CODEGEN_ERROR_NONE)
-        {
-            result.error = fragment->error;
-            result.failed_function = (IrFunctionId){.value = function_index};
-            result.failed_instruction = fragment->failed_instruction;
-            result.failed_opcode = fragment->failed_opcode;
-            state->result = result;
-            return;
-        }
-    }
-
-    u64 function_code_size = 0;
-    u64 relocation_capacity_64 = result.relocation_count;
-    u64 line_entry_capacity_64 = 0;
-    u64 debug_location_capacity_64 = 0;
-    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
-    {
-        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
-        {
-            continue;
-        }
-        CodegenModule* fragment = &state->fragments[function_index].module;
-        u64 alignment = state->target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
-        if (function_code_size > UINT64_MAX - (alignment - 1))
-        {
-            result.error = CODEGEN_ERROR_CAPACITY;
-            state->result = result;
-            return;
-        }
-        function_code_size = (function_code_size + alignment - 1) & ~(alignment - 1);
-        if (fragment->code.length > UINT64_MAX - function_code_size)
-        {
-            result.error = CODEGEN_ERROR_CAPACITY;
-            state->result = result;
-            return;
-        }
-        function_code_size += fragment->code.length;
-        relocation_capacity_64 += fragment->relocation_count;
-        line_entry_capacity_64 += fragment->line_entry_count;
-        debug_location_capacity_64 += fragment->debug_location_count;
-    }
-    if (function_code_size > UINT32_MAX || relocation_capacity_64 > UINT32_MAX || line_entry_capacity_64 > UINT32_MAX ||
-        debug_location_capacity_64 > UINT32_MAX || state->assembly_alignment_capacity > UINT64_MAX - function_code_size - 64)
-    {
-        result.error = CODEGEN_ERROR_CAPACITY;
-        state->result = result;
-        return;
-    }
-    u64 code_capacity = function_code_size + state->assembly_alignment_capacity + 64;
-    if (state->assembly_capacity > (UINT64_MAX - code_capacity) / 4)
-    {
-        result.error = CODEGEN_ERROR_CAPACITY;
-        state->result = result;
-        return;
-    }
-    code_capacity += state->assembly_capacity * 4;
-
-    u32 global_relocation_count = result.relocation_count;
-    CodegenModuleRelocation* global_relocations = result.relocations;
-    u32 entry_capacity = state->module->function_count +
-                         (u32)BUSTER_MIN(state->assembly_capacity, (u64)UINT32_MAX - state->module->function_count);
-    result.entries = arena_allocate(state->arena, CodegenModuleEntry, entry_capacity);
-    result.functions = arena_allocate(state->arena, CodegenFunctionDescriptor, entry_capacity);
-    result.relocations = arena_allocate(state->arena, CodegenModuleRelocation, (u32)relocation_capacity_64);
-    result.line_entries = state->options.debug_info ? arena_allocate(state->arena, CodegenLineEntry, (u32)line_entry_capacity_64) : 0;
-    result.debug_locations = state->options.debug_info ? arena_allocate(state->arena, DebugLocationSeed, (u32)debug_location_capacity_64) : 0;
-    result.entry_count = 0;
-    result.function_count = 0;
-    result.relocation_count = global_relocation_count;
-    result.line_entry_count = 0;
-    result.debug_location_count = 0;
-    result.statistics = (CodegenStatistics){0};
-    if (global_relocation_count)
-    {
-        memcpy(result.relocations, global_relocations, sizeof(*result.relocations) * global_relocation_count);
-    }
-
-    if (code_capacity > UINT32_MAX)
-    {
-        result.error = CODEGEN_ERROR_CAPACITY;
-        state->result = result;
-        return;
-    }
-    bool code_buffer_exhausted = false;
-    CodegenBuffer buffer = {
-        .bytes = arena_allocate(state->arena, u8, code_capacity),
-        .capacity = code_capacity,
-        .exhausted = &code_buffer_exhausted,
-    };
-    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
-    {
-        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
-        {
-            continue;
-        }
-        CodegenCanonicalFragment* canonical_fragment = state->fragments + function_index;
-        CodegenModule* fragment = &canonical_fragment->module;
-        result.failed_function = (IrFunctionId){.value = function_index};
-        result.failed_instruction = fragment->failed_instruction;
-        result.failed_opcode = fragment->failed_opcode;
-        u64 alignment = state->target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
-        while (buffer.count % alignment && !buffer.error)
-        {
-            if (state->target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("NOP"), 0, 0))
-                {
-                    result.error = buffer.error;
-                    state->result = result;
-                    return;
-                }
-            }
-            else
-            {
-                codegen_emit_u8(&buffer, 0);
-            }
-        }
-        if (buffer.error || buffer.count > UINT32_MAX || fragment->code.length > buffer.capacity - buffer.count)
-        {
-            result.error = CODEGEN_ERROR_CAPACITY;
-            state->result = result;
-            return;
-        }
-        u32 function_offset = (u32)buffer.count;
-        if (fragment->code.length)
-        {
-            memcpy(buffer.bytes + buffer.count, fragment->code.pointer, fragment->code.length);
-            buffer.count += fragment->code.length;
-        }
-        for (u32 entry_index = 0; entry_index < fragment->entry_count; entry_index += 1)
-        {
-            CodegenModuleEntry entry = fragment->entries[entry_index];
-            if (!codegen_canonical_merge_add_u32(entry.offset, function_offset, &entry.offset))
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            result.entries[result.entry_count++] = entry;
-        }
-        for (u32 descriptor_index = 0; descriptor_index < fragment->function_count; descriptor_index += 1)
-        {
-            CodegenFunctionDescriptor* source = fragment->functions + descriptor_index;
-            if (source->code_offset > UINT32_MAX - function_offset)
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            codegen_function_descriptor_copy(state->arena, result.functions + result.function_count++, source, function_offset);
-        }
-        for (u32 relocation_index = 0; relocation_index < fragment->relocation_count; relocation_index += 1)
-        {
-            CodegenModuleRelocation relocation = fragment->relocations[relocation_index];
-            if (relocation.source == CODEGEN_MODULE_RELOCATION_CODE &&
-                !codegen_canonical_merge_add_u32(relocation.offset, function_offset, &relocation.offset))
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            result.relocations[result.relocation_count++] = relocation;
-        }
-        for (u32 line_index = 0; line_index < fragment->line_entry_count; line_index += 1)
-        {
-            CodegenLineEntry line = fragment->line_entries[line_index];
-            if (!codegen_canonical_merge_add_u32(line.code_offset, function_offset, &line.code_offset))
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            codegen_record_line(result.line_entries, &result.line_entry_count, (u32)line_entry_capacity_64, line.code_offset, line.source, line.line,
-                                line.column);
-        }
-        for (u32 location_index = 0; location_index < fragment->debug_location_count; location_index += 1)
-        {
-            DebugLocationSeed location = fragment->debug_locations[location_index];
-            if (!codegen_canonical_merge_add_u32(location.start, function_offset, &location.start) ||
-                !codegen_canonical_merge_add_u32(location.end, function_offset, &location.end))
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            result.debug_locations[result.debug_location_count++] = location;
-        }
-        codegen_statistics_add(&result.statistics, fragment->statistics);
-    }
-
-    // Static locals may contain addresses of labels in their owning function.
-    // Resolve those global contributions only after every fragment has exposed
-    // its local block offsets; no worker mutates the shared relocation array.
-    for (u32 relocation_index = 0; relocation_index < global_relocation_count; relocation_index += 1)
-    {
-        CodegenModuleRelocation* relocation = result.relocations + relocation_index;
-        if (!relocation->label_address)
-        {
-            continue;
-        }
-        bool found = false;
-        for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
-        {
-            IrFunction* function = state->module->functions + function_index;
-            CodegenCanonicalFragmentInfo* info = &state->fragments[function_index].info;
-            if (function->symbol.value != relocation->symbol.value)
-            {
-                continue;
-            }
-            if (!info->block_offsets || relocation->label_block.value >= info->block_count)
-            {
-                result.error = CODEGEN_ERROR_INVALID_IR;
-                state->result = result;
-                return;
-            }
-            s64 block_addend = info->block_offsets[relocation->label_block.value];
-            if (block_addend > 0 && relocation->addend > INT64_MAX - block_addend)
-            {
-                result.error = CODEGEN_ERROR_CAPACITY;
-                state->result = result;
-                return;
-            }
-            relocation->addend += block_addend;
-            relocation->label_address = false;
-            found = true;
-            break;
-        }
-        if (!found)
-        {
-            result.error = CODEGEN_ERROR_INVALID_IR;
-            state->result = result;
-            return;
-        }
-    }
-
-    for (u32 assembly_index = 0; assembly_index < state->module->assembly_count; assembly_index += 1)
-    {
-        if (!codegen_emit_global_assembly(state->arena, state->program, state->module->assemblies[assembly_index], state->target, &buffer, &result))
-        {
-            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-            state->result = result;
-            return;
-        }
-    }
-    if (buffer.count > UINT32_MAX)
-    {
-        result.error = CODEGEN_ERROR_CAPACITY;
-        state->result = result;
-        return;
-    }
-    while (result.function_count < result.entry_count)
-    {
-        u32 function_index = result.function_count;
-        CodegenModuleEntry* entry = result.entries + function_index;
-        u32 end = function_index + 1 < result.entry_count ? result.entries[function_index + 1].offset : (u32)buffer.count;
-        result.functions[result.function_count++] = (CodegenFunctionDescriptor){
-            .symbol = entry->symbol,
-            .code_offset = entry->offset,
-            .code_size = end - entry->offset,
-        };
-    }
-    result.code = (ByteSlice){
-        .pointer = buffer.bytes,
-        .length = buffer.count,
-    };
-    result.statistics.code_bytes = result.code.length;
-    result.error = buffer.error;
-    state->result = result;
-}
-
-BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argument)
-{
-    CodegenCanonicalParallelState* state = (CodegenCanonicalParallelState*)argument;
-    // Source-position recovery amortizes through mutable single-consumer
-    // cursor state. The source tables remain shared and read-only, but each
-    // lane needs its own cursor while emitting debug line rows.
-    IrProgram emission_program = *state->program;
-    emission_program.source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    CodegenX64MetadataCache* x64_metadata_cache = state->x64_metadata_caches ? state->x64_metadata_caches[lane_index()] : 0;
-    // A large generated function can require more transient codegen state
-    // than the general-purpose 64 MiB thread scratch arena. The worker arena
-    // is reset after each function; only an exact compact copy survives.
-    Arena* emission_arena = codegen_worker_arena_create(state->worker_arena_reserve, state->worker_arena_granularity);
-    if (!emission_arena)
-    {
-        atomic_u64_increment(&state->worker_arena_failures);
-    }
-    while (emission_arena)
-    {
-        u64 function_index = atomic_u64_increment(&state->take_index);
-        if (function_index >= state->module->function_count)
-        {
-            break;
-        }
-        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
-        {
-            continue;
-        }
-        IrModule fragment_module = *state->module;
-        fragment_module.functions = state->module->functions + function_index;
-        fragment_module.function_count = 1;
-        fragment_module.function_capacity = 1;
-        fragment_module.globals = 0;
-        fragment_module.global_count = 0;
-        fragment_module.global_capacity = 0;
-        fragment_module.assemblies = 0;
-        fragment_module.assembly_count = 0;
-        fragment_module.assembly_capacity = 0;
-        CodegenModuleOptions fragment_options = state->options;
-        fragment_options.assume_validated = true;
-        fragment_options.lane_count = 1;
-        CodegenCanonicalFragment* fragment = state->fragments + function_index;
-        CodegenCanonicalFragmentInfo emitted_info = {0};
-        CodegenModule emitted = {0};
-        TemporalArena attempt_scope = arena_begin_temporal(emission_arena);
-        for (u64 capacity_scale = 1;; capacity_scale *= 2)
-        {
-            bool code_buffer_exhausted = false;
-            emitted_info = (CodegenCanonicalFragmentInfo){0};
-            emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, state->f80_cache, &fragment_module,
-                                                                 state->target, fragment_options, capacity_scale, &code_buffer_exhausted, false,
-                                                                 &emitted_info, x64_metadata_cache);
-            if (!code_buffer_exhausted)
-            {
-                break;
-            }
-            scratch_end(attempt_scope);
-        }
-        os_mutex_lock(state->fragment_mutex);
-        codegen_fragment_arena_align(state->fragment_arena);
-        codegen_canonical_fragment_compact(state->fragment_arena, fragment, emitted, emitted_info);
-        codegen_fragment_arena_align(state->fragment_arena);
-        os_mutex_unlock(state->fragment_mutex);
-        if (!codegen_worker_arena_reset(&emission_arena, state->worker_arena_reserve, state->worker_arena_granularity))
-        {
-            atomic_u64_increment(&state->worker_arena_failures);
-        }
-    }
-    if (emission_arena)
-    {
-        BUSTER_CHECK(arena_destroy(emission_arena, 1));
-    }
-    lane_sync();
-    if (lane_index() == 0)
-    {
-        if (state->worker_arena_failures)
-        {
-            state->result.error = CODEGEN_ERROR_CAPACITY;
-        }
-        else
-        {
-            codegen_canonical_fragments_merge(state);
-        }
-    }
-    lane_sync();
-}
-
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
@@ -16194,10 +15564,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         return result;
     }
     codegen_prewarm_for_target(target);
-    // ABI records and the target-for-ABI cache are mutable on first use. Freeze
-    // both on the caller before any worker reads them.
+    // ABI records and the target-for-ABI cache are mutable on first use, and an
+    // attempt must not be the thing that fills a cache the next attempt reads.
+    // Freezing both here also keeps them out of the rewind below.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
-    CodegenCanonicalX64F80Cache f80_cache = {0};
     if (!options.assume_validated)
     {
         IrValidationResult validation = ir_validate_canonical_module(program, module);
@@ -16207,6 +15577,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
     }
+    CodegenCanonicalX64F80Cache f80_cache = {0};
+    CodegenX64MetadataCache* x64_metadata_cache = 0;
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         f80_cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
@@ -16215,116 +15587,48 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             result.error = CODEGEN_ERROR_CAPACITY;
             return result;
         }
-    }
-    u64 lane_count = codegen_module_lane_count(options, module->function_count);
-    IrModule globals_module = *module;
-    globals_module.functions = 0;
-    globals_module.function_count = 0;
-    globals_module.function_capacity = 0;
-    globals_module.assemblies = 0;
-    globals_module.assembly_count = 0;
-    globals_module.assembly_capacity = 0;
-    CodegenModuleOptions serial_options = options;
-    serial_options.assume_validated = true;
-    serial_options.lane_count = 1;
-    bool globals_buffer_exhausted = false;
-    result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, &globals_module, target, serial_options, 1,
-                                                       &globals_buffer_exhausted, true, 0, 0);
-    BUSTER_CHECK(!globals_buffer_exhausted);
-    result.ir_module = module;
-    if (result.error != CODEGEN_ERROR_NONE)
-    {
-        return result;
-    }
-
-    u64 assembly_capacity = 0;
-    u64 assembly_alignment_capacity = 0;
-    for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
-    {
-        if (module->assemblies[assembly_index].source.length > UINT64_MAX - assembly_capacity)
+        // Every row the cache holds is keyed on instruction shape alone, so it
+        // stays valid across a retry and is allocated before the temporal scope
+        // opens rather than being rebuilt by each attempt. A caller may pass a
+        // deliberately small arena to exercise a capacity-limited module, so a
+        // cache that does not fit is skipped instead of failing the module:
+        // emission treats an absent cache as a miss on every query.
+        u32 template_capacity = codegen_canonical_x64_template_capacity(module->function_count);
+        u64 cache_size = sizeof(CodegenX64MetadataCache) + (u64)template_capacity * sizeof(CodegenX64TemplateCacheEntry);
+        if (module->function_count && cache_size <= arena->reserved_size - BUSTER_MIN(arena->position, arena->reserved_size))
         {
-            result.error = CODEGEN_ERROR_CAPACITY;
+            x64_metadata_cache = arena_allocate(arena, CodegenX64MetadataCache, 1);
+            memset(x64_metadata_cache, 0, sizeof(*x64_metadata_cache));
+            x64_metadata_cache->templates = arena_allocate(arena, CodegenX64TemplateCacheEntry, template_capacity);
+            memset(x64_metadata_cache->templates, 0, sizeof(*x64_metadata_cache->templates) * template_capacity);
+            x64_metadata_cache->template_mask = template_capacity - 1u;
+        }
+    }
+    // The code buffer is reserved at a flat rate per IR instruction, which is
+    // an estimate rather than a bound: an instruction that moves an aggregate
+    // encodes a load and a store per eightbyte, so its size grows with the type
+    // and a module holding a few wide values by value outgrows the rate.
+    // Measuring the excess up front costs a walk of every function's operands
+    // on every module, wide values or not, and that walk is a percent of
+    // compile throughput. Generating the module again with twice the room costs
+    // nothing until it is needed. The attempt owns nothing outside this arena
+    // beyond the caches prepared above, so rewinding it is the whole undo, and
+    // the reserve's own `UINT32_MAX` ceiling ends the doubling.
+    TemporalArena attempt_scope = arena_begin_temporal(arena);
+    for (u64 capacity_scale = 1;; capacity_scale *= 2)
+    {
+        bool code_buffer_exhausted = false;
+        result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, module, target, options, capacity_scale, &code_buffer_exhausted,
+                                                           x64_metadata_cache);
+        // Every other capacity failure -- a frame displacement out of range, a
+        // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
+        // more room cannot fix, and is reported as it stands.
+        if (!code_buffer_exhausted)
+        {
             return result;
         }
-        assembly_capacity += module->assemblies[assembly_index].source.length;
-        u64 alignment_padding = codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
-        if (alignment_padding > UINT64_MAX - assembly_alignment_capacity)
-        {
-            result.error = CODEGEN_ERROR_CAPACITY;
-            return result;
-        }
-        assembly_alignment_capacity += alignment_padding;
+        scratch_end(attempt_scope);
     }
-    CodegenCanonicalFragment* fragments = arena_allocate(arena, CodegenCanonicalFragment, module->function_count);
-    if (module->function_count)
-    {
-        memset(fragments, 0, sizeof(*fragments) * module->function_count);
-    }
-    u64 x64_metadata_cache_count = 0;
-    u32 x64_template_capacity = 0;
-    u64 fragment_arena_reserved_size = arena->reserved_size;
-    if (target.cpu_arch == CPU_ARCH_X86_64 && module->function_count &&
-        lane_count <= (ARENA_MAX_RESERVATION - fragment_arena_reserved_size) /
-                          (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*) +
-                           (u64)CODEGEN_X64_TEMPLATE_CACHE_MAXIMUM * sizeof(CodegenX64TemplateCacheEntry)))
-    {
-        x64_metadata_cache_count = lane_count;
-        x64_template_capacity = codegen_canonical_x64_template_capacity(module->function_count);
-        fragment_arena_reserved_size +=
-            x64_metadata_cache_count * (sizeof(CodegenX64MetadataCache) + sizeof(CodegenX64MetadataCache*) +
-                                        x64_template_capacity * sizeof(CodegenX64TemplateCacheEntry));
-    }
-    Arena* fragment_arena = codegen_worker_arena_create(fragment_arena_reserved_size, arena->granularity);
-    OsMutexHandle* fragment_mutex = os_mutex_create();
-    if (!fragment_arena || !fragment_mutex)
-    {
-        if (fragment_mutex)
-        {
-            os_mutex_destroy(fragment_mutex);
-        }
-        if (fragment_arena)
-        {
-            BUSTER_CHECK(arena_destroy(fragment_arena, 1));
-        }
-        result.error = CODEGEN_ERROR_CAPACITY;
-        return result;
-    }
-    CodegenX64MetadataCache** x64_metadata_caches = 0;
-    if (x64_metadata_cache_count)
-    {
-        x64_metadata_caches = arena_allocate(fragment_arena, CodegenX64MetadataCache*, x64_metadata_cache_count);
-        memset(x64_metadata_caches, 0, sizeof(*x64_metadata_caches) * x64_metadata_cache_count);
-        for (u64 cache_index = 0; cache_index < x64_metadata_cache_count; cache_index += 1)
-        {
-            CodegenX64MetadataCache* lane_cache = arena_allocate(fragment_arena, CodegenX64MetadataCache, 1);
-            memset(lane_cache, 0, sizeof(*lane_cache));
-            lane_cache->templates = arena_allocate(fragment_arena, CodegenX64TemplateCacheEntry, x64_template_capacity);
-            memset(lane_cache->templates, 0, sizeof(*lane_cache->templates) * x64_template_capacity);
-            lane_cache->template_mask = x64_template_capacity - 1u;
-            x64_metadata_caches[cache_index] = lane_cache;
-        }
-    }
-    CodegenCanonicalParallelState state = {
-        .arena = arena,
-        .fragment_arena = fragment_arena,
-        .fragment_mutex = fragment_mutex,
-        .program = program,
-        .f80_cache = &f80_cache,
-        .module = module,
-        .fragments = fragments,
-        .x64_metadata_caches = x64_metadata_caches,
-        .result = result,
-        .target = target,
-        .options = options,
-        .assembly_capacity = assembly_capacity,
-        .assembly_alignment_capacity = assembly_alignment_capacity,
-        .worker_arena_reserve = arena->reserved_size,
-        .worker_arena_granularity = arena->granularity,
-    };
-    lane_run(lane_count, &codegen_canonical_parallel_lane, &state);
-    os_mutex_destroy(fragment_mutex);
-    BUSTER_CHECK(arena_destroy(fragment_arena, 1));
-    return state.result;
 }
 
 CodegenExecutable codegen_make_executable(CodegenFunction function)

@@ -385,9 +385,6 @@ typedef enum CodegenRegisterAllocatorMode
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
-    // Zero selects the bounded host default. Tests and deterministic callers
-    // may request a maximum width; one keeps the identical serial path.
-    u32 lane_count;
     bool debug_info;
     bool assume_validated;
     // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
@@ -398,11 +395,11 @@ struct CodegenModuleOptions
     u8 assembly_syntax;
 };
 
-// Fills the per-abi target cache on the calling thread. Call before lane_run;
-// the cache is read without synchronization, so a gang that reaches it
-// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
-// racing. Target-specific x86 metadata and exact machine plans are filled by
-// codegen_prewarm_for_target() immediately before x86 worker execution.
+// Fills the per-abi target cache. Emission reads that cache without ever
+// filling it, so an unwarmed entry reached during emission reports through
+// BUSTER_CHECK_SERIAL_INITIALIZATION rather than being built mid-module.
+// Target-specific x86 metadata and exact machine plans are filled by
+// codegen_prewarm_for_target() before the module is generated.
 BUSTER_F_DECL void codegen_prewarm(void);
 BUSTER_F_DECL void codegen_prewarm_for_target(Target target);
 BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
