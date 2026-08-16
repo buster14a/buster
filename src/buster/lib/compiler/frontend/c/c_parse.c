@@ -777,7 +777,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         }
                         u32 operand_type_index = operand_start;
                         CParseResult operand_parse = *result;
-                        CTypeId operand_type = !depth && close > operand_start
+                        // Callers inside the explicit type-parse machine pass no
+                        // machine, because its frame stack cannot be reentered;
+                        // their sizeof-bounded arrays stay unresolved instead.
+                        CTypeId operand_type = machine && !depth && close > operand_start
                                                    ? c_parse_scalar_type(machine, &operand_parse, preprocess, operand_start, close, &operand_type_index)
                                                    : C_TYPE_ID_INVALID;
                         bool pointer_type = false;
@@ -5896,6 +5899,74 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParse
                                         declarator_start);
 }
 
+// Resolves the type name of a sizeof/_Alignof operand without the type-parse
+// machine, for the constant expressions the machine itself evaluates while it
+// runs. The machine is an explicit frame stack with one shared result slot, so
+// a step cannot reenter it; this walks the type table directly instead.
+BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                                   u32 start, u32 end, u64* size_out, u32* alignment_out)
+{
+    if (start >= end)
+    {
+        return false;
+    }
+    // Resolving the operand can append pointer, array, and tag records; keep
+    // them in a copy so an operand never mutates the caller's type table.
+    CParseResult operand_parse = *result;
+    u32 index = start;
+    CTypeId type = c_parse_qualified_typedef_type(&operand_parse, preprocess, scope, start, end, &index);
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        u32 tag_index = c_parse_skip_attributes(preprocess, start, end);
+        String8 tag_word = tag_index < end && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER
+                               ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[tag_index])
+                               : (String8){0};
+        CTypeKind tag_kind = string_equal(tag_word, S8("struct"))  ? C_TYPE_STRUCT
+                             : string_equal(tag_word, S8("union")) ? C_TYPE_UNION
+                             : string_equal(tag_word, S8("enum"))  ? C_TYPE_ENUM
+                                                                   : C_TYPE_INVALID;
+        if (tag_kind != C_TYPE_INVALID)
+        {
+            u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, end);
+            if (name_index < end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
+            {
+                type = c_parse_aggregate_lookup(&operand_parse, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]));
+                index = c_parse_skip_attributes(preprocess, name_index + 1, end);
+            }
+        }
+    }
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        index = start;
+        type = c_parse_primitive_type(&operand_parse, preprocess, start, end, &index);
+    }
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    for (;;)
+    {
+        u32 pointer_start = index;
+        type = c_parse_pointer_chain(&operand_parse, preprocess, type, &index, end);
+        CType qualifiers = {0};
+        while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+               c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), &qualifiers))
+        {
+            index += 1;
+        }
+        if (index == pointer_start)
+        {
+            break;
+        }
+    }
+    type = c_parse_array_suffixes(&operand_parse, preprocess, type, &index, end);
+    if (type.value == C_ID_UNDERLYING_INVALID || index != end)
+    {
+        return false;
+    }
+    return c_parse_type_layout(0, arena, preprocess, &operand_parse, type, size_out, alignment_out);
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start)
 {
     CParseResult* result = frame->result;
@@ -6201,6 +6272,53 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                             expression_index = cast_end;
                             continue;
                         }
+                    }
+                    // sizeof/_Alignof has to be folded here: the evaluator below
+                    // is the preprocessor's, which reads both words as ordinary
+                    // identifiers and substitutes zero for them.
+                    bool enum_word_is_alignof = expression_token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, expression_token));
+                    if (expression_token.kind == C_TOKEN_IDENTIFIER &&
+                        (enum_word_is_alignof || string_equal(c_token_spelling(preprocess.spelling_base, expression_token), S8("sizeof"))))
+                    {
+                        u32 expression_end = expression_start + expression_count;
+                        bool parenthesized = expression_index + 2 < expression_count &&
+                                             c_token_is_punctuator(&preprocess.tokens[source_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                        u32 operand_start = source_index + 2;
+                        u32 operand_end = operand_start;
+                        u32 operand_depth = 1;
+                        while (parenthesized && operand_end < expression_end)
+                        {
+                            CToken operand_token = preprocess.tokens[operand_end];
+                            if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                            {
+                                operand_depth += 1;
+                            }
+                            else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                            {
+                                operand_depth -= 1;
+                                if (!operand_depth)
+                                {
+                                    break;
+                                }
+                            }
+                            operand_end += 1;
+                        }
+                        u64 operand_size = 0;
+                        u32 operand_alignment = 0;
+                        if (!parenthesized || operand_depth || operand_end == operand_start ||
+                            !c_parse_machineless_sizeof_operand_layout(temporary.arena, result, preprocess, frame->scope, operand_start, operand_end,
+                                                                       &operand_size, &operand_alignment))
+                        {
+                            // Substituting zero here would silently misfold the
+                            // enumerator, so an unresolved operand fails instead.
+                            scratch_end(temporary);
+                            return C_TYPE_ID_INVALID;
+                        }
+                        evaluation_tokens[evaluation_token_count++] =
+                            c_space_token(&enum_space, string_format(temporary.arena, S8("{u64}"), enum_word_is_alignof ? operand_alignment : operand_size),
+                                          C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+                        expression_index = operand_end - expression_start;
+                        continue;
                     }
                     bool folded_member = false;
                     if (expression_token.kind == C_TOKEN_IDENTIFIER)

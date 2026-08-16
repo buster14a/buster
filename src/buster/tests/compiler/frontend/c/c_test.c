@@ -5097,6 +5097,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
     return result;
 }
 
+// Regression coverage for the 2026-08-16 enum-constant miscompile: enumerator
+// initializers were folded by the preprocessor's #if evaluator, which reads
+// `sizeof` as an ordinary identifier and substitutes zero for it, so
+// 1 << (sizeof(u16) * 8u - 2u) folded to 0 while the same expression folded
+// correctly as an array bound, a bit-field width, and a case label. Every
+// constant context that accepts sizeof/_Alignof must agree on the value.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef unsigned short u16;\n"
+                                               "struct SizeofPoint { int x; int y; };\n"
+                                               "enum SizeofConstants {\n"
+                                               " SIZEOF_SHIFT = 1 << (sizeof(u16) * 8u - 2u),\n"
+                                               " SIZEOF_WORD = sizeof(u16),\n"
+                                               " SIZEOF_POINT = sizeof(struct SizeofPoint),\n"
+                                               " SIZEOF_POINTER = sizeof(char *),\n"
+                                               " SIZEOF_ARRAY = sizeof(u16[3]),\n"
+                                               " SIZEOF_ALIGN = _Alignof(struct SizeofPoint),\n"
+                                               " SIZEOF_DERIVED = SIZEOF_WORD + SIZEOF_POINT,\n"
+                                               " SIZEOF_CAST = (int)(sizeof(struct SizeofPoint) / sizeof(int)),\n"
+                                               "};\n"
+                                               "struct SizeofBits { unsigned wide : sizeof(u16) * 8u - 2u; unsigned narrow : 2; };\n"
+                                               "static unsigned char sizeof_bound[sizeof(u16) * 8u - 2u];\n"
+                                               "static struct SizeofBits sizeof_bits;\n"
+                                               "unsigned char sizeof_bound_probe(void) { return sizeof_bound[0] + (unsigned char)sizeof_bits.narrow; }\n"
+                                               "int sizeof_dispatch(int value)\n"
+                                               "{\n"
+                                               " switch (value) {\n"
+                                               " case (int)(sizeof(u16) * 8u - 2u): return 7;\n"
+                                               " default: return 0;\n"
+                                               " }\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    bool found_shift = false;
+    bool found_word = false;
+    bool found_point = false;
+    bool found_pointer = false;
+    bool found_array = false;
+    bool found_align = false;
+    bool found_derived = false;
+    bool found_cast = false;
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse.entities[entity_index];
+        if (entity->kind != C_ENTITY_ENUMERATOR || entity->constant_is_negative)
+        {
+            continue;
+        }
+        found_shift |= string_equal(entity->name, S8("SIZEOF_SHIFT")) && entity->constant_value == 16384;
+        found_word |= string_equal(entity->name, S8("SIZEOF_WORD")) && entity->constant_value == 2;
+        found_point |= string_equal(entity->name, S8("SIZEOF_POINT")) && entity->constant_value == 8;
+        found_pointer |= string_equal(entity->name, S8("SIZEOF_POINTER")) && entity->constant_value == tokens.data_layout.pointer.size;
+        found_array |= string_equal(entity->name, S8("SIZEOF_ARRAY")) && entity->constant_value == 6;
+        found_align |= string_equal(entity->name, S8("SIZEOF_ALIGN")) && entity->constant_value == 4;
+        found_derived |= string_equal(entity->name, S8("SIZEOF_DERIVED")) && entity->constant_value == 10;
+        found_cast |= string_equal(entity->name, S8("SIZEOF_CAST")) && entity->constant_value == 2;
+    }
+    BUSTER_TEST(arguments, found_shift);
+    BUSTER_TEST(arguments, found_word);
+    BUSTER_TEST(arguments, found_point);
+    BUSTER_TEST(arguments, found_pointer);
+    BUSTER_TEST(arguments, found_array);
+    BUSTER_TEST(arguments, found_align);
+    BUSTER_TEST(arguments, found_derived);
+    BUSTER_TEST(arguments, found_cast);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("sizeof-constant-expression.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        IrType* bound_type = 0;
+        IrType* bits_type = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+            if (symbol && string_equal(symbol->link_name, S8("sizeof_bound")))
+            {
+                bound_type = ir_type_from_id(&ir.program->types, global->type);
+            }
+            else if (symbol && string_equal(symbol->link_name, S8("sizeof_bits")))
+            {
+                bits_type = ir_type_from_id(&ir.program->types, global->type);
+            }
+        }
+        BUSTER_TEST(arguments, bound_type && bound_type->kind == IR_TYPE_ARRAY && bound_type->element_count == 14);
+        // The bit-field width is folded during lowering, not at parse time, so
+        // the resolved field layout is where a misfolded width would show.
+        BUSTER_TEST(arguments, bits_type && bits_type->kind == IR_TYPE_STRUCT && bits_type->field_count == 2);
+        if (bits_type && bits_type->field_count == 2)
+        {
+            BUSTER_TEST(arguments, bits_type->fields[0].is_bit_field && bits_type->fields[0].bit_width == 14 && bits_type->fields[0].bit_offset == 0);
+            BUSTER_TEST(arguments, bits_type->fields[1].is_bit_field && bits_type->fields[1].bit_width == 2 && bits_type->fields[1].bit_offset == 14);
+            BUSTER_TEST(arguments, bits_type->layout.resolved && bits_type->layout.size == 4);
+        }
+        IrInstruction* switch_instruction = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                if (function->instructions[instruction_index].opcode == IR_OPCODE_SWITCH)
+                {
+                    switch_instruction = &function->instructions[instruction_index];
+                }
+            }
+        }
+        BUSTER_TEST(arguments, switch_instruction != 0);
+        if (switch_instruction)
+        {
+            BUSTER_TEST(arguments, switch_instruction->immediate_count == 1);
+            BUSTER_TEST(arguments, switch_instruction->immediates[0] == 14);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 /* Function-body sizeof over an expression operand must fold through the resolved
    operand types with the usual arithmetic conversions, never through the
    type-prediction guess: narrow operands promote to int, shifts keep the promoted
@@ -8408,6 +8534,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
+    c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
