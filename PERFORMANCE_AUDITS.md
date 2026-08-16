@@ -36,7 +36,7 @@ failing their existing error paths at 64K+ instead of truncating).
 `DebugSourceLocation` 48 -> 20 (the embedded `String8 path` was a per-record
 interned copy of what `source` already names; offset/length u64 -> u32;
 `line == 0` is the no-declaration signal) — shrinks DebugType 176 -> 144,
-DebugVariable 120 -> 96, DebugTypeField 96 -> 64, DebugScope 88 -> 56 and
+DebugVariable 120 -> 88, DebugTypeField 96 -> 64, DebugScope 88 -> 56 and
 deletes one `debug_string` per record. Entity lookup buckets sized from
 interned names instead of identifier tokens (3 x 8 MB memset per parse ->
 ~1.5 MB total). Line rows 16 -> 12 (source/column u16, saturated in
