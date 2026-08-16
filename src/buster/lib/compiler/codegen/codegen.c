@@ -6822,7 +6822,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement);
                         break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
-                        break; default: {}
+                        break; default: BUSTER_TODO();
                     }
 
                     // Keep exact-form telemetry even when the encoder fails;
