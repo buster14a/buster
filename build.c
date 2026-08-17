@@ -9140,6 +9140,7 @@ struct MatrixTestCombination
     Generate generate;
     BuildCompiler compiler;
     u32 sanitize : 1;
+    u32 run_tests : 1;
 };
 
 typedef struct MatrixTestTree MatrixTestTree;
@@ -9196,7 +9197,8 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
 // command starts as soon as its compile finishes or waits behind shorter trees.
 // The ranking follows the measured cost ordering: sanitized Debug dominates,
 // then sanitized Release, then the unity Release tree that also runs
-// clang_analyze, then trees that test two configurations, then the rest.
+// clang_analyze, then trees that build and test two configurations, then the
+// compile-only compiler coverage.
 BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_tree_schedule_rank(bool sanitize, bool optimize, bool unity_only, u32 combination_count)
 {
     if (sanitize)
@@ -9348,19 +9350,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_ordering_tests(void)
     }
 
     // The Linux matrix order the combination loop produces, longest-pole last.
-    MatrixTestTree trees[6] = {
-        {.build_directory = S8("clang-debug")},
+    MatrixTestTree trees[5] = {
         {.build_directory = S8("clang-release"), .unity_only = 1},
         {.build_directory = S8("clang-sanitize-debug")},
         {.build_directory = S8("clang-sanitize-release")},
-        {.build_directory = S8("gcc-shared"), .combination_count = 2},
-        {.build_directory = S8("zig-shared"), .combination_count = 2},
+        {.build_directory = S8("gcc-debug")},
+        {.build_directory = S8("zig-debug")},
     };
-    u32 ranks[BUSTER_ARRAY_LENGTH(trees)] = {0, 2, 4, 3, 1, 1};
+    u32 ranks[BUSTER_ARRAY_LENGTH(trees)] = {2, 4, 3, 0, 0};
     matrix_superbuild_order_trees(trees, ranks, BUSTER_ARRAY_LENGTH(trees));
     String8 expected[] = {
         S8_INITIALIZER("clang-sanitize-debug"), S8_INITIALIZER("clang-sanitize-release"), S8_INITIALIZER("clang-release"),
-        S8_INITIALIZER("gcc-shared"),           S8_INITIALIZER("zig-shared"),             S8_INITIALIZER("clang-debug"),
+        S8_INITIALIZER("gcc-debug"),            S8_INITIALIZER("zig-debug"),
     };
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(trees); tree_i += 1)
     {
@@ -9372,8 +9373,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_ordering_tests(void)
     }
 
     // Equal ranks must keep their original relative order so the manifest is
-    // deterministic; gcc-shared and zig-shared both rank 1 above.
-    if (!string_equal(trees[3].build_directory, S8("gcc-shared")) || !string_equal(trees[4].build_directory, S8("zig-shared")))
+    // deterministic; the GCC and Zig compile-only trees both rank 0 above.
+    if (!string_equal(trees[3].build_directory, S8("gcc-debug")) || !string_equal(trees[4].build_directory, S8("zig-debug")))
     {
         string_print(S8("error: superbuild tree ordering is not stable for equal ranks\n"));
         return PROCESS_RESULT_FAILED;
@@ -9389,17 +9390,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         return ordering_result;
     }
 
-    MatrixTestTree linux_trees[6] = {
+    MatrixTestTree linux_trees[5] = {
         {.build_directory = S8("linux-debug")},
         {.build_directory = S8("linux-canonical"), .unity_only = 1},
         {0},
         {0},
         {0},
-        {0},
     };
     matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16);
-    u32 expected_linux_unity[] = {0, 1, 0, 0, 0, 0};
-    u32 expected_linux_jobs[] = {3, 2, 3, 3, 3, 2};
+    u32 expected_linux_unity[] = {0, 1, 0, 0, 0};
+    u32 expected_linux_jobs[] = {4, 2, 4, 3, 3};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(linux_trees); tree_i += 1)
     {
         if (linux_trees[tree_i].unity_only != expected_linux_unity[tree_i] ||
@@ -9411,18 +9411,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         }
     }
 
-    MatrixTestTree windows_trees[7] = {
+    MatrixTestTree windows_trees[6] = {
         {0},
         {0},
         {.build_directory = S8("windows-canonical"), .unity_only = 1},
         {0},
         {0},
         {0},
-        {0},
     };
     matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
-    u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0, 0};
-    u32 expected_windows_jobs[] = {1, 1, 1, 1, 1, 1, 1};
+    u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0};
+    u32 expected_windows_jobs[] = {1, 1, 1, 1, 1, 1};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(windows_trees); tree_i += 1)
     {
         if (windows_trees[tree_i].unity_only != expected_windows_unity[tree_i] ||
@@ -9471,20 +9470,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     oversized_self_host.pool_jobs = 2;
     String8 manifest_path = string_format_z(arena, S8("build/superbuild-manifest-{u64}.cmake"), os_get_current_process_id());
     remove_path_recursive(arena, manifest_path);
-    MatrixTestCombination manifest_combination = {
-        .build_directory = S8("build/canonical"),
-        .options = {.config = S8("Release"), .optimize = 1, .optimize_set = 1},
-        .compiler = BUILD_COMPILER_CLANG,
+    MatrixTestCombination manifest_combinations[2] = {
+        {
+            .build_directory = S8("build/canonical"),
+            .options = {.config = S8("Release"), .optimize = 1, .optimize_set = 1},
+            .compiler = BUILD_COMPILER_CLANG,
+            .run_tests = 1,
+        },
+        {
+            .build_directory = S8("build/gcc-debug"),
+            .options = {.config = S8("Debug"), .optimize_set = 1},
+            .compiler = BUILD_COMPILER_GCC,
+        },
     };
-    MatrixTestTree manifest_tree = {
-        .build_directory = S8("build/canonical"),
-        .combination_indices = {0},
-        .combination_count = 1,
-        .parallel_jobs = 1,
-        .unity_only = 1,
+    MatrixTestTree manifest_trees[2] = {
+        {
+            .build_directory = S8("build/canonical"),
+            .combination_indices = {0},
+            .combination_count = 1,
+            .parallel_jobs = 1,
+            .unity_only = 1,
+        },
+        {
+            .build_directory = S8("build/gcc-debug"),
+            .combination_indices = {1},
+            .combination_count = 1,
+            .parallel_jobs = 1,
+        },
     };
     MatrixSuperbuildSelfHostPlan manifest_plan = {
-        .build_directory = manifest_tree.build_directory,
+        .build_directory = manifest_trees[0].build_directory,
         .config = S8("Release"),
         .build_driver = S8("/absolute/build-driver"),
         .provenance_record_path = S8("/absolute/provenance.record"),
@@ -9496,7 +9511,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         .producer_clean_required = 1,
     };
     bool manifest_written = matrix_superbuild_manifest_write(arena, manifest_path, S8("/absolute/source"), manifest_plan.build_driver,
-                                                              &manifest_tree, 1, 1, &manifest_combination, manifest_plan, false, false);
+                                                              manifest_trees, BUSTER_ARRAY_LENGTH(manifest_trees), 2, manifest_combinations, manifest_plan,
+                                                              false, false);
     ByteSlice manifest_bytes = file_read(arena, manifest_path, (FileReadOptions){.map_required = 0});
     String8 manifest = BYTE_SLICE_TO_STRING(8, manifest_bytes);
     bool manifest_fields_valid = manifest_written && manifest.pointer &&
@@ -9505,9 +9521,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PROVENANCE_RECORD")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_SELF_HOST_POOL_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
-                                 string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH;
+                                 string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_BUILD_TARGETS ide:Debug)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
-    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
+    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
@@ -9564,14 +9583,17 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         MatrixTestTree tree = trees[tree_i];
         MatrixTestCombination first = combinations[tree.combination_indices[0]];
         String8 first_config = cmake_build_config(first.options);
-        String8 first_target = S8("test_all");
+        String8 first_test_config = first.run_tests ? first_config : (String8){0};
+        String8 first_target = first.run_tests ? S8("test_all") : (String8){0};
         String8 second_config = {0};
+        String8 second_test_config = {0};
         String8 second_target = {0};
         if (tree.combination_count > 1)
         {
             MatrixTestCombination second = combinations[tree.combination_indices[1]];
             second_config = cmake_build_config(second.options);
-            second_target = S8("test_all");
+            second_test_config = second.run_tests ? second_config : (String8){0};
+            second_target = second.run_tests ? S8("test_all") : (String8){0};
         }
 
         String8 analyze_config = {0};
@@ -9599,9 +9621,9 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         }
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_PARALLEL_JOBS {u32})\n"), prefix, tree.parallel_jobs));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_UNITY_ONLY {u32})\n"), prefix, tree.unity_only));
-        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_CONFIG {S8})\n"), prefix, first_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_CONFIG {S8})\n"), prefix, first_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_TARGET {S8})\n"), prefix, first_target));
-        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
         // Whole-table audits ride on the same canonical tree that already
@@ -9690,18 +9712,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
 
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
-        bool fuzz_supported = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
-        bool support_sanitize = compiler == BUILD_COMPILER_CLANG;
-        bool support_optimize = true;
+        bool is_clang = compiler == BUILD_COMPILER_CLANG;
+        bool fuzz_supported = is_clang && !BUSTER_APPLE;
+        bool support_sanitize = is_clang;
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {
-            u32 tree_count = fuzz_supported ? 1 + support_optimize : 1;
+            // Clang's unsanitized Debug row duplicates the stronger sanitized
+            // Debug coverage. Non-Clang compilers provide compile portability
+            // coverage only, so build just Debug and never execute it.
+            u32 first_optimize = is_clang && !sanitize ? 1 : 0;
+            u32 optimize_count = is_clang && sanitize ? 2 : 1;
+            bool split_configs = fuzz_supported && optimize_count > 1;
+            u32 tree_count = split_configs ? optimize_count : 1;
             for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
             {
-                u32 first_optimize = fuzz_supported ? tree_i : 0;
-                u32 optimize_count = fuzz_supported ? 1 : 1 + support_optimize;
-                bool fuzz_available = fuzz_supported && ((sanitize && !first_optimize) || (!sanitize && first_optimize));
+                u32 tree_first_optimize = split_configs ? first_optimize + tree_i : first_optimize;
+                u32 tree_optimize_count = split_configs ? 1 : optimize_count;
+                bool fuzz_available = fuzz_supported && ((sanitize && !tree_first_optimize) || (!sanitize && tree_first_optimize));
                 String8 build_directory_parts[] = {
                     build_prefix,
                     S8("ci_"),
@@ -9713,11 +9741,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                     S8("-fuzz_available_"),
                     fuzz_available ? S8("on") : S8("off"),
                     S8("-configs_"),
-                    fuzz_supported ? (first_optimize ? S8("Release") : S8("Debug")) : S8("shared"),
+                    tree_optimize_count > 1 ? S8("shared") : (tree_first_optimize ? S8("Release") : S8("Debug")),
                 };
 
                 String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
-                String8 configuration_types = optimize_count > 1 ? S8("Debug;Release") : (first_optimize ? S8("Release") : S8("Debug"));
+                String8 configuration_types =
+                    tree_optimize_count > 1 ? S8("Debug;Release") : (tree_first_optimize ? S8("Release") : S8("Debug"));
                 String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
 
                 Generate generate = {
@@ -9729,7 +9758,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                     .fuzz_available = fuzz_available,
                     .sanitize = sanitize,
                     .ci = ci,
-                    .optimize = first_optimize,
+                    .optimize = tree_first_optimize,
                     .optimize_set = true,
                     .link_libc = true,
                     .time_trace = false,
@@ -9750,9 +9779,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                     cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
                 }
 
-                for (u32 optimize_i = 0; optimize_i < optimize_count; optimize_i += 1)
+                for (u32 optimize_i = 0; optimize_i < tree_optimize_count; optimize_i += 1)
                 {
-                    u32 optimize = first_optimize + optimize_i;
+                    u32 optimize = tree_first_optimize + optimize_i;
                     combinations[combination_count++] = (MatrixTestCombination){
                         .build_directory = build_directory,
                         .options =
@@ -9764,6 +9793,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                         .compiler = compiler,
                         .generate = generate,
                         .sanitize = sanitize,
+                        .run_tests = is_clang,
                     };
                 }
             }
@@ -10051,10 +10081,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
     {
         MatrixTestCombination combination = combinations[combination_i];
-        String8 test_targets[] = {
-            S8("test_all"),
-        };
-        build_add(arena, combination.build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(test_targets), (SliceString8){0}, combination.options);
+        String8 targets[] = {combination.run_tests ? S8("test_all") : S8("ide")};
+        build_add(arena, combination.build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, combination.options);
 
         if (combination.compiler == BUILD_COMPILER_CLANG && !combination.sanitize && combination.options.optimize)
         {

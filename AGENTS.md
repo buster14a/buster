@@ -103,17 +103,17 @@ shell, CMake, and utility subprocesses.
 `import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
 `test_all_combinations_ci`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
-The combination matrix shares one multi-config build tree across Debug and
-Release when their configure-time policy matches. Clang's fuzz-enabled Debug
-sanitized and Release non-sanitized configurations use dedicated trees;
-dedicated trees generate only the configuration they use, while shared trees
-keep Debug and Release in one cross-config Ninja graph. Sanitizer rows are
-otherwise Clang-only. GCC and Zig cover unsanitized Debug and Release, and
-MSVC covers Debug and Release on Windows. Only optimized, unsanitized
-Clang/AppleClang builds use the requested unity build; GCC, Zig, MSVC, and
-every other non-Clang compiler use split translation units in Release as well
-as Debug. TCC is retained only as the bootstrap compiler for `build.c` and is
-omitted from all application/compiler combinations.
+The combination matrix shares one multi-config build tree across configurations
+when their configure-time policy matches. Clang omits unsanitized Debug because
+sanitized Debug provides the stronger coverage; it builds and runs unsanitized
+Release plus sanitized Debug and Release. Non-Apple Clang configurations use
+dedicated trees because their fuzz-runtime policy differs, while AppleClang's
+two sanitized configurations share one cross-config Ninja graph. GCC and Zig
+compile unsanitized Debug only and do not execute it; MSVC does the same on
+Windows. Only optimized, unsanitized Clang/AppleClang builds use the requested
+unity build; every other build uses split translation units. TCC is retained
+only as the bootstrap compiler for `build.c` and is omitted from all
+application/compiler combinations.
 The matrix configures its compiler trees in parallel, then uses
 `cmake/superbuild/CMakeLists.txt` for one outer `cmake --build` invocation.
 Each shared compiler tree builds Debug and Release through one cross-config
@@ -122,11 +122,11 @@ Ninja process, so concurrent builds never write the same `.ninja_deps` or
 commands, so a completed tree can release its slot to its tests while other
 trees continue compiling. On hosts with four or fewer logical CPUs, it admits
 one tree per CPU and sets every inner Ninja and `BUSTER_TEST_JOBS` quota to
-one; the seven-tree Windows matrix therefore runs four one-job compiler trees
+one; the six-tree Windows matrix therefore runs four one-job compiler trees
 at a time without nested oversubscription. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
-unity trees use one job. Tests then run concurrently in the same bounded pool,
-with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
+unity trees use one job. Clang tests then run concurrently in the same bounded
+pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
 must honor that limit. Application builds are multithreaded by default;
 `./build.sh generate -DBUSTER_SINGLE_THREADED=ON` is the explicit serial
 fallback. A single compile is serial throughout: the compiler library starts no
@@ -176,8 +176,9 @@ code generation but cost 0.065% of instructions on a unity self-compile
 (29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
 and no change to the parser benchmark. CI opts out of both because it profiles
 nothing and pays the compile time.
-Clang static analysis runs only against unsanitized Release. Every matrix
-configuration runs `test_all`; platform packages use their native test runner.
+Clang static analysis runs only against unsanitized Release. Every Clang matrix
+configuration runs `test_all`; GCC, Zig, and MSVC are compile-only, and platform
+packages use their native test runner.
 The one carve-out inside `test_all` is a **whole-table audit**: a module whose
 result is a function of the generated metadata tables and the repository's
 source text alone, so no compiler, configuration or optimization level can

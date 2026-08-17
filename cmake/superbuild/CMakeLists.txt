@@ -68,7 +68,10 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     if (BUSTER_TREE_BUILD_DIRECTORY STREQUAL "" OR BUSTER_TREE_NATIVE_CONFIG STREQUAL "" OR
         BUSTER_TREE_BUILD_TARGETS STREQUAL "" OR BUSTER_TREE_PARALLEL_JOBS LESS 1 OR
         (NOT BUSTER_TREE_UNITY_ONLY STREQUAL "0" AND NOT BUSTER_TREE_UNITY_ONLY STREQUAL "1") OR
-        BUSTER_TREE_TEST_0_CONFIG STREQUAL "" OR BUSTER_TREE_TEST_0_TARGET STREQUAL "")
+        (NOT BUSTER_TREE_TEST_0_CONFIG STREQUAL "" AND BUSTER_TREE_TEST_0_TARGET STREQUAL "") OR
+        (BUSTER_TREE_TEST_0_CONFIG STREQUAL "" AND NOT BUSTER_TREE_TEST_0_TARGET STREQUAL "") OR
+        (NOT BUSTER_TREE_TEST_1_CONFIG STREQUAL "" AND BUSTER_TREE_TEST_1_TARGET STREQUAL "") OR
+        (BUSTER_TREE_TEST_1_CONFIG STREQUAL "" AND NOT BUSTER_TREE_TEST_1_TARGET STREQUAL ""))
         message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} is incomplete")
     endif()
 
@@ -93,19 +96,19 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     )
     add_dependencies(buster_compile ${BUSTER_TREE_COMPILE_TARGET})
 
-    set(BUSTER_TREE_TEST_COMMANDS
-        COMMAND "${CMAKE_COMMAND}" -E env
+    set(BUSTER_TREE_TEST_COMMANDS)
+    if (NOT BUSTER_TREE_TEST_0_CONFIG STREQUAL "")
+        list(APPEND BUSTER_TREE_TEST_COMMANDS
+            COMMAND "${CMAKE_COMMAND}" -E env
             "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
             "BUSTER_TEST_TABLE_AUDITS=${BUSTER_TREE_TABLE_AUDITS}"
             "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
             --config "${BUSTER_TREE_TEST_0_CONFIG}"
             --target "${BUSTER_TREE_TEST_0_TARGET}"
             ${BUSTER_TREE_BUILD_OPTIONS}
-    )
+        )
+    endif()
     if (NOT BUSTER_TREE_TEST_1_CONFIG STREQUAL "")
-        if (BUSTER_TREE_TEST_1_TARGET STREQUAL "")
-            message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} has an incomplete second test")
-        endif()
         list(APPEND BUSTER_TREE_TEST_COMMANDS
             COMMAND "${CMAKE_COMMAND}" -E env
                 "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
@@ -125,18 +128,23 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         )
     endif()
 
-    set(BUSTER_TREE_TEST_TARGET "buster_test_${BUSTER_SUPERBUILD_TREE_INDEX}")
-    add_custom_target(${BUSTER_TREE_TEST_TARGET}
-        ${BUSTER_TREE_TEST_COMMANDS}
-        WORKING_DIRECTORY "${BUSTER_SUPERBUILD_SOURCE_DIR}"
-        JOB_POOL buster_matrix_cpu
-        VERBATIM
-    )
-    # Preserve tree-level pipelining: a completed tree can release its
-    # compiler slot to its test command while other trees continue building.
-    # The shared pool still bounds both kinds of command globally.
-    add_dependencies(${BUSTER_TREE_TEST_TARGET} ${BUSTER_TREE_COMPILE_TARGET})
-    add_dependencies(buster_matrix ${BUSTER_TREE_TEST_TARGET})
+    if (BUSTER_TREE_TEST_COMMANDS)
+        set(BUSTER_TREE_TEST_TARGET "buster_test_${BUSTER_SUPERBUILD_TREE_INDEX}")
+        add_custom_target(${BUSTER_TREE_TEST_TARGET}
+            ${BUSTER_TREE_TEST_COMMANDS}
+            WORKING_DIRECTORY "${BUSTER_SUPERBUILD_SOURCE_DIR}"
+            JOB_POOL buster_matrix_cpu
+            VERBATIM
+        )
+        # Preserve tree-level pipelining: a completed tree can release its
+        # compiler slot to its test command while other trees continue building.
+        # The shared pool still bounds both kinds of command globally.
+        add_dependencies(${BUSTER_TREE_TEST_TARGET} ${BUSTER_TREE_COMPILE_TARGET})
+        add_dependencies(buster_matrix ${BUSTER_TREE_TEST_TARGET})
+    else()
+        # Compile-only portability rows have no post-build command.
+        add_dependencies(buster_matrix ${BUSTER_TREE_COMPILE_TARGET})
+    endif()
 endforeach()
 
 if (BUSTER_SUPERBUILD_SELF_HOST_ENABLED)
