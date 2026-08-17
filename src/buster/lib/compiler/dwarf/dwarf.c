@@ -900,6 +900,8 @@ struct DwarfModelWriter
     u32 ref_capacity;
     u32* type_offsets;
     u32* function_offsets;
+    u32* scope_child_offsets;
+    u32* scope_children;
 };
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_relocation(DwarfModelWriter* writer, DwarfRelocation relocation)
@@ -1444,16 +1446,49 @@ struct DwarfModelScopeFrame
     u8 reserved[3];
 };
 
-BUSTER_GLOBAL_LOCAL bool dwarf_model_scope_has_child(DebugModel* model, DebugScopeId parent)
+// Scope emission asks for a scope's children both to choose its abbreviation
+// and to walk its descendants.  Build one parent-to-children CSR table up
+// front so those queries do not rescan the complete model.  Scope IDs are
+// inserted in ascending order, which preserves the old deterministic walk.
+BUSTER_GLOBAL_LOCAL void dwarf_model_build_scope_children(DwarfModelWriter* writer)
 {
-    for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
+    DebugModel* model = writer->model;
+    u32 scope_count = model->scope_count;
+    writer->scope_child_offsets = arena_allocate(writer->arena, u32, (u64)scope_count + 1);
+    memset(writer->scope_child_offsets, 0, sizeof(*writer->scope_child_offsets) * ((u64)scope_count + 1));
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
     {
-        if (model->scopes[scope_index].parent == parent)
+        DebugScopeId parent = model->scopes[scope_index].parent;
+        if (parent < scope_count)
         {
-            return true;
+            writer->scope_child_offsets[parent + 1] += 1;
         }
     }
-    return false;
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        writer->scope_child_offsets[scope_index + 1] += writer->scope_child_offsets[scope_index];
+    }
+    u32 child_count = writer->scope_child_offsets[scope_count];
+    writer->scope_children = child_count ? arena_allocate(writer->arena, u32, child_count) : 0;
+    u32* cursors = scope_count ? arena_allocate(writer->arena, u32, scope_count) : 0;
+    if (cursors)
+    {
+        memset(cursors, 0, sizeof(*cursors) * scope_count);
+    }
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        DebugScopeId parent = model->scopes[scope_index].parent;
+        if (parent < scope_count)
+        {
+            writer->scope_children[writer->scope_child_offsets[parent] + cursors[parent]] = scope_index;
+            cursors[parent] += 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool dwarf_model_scope_has_child(DwarfModelWriter* writer, DebugScopeId parent)
+{
+    return parent < writer->model->scope_count && writer->scope_child_offsets[parent] < writer->scope_child_offsets[parent + 1];
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, DebugScopeId root)
@@ -1464,15 +1499,16 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
     }
     DwarfModelScopeFrame* stack = arena_allocate(writer->arena, DwarfModelScopeFrame, writer->model->scope_count + 1);
     u32 stack_count = 1;
-    stack[0] = (DwarfModelScopeFrame){.scope = root, .entered = true};
+    stack[0] = (DwarfModelScopeFrame){.scope = root, .next_child = writer->scope_child_offsets[root], .entered = true};
     for (;;)
     {
         DwarfModelScopeFrame* frame = stack + stack_count - 1;
         u32 child = UINT32_MAX;
-        while (frame->next_child < writer->model->scope_count)
+        u32 child_end = writer->scope_child_offsets[frame->scope + 1];
+        while (frame->next_child < child_end)
         {
-            u32 candidate = frame->next_child++;
-            if (candidate != root && writer->model->scopes[candidate].parent == frame->scope)
+            u32 candidate = writer->scope_children[frame->next_child++];
+            if (candidate != root)
             {
                 child = candidate;
                 break;
@@ -1481,13 +1517,13 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
         if (child != UINT32_MAX)
         {
             DebugScope* child_scope = writer->model->scopes + child;
-            bool has_child = child_scope->variable_count != 0 || dwarf_model_scope_has_child(writer->model, child);
+            bool has_child = child_scope->variable_count != 0 || dwarf_model_scope_has_child(writer, child);
             dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
             dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
             dwarf_model_emit_scope_variables(writer, child_scope);
             if (has_child)
             {
-                stack[stack_count++] = (DwarfModelScopeFrame){.scope = child};
+                stack[stack_count++] = (DwarfModelScopeFrame){.scope = child, .next_child = writer->scope_child_offsets[child]};
             }
             continue;
         }
@@ -1539,7 +1575,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
     if (function->scope < writer->model->scope_count)
     {
         DebugScope* scope = writer->model->scopes + function->scope;
-        has_children = scope->variable_count != 0 || dwarf_model_scope_has_child(writer->model, function->scope);
+        has_children = scope->variable_count != 0 || dwarf_model_scope_has_child(writer, function->scope);
     }
     for (u32 inline_index = 0; inline_index < writer->model->inline_site_count; inline_index += 1)
     {
@@ -1679,6 +1715,7 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
         .type_offsets = arena_allocate(arena, u32, model->type_count ? model->type_count : 1),
         .function_offsets = arena_allocate(arena, u32, model->function_count ? model->function_count : 1),
     };
+    dwarf_model_build_scope_children(&writer);
     writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
     bool include_padded_float = false;
     for (u32 type_index = 0; type_index < model->type_count; type_index += 1)

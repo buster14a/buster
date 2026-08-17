@@ -547,11 +547,30 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     };
     DebugScope dwarf_scopes[] = {
         {
+            .parent = DEBUG_SCOPE_INVALID,
             .kind = DEBUG_SCOPE_FUNCTION,
             .start = 0,
             .end = 32,
             .variables = dwarf_variable_ids,
             .variable_count = BUSTER_ARRAY_LENGTH(dwarf_variable_ids),
+        },
+        {
+            .parent = 0,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 4,
+            .end = 20,
+        },
+        {
+            .parent = 1,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 8,
+            .end = 12,
+        },
+        {
+            .parent = 0,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 20,
+            .end = 28,
         },
     };
     DebugFunction dwarf_functions[] = {
@@ -596,23 +615,33 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         .line = 1,
     };
     DwarfLineEntry dwarf_model_line = {.code_offset = 0, .file = 0, .line = 1, .column = 1};
-    DwarfResult model_built = dwarf_build(arguments->arena, (DwarfInput){
-                                                               .model = &dwarf_model,
-                                                               .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
-                                                               .producer = S8("buster"),
-                                                               .comp_dir = S8("."),
-                                                               .file_paths = files,
-                                                               .functions = &dwarf_model_function,
-                                                               .lines = &dwarf_model_line,
-                                                               .code_size = 32,
-                                                               .file_count = BUSTER_ARRAY_LENGTH(files),
-                                                               .function_count = 1,
-                                                               .line_count = 1,
-                                                               .language = 0x000c,
-                                                           });
+    DwarfInput dwarf_model_input = {
+        .model = &dwarf_model,
+        .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
+        .producer = S8("buster"),
+        .comp_dir = S8("."),
+        .file_paths = files,
+        .functions = &dwarf_model_function,
+        .lines = &dwarf_model_line,
+        .code_size = 32,
+        .file_count = BUSTER_ARRAY_LENGTH(files),
+        .function_count = 1,
+        .line_count = 1,
+        .language = 0x000c,
+    };
+    DwarfResult model_built = dwarf_build(arguments->arena, dwarf_model_input);
     BUSTER_TEST(arguments, model_built.valid);
     BUSTER_TEST(arguments, model_built.sections[DWARF_SECTION_LOC].length > 16);
     BUSTER_TEST(arguments, model_built.sections[DWARF_SECTION_RANGES].length > 32);
+    DwarfResult model_built_repeat = dwarf_build(arguments->arena, dwarf_model_input);
+    bool model_outputs_match = model_built.valid && model_built_repeat.valid;
+    for (u32 section_index = 0; model_outputs_match && section_index < DWARF_SECTION_COUNT; section_index += 1)
+    {
+        ByteSlice first = model_built.sections[section_index];
+        ByteSlice second = model_built_repeat.sections[section_index];
+        model_outputs_match = first.length == second.length && (!first.length || memcmp(first.pointer, second.pointer, first.length) == 0);
+    }
+    BUSTER_TEST(arguments, model_outputs_match);
     bool has_inline_abbrev = false;
     for (u64 byte_index = 0; byte_index < model_built.sections[DWARF_SECTION_ABBREV].length; byte_index += 1)
     {
