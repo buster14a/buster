@@ -4242,7 +4242,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.branch_fusions = arena_allocate(arena, MachineX64BranchFusion, function->value_count ? function->value_count : 1);
     selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
     selector.atomic_success_registers = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* local_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* local_store_ordinals = local_store_counts;
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         selector.branch_fusions[value_index] = (MachineX64BranchFusion){0};
@@ -7706,7 +7706,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
-    BusterX86MetadataPhysicalOperand operands[4] = {0};
+    BusterX86MetadataPhysicalOperand operands[4];
     bool force_disp32 = (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
     for (u32 operand_index = 0; operand_index < variant.operand_count; operand_index += 1)
     {
@@ -7911,7 +7911,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
         {
             continue;
         }
-        BusterX86MetadataPhysicalOperand operands[4] = {0};
+        BusterX86MetadataPhysicalOperand operands[4];
         bool force_disp32 = (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
         bool step_valid = true;
         for (u32 operand_index = 0; operand_index < step->operand_count; operand_index += 1)

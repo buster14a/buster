@@ -1998,7 +1998,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     // promoted local's latest store ordinal and the commit compares.
     selector.branch_fusions = arena_allocate(arena, MachineA64BranchFusion, function->value_count ? function->value_count : 1);
     selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    u32* local_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* local_store_ordinals = local_store_counts;
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         selector.branch_fusions[value_index] = (MachineA64BranchFusion){.condition = 0xff};

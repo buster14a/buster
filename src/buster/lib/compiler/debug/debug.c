@@ -500,44 +500,6 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         debug_fill_ir_type(arena, &result, input.program, input.program->types.types + type_index, result.types + type_index);
     }
 
-    // Touch every referenced child type while the model is still mutable.  This
-    // also validates that canonical type references stay within the type table.
-    bool* visited = arena_allocate(arena, bool, result.type_count ? result.type_count : 1);
-    DebugTypeId* worklist = arena_allocate(arena, DebugTypeId, result.type_count ? result.type_count : 1);
-    memset(visited, 0, sizeof(bool) * (result.type_count ? result.type_count : 1));
-    u32 work_count = 0;
-    for (u32 root = 0; root < result.type_count; root += 1)
-    {
-        if (!visited[root])
-        {
-            visited[root] = true;
-            worklist[work_count++] = root;
-        }
-    }
-    while (work_count)
-    {
-        DebugType* type = result.types + worklist[--work_count];
-        if (type->element_type != DEBUG_ID_INVALID && type->element_type < result.type_count && !visited[type->element_type])
-        {
-            visited[type->element_type] = true;
-            worklist[work_count++] = type->element_type;
-        }
-        if (type->return_type != DEBUG_ID_INVALID && type->return_type < result.type_count && !visited[type->return_type])
-        {
-            visited[type->return_type] = true;
-            worklist[work_count++] = type->return_type;
-        }
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            DebugTypeId child = type->fields[field_index].type;
-            if (child != DEBUG_ID_INVALID && child < result.type_count && !visited[child])
-            {
-                visited[child] = true;
-                worklist[work_count++] = child;
-            }
-        }
-    }
-
     for (u32 symbol_index = 0; symbol_index < input.program->symbols.count; symbol_index += 1)
     {
         IrSymbol* symbol = input.program->symbols.symbols + symbol_index;
