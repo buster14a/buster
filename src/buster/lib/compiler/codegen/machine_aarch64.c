@@ -454,12 +454,6 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
-    u32 instruction_index = (u32)(instruction - function->instructions);
-    MachineSelectionRuleContext selection_context =
-        machine_selection_rule_context(&selector->selection_prepass, (IrInstructionId){.value = instruction_index}, selector->target);
-    MachineSelectionDecision selection_decision =
-        machine_selection_rule_select(selection_context, MACHINE_SELECTION_MODE_FAST, &selector->selection_counters);
-    BUSTER_CHECK(selection_decision.selected.rule != MACHINE_SELECTION_RULE_INVALID);
     u32 result_register = UINT32_MAX;
     if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
     {
@@ -1658,7 +1652,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
-    selector.selection_prepass = machine_selection_prepass_build(arena, program, function);
+    selector.selection_prepass = machine_selection_prepass_build_minimal(arena, program, function);
     if (!selector.selection_prepass.valid)
     {
         return result;
@@ -2213,6 +2207,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         selector.virtual_register_definitions[register_index] = MACHINE_POINT_INVALID;
     }
     u32 typed_instruction_count = 0;
+    u32 simd_operation_count = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -2338,6 +2333,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             IrInstruction* instruction = function->instructions + id.value;
             typed_instruction_count += 1;
+            simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
             IrSourceRange mark_source = ir_instruction_canonical_source(function, id);
             if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
             {
@@ -2414,6 +2410,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     result.returns_value = returns_value;
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;
+    result.simd_operation_count = simd_operation_count;
     result.selection_counters = selector.selection_counters;
     return result;
 }

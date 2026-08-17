@@ -324,6 +324,35 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_invalid_operand_storage(Arena* a
     return !invalid_prepass.valid && invalid_prepass.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE && !fallback.supported;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_minimal_invalid_value(Arena* arena, IrProgram* program, IrFunction* function)
+{
+    if (!arena || !program || !function || function->value_count == 0)
+    {
+        return false;
+    }
+    IrInstruction* probe = 0;
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->operand_count && instruction->operands)
+        {
+            probe = instruction;
+            break;
+        }
+    }
+    if (!probe)
+    {
+        return false;
+    }
+    IrValueId saved_operand = probe->operands[0];
+    probe->operands[0] = (IrValueId){.value = function->value_count};
+    MachineSelectionPrepass full = machine_selection_prepass_build(arena, program, function);
+    MachineSelectionPrepass minimal = machine_selection_prepass_build_minimal(arena, program, function);
+    probe->operands[0] = saved_operand;
+    return !full.valid && full.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE && !minimal.valid &&
+           minimal.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -351,6 +380,29 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, prepass.instruction_count == add->instruction_count);
     BUSTER_TEST(arguments, prepass.ordinal_count == add->instruction_count);
     BUSTER_TEST(arguments, prepass.value_count == add->value_count);
+
+    MachineSelectionPrepass minimal_prepass = machine_selection_prepass_build_minimal(arguments->arena, program, add);
+    BUSTER_TEST(arguments, minimal_prepass.valid);
+    BUSTER_TEST(arguments, minimal_prepass.error == MACHINE_SELECTION_PREPASS_NONE);
+    BUSTER_TEST(arguments, minimal_prepass.instruction_count == prepass.instruction_count);
+    BUSTER_TEST(arguments, minimal_prepass.value_count == prepass.value_count);
+    BUSTER_TEST(arguments, minimal_prepass.block_count == prepass.block_count);
+    BUSTER_TEST(arguments, minimal_prepass.ordinal_count == prepass.ordinal_count);
+    bool minimal_facts_match = true;
+    for (u32 value_index = 0; minimal_facts_match && value_index < add->value_count; value_index += 1)
+    {
+        minimal_facts_match = minimal_prepass.value_definitions[value_index].value == prepass.value_definitions[value_index].value &&
+                              minimal_prepass.value_definition_blocks[value_index] == prepass.value_definition_blocks[value_index] &&
+                              minimal_prepass.value_use_counts[value_index] == prepass.value_use_counts[value_index] &&
+                              minimal_prepass.value_use_blocks[value_index] == prepass.value_use_blocks[value_index];
+    }
+    BUSTER_TEST(arguments, minimal_facts_match);
+    BUSTER_TEST(arguments, minimal_prepass.instruction_owner_blocks == 0 && minimal_prepass.instruction_ordinals == 0 &&
+                               minimal_prepass.value_definition_ordinals == 0 && minimal_prepass.value_first_use_ordinals == 0 &&
+                               minimal_prepass.value_last_use_ordinals == 0 && minimal_prepass.value_local_store_counts == 0 &&
+                               minimal_prepass.value_constant_bits == 0 && minimal_prepass.value_flags == 0 &&
+                               minimal_prepass.value_promotable_local_widths == 0 && minimal_prepass.instruction_result_classes == 0 &&
+                               minimal_prepass.instruction_side_effects == 0);
 
     bool saw_constant = false;
     bool saw_promotable_local = false;
@@ -417,6 +469,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
     // later scans can rely on the count alone without a per-row pointer
     // branch.
     BUSTER_TEST(arguments, machine_selection_test_invalid_operand_storage(arguments->arena, program, memory, x86_target));
+    BUSTER_TEST(arguments, machine_selection_test_minimal_invalid_value(arguments->arena, program, memory));
 
     MachineSelectionPrepass invalid = machine_selection_prepass_build(0, program, add);
     BUSTER_TEST(arguments, !invalid.valid && invalid.error == MACHINE_SELECTION_PREPASS_INVALID_ARGUMENT);

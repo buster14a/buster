@@ -41,6 +41,15 @@ Do not add optimization passes or spend compile time improving generated code
 unless that work is explicitly requested. Prefer direct, predictable lowering
 and code generation with minimal analysis overhead.
 
+The long-term implementation direction is to make the compiler broadly
+SIMD-friendly: prefer compact contiguous data, batchable lane work, masks for
+tails and irregular active sets, branch-regular loops, and layouts that can
+evolve from scalar to vector processing. Reducing branch and cache misses is
+therefore an architectural goal as well as a present-day performance lever.
+Keep the measurement discipline explicit: record SIMD-readiness and miss-rate
+improvements, but do not describe a scalar throughput regression as a current
+speedup merely because a proxy improved.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current

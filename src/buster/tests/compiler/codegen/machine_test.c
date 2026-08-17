@@ -1904,10 +1904,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult add_selected = machine_select_canonical_function(arguments->arena, machine_program, add_function, machine_target);
             BUSTER_TEST(arguments, add_selected.supported);
-            BUSTER_TEST(arguments, add_selected.selection_counters.query_count[MACHINE_SELECTION_MODE_FAST] ==
-                                       add_selected.selected_typed_instructions);
-            BUSTER_TEST(arguments, add_selected.selection_counters.legal_count[MACHINE_SELECTION_MODE_FAST] ==
-                                       add_selected.selected_typed_instructions);
             bool saw_ssa_alu = false;
             bool ssa_alu_well_formed = true;
             for (u32 row_index = 0; add_selected.supported && row_index < add_selected.function.instruction_count; row_index += 1)

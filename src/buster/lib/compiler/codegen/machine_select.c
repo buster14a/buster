@@ -337,25 +337,133 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
     return result;
 }
 
+MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, IrProgram* program, IrFunction* function)
+{
+    MachineSelectionPrepass result = {
+        .program = program,
+        .function = function,
+        .error = MACHINE_SELECTION_PREPASS_NONE,
+        .valid = false,
+    };
+    if (!arena || !program || !function || (function->instruction_count && !function->instructions) ||
+        (function->block_count && !function->blocks) || (function->value_count && !function->values))
+    {
+        result.error = MACHINE_SELECTION_PREPASS_INVALID_ARGUMENT;
+        return result;
+    }
+    result.instruction_count = function->instruction_count;
+    result.value_count = function->value_count;
+    result.block_count = function->block_count;
+    result.ordinal_count = function->instruction_count;
+    u32 instruction_capacity = function->instruction_count ? function->instruction_count : 1;
+    u32 value_capacity = function->value_count ? function->value_count : 1;
+    result.value_definitions = arena_allocate(arena, IrInstructionId, value_capacity);
+    result.value_definition_blocks = arena_allocate(arena, u32, value_capacity);
+    result.value_use_counts = arena_allocate(arena, u32, value_capacity);
+    result.value_use_blocks = arena_allocate(arena, u32, value_capacity);
+    u8* visited = arena_allocate(arena, u8, instruction_capacity);
+    memset(visited, 0, instruction_capacity);
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        result.value_definitions[value_index] = IR_INSTRUCTION_ID_INVALID;
+        result.value_definition_blocks[value_index] = MACHINE_SELECTION_INVALID_INDEX;
+        result.value_use_counts[value_index] = 0;
+        result.value_use_blocks[value_index] = MACHINE_SELECTION_INVALID_INDEX;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        IrInstructionId tail = IR_INSTRUCTION_ID_INVALID;
+        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        {
+            if (id.value >= function->instruction_count || visited[id.value])
+            {
+                result.error = MACHINE_SELECTION_PREPASS_OWNERSHIP;
+                return result;
+            }
+            visited[id.value] = 1;
+            IrInstruction* instruction = function->instructions + id.value;
+            if (instruction->operand_count && !instruction->operands)
+            {
+                result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
+                return result;
+            }
+            if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                u32 value_index = instruction->result.value;
+                if (value_index >= function->value_count)
+                {
+                    result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
+                    return result;
+                }
+                if (result.value_definitions[value_index].value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result.error = MACHINE_SELECTION_PREPASS_DUPLICATE_DEFINITION;
+                    return result;
+                }
+                result.value_definitions[value_index] = id;
+                result.value_definition_blocks[value_index] = block->id.value;
+            }
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                u32 value_index = instruction->operands[operand_index].value;
+                if (value_index >= function->value_count)
+                {
+                    result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
+                    return result;
+                }
+                result.value_use_counts[value_index] += 1;
+                if (result.value_use_blocks[value_index] == MACHINE_SELECTION_INVALID_INDEX)
+                {
+                    result.value_use_blocks[value_index] = block->id.value;
+                }
+                else if (result.value_use_blocks[value_index] != block->id.value)
+                {
+                    result.value_use_blocks[value_index] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                }
+            }
+            tail = id;
+        }
+        if (tail.value != block->last_instruction.value)
+        {
+            result.error = MACHINE_SELECTION_PREPASS_OWNERSHIP;
+            return result;
+        }
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        if (!visited[instruction_index])
+        {
+            result.error = MACHINE_SELECTION_PREPASS_OWNERSHIP;
+            return result;
+        }
+    }
+    result.valid = true;
+    return result;
+}
+
 bool machine_selection_prepass_value_flag(MachineSelectionPrepass const* prepass, IrValueId value, MachineSelectionValueFlag flag)
 {
-    return prepass && value.value < prepass->value_count && (prepass->value_flags[value.value] & (u8)flag) != 0;
+    return prepass && prepass->value_flags && value.value < prepass->value_count && (prepass->value_flags[value.value] & (u8)flag) != 0;
 }
 
 bool machine_selection_prepass_instruction_owned_by(MachineSelectionPrepass const* prepass, IrInstructionId instruction, u32 block_index)
 {
-    return prepass && instruction.value < prepass->instruction_count && prepass->instruction_owner_blocks[instruction.value].value == block_index;
+    return prepass && prepass->instruction_owner_blocks && instruction.value < prepass->instruction_count &&
+           prepass->instruction_owner_blocks[instruction.value].value == block_index;
 }
 
 MachineSelectionResultClass machine_selection_result_class(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
 {
-    return prepass && instruction.value < prepass->instruction_count ? (MachineSelectionResultClass)prepass->instruction_result_classes[instruction.value]
+    return prepass && prepass->instruction_result_classes && instruction.value < prepass->instruction_count
+               ? (MachineSelectionResultClass)prepass->instruction_result_classes[instruction.value]
                                                                        : MACHINE_SELECTION_RESULT_NONE;
 }
 
 MachineSelectionSideEffect machine_selection_side_effects(MachineSelectionPrepass const* prepass, IrInstructionId instruction)
 {
-    return prepass && instruction.value < prepass->instruction_count ? (MachineSelectionSideEffect)prepass->instruction_side_effects[instruction.value]
+    return prepass && prepass->instruction_side_effects && instruction.value < prepass->instruction_count
+               ? (MachineSelectionSideEffect)prepass->instruction_side_effects[instruction.value]
                                                                        : MACHINE_SELECTION_SIDE_EFFECT_UNKNOWN;
 }
 

@@ -1150,12 +1150,14 @@ struct MachineSelectResult
     bool returns_value;
     u8 reserved[2];
     // Selector expansion statistics: typed instructions consumed and machine
-    // rows produced.
+    // rows produced. SIMD operations are counted during that same typed-IR
+    // walk so accepted machine functions need no source-IR rescan.
     u32 selected_typed_instructions;
     u32 machine_instructions;
-    // Shared declarative matcher telemetry for this function. The current
-    // target emitter consumes the decision classification and retains custom
-    // ABI/complex lowering as the explicit legacy constructor path.
+    u32 simd_operation_count;
+    // Reserved matcher telemetry storage. Target selectors no longer run the
+    // declarative matcher on their hot path, but retaining this cold block
+    // preserves the measured favorable layout of selection results.
     MachineSelectionCounters selection_counters;
 };
 
@@ -1448,9 +1450,10 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* a
 // liveness (defining blocks, last uses, escapes), per-row next calls, the
 // class-trimmed register-file width, and — for QUALITY's global layer —
 // whole-function touch intervals with their constrained-opcode
-// disqualifications and the raw backward-edge spans. Computed once and
-// shared across every scan of the same function: QUALITY's baseline and
-// pinned runs read one prepass instead of re-deriving it all per run.
+// disqualifications and the raw backward-edge spans. It also folds the
+// callee-saved subset of implicit opcode clobbers into that walk. Computed
+// once and shared across every scan of the same function: QUALITY's baseline
+// and pinned runs read one prepass instead of re-deriving it all per run.
 typedef struct MachineFastPrepass MachineFastPrepass;
 struct MachineFastPrepass
 {
@@ -1470,6 +1473,9 @@ struct MachineFastPrepass
     u64* loop_spans;
     u32 loop_span_count;
     u32 active_register_count;
+    // Callee-saved subset of implicit opcode clobbers, folded into the
+    // prepass instruction walk so each FAST placement need not rescan rows.
+    u64 callee_saved_clobber_mask;
     bool valid;
     u8 reserved[3];
 };

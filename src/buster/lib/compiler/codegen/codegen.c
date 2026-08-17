@@ -6547,20 +6547,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_INVALID_IR;
             return result;
         }
-        bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
-        bool windows_dynamic_stack = false;
-        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
-        {
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                IrOpcode opcode = function->instructions[instruction_index].opcode;
-                windows_dynamic_stack |= opcode == IR_OPCODE_STACK_ALLOCATE || opcode == IR_OPCODE_STACK_RESTORE;
-            }
-        }
-        bool x64_aligned_argument_call = false;
         bool x64_save_rbx = target.cpu_arch == CPU_ARCH_X86_64 && codegen_canonical_x64_function_saves_rbx(function);
         if (target.cpu_arch == CPU_ARCH_X86_64 && !x64_save_rbx)
         {
+            // The machine selector reads inline-assembly metadata too, so
+            // retain this cheap shape check before the lazy machine attempt.
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = function->instructions + instruction_index;
@@ -6573,6 +6564,39 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
             }
         }
+        CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
+        result.function_count += 1;
+        *descriptor = (CodegenFunctionDescriptor){
+            .symbol = function->symbol,
+            .code_offset = result.entries[result.entry_count - 1].offset,
+        };
+        result.statistics.function_count += 1;
+        result.statistics.instruction_count += function->instruction_count;
+        result.statistics.value_count += function->value_count;
+        u32 unwind_action_capacity = 0;
+        u32 machine_simd_operation_count = 0;
+        u32 machine_stack_frame_size = 0;
+        bool machine_function_emitted = false;
+        // Selection is attempted before canonical-only frame, ABI, and call
+        // metadata is built. A supported machine function never needs that
+        // preparation; the fallback edge below enters it exactly once.
+        goto machine_attempt;
+
+    canonical_prep:
+        ;
+        // This state is reached only for NONE/PE-unwind paths or a machine
+        // attempt that could not be kept. It owns all canonical emitter data.
+        bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
+        bool windows_dynamic_stack = false;
+        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
+        {
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = function->instructions[instruction_index].opcode;
+                windows_dynamic_stack |= opcode == IR_OPCODE_STACK_ALLOCATE || opcode == IR_OPCODE_STACK_RESTORE;
+            }
+        }
+        bool x64_aligned_argument_call = false;
         u32* value_offsets = arena_allocate(arena, u32, function->value_count);
         u8* direct_call_uses = codegen_canonical_direct_call_uses(arena, function);
         // The Windows x64 sizing pass below already computes every call's
@@ -6841,8 +6865,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // callee-saved pushes, and the stack allocation. The AArch64
         // machine path sizes its own frame after this allocation, so the
         // allocator modes reserve room for its worst-case chunk count.
-        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 8u : windows_aarch64 ? 6u : 5u) + stack_action_capacity +
-                                     (target.cpu_arch == CPU_ARCH_AARCH64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE ? 20u : 0u);
+        unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 8u : windows_aarch64 ? 6u : 5u) + stack_action_capacity +
+                                 (target.cpu_arch == CPU_ARCH_AARCH64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE ? 20u : 0u);
         // The x86-64 machine prologue allocates a page per action whatever the
         // ABI, while the canonical Windows prologue takes the whole frame in
         // one; it also pushes up to seven callee-saved registers under Win64
@@ -6854,20 +6878,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             u32 machine_unwind_action_capacity = 9u + frame_size / CODEGEN_X64_STACK_PROBE_PAGE + (frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0);
             unwind_action_capacity = BUSTER_MAX(unwind_action_capacity, machine_unwind_action_capacity);
         }
-        CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
-        result.function_count += 1;
-        *descriptor = (CodegenFunctionDescriptor){
-            .unwind_actions = arena_allocate(arena, CodegenUnwindAction, unwind_action_capacity),
-            .epilog_offsets = target.cpu_arch == CPU_ARCH_AARCH64 ? arena_allocate(arena, u32, function->instruction_count) : 0,
-            .symbol = function->symbol,
-            .code_offset = result.entries[result.entry_count - 1].offset,
-        };
-        result.statistics.function_count += 1;
-        result.statistics.instruction_count += function->instruction_count;
-        result.statistics.value_count += function->value_count;
+        descriptor->unwind_actions = arena_allocate(arena, CodegenUnwindAction, unwind_action_capacity);
+        descriptor->epilog_offsets = target.cpu_arch == CPU_ARCH_AARCH64 ? arena_allocate(arena, u32, function->instruction_count) : 0;
+        descriptor->unwind_action_count = 0;
+        descriptor->epilog_count = 0;
         result.statistics.stack_value_bytes += value_bytes;
         result.statistics.stack_frame_bytes += frame_size;
         result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, frame_size);
+        goto canonical_emit;
+
+    machine_attempt:
+        // The descriptor is a shell until this path knows its unwind shape;
+        // canonical fallback fills the same shell after its sizing pass.
         // MIR_STACK routes eligible functions through machine selection,
         // stack placement, and the machine encoder; everything else falls
         // back to the canonical path below and is counted. The machine
@@ -6876,7 +6898,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // exact meaning. PE-unwind AArch64 targets stay canonical: their
         // unwind data wants the packed-epilogue and probe-NOP shapes the machine
         // wiring does not model yet.
-        bool machine_function_emitted = false;
         if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
              options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
             (target.cpu_arch == CPU_ARCH_X86_64 || (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
@@ -6891,6 +6912,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             if (!label_address_target)
             {
                 selected = machine_select_canonical_function(machine_scratch.arena, program, function, target);
+                machine_simd_operation_count = selected.simd_operation_count;
             }
             if (!selected.supported)
             {
@@ -6980,6 +7002,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     if (!encoded.valid)
                     {
                         result.statistics.fallback_encode_count += 1;
+                    }
+                    if (encoded_fits)
+                    {
+                        u32 machine_unwind_capacity = 0;
+                        if (target.cpu_arch == CPU_ARCH_X86_64)
+                        {
+                            machine_unwind_capacity = 9u + placement.frame_size / CODEGEN_X64_STACK_PROBE_PAGE +
+                                                      (placement.frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0);
+                        }
+                        else
+                        {
+                            u32 machine_saved_register_count = 0;
+                            for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
+                            {
+                                machine_saved_register_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                            }
+                            u32 machine_frame_total = placement.frame_size + 16u + 8u * machine_saved_register_count;
+                            u32 machine_frame_chunks = machine_frame_total / A64_SP_ADJUST_CHUNK +
+                                                       (machine_frame_total % A64_SP_ADJUST_CHUNK != 0);
+                            machine_unwind_capacity = 6u + machine_frame_chunks + machine_saved_register_count + function->instruction_count;
+                        }
+                        unwind_action_capacity = machine_unwind_capacity;
+                        descriptor->unwind_actions = arena_allocate(arena, CodegenUnwindAction, machine_unwind_capacity);
+                        descriptor->epilog_offsets = target.cpu_arch == CPU_ARCH_AARCH64 ? arena_allocate(arena, u32, function->instruction_count) : 0;
+                        descriptor->unwind_action_count = 0;
+                        descriptor->epilog_count = 0;
                     }
                     if (encoded_fits && target.cpu_arch == CPU_ARCH_AARCH64)
                     {
@@ -7075,6 +7123,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
+                            machine_stack_frame_size = placement.frame_size;
                             result.statistics.allocator_reload_count += placement.reload_count;
                             result.statistics.allocator_spill_count += placement.spill_count;
                             result.statistics.allocator_copy_count += placement.copy_count;
@@ -7180,6 +7229,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
+                            machine_stack_frame_size = placement.frame_size;
                             result.statistics.allocator_reload_count += placement.reload_count;
                             result.statistics.allocator_spill_count += placement.spill_count;
                             result.statistics.allocator_copy_count += placement.copy_count;
@@ -7200,13 +7250,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // Canonical emission accounts for SIMD operations while lowering
             // each row. The machine path bypasses that code, so preserve the
             // same source-IR statistic once its encoded function is kept.
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                result.statistics.simd_operation_count += function->instructions[instruction_index].opcode == IR_OPCODE_SIMD;
-            }
+            result.statistics.simd_operation_count += machine_simd_operation_count;
+            // Machine placement is the only frame information available on
+            // this path; it is the actual frame size and preserves the
+            // diagnostic statistics without rebuilding canonical value slots.
+            result.statistics.stack_value_bytes += machine_stack_frame_size;
+            result.statistics.stack_frame_bytes += machine_stack_frame_size;
+            result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, machine_stack_frame_size);
             continue;
         }
         result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
+        goto canonical_prep;
+
+    canonical_emit:
         // A machine attempt that bailed after describing part of its prologue
         // leaves those actions behind; the canonical prologue below describes
         // the frame it actually emits, so the fallback starts from an empty

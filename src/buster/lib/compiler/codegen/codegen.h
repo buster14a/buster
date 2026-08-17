@@ -289,6 +289,9 @@ struct CodegenStatistics
 {
     u64 instruction_count;
     u64 value_count;
+    // Canonical emission reports its planned value/frame storage separately.
+    // Machine emission has no canonical value-slot plan and reports the
+    // retained placement frame in both counters.
     u64 stack_value_bytes;
     u64 stack_frame_bytes;
     u64 code_bytes;

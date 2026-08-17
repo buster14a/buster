@@ -86,6 +86,11 @@ struct MachineSelectionPrepass
 #define MACHINE_SELECTION_MULTIPLE_BLOCKS (UINT32_MAX - 1u)
 
 BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function);
+// Production selectors consume only the ID-keyed definition/use facts below.
+// Keep the full builder above for diagnostics and the declarative matcher;
+// this variant retains validation while omitting unconsumed per-instruction
+// classifications, ordinals, and value flags.
+BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, IrProgram* program, IrFunction* function);
 BUSTER_F_DECL bool machine_selection_prepass_value_flag(MachineSelectionPrepass const* prepass, IrValueId value, MachineSelectionValueFlag flag);
 BUSTER_F_DECL bool machine_selection_prepass_instruction_owned_by(MachineSelectionPrepass const* prepass, IrInstructionId instruction, u32 block_index);
 BUSTER_F_DECL MachineSelectionResultClass machine_selection_result_class(MachineSelectionPrepass const* prepass, IrInstructionId instruction);
