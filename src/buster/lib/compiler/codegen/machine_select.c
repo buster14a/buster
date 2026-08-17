@@ -105,6 +105,15 @@ BUSTER_GLOBAL_LOCAL MachineSelectionResultClass machine_selection_instruction_re
     return MACHINE_SELECTION_RESULT_SCALAR;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_scalar_register_type(IrType* type)
+{
+    if (!type || !type->layout.resolved || type->layout.size > 8)
+    {
+        return false;
+    }
+    return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_selection_local_type_promotable(IrProgram* program, IrValue* value)
 {
     if (!program || !value)
@@ -112,11 +121,11 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_local_type_promotable(IrProgram* prog
         return false;
     }
     IrType* type = ir_type_from_id(&program->types, value->canonical_type);
-    if (!type || !type->layout.resolved || (type->layout.size != 4 && type->layout.size != 8))
+    if (!machine_selection_scalar_register_type(type) || (type->layout.size != 4 && type->layout.size != 8))
     {
         return false;
     }
-    return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    return true;
 }
 
 MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function)
@@ -187,6 +196,11 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
         IrInstruction* instruction = function->instructions + instruction_index;
         IrBlockId owner = result.instruction_owner_blocks[instruction_index];
         u32 block_index = owner.value;
+        if (instruction->operand_count && !instruction->operands)
+        {
+            result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
+            return result;
+        }
         result.instruction_ordinals[instruction_index] = ordinal;
         result.instruction_result_classes[instruction_index] = (u8)machine_selection_instruction_result_class(program, function, instruction);
         result.instruction_side_effects[instruction_index] = machine_selection_instruction_side_effects(instruction);
@@ -246,7 +260,7 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
         ordinal += 1;
         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
         {
-            IrValueId value = instruction->operands ? instruction->operands[operand_index] : IR_VALUE_ID_INVALID;
+            IrValueId value = instruction->operands[operand_index];
             if (value.value >= function->value_count)
             {
                 result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
@@ -290,10 +304,6 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = function->instructions + instruction_index;
-            if (!instruction->operands)
-            {
-                continue;
-            }
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
                 u32 value_index = instruction->operands[operand_index].value;
@@ -312,7 +322,7 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
                                                         ? function->values[instruction->operands[1].value].canonical_type
                                                         : IR_TYPE_ID_INVALID;
                     IrType* access_type = ir_type_from_id(&program->types, access_type_id);
-                    legal_place = access_type && access_type->layout.resolved &&
+                    legal_place = machine_selection_scalar_register_type(access_type) &&
                                   access_type->layout.size == result.value_promotable_local_widths[value_index];
                 }
                 if (!legal_place)
