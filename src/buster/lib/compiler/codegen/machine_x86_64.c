@@ -4723,13 +4723,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         result.failed_opcode = selector.failed_opcode;
         return result;
     }
-    result.function = machine_function_builder_finish(arena, &selector.builder);
     for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
     {
         IrBlock* destination = function->blocks + destination_block;
         for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
         {
-            u32 copy_offset = result.function.edge_copy_source_count;
+            u32 copy_offset = selector.builder.edge_copy_sources.total_count;
             for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
             {
                 IrIncoming* incoming = parameter->first_incoming;
@@ -4741,27 +4740,17 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
                 }
-                MachineRef* grown = arena_allocate(arena, MachineRef, result.function.edge_copy_source_count + 1u);
-                if (result.function.edge_copy_source_count)
-                {
-                    memcpy(grown, result.function.edge_copy_sources, (u64)result.function.edge_copy_source_count * sizeof(MachineRef));
-                }
-                grown[result.function.edge_copy_source_count++] =
-                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]);
-                result.function.edge_copy_sources = grown;
+                machine_builder_edge_copy_source(
+                    &selector.builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]));
             }
-            MachineEdge* grown_edges = arena_allocate(arena, MachineEdge, result.function.edge_count + 1u);
-            if (result.function.edge_count)
-            {
-                memcpy(grown_edges, result.function.edges, (u64)result.function.edge_count * sizeof(MachineEdge));
-            }
-            grown_edges[result.function.edge_count++] = (MachineEdge){.source_block = predecessor->block.value,
-                                                                      .destination_block = destination_block,
-                                                                      .copy_offset = copy_offset,
-                                                                      .copy_count = (u16)destination->parameter_count};
-            result.function.edges = grown_edges;
+            machine_builder_edge(&selector.builder,
+                                 (MachineEdge){.source_block = predecessor->block.value,
+                                               .destination_block = destination_block,
+                                               .copy_offset = copy_offset,
+                                               .copy_count = (u16)destination->parameter_count});
         }
     }
+    result.function = machine_function_builder_finish(arena, &selector.builder);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;
     result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
     result.function.immediate_count = selector.immediates.total_count;

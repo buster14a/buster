@@ -18,6 +18,47 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-17d` (Linux x86_64, Zen 4 7940HS; **native codegen verifier and
+selector edge construction**). The machine path no longer verifies every
+selected function twice: `codegen_generate_canonical_module_attempt` retains
+the first `MachineVerifyResult.error` for both fallback telemetry and the
+placement gate. Both x86-64 and AArch64 selectors now append CFG edges and
+parallel-copy sources to the `MachineFunctionBuilder` streams before the one
+final flatten, instead of arena-allocating a one-row-larger array and copying
+the complete prefix for every append. Traversal order, copy offsets and
+failure behavior stay unchanged.
+
+Same-source A/B used the saved pre-change and final trusted Clang Release
+compilers, both compiling the final unity TU to the same path, seven
+interleaved rounds. Median instructions are 16,456,348,477 -> 16,308,620,307,
+**-147,728,170 (-0.898%)**; branches are 3,039,388,760 -> 3,013,774,374
+(-0.843%), and branch misses are 31,434,542 -> 30,673,174 (**-2.42%**).
+Cycle medians read -0.82%, but the distributions overlap and no wall/cycle
+claim is made. A separate five-round cache series records L1d loads
+5,949,562,885 -> 5,910,992,196 (-0.65%), L1d misses 192,531,364 ->
+187,236,027 (**-2.75%**), generic cache references 417,673,066 -> 407,665,803
+(-2.40%), and generic cache misses 14,628,202 -> 13,894,142 (**-5.02%**).
+Both compilers produced byte-identical output. The verifier removal supplies
+145.7 M of the instruction win; the selector stream conversion supplies a
+smaller 2.09 M (-0.013%) while deleting the quadratic growth path and 42
+lines of copy logic.
+
+Two measured candidates were reverted. A CSR-parallel first-edge index for
+FAST replaced four repeated edge scans but cost **+11.06 M instructions
+(+0.068%)**, +2.28 M branches and +0.54 M branch misses: building and probing
+the index costs more than the short edge arrays it replaces on this workload.
+Hoisting x86 metadata aggregate-block topology work removed 13 K branch
+misses but added 49 K instructions and 8 K branches because it made a query
+operand scan unconditional; the miss delta is 0.04% and far below cycle noise.
+
+Final `test_self_host` holds the byte-identical fixed point at 35,497,344
+bytes: stage 1 retires 16,308,885,038 instructions, stage 2 retires
+114,940,178,696, and all 1,440,839 exact attempts succeed. Release `test_all`
+passes 308,861 assertions across 39 modules, including the complete x86
+metadata census and the AArch64 selector/encoder suites. The complete local
+combination matrix also passes: Clang unsanitized and sanitized Debug/Release,
+GCC and Zig Debug compilation, and Clang static analysis with zero warnings.
+
 `2026-08-17c` (Linux x86_64, Zen 4 7940HS; **cache/branch investigation**;
 [PR #441](https://code.buster14a.com/buster/buster/pulls/441),
 [PR #442](https://code.buster14a.com/buster/buster/pulls/442),

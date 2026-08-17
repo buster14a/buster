@@ -6897,11 +6897,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 u32 reason = selected.failed_opcode <= IR_OPCODE_COUNT ? (u32)selected.failed_opcode : (u32)IR_OPCODE_COUNT;
                 result.statistics.fallback_opcode_counts[reason] += 1;
             }
-            if (selected.supported && machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+            MachineVerifyError verify_error = selected.supported ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
             {
                 result.statistics.fallback_verify_count += 1;
             }
-            if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
+            if (selected.supported && verify_error == MACHINE_VERIFY_NONE)
             {
                 MachineStackPlacement placement;
 
