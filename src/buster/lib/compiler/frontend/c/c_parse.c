@@ -6067,10 +6067,16 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     {
         if (aggregate_index == start && aggregate_index < end && preprocess.tokens[aggregate_index].kind == C_TOKEN_IDENTIFIER)
         {
-            for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
+            // The old entity walk chose the oldest matching typedef, even when
+            // a scoped lookup had already rejected the name. Keep that
+            // fallback contract; the bucket helper validates partial parse
+            // metadata before using the newest-first chain.
+            CEntityId typedef_entity = c_parse_lookup_typedef_name_fallback(result, spelling);
+            if (typedef_entity.value < result->entity_count)
             {
-                CEntity* entity = &result->entities[entity_index];
-                if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index])))
+                CEntity* entity = &result->entities[typedef_entity.value];
+                if (entity->kind == C_ENTITY_TYPEDEF)
                 {
                     u32 qualifier_index = aggregate_index + 1;
                     CTypeId type = entity->type;
@@ -7648,6 +7654,66 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, Stri
         }
     }
     return found;
+}
+
+BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name)
+{
+    if (!result)
+    {
+        return C_ENTITY_ID_INVALID;
+    }
+
+    // A complete parse has a power-of-two bucket table and a terminated chain.
+    // Hand-built or partially rolled-back results can omit either table, point
+    // at an invalid entity, or leave a cycle. Prove the chain before entering
+    // the canonical lookup, whose hot path intentionally assumes this shape.
+    bool bucket_chain_valid = result->entities && result->typedef_lookup_buckets && result->entity_lookup_bucket_count &&
+                              (result->entity_lookup_bucket_count & (result->entity_lookup_bucket_count - 1)) == 0;
+    if (bucket_chain_valid)
+    {
+        u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
+        CEntityId entity = result->typedef_lookup_buckets[bucket];
+        u32 steps = 0;
+        while (entity.value != C_ID_UNDERLYING_INVALID)
+        {
+            if (steps >= result->entity_count || entity.value >= result->entity_count)
+            {
+                bucket_chain_valid = false;
+                break;
+            }
+            CEntity* candidate = &result->entities[entity.value];
+            if (candidate->kind != C_ENTITY_TYPEDEF)
+            {
+                bucket_chain_valid = false;
+                break;
+            }
+            entity = candidate->next_typedef_in_lookup;
+            steps += 1;
+        }
+        if (bucket_chain_valid)
+        {
+            // Keep the canonical newest-first lookup as the source of the
+            // result after validation; oldest=true preserves the historical
+            // ascending entity scan's first exact typedef.
+            return c_parse_lookup_typedef_name(result, name, true);
+        }
+    }
+
+    // Preserve the original fallback for absent or malformed lookup metadata.
+    // Ascending entity order is the language's oldest-typedef tie breaker.
+    if (!result->entities)
+    {
+        return C_ENTITY_ID_INVALID;
+    }
+    for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+    {
+        CEntity* entity = &result->entities[entity_index];
+        if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
+        {
+            return (CEntityId){.value = entity_index};
+        }
+    }
+    return C_ENTITY_ID_INVALID;
 }
 
 BUSTER_C_SHARED CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name)

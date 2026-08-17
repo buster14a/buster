@@ -4356,6 +4356,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_fallback_lookup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(
+        temporary.arena,
+        S8("int TypeName;\n"
+           "int typedef_fallback_scope(void) {\n"
+           "    typedef long TypeName;\n"
+           "    {\n"
+           "        typedef short TypeName;\n"
+           "        TypeName const value;\n"
+           "        return sizeof(value);\n"
+           "    }\n"
+           "}\n"),
+        (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CEntityId value_id = C_ENTITY_ID_INVALID;
+    CEntityId oldest_typedef = C_ENTITY_ID_INVALID;
+    CEntityId newest_typedef = C_ENTITY_ID_INVALID;
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &parse.entities[entity_index];
+        if (entity->kind == C_ENTITY_LOCAL && string_equal(entity->name, S8("value")))
+        {
+            value_id = (CEntityId){.value = entity_index};
+        }
+        if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, S8("TypeName")))
+        {
+            if (oldest_typedef.value == C_ID_UNDERLYING_INVALID)
+            {
+                oldest_typedef = (CEntityId){.value = entity_index};
+            }
+            newest_typedef = (CEntityId){.value = entity_index};
+        }
+    }
+    BUSTER_TEST(arguments, value_id.value != C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, oldest_typedef.value != C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, newest_typedef.value != C_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, oldest_typedef.value != newest_typedef.value);
+    CEntityId fallback_typedef = c_parse_lookup_typedef_name_fallback(&parse, S8("TypeName"));
+    BUSTER_TEST(arguments, fallback_typedef.value == oldest_typedef.value);
+    if (value_id.value < parse.entity_count)
+    {
+        // The global object makes the scoped probe reject TypeName, forcing
+        // the scalar fallback. The old entity walk then selected the oldest
+        // typedef (long), while the ordinary scope lookup still sees the
+        // inner short typedef.
+        CType* value_type = c_type_from_id(&parse, parse.entities[value_id.value].type);
+        BUSTER_TEST(arguments, value_type && value_type->kind == C_TYPE_LONG && value_type->is_const);
+        CEntityId scoped_name = c_parse_lookup_entity(&parse, parse.entities[value_id.value].scope, S8("TypeName"));
+        BUSTER_TEST(arguments, scoped_name.value == newest_typedef.value);
+        if (scoped_name.value < parse.entity_count)
+        {
+            CType* scoped_type = c_type_from_id(&parse, parse.entities[scoped_name.value].type);
+            BUSTER_TEST(arguments, scoped_type && scoped_type->kind == C_TYPE_SHORT);
+        }
+    }
+
+    // A partial result may have no typedef buckets at all. The fallback must
+    // retain the old ascending entity walk rather than probing a null table.
+    CEntityId* saved_typedef_buckets = parse.typedef_lookup_buckets;
+    u32 saved_bucket_count = parse.entity_lookup_bucket_count;
+    parse.typedef_lookup_buckets = 0;
+    BUSTER_TEST(arguments, c_parse_lookup_typedef_name_fallback(&parse, S8("TypeName")).value == oldest_typedef.value);
+    parse.typedef_lookup_buckets = saved_typedef_buckets;
+    parse.entity_lookup_bucket_count = 0;
+    BUSTER_TEST(arguments, c_parse_lookup_typedef_name_fallback(&parse, S8("TypeName")).value == oldest_typedef.value);
+    parse.entity_lookup_bucket_count = saved_bucket_count;
+
+    if (saved_typedef_buckets && saved_bucket_count)
+    {
+        u32 type_name_bucket = (u32)c_parse_name_hash(c_parse_name_symbol(&parse, S8("TypeName")), S8("TypeName")) & (saved_bucket_count - 1);
+        CEntityId saved_bucket_head = saved_typedef_buckets[type_name_bucket];
+        saved_typedef_buckets[type_name_bucket] = (CEntityId){.value = parse.entity_count};
+        // An out-of-range chain id is malformed, so the helper must discard
+        // any partial result and recover the oldest exact typedef by scan.
+        BUSTER_TEST(arguments, c_parse_lookup_typedef_name_fallback(&parse, S8("TypeName")).value == oldest_typedef.value);
+        saved_typedef_buckets[type_name_bucket] = saved_bucket_head;
+
+        if (newest_typedef.value < parse.entity_count)
+        {
+            CEntityId saved_next = parse.entities[newest_typedef.value].next_typedef_in_lookup;
+            saved_typedef_buckets[type_name_bucket] = newest_typedef;
+            parse.entities[newest_typedef.value].next_typedef_in_lookup = newest_typedef;
+            // A self-cycle must be bounded and must fall back to the same
+            // oldest exact typedef rather than looping or returning a prefix.
+            BUSTER_TEST(arguments, c_parse_lookup_typedef_name_fallback(&parse, S8("TypeName")).value == oldest_typedef.value);
+            parse.entities[newest_typedef.value].next_typedef_in_lookup = saved_next;
+            saved_typedef_buckets[type_name_bucket] = saved_bucket_head;
+        }
+    }
+    scratch_end(temporary);
+
+    TemporalArena malformed_temporary = scratch_begin(0, 0);
+    CPreprocessResult malformed_tokens = c_preprocess(malformed_temporary.arena,
+                                                       S8("int malformed_typedef_fallback(void) { UnknownType value; return 0; }\n"),
+                                                       (CPreprocessOptions){0});
+    CParseResult malformed_parse = c_parse(malformed_temporary.arena, malformed_tokens);
+    BUSTER_TEST(arguments, malformed_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, malformed_parse.diagnostic_count != 0);
+    scratch_end(malformed_temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8857,6 +8964,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
+    c_test_result_add(&result, c_test_typedef_fallback_lookup(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));

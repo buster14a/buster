@@ -100,6 +100,7 @@ BUSTER_C_EXTERN u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
 BUSTER_C_EXTERN CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name);
 BUSTER_C_EXTERN u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index);
 BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
 BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* arena);
