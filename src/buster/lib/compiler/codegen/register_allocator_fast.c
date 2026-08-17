@@ -1214,12 +1214,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     bool* contract_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
     u32* out_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
     bool* out_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
-    for (u64 entry_index = 0; entry_index < (u64)function->block_count * register_count; entry_index += 1)
+    u64 entry_count = (u64)function->block_count * register_count;
+    if (entry_count)
     {
-        contract_owner[entry_index] = UINT32_MAX;
-        contract_dirty[entry_index] = false;
-        out_owner[entry_index] = UINT32_MAX;
-        out_dirty[entry_index] = false;
+        memset(contract_owner, 0xff, entry_count * sizeof(*contract_owner));
+        memset(contract_dirty, 0, entry_count * sizeof(*contract_dirty));
+        memset(out_owner, 0xff, entry_count * sizeof(*out_owner));
+        memset(out_dirty, 0, entry_count * sizeof(*out_dirty));
     }
     MachineBuilderStream retro_edits;
     machine_stream_initialize(&retro_edits, sizeof(MachineEdit));

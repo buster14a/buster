@@ -7229,7 +7229,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
                                                      MachineX64ExactEmitCounters* counters)
 {
     if (counters) counters->attempts += 1;
-    u8 exact_bytes[16];
+    // The metadata bridge writes only after all dynamic validation and
+    // capacity checks succeed.  Point it at the final encoder storage so the
+    // machine path does not copy through a second 16-byte staging buffer.
+    // Guard the subtraction and pointer formation first: an already-overflowed
+    // encoder must fail closed without forming an out-of-range destination.
+    if (encoder->count > encoder->capacity)
+    {
+        encoder->overflow = true;
+        if (counters) counters->fallbacks += 1;
+        return false;
+    }
+    u32 output_capacity = encoder->capacity - encoder->count;
+    if (output_capacity > 16u) output_capacity = 16u;
+    u8* output = encoder->bytes + encoder->count;
     BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(metadata_token, (BusterX86MetadataMachineExactQuery){
         .operands = operands,
         .operand_count = operand_count,
@@ -7237,19 +7250,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
         .force_lock = force_lock,
         .mask_register_plus_one = mask_register_plus_one,
         .zeroing = zeroing,
-        .output = exact_bytes,
-        .output_capacity = sizeof(exact_bytes),
+        .output = output,
+        .output_capacity = output_capacity,
         .relocations = 0,
         .relocation_capacity = 0,
     });
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
-        emitted.byte_count > sizeof(exact_bytes) || encoder->count > encoder->capacity || emitted.byte_count > encoder->capacity - encoder->count)
+        emitted.byte_count > 16u || emitted.byte_count > output_capacity)
     {
         encoder->overflow = true;
         if (counters) counters->fallbacks += 1;
         return false;
     }
-    memcpy(encoder->bytes + encoder->count, exact_bytes, emitted.byte_count);
     encoder->count += emitted.byte_count;
     if (counters) counters->successes += 1;
     return true;

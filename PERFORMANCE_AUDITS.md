@@ -18,6 +18,67 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-17f` (Linux x86_64, Zen 4 7940HS; **exact-emitter validation,
+dispatch, and staging**). Four independently measured changes reduce the
+remaining native x86 encoding and FAST-placement work without adding a byte
+authority. Exact-plan publication caches the ordinary-policy integrity byte in
+the existing tail padding of its immutable 232-byte record; token validation
+still proves prewarm, slot, policy, readiness, identity, form, pattern,
+operand count, hash, APX policy and the supplied integrity byte before use.
+The scalar machine-fast binding loop combines its duplicated operand-kind
+dispatch and repeated GPR-class test while preserving the exact mismatch
+versus unsupported/fallback split, including malformed unknown binding kinds.
+
+`machine_x64_emit_exact_form` now gives the metadata bridge the final bounded
+encoder span instead of copying successful output through a second 16-byte
+array. The metadata scalar and generic paths retain their private transactional
+scratch, so every late range/length failure still leaves caller output
+untouched; the public metadata API and its overlap behavior are unchanged.
+Finally, FAST placement initializes its four block-by-register owner/dirty
+arrays with guarded contiguous bulk fills instead of a scalar four-store loop.
+This is deliberately a runtime-wide-memory primitive rather than a mandated
+fixed-width batch: tails and irregular active sets remain compatible with the
+mask-oriented SIMD direction.
+
+All isolated A/Bs used saved trusted Clang Release compilers, identical final
+source/flags/output paths, CPU 2 pinning, seven interleaved non-multiplexed
+instruction rounds, and byte-identical outputs. Cached token integrity is
+15,005,566,058 -> 14,960,561,444, **-45,004,614 (-0.300%)**; it trades
+branches **+0.108%**, while branch misses are noisy. Merged binding dispatch is
+14,971,079,862 -> 14,965,695,287, **-5,384,575 (-0.0360%)**; branches rise
+0.062%, branch misses fall 0.38%, and L1d loads fall 0.18%. FAST bulk fill is
+14,986,440,016 -> 14,971,125,884, **-15,314,132 (-0.102%)**; branches fall
+0.058% and branch misses fall directionally, while median L1d misses rise
+1.46%. Removing the outer byte copy is 14,966,077,687 -> 14,915,105,194,
+**-50,972,493 (-0.341%)**, with branches **-0.841%** and L1 counters flat
+within noise.
+
+The clean merged-main versus final-candidate cumulative A/B is instructions
+15,031,788,627 -> 14,915,062,140, **-116,726,487 (-0.777%)**; cycles
+5,550,876,883 -> 5,479,017,618, **-1.295%**; branches 2,768,725,057 ->
+2,748,531,379, **-0.729%**. Branch misses rise 28,376,850 -> 29,778,318
+(**+4.94%**), while L1d loads and misses are nearly flat at +0.16% each. The
+miss-rate tradeoff is recorded rather than hidden: the candidate removes
+enough dependent validation/copy work to win retired instructions and cycles,
+but its changed code layout is less friendly to this run's branch predictor.
+
+One cache-oriented selector experiment was rejected. Materializing all sparse
+IR row IDs once for two reverse alias sweeps saved 0.083% instructions, 0.042%
+branches and 0.139% L1d loads, but raised branch and L1d misses about 0.67%
+each and cycles 0.62%; retaining only a per-block working set is better for the
+current cache shape. The debug-off declaration-position and machine-line-mark
+work remains deferred because the mandatory self-host gate carries debug info,
+so that series needs a separate `-g0` benchmark rather than a source-only
+claim.
+
+Final `test_self_host` holds the byte-identical fixed point at 35,523,192
+bytes: stage 1 retires 14,915,336,386 instructions, stage 2 retires
+106,134,385,650, and all 1,442,309 exact attempts succeed. Release `test_all`
+passes 309,177 assertions across 39 modules, including 877 metadata tests and
+the 34,043-row completion census. The complete local combination matrix also
+passes: Clang unsanitized and sanitized Debug/Release, GCC and Zig Debug
+compilation, and Clang static analysis with zero warnings.
+
 `2026-08-17e` (Linux x86_64, Zen 4 7940HS; **machine-path dead work and
 SIMD-oriented dataflow**). Five independently measured changes remove work
 that the native machine path either ignored or recomputed. Target selectors no

@@ -887,6 +887,12 @@ struct BusterX86MetadataExactPlanRecord
     u8 machine_fast_template_relative_width;
     u8 machine_fast_template_relative_offset;
     u8 machine_fast_template_has_relative;
+    // The serially published identity already fixes the token integrity
+    // byte for the ordinary machine policy.  Cache that pure value beside
+    // the immutable plan so workers do not re-read the form identity and
+    // re-run the shift/xor chain on every token validation.  The APX policy
+    // bit is the only allowed variation and is folded in at validation time.
+    u8 machine_exact_integrity;
     bool ready;
 };
 BUSTER_CT_CHECK(sizeof(BusterX86MetadataExactPlanRecord) <= 256);
@@ -6617,52 +6623,50 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             return false;
         BusterX86MetadataPhysicalOperand const* physical = query.operands + binding_index;
         u8 binding_kind = plan->machine_fast_binding_kind[binding_index];
-        bool operand_matches = false;
         if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_REGISTER)
         {
-            operand_matches = physical->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                              physical->reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR;
-            if (operand_matches)
+            if (physical->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                physical->reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
             {
-                u16 width = physical->width ? physical->width : physical->reg.width;
-                u16 width_flags = plan->machine_fast_binding_width_flags[binding_index];
-                if (width && width_flags && width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
-                    width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY &&
-                    !(width_flags & buster_x86_metadata_emit_width_flags(width)))
-                    operand_matches = false;
+                result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                result->diagnostic_operand = metadata_index;
+                return true;
             }
+            u16 width = physical->width ? physical->width : physical->reg.width;
+            u16 width_flags = plan->machine_fast_binding_width_flags[binding_index];
+            if (width && width_flags && width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
+                width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY &&
+                !(width_flags & buster_x86_metadata_emit_width_flags(width)))
+            {
+                result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                result->diagnostic_operand = metadata_index;
+                return true;
+            }
+            if (physical->reg.index >= 16 || physical->reg.high_byte)
+                return false;
         }
         else if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_MEMORY ||
                  binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_ADDRESS_GENERATOR)
         {
-            operand_matches = physical->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
-            if (operand_matches && binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_MEMORY)
+            if (physical->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+            {
+                result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                result->diagnostic_operand = metadata_index;
+                return true;
+            }
+            if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_MEMORY)
             {
                 u16 width = physical->width;
                 u16 width_flags = plan->machine_fast_binding_width_flags[binding_index];
                 if (width && width_flags && width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
                     width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY &&
                     !(width_flags & buster_x86_metadata_emit_width_flags(width)))
-                    operand_matches = false;
+                {
+                    result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                    result->diagnostic_operand = metadata_index;
+                    return true;
+                }
             }
-        }
-        else if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_IMMEDIATE)
-            operand_matches = physical->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE;
-        if (!operand_matches)
-        {
-            result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-            result->diagnostic_operand = metadata_index;
-            return true;
-        }
-        if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_REGISTER)
-        {
-            if (physical->reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR || physical->reg.index >= 16 ||
-                physical->reg.high_byte)
-                return false;
-        }
-        else if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_MEMORY ||
-                 binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_ADDRESS_GENERATOR)
-        {
             BusterX86MetadataPhysicalMemory memory = physical->memory;
             if (!memory.has_base || memory.has_symbol || memory.symbol.pointer || memory.symbol.length || memory.has_index || memory.rip_relative ||
                 memory.vsib || memory.scale > 1 || memory.has_segment || memory.segment != BUSTER_X86_METADATA_SEGMENT_NONE ||
@@ -6671,6 +6675,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
         }
         else if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_IMMEDIATE)
         {
+            if (physical->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+            {
+                result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                result->diagnostic_operand = metadata_index;
+                return true;
+            }
             if (physical->has_symbol || physical->symbol.pointer || physical->symbol.length ||
                 (physical->has_value && physical->has_unsigned_value))
                 return false;
@@ -6680,7 +6690,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
                 return true;
             }
         }
-        else return false;
+        else
+        {
+            result->status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+            result->diagnostic_operand = metadata_index;
+            return true;
+        }
     }
 
     BusterX86MetadataPhysicalOperand const* reg_binding =
@@ -8441,8 +8456,8 @@ buster_x86_metadata_machine_exact_plan_record(BusterX86MetadataMachineExactToken
         record->operand_count != record->form->operand_count || record->form->id != record->identity.form_id ||
         record->form->stable_hash != record->identity.stable_hash)
         return 0;
-    u8 integrity = buster_x86_metadata_machine_exact_token_integrity(
-        token.slot_plus_one, token.policy_flags, record->identity.form_id, record->identity.stable_hash);
+    u8 integrity = (u8)(record->machine_exact_integrity ^
+                        (token.policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX));
     if (token.integrity != integrity ||
         (record->form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
          !(token.policy_flags & BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_ALLOWS_APX)))
@@ -10242,6 +10257,12 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
         }
     }
     buster_x86_metadata_machine_fast_prepare(plan, form, pattern);
+    // The token integrity helper is pure over the immutable plan identity and
+    // the ordinary VALID policy.  Publish its base value with the rest of the
+    // plan; machine_exact_plan_record() still performs every fail-closed
+    // identity/shape/policy check before consuming it.
+    plan->machine_exact_integrity = buster_x86_metadata_machine_exact_token_integrity(
+        (u16)(slot + 1), BUSTER_X86_METADATA_MACHINE_EXACT_TOKEN_POLICY_VALID, plan->identity.form_id, plan->identity.stable_hash);
     // Publish this bit last.  The prewarm completion flag is published only
     // after this serial preparation returns, so workers see immutable plan
     // records and their pointed-to normalized/pattern caches.
