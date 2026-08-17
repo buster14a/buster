@@ -58,11 +58,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_coverage_record(const Bust
                                                                      BusterX86MetadataValidationResult* result);
 
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
-// Distance from each pool byte to its terminating NUL (UINT32_MAX when none
+// Distance from each pool byte to its terminating NUL (UINT16_MAX when none
 // follows), so asking a string's length is one read instead of a byte scan --
 // consumers ask per record and per literal comparison, which rescanned the
-// same strings constantly.
-BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_pool_nul_distances[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
+// same strings constantly.  The checked-in pool's longest string is 276
+// bytes.  A future oversized string saturates to the invalid sentinel during
+// decode, making validation fail closed instead of truncating its length.
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_pool_nul_distances[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_valid[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
@@ -104,7 +106,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     {
         buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
     }
-    u32 nul_distance = UINT32_MAX;
+    u16 nul_distance = UINT16_MAX;
     for (u64 index = BUSTER_X86_GENERATED_STRING_POOL_SIZE; index; index -= 1)
     {
         u64 position = index - 1;
@@ -112,9 +114,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
         {
             nul_distance = 0;
         }
-        else if (nul_distance != UINT32_MAX)
+        else if (nul_distance != UINT16_MAX)
         {
-            nul_distance += 1;
+            nul_distance = nul_distance == UINT16_MAX - 1 ? UINT16_MAX : (u16)(nul_distance + 1);
         }
         buster_x86_metadata_pool_nul_distances[position] = nul_distance;
     }
@@ -549,8 +551,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset
     {
         return false;
     }
-    u32 distance = buster_x86_metadata_pool_nul_distances[offset];
-    if (distance == UINT32_MAX)
+    u16 distance = buster_x86_metadata_pool_nul_distances[offset];
+    if (distance == UINT16_MAX)
     {
         return false;
     }
@@ -832,7 +834,12 @@ struct BusterX86MetadataExactPlanRecord
     BusterX86MetadataExactPlan identity;
     BusterX86MetadataForm const* form;
     BusterX86MetadataPatternSemantics const* pattern;
-    BusterX86MetadataOperand operands[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
+    // Operand views are already normalized into one immutable, contiguous
+    // table during metadata prewarm.  Borrow the owning form's range instead
+    // of copying sixteen 24-byte slots into every sparse exact plan.  Besides
+    // removing duplicate storage, this pulls the machine-fast projection six
+    // cache lines closer to the record head on 64-bit hosts.
+    BusterX86MetadataOperand const* operands;
     u8 effective_field_sources[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
     u8 operand_flags[BUSTER_X86_METADATA_EXACT_PLAN_OPERAND_CAPACITY];
     u16 operand_count;
@@ -891,6 +898,7 @@ struct BusterX86MetadataExactPlanRecord
     u8 machine_fast_template_has_relative;
     bool ready;
 };
+BUSTER_CT_CHECK(sizeof(BusterX86MetadataExactPlanRecord) <= 256);
 
 enum
 {
@@ -8178,13 +8186,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_emit_required_fe
 // path of every emitted instruction; only buster_x86_metadata_emit_form_to_scratch
 // needs a mutable copy, because it rewrites the prefix kind and encoder family
 // and then hands the rewritten row to its own callees.
-BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_with_form(BusterX86MetadataEmitQuery query,
+BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_with_form(BusterX86MetadataEmitQuery const* query_pointer,
                                                                                          BusterX86MetadataForm const* form_pointer,
                                                                                          bool check_mnemonic,
                                                                                          BusterX86MetadataExactPlanRecord const* plan,
                                                                                          BusterX86MetadataMachineExactToken const* machine_token,
                                                                                          bool force_disp32, bool policy_prevalidated)
 {
+#define query (*query_pointer)
 #define form (*form_pointer)
     BusterX86MetadataEmitResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
@@ -8237,6 +8246,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
     result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
     return result;
 #undef form
+#undef query
 }
 
 BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQuery query)
@@ -8254,7 +8264,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQ
         result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
         return result;
     }
-    return buster_x86_metadata_emit_form_with_form(query, &form, true, 0, 0, false, false);
+    return buster_x86_metadata_emit_form_with_form(&query, &form, true, 0, 0, false, false);
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact_policy(BusterX86MetadataEmitQuery query,
@@ -8296,7 +8306,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_ex
     normalized.physical.mnemonic = buster_x86_metadata_string_span(form_pointer->iclass);
     normalized.physical.source_semantics = false;
     if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
-    return buster_x86_metadata_emit_form_with_form(normalized, form_pointer, false, 0, 0, false, policy_prevalidated);
+    return buster_x86_metadata_emit_form_with_form(&normalized, form_pointer, false, 0, 0, false, policy_prevalidated);
 }
 
 BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86MetadataEmitQuery query, BusterX86MetadataFormKey key)
@@ -8501,7 +8511,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_prevalidated(BusterX8
         .relocation_capacity = query.relocation_capacity,
     };
     if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
-    return buster_x86_metadata_emit_form_with_form(normalized, record->form, false, record, 0, false, false);
+    return buster_x86_metadata_emit_form_with_form(&normalized, record->form, false, record, 0, false, false);
 }
 
 BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86MetadataMachineExactToken token,
@@ -8559,7 +8569,7 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_machine(BusterX86Meta
             }
             else
             {
-                result = buster_x86_metadata_emit_form_with_form(normalized, record->form, false, record, &token, query.force_disp32, false);
+                result = buster_x86_metadata_emit_form_with_form(&normalized, record->form, false, record, &token, query.force_disp32, false);
             }
         }
     }
@@ -10111,16 +10121,18 @@ bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key, Buster
     plan->identity = (BusterX86MetadataExactPlan){.form_id = key.form_id, .stable_hash = key.stable_hash};
     plan->form = &buster_x86_metadata_normalized_forms[key.form_id];
     plan->pattern = &buster_x86_metadata_pattern_semantics_cache[key.form_id];
+    plan->operands = &buster_x86_metadata_operand_views[form.operand_first];
     plan->operand_count = form.operand_count;
     for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
     {
-        if (!buster_x86_metadata_operand(key.form_id, operand_index, &plan->operands[operand_index]))
+        BusterX86MetadataOperand operand = {0};
+        if (!buster_x86_metadata_operand(key.form_id, operand_index, &operand))
         {
             *plan = (BusterX86MetadataExactPlanRecord){0};
             return false;
         }
         plan->effective_field_sources[operand_index] =
-            buster_x86_metadata_emit_effective_field_source_pattern(plan->operands[operand_index], pattern);
+            buster_x86_metadata_emit_effective_field_source_pattern(operand, pattern);
     }
     plan->pattern_control_blocker = buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
     plan->moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);

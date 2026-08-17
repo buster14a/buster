@@ -18,6 +18,40 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-17a` (Linux x86_64, Zen 4 7940HS; **x86 metadata cache compaction**).
+The Release executable's `.bss` falls from 20,193,552 to 16,356,016 bytes,
+**-3,837,536 bytes (-19.0%)**.  The two bulk savings are the string-pool NUL
+distance table, narrowed from u32 to u16 (6.91 -> 3.45 MB), and sparse exact
+plans, whose normalized operands now borrow the immutable prewarmed operand
+view table instead of copying sixteen slots into every plan.  The exact-plan
+record is 608 -> 232 bytes, **ten cache lines -> four**; a compile-time ceiling
+keeps it at no more than four lines.  A future pool string of 65,535 bytes or
+more saturates to the u16 invalid sentinel and fails metadata validation rather
+than truncating.  The checked-in maximum is 276 bytes.
+
+The last internal 120-byte `BusterX86MetadataEmitQuery` hop is borrowed too.
+Its four callers already own stable locals for the duration of emission, so
+the form worker no longer takes another by-value copy.  This is the smaller
+copy left open by `2026-08-16b`; unlike moving the generated-form load behind
+the policy branch, it survives measurement.  That branch rewrite measured
+**+0.064% instructions** and was reverted.
+
+Same-source A/B used separate trusted Clang Release compiler binaries, both
+compiling the post-change unity TU to the same output path, five interleaved
+rounds.  Median instructions are 16,484,634,274 -> 16,483,503,575
+(**-1.13 M, -0.007%**).  Cycles, L1d misses and wall are flat: their
+distributions overlap, so this is a footprint/cache-density change rather than
+a claimed throughput win.  The profile that selected it records 16.47 G
+instructions and 1,443,159 successful exact emissions, with
+`buster_x86_metadata_emit_exact_machine` at 7.83%,
+`emit_form_to_scratch` at 3.68%, and `emit_bind_form` at 2.21%.
+
+Validation: `test_self_host` holds the byte-identical stage-1/stage-2 fixed
+point (1,443,079 exact attempts, zero failures); Release `test_all` passes
+308,861 assertions across 39 modules including the x86 completion census; and
+`test_all_combinations` passes Clang sanitized/unsanitized, GCC and Zig in
+Debug/Release plus Clang static analysis.
+
 `2026-08-16e` (Linux x86_64, Zen 4 7940HS; **`CToken` 16 -> 12 lands** — the
 one candidate `2026-08-16d` deferred). Same-source A/B against the merged
 main (d91617cd + 794150ff included), both compilers clang-built Release
