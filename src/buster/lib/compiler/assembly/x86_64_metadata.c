@@ -4854,18 +4854,18 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86Met
     return (u16)(pattern.vector_length / divisor);
 }
 
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataForm form,
-                                                              BusterX86MetadataPatternSemantics pattern)
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataForm const* form,
+                                                              BusterX86MetadataPatternSemantics const* pattern)
 {
-    if (!form.displacement_scale) return 1;
-    if (pattern.tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128) return 16;
-    u16 element_bits = pattern.has_element_size_control ? pattern.element_size_bits
-                                                         : buster_x86_metadata_emit_element_size_bits(form);
+    if (!form->displacement_scale) return 1;
+    if (pattern->tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128) return 16;
+    u16 element_bits = pattern->has_element_size_control ? pattern->element_size_bits
+                                                         : buster_x86_metadata_emit_element_size_bits(*form);
     u32 element = element_bits && element_bits % 8 == 0 ? element_bits / 8 : 0;
-    if (pattern.vector_length && pattern.vector_length % 8) return 0;
-    u32 vector = pattern.vector_length ? pattern.vector_length / 8 : 16;
+    if (pattern->vector_length && pattern->vector_length % 8) return 0;
+    u32 vector = pattern->vector_length ? pattern->vector_length / 8 : 16;
     u32 result = 0;
-    switch (form.tuple_kind)
+    switch (form->tuple_kind)
     {
     case BUSTER_X86_METADATA_TUPLE_FULL: result = vector; break;
     case BUSTER_X86_METADATA_TUPLE_HALF: result = vector / 2; break;
@@ -4902,17 +4902,17 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_broadcast_elements(BusterX86Meta
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysicalMemory memory,
-                                                           BusterX86MetadataForm form,
-                                                           BusterX86MetadataPatternSemantics pattern,
+                                                           BusterX86MetadataForm const* form,
+                                                           BusterX86MetadataPatternSemantics const* pattern,
                                                            bool force_disp32,
                                                            BusterX86MetadataAddressEncoding* result)
 {
     BusterX86MetadataAddressEncoding address = {0};
     u8 address_size = memory.address_size ? memory.address_size : 64;
-    u16 register_limit = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX ? 32 : 16;
+    u16 register_limit = form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 || form->prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX ? 32 : 16;
     if (address_size == 16 || (address_size != 32 && address_size != 64)) return false;
-    if (pattern.required_address_size && address_size != pattern.required_address_size) return false;
-    if (pattern.forbid_address_override && address_size != 64) return false;
+    if (pattern->required_address_size && address_size != pattern->required_address_size) return false;
+    if (pattern->forbid_address_override && address_size != 64) return false;
     if (memory.has_base && memory.base.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR) return false;
     if (memory.has_index && !memory.vsib && memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR) return false;
     if (memory.has_index && memory.vsib && memory.index.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
@@ -4943,7 +4943,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
     }
     if (memory.scale != 0 && memory.scale != 1 && memory.scale != 2 && memory.scale != 4 && memory.scale != 8) return false;
     if (memory.rip_relative && (address_size != 64 || memory.has_base || memory.has_index)) return false;
-    if (memory.has_index && memory.vsib && form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY)
+    if (memory.has_index && memory.vsib && form->prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY)
         return false;
     if (!memory.has_index && memory.scale > 1) return false;
     if (memory.rip_relative)
@@ -4986,7 +4986,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
         address.index_index = memory.has_index ? memory.index.index : 0;
         u8 scale = memory.scale ? memory.scale : 1;
         u8 scale_bits = scale == 1 ? 0 : scale == 2 ? 1 : scale == 4 ? 2 : 3;
-        address.has_sib = pattern.force_sib || memory.has_index || scale != 1 || (memory.base.index & 7) == 4;
+        address.has_sib = pattern->force_sib || memory.has_index || scale != 1 || (memory.base.index & 7) == 4;
         address.rm = address.has_sib ? 4 : (u8)(memory.base.index & 7);
         if (address.has_sib)
         {
@@ -5014,10 +5014,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
         }
         else
         {
-            u8 forced_width = form.displacement_width && !form.relocation_base ? form.displacement_width : 0;
+            u8 forced_width = form->displacement_width && !form->relocation_base ? form->displacement_width : 0;
             u8 tuple_scale = buster_x86_metadata_emit_tuple_scale(form, pattern);
-            if (form.displacement_scale && !tuple_scale) return false;
-            bool compressed_displacement = form.displacement_scale && tuple_scale > 1;
+            if (form->displacement_scale && !tuple_scale) return false;
+            bool compressed_displacement = form->displacement_scale && tuple_scale > 1;
             if (forced_width == 1 || compressed_displacement)
             {
                 if (!memory.has_symbol && tuple_scale > 1 && memory.displacement % tuple_scale == 0)
@@ -5052,11 +5052,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
         }
         address.has_symbol = memory.has_symbol;
     }
-    if (pattern.mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_ANY && pattern.mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_MEMORY &&
-        address.mod != pattern.mod_kind)
+    if (pattern->mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_ANY &&
+        pattern->mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_MEMORY && address.mod != pattern->mod_kind)
         return false;
-    if (pattern.rm_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY && address.rm != pattern.rm_fixed) return false;
-    if (pattern.has_sib && !address.has_sib) return false;
+    if (pattern->rm_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY && address.rm != pattern->rm_fixed) return false;
+    if (pattern->has_sib && !address.has_sib) return false;
     *result = address;
     return true;
 }
@@ -5500,7 +5500,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                         : buster_x86_metadata_feature_input_allows_apx(query.features)))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     BusterX86MetadataAddressEncoding address = {0};
-    if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, form, pattern, force_disp32, &address))
+    if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, &form, &pattern, force_disp32, &address))
         return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
 
     // The register-register 0x87 XCHG form is schema-proven symmetric:
@@ -6787,7 +6787,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
                 address_ready = false;
         }
         if (!address_ready)
-            address_ready = buster_x86_metadata_emit_address(memory, *form, *plan->pattern, force_disp32, &address);
+            address_ready = buster_x86_metadata_emit_address(memory, form, plan->pattern, force_disp32, &address);
     }
     if (has_memory && !address_ready)
     {

@@ -6760,13 +6760,23 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_feature_id(BusterX86MetadataFe
     return (u8)(0x80u | BUSTER_MIN(features.count, 0x7fu));
 }
 
-BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature_seed(String8 mnemonic,
-                                                                   BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                                   BusterX86MetadataFeatureInput features,
-                                                                   BusterX86MetadataPhysicalAttributes attributes, u64 seed)
+typedef struct MachineX64MetadataShapeHashes MachineX64MetadataShapeHashes;
+struct MachineX64MetadataShapeHashes
 {
-    u64 hash = seed ^ machine_x64_metadata_shape_mnemonic_id(mnemonic) ^ ((u64)operand_count << 8) ^
-               ((u64)machine_x64_metadata_shape_feature_id(features) << 16);
+    u64 signature;
+    u64 guard;
+};
+
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapeHashes machine_x64_metadata_shape_hashes(
+    String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
+{
+    u64 common = machine_x64_metadata_shape_mnemonic_id(mnemonic) ^ ((u64)operand_count << 8) ^
+                 ((u64)machine_x64_metadata_shape_feature_id(features) << 16);
+    MachineX64MetadataShapeHashes hashes = {
+        .signature = UINT64_C(1469598103934665603) ^ common,
+        .guard = UINT64_C(0x6a09e667f3bcc909) ^ common,
+    };
     u64 attribute_bits = attributes.decorator_flags | ((u64)attributes.apx_flags << 8) | ((u64)attributes.amx_flags << 16) |
                          ((u64)attributes.mask_register << 24) | ((u64)attributes.broadcast_elements << 32) |
                          ((u64)attributes.rounding_mode << 40) | ((u64)attributes.has_mask_register << 44) |
@@ -6774,7 +6784,8 @@ BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature_seed(String8 mnemon
                          ((u64)attributes.lock << 48) | ((u64)attributes.rep << 49) | ((u64)attributes.repne << 50) |
                          ((u64)attributes.implicit_segment << 51) | ((u64)attributes.branch_hint << 55) |
                          ((u64)attributes.notrack << 58) | ((u64)attributes.dfv << 59) | ((u64)attributes.has_dfv << 60);
-    hash ^= attribute_bits;
+    hashes.signature ^= attribute_bits;
+    hashes.guard ^= attribute_bits;
     for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
     {
         BusterX86MetadataPhysicalOperand operand = operands[operand_index];
@@ -6802,28 +6813,12 @@ BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature_seed(String8 mnemon
         {
             descriptor |= (u64)machine_x64_metadata_shape_immediate_class(operand) << 14;
         }
-        hash ^= descriptor + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
-        hash *= UINT64_C(0x9e3779b97f4a7c15);
+        hashes.signature ^= descriptor + UINT64_C(0x9e3779b97f4a7c15) + (hashes.signature << 6) + (hashes.signature >> 2);
+        hashes.signature *= UINT64_C(0x9e3779b97f4a7c15);
+        hashes.guard ^= descriptor + UINT64_C(0x9e3779b97f4a7c15) + (hashes.guard << 6) + (hashes.guard >> 2);
+        hashes.guard *= UINT64_C(0x9e3779b97f4a7c15);
     }
-    return hash;
-}
-
-BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_signature(String8 mnemonic,
-                                                              BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                              BusterX86MetadataFeatureInput features,
-                                                              BusterX86MetadataPhysicalAttributes attributes)
-{
-    return machine_x64_metadata_shape_signature_seed(mnemonic, operands, operand_count, features, attributes,
-                                                      UINT64_C(1469598103934665603));
-}
-
-BUSTER_GLOBAL_LOCAL u64 machine_x64_metadata_shape_guard(String8 mnemonic,
-                                                          BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                          BusterX86MetadataFeatureInput features,
-                                                          BusterX86MetadataPhysicalAttributes attributes)
-{
-    return machine_x64_metadata_shape_signature_seed(mnemonic, operands, operand_count, features, attributes,
-                                                      UINT64_C(0x6a09e667f3bcc909));
+    return hashes;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
@@ -6859,13 +6854,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         machine_x64_metadata_shape_cache_invalid_count += 1;
         return false;
     }
-    u64 signature = machine_x64_metadata_shape_signature(mnemonic, operands, operand_count, features, attributes);
-    u64 guard = machine_x64_metadata_shape_guard(mnemonic, operands, operand_count, features, attributes);
+    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
     for (u32 entry_index = 0; entry_index < machine_x64_metadata_shape_cache_count; entry_index += 1)
     {
         MachineX64MetadataShapeCacheEntry* entry = machine_x64_metadata_shape_cache + entry_index;
-        if (entry->signature != signature) continue;
-        if (entry->guard != guard || entry->token.slot_plus_one != token.slot_plus_one || entry->token.policy_flags != token.policy_flags ||
+        if (entry->signature != hashes.signature) continue;
+        if (entry->guard != hashes.guard || entry->token.slot_plus_one != token.slot_plus_one ||
+            entry->token.policy_flags != token.policy_flags ||
             entry->token.integrity != token.integrity)
         {
             machine_x64_metadata_shape_cache_invalid_count += 1;
@@ -6879,8 +6874,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         return false;
     }
     machine_x64_metadata_shape_cache[machine_x64_metadata_shape_cache_count++] = (MachineX64MetadataShapeCacheEntry){
-        .signature = signature,
-        .guard = guard,
+        .signature = hashes.signature,
+        .guard = hashes.guard,
         .token = token,
     };
     return true;
@@ -6890,17 +6885,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataMachineExactToken const* machine_x64_metada
     String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
     BusterX86MetadataFeatureInput features, BusterX86MetadataPhysicalAttributes attributes)
 {
-    u64 signature = machine_x64_metadata_shape_signature(mnemonic, operands, operand_count, features, attributes);
-    u64 guard = machine_x64_metadata_shape_guard(mnemonic, operands, operand_count, features, attributes);
-    u32 slot = (u32)signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
+    MachineX64MetadataShapeHashes hashes = machine_x64_metadata_shape_hashes(mnemonic, operands, operand_count, features, attributes);
+    u32 slot = (u32)hashes.signature & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     for (u32 probe = 0; probe < MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY; probe += 1)
     {
         u16 entry_plus_one = machine_x64_metadata_shape_cache_slots[slot];
         if (!entry_plus_one) return 0;
         MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + (entry_plus_one - 1u);
-        if (entry->signature == signature)
+        if (entry->signature == hashes.signature)
         {
-            return entry->guard == guard ? &entry->token : 0;
+            return entry->guard == hashes.guard ? &entry->token : 0;
         }
         slot = (slot + 1u) & (MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY - 1u);
     }

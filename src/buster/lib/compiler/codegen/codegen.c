@@ -757,11 +757,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_shape_valid(u64 cons
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* function)
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_shape(IrFunction* function, bool* saves_rbx)
 {
+    *saves_rbx = false;
     if (!function)
     {
-        return false;
+        return true;
     }
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
@@ -769,6 +770,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_STORE ||
             instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
         {
+            *saves_rbx = true;
             return true;
         }
         if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
@@ -784,6 +786,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         {
             if ((instruction->immediates[operand_index] & 0xff) == IR_INLINE_ASSEMBLY_CONSTRAINT_B)
             {
+                *saves_rbx = true;
                 return true;
             }
         }
@@ -791,11 +794,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         {
             if (codegen_inline_assembly_clobber_is_rbx(extra.clobbers[clobber_index]))
             {
+                *saves_rbx = true;
                 return true;
             }
         }
     }
-    return false;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_asm_memory_width(u32 width)
@@ -6547,22 +6551,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_INVALID_IR;
             return result;
         }
-        bool x64_save_rbx = target.cpu_arch == CPU_ARCH_X86_64 && codegen_canonical_x64_function_saves_rbx(function);
-        if (target.cpu_arch == CPU_ARCH_X86_64 && !x64_save_rbx)
+        bool x64_save_rbx = false;
+        if (target.cpu_arch == CPU_ARCH_X86_64 && !codegen_canonical_x64_function_shape(function, &x64_save_rbx))
         {
-            // The machine selector reads inline-assembly metadata too, so
-            // retain this cheap shape check before the lazy machine attempt.
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
-                if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
-                    ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers)))
-                {
-                    result.error = CODEGEN_ERROR_INVALID_IR;
-                    return result;
-                }
-            }
+            result.error = CODEGEN_ERROR_INVALID_IR;
+            return result;
         }
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;

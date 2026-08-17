@@ -18,6 +18,73 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-17g` (Linux x86_64, Zen 4 7940HS; **shape-cache hashing,
+metadata-address borrowing, and x86 function-shape scans**). The post-17f
+trusted Release profile leaves native code generation centered on
+`buster_x86_metadata_emit_exact_machine` (5.41% self cycles),
+`machine_encode_x86_64` (4.72%), `machine_select_canonical_function` (3.77%),
+generic metadata scratch emission (3.52%), FAST placement (2.92%), metadata
+binding (2.58%), and FAST prepass (1.72%). Branch and L1d miss rates remain
+small enough that duplicated work, rather than either miss class by itself,
+is still the first-order cost.
+
+The x86 machine shape cache now computes its independent signature and
+collision guard in one operand pass. Both accumulators keep their original
+seeds and exact per-operand update order; the cache key, slot layout, collision
+check, and token remain unchanged. This shares mnemonic/feature
+classification, attribute packing, operand loads, kind dispatch, and loop
+control without weakening the guard. Seven interleaved non-multiplexed
+instruction rounds, with byte-identical output in every pair, reduce the
+median from 14,923,271,474 to 14,850,746,516, **-72,524,958 (-0.486%)**.
+Branches fall 0.455%, branch misses 0.354%, and L1d loads 0.533%; L1d misses
+rise 0.848%. Nine cycle pairs are mixed, so no isolated cycle claim is made.
+
+The metadata address encoder now borrows the effective normalized form and
+pattern instead of receiving their 264- and 144-byte records by value. The
+tuple-scale helper follows the same borrowed view, and both callers pass the
+locals after all prefix/AMX mutations, so displacement, tuple, SIB/VSIB, and
+fallback behavior are unchanged. Existing Release disassembly showed the
+aggregate stack copies around this call. The isolated seven-round gate saves
+about 5.4 M instructions (**-0.036%**) and 0.294% of L1d loads; branches and
+L1d misses are flat, while the nine-round cycle median is directionally lower.
+
+Finally, x86 canonical preparation no longer scans ordinary IR rows twice or
+binary-searches sparse instruction-extra metadata for non-assembly rows. One
+function-shape walk validates the inline-assembly storage it actually reaches
+and reports whether atomic or assembly constraints require RBX. It retains the
+old early-return order: an atomic/RBX requirement found before later malformed
+assembly still stops the scan exactly where it did. Checking the opcode before
+the sparse lookup saves 11.28 M instructions (**-0.076%**); folding the
+remaining RBX and validation walks saves another 7.42 M (**-0.050%**), with
+branches and L1d traffic also lower.
+
+The clean merged-main versus final-candidate cumulative A/B uses seven
+interleaved single-event rounds per counter and byte-identical output. Median
+instructions are 14,921,435,408 -> 14,824,924,645, **-96,510,763
+(-0.647%)**; branches 2,752,821,094 -> 2,736,345,920 (**-0.599%**); branch
+misses 28,357,071 -> 28,271,660 (**-0.301%**); L1d loads 5,377,087,741 ->
+5,340,120,396 (**-0.688%**); and L1d misses 139,249,802 -> 137,881,685
+(**-0.983%**). Nine cycle rounds favor the candidate in seven pairs, with
+sorted medians 5,450,610,224 -> 5,373,478,804 (**-1.42%**).
+
+Two allocator shapes were measured and reverted. Ping-ponging the stable
+retro-edit merge buffers removes each pass's explicit copy but adds about
+5.6 M instructions (**+0.038%**); the original copy-back loop is better for
+this bounded stream. Iterating only the set bits in the eviction candidate
+mask adds about 3.3 M (**+0.022%**) versus the predictable bounded register
+scan. These are not retained as SIMD-readiness wins: the current scalar
+throughput rule rejects them even though their source shapes appear more
+branchless or copy-light.
+
+Final `test_self_host` reaches a byte-identical 35,514,248-byte fixed point:
+stage 1 retires 14,816,467,146 instructions, stage 2 retires 105,139,106,837,
+and all 1,441,827 exact attempts succeed. Release `test_all` passes 309,175
+assertions across 39 modules, including 877 metadata tests and the 34,043-row
+completion census. The complete local combination matrix also passes: Clang
+unsanitized and sanitized Debug/Release, GCC and Zig Debug compilation, the
+canonical 309,177-assertion table-audit run, and Clang static analysis with
+zero warnings.
+
 `2026-08-17f` (Linux x86_64, Zen 4 7940HS; **exact-emitter validation,
 dispatch, and staging**). Four independently measured changes reduce the
 remaining native x86 encoding and FAST-placement work without adding a byte
