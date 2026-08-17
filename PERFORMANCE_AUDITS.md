@@ -18,6 +18,35 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-17c` (Linux x86_64, Zen 4 7940HS; **cache/branch investigation**;
+[PR #441](https://code.buster14a.com/buster/buster/pulls/441),
+[PR #442](https://code.buster14a.com/buster/buster/pulls/442),
+[PR #443](https://code.buster14a.com/buster/buster/pulls/443),
+[PR #444](https://code.buster14a.com/buster/buster/pulls/444), and
+[PR #445](https://code.buster14a.com/buster/buster/pulls/445)).  Each candidate
+was measured serially against the trusted compiler with the same source,
+flags, output path, and CPU pin: five interleaved rounds, with every output
+byte-identical.  The accepted final medians were: #441 DWARF facts, **-3.003%
+instructions, -1.936% cycles, -18.709% L1d misses**; #442 typedef facts,
+**-0.121% instructions, -0.229% cycles, -1.472% L1d misses**; #443 constants,
+**-0.264% instructions, -0.639% cycles, -1.709% L2 accesses, -19.836% L2
+misses**; #444 operand facts, **-0.153% instructions, -0.891% L1d misses,
+-0.039% branches, -0.123% branch misses** (the two-cycle result was noisy at
+**+0.513%**, so no cycle claim); and #445 stateless picker, **-0.013%
+instructions, -0.189% median cycles, -0.115% branches, -1.604% branch
+misses** (mixed L1 was **+0.793%** median / **+0.337%** paired, so no L1
+claim).
+
+Rejected experiments were the first constant name-chain version (**+2.439%
+L2 misses** despite **-0.162% instructions**), an ordinal alias that failed
+the fixed point with NUL source, a maintained free mask (**+0.358%
+instructions, +0.907% cycles, +0.525% L1d** despite **-2.945% misses**), an
+append-time slot flag (**+0.015% instructions, +0.649% L1d** despite
+**-0.898% misses**), and a local branchless slot fold that was statically
+worse because it added unconditional stores.  The direct-call scan stayed
+unchanged: it has no reusable state, and a new stream would trade branches for
+cache traffic.
+
 `2026-08-17b` (Linux x86_64, Zen 4 7940HS; **x86 metadata cache compaction,
 second pass**).  Release `.bss` falls from the `2026-08-17a` baseline of
 16,356,016 to 14,847,456 bytes, **-1,508,560 bytes (-9.2%)**.  Across both
