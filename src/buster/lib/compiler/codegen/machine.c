@@ -1929,3 +1929,123 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     }
     return machine_select_canonical_function_x86_64(arena, program, function, target);
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_state_reset(MachineFastState* state, MachineTargetDescription const* description,
+                                                              MachineStackPlacement* placement, u32* locations, u32* last_use,
+                                                              u8* escapes, u32* rematerialize_immediates)
+{
+    *state = (MachineFastState){0};
+    state->description = description;
+    state->placement = placement;
+    state->virtual_register_locations = locations;
+    state->last_use = last_use;
+    state->escapes = escapes;
+    state->rematerialize_immediates = rematerialize_immediates;
+    state->active_register_count = description->register_count;
+    state->current_point = machine_point_make(1, MACHINE_POINT_BEFORE);
+    for (u32 register_index = 0; register_index < MACHINE_TARGET_REGISTER_LIMIT; register_index += 1)
+    {
+        state->owner[register_index] = UINT32_MAX;
+        state->age[register_index] = register_index;
+        state->dirty[register_index] = false;
+        locations[register_index] = UINT32_MAX;
+        last_use[register_index] = UINT32_MAX;
+        escapes[register_index] = 0;
+        rematerialize_immediates[register_index] = UINT32_MAX;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_occupy(MachineFastState* state, u64 mask)
+{
+    for (u32 register_index = 0; register_index < state->active_register_count; register_index += 1)
+    {
+        if (mask & (1ull << register_index))
+        {
+            state->owner[register_index] = register_index;
+            state->virtual_register_locations[register_index] = register_index;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u64 machine_fast_picker_test_first_registers(u64 available, u32 count, u32* registers)
+{
+    u64 selected = 0;
+    for (u32 index = 0; index < count && available; index += 1)
+    {
+        u32 physical_register = machine_fast_first_set(available);
+        registers[index] = physical_register;
+        selected |= 1ull << physical_register;
+        available &= available - 1;
+    }
+    return selected;
+}
+
+BUSTER_F_DECL u32 machine_fast_picker_test_cases(void)
+{
+    u32 passed = 0;
+    MachineTargetDescription const* targets[] = {machine_target_x86_64(), machine_target_aarch64()};
+    bool preferred_free = true;
+    bool lowest_other_free = true;
+    bool dead_first = true;
+    bool lru_order = true;
+    bool ctz_guard = true;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        MachineTargetDescription const* description = targets[target_index];
+        MachineStackPlacement placement = {0};
+        MachineFastState state;
+        u32 locations[MACHINE_TARGET_REGISTER_LIMIT];
+        u32 last_use[MACHINE_TARGET_REGISTER_LIMIT];
+        u8 escapes[MACHINE_TARGET_REGISTER_LIMIT];
+        u32 rematerialize_immediates[MACHINE_TARGET_REGISTER_LIMIT];
+        u64 allocatable = description->allocatable_mask;
+        u64 callee_saved = allocatable & description->callee_saved_mask;
+        u64 caller_saved = allocatable & ~description->callee_saved_mask;
+        u32 preferred_registers[1] = {UINT32_MAX};
+        u32 caller_registers[3] = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        u64 preferred_mask = machine_fast_picker_test_first_registers(callee_saved, 1, preferred_registers);
+        u64 caller_mask = machine_fast_picker_test_first_registers(caller_saved, 3, caller_registers);
+        preferred_free &= preferred_mask && caller_mask;
+        lowest_other_free &= caller_mask && caller_registers[1] != UINT32_MAX;
+        dead_first &= caller_mask && caller_registers[2] != UINT32_MAX;
+        lru_order &= caller_mask && caller_registers[2] != UINT32_MAX;
+        ctz_guard &= description->register_count &&
+                     machine_fast_first_set(1ull << (description->register_count - 1)) == description->register_count - 1;
+        if (!preferred_mask || !caller_mask || caller_registers[1] == UINT32_MAX || caller_registers[2] == UINT32_MAX)
+        {
+            continue;
+        }
+
+        machine_fast_picker_test_state_reset(&state, description, &placement, locations, last_use, escapes, rematerialize_immediates);
+        u32 selected = machine_fast_pick(&state, preferred_mask | (1ull << caller_registers[0]), 0, true);
+        preferred_free &= selected == preferred_registers[0];
+
+        machine_fast_picker_test_state_reset(&state, description, &placement, locations, last_use, escapes, rematerialize_immediates);
+        selected = machine_fast_pick(&state, (1ull << caller_registers[0]) | (1ull << caller_registers[1]), 0, true);
+        lowest_other_free &= selected == caller_registers[0];
+
+        machine_fast_picker_test_state_reset(&state, description, &placement, locations, last_use, escapes, rematerialize_immediates);
+        machine_fast_picker_test_occupy(&state, (1ull << caller_registers[0]) | (1ull << caller_registers[1]) | (1ull << caller_registers[2]));
+        last_use[caller_registers[1]] = 0;
+        selected = machine_fast_pick(&state,
+                                     (1ull << caller_registers[0]) | (1ull << caller_registers[1]) | (1ull << caller_registers[2]), 0, true);
+        dead_first &= selected == caller_registers[1];
+
+        machine_fast_picker_test_state_reset(&state, description, &placement, locations, last_use, escapes, rematerialize_immediates);
+        machine_fast_picker_test_occupy(&state, (1ull << caller_registers[0]) | (1ull << caller_registers[1]) | (1ull << caller_registers[2]));
+        state.age[caller_registers[0]] = 10;
+        state.age[caller_registers[1]] = 4;
+        state.age[caller_registers[2]] = 4;
+        selected = machine_fast_pick(&state,
+                                     (1ull << caller_registers[0]) | (1ull << caller_registers[1]) | (1ull << caller_registers[2]), 0, true);
+        lru_order &= selected == caller_registers[1];
+    }
+    if (preferred_free) passed |= MACHINE_FAST_PICK_TEST_PREFERRED_FREE;
+    if (lowest_other_free) passed |= MACHINE_FAST_PICK_TEST_LOWEST_OTHER_FREE;
+    if (dead_first) passed |= MACHINE_FAST_PICK_TEST_DEAD_FIRST;
+    if (lru_order) passed |= MACHINE_FAST_PICK_TEST_LRU_ORDER;
+    if (ctz_guard) passed |= MACHINE_FAST_PICK_TEST_CTZ_GUARD;
+    return passed;
+}
+#endif

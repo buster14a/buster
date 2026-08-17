@@ -684,6 +684,21 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_class_mask(MachineFastState* state, u32 vir
                : state->description->allocatable_mask;
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
+{
+#if BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
+    return (u32)__builtin_ctzll(mask);
+#else
+    u32 result = 0;
+    while (!(mask & 1u))
+    {
+        mask >>= 1;
+        result += 1;
+    }
+    return result;
+#endif
+}
+
 // Picks a free allocatable register, else evicts the least recently used
 // owner — a probe bounded by the register-file size. Call-crossing values
 // reach for the callee-saved members; everything else only touches them
@@ -699,28 +714,36 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mas
         u64 without_unpaid = candidates & ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
         candidates = without_unpaid ? without_unpaid : candidates;
     }
+    u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
+    // Discover free candidates on demand without a per-owner branch. The
+    // ctz walk is bounded by the small candidate set, and the resulting mask
+    // preserves the original lowest-register preference order exactly.
+    u64 free = 0;
+    for (u64 remaining = candidates; remaining; remaining &= remaining - 1)
+    {
+        u32 physical_register = machine_fast_first_set(remaining);
+        u64 bit = 1ull << physical_register;
+        u64 is_free = (u64)(state->owner[physical_register] == UINT32_MAX);
+        free |= bit & (0u - is_free);
+    }
+    u64 preferred_free = free & preferred_class;
+    if (preferred_free)
+    {
+        return machine_fast_first_set(preferred_free);
+    }
+    if (free)
+    {
+        return machine_fast_first_set(free);
+    }
+
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
     u32 dead = UINT32_MAX;
-    u32 free_other = UINT32_MAX;
-    u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
     for (u32 physical_register = 0; physical_register < state->active_register_count; physical_register += 1)
     {
         if (!(candidates & (1ull << physical_register)))
         {
             continue;
-        }
-        if (state->owner[physical_register] == UINT32_MAX)
-        {
-            if (!((preferred_class >> physical_register) & 1u))
-            {
-                if (free_other == UINT32_MAX)
-                {
-                    free_other = physical_register;
-                }
-                continue;
-            }
-            return physical_register;
         }
         // A dead owner costs nothing to displace: its spill is dropped.
         if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
@@ -732,10 +755,6 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mas
             best_age = state->age[physical_register];
             best = physical_register;
         }
-    }
-    if (free_other != UINT32_MAX)
-    {
-        return free_other;
     }
     if (dead != UINT32_MAX)
     {

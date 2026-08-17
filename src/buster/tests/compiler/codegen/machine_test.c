@@ -959,6 +959,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
 
+    // Exercise the stateless FAST picker directly on both target register
+    // files: preferred free, lowest nonpreferred free, dead-first eviction,
+    // stable LRU tie order, and the nonzero-mask ctz guard (the no-free cases
+    // also prove the picker never asks ctz to decode zero).
+    u32 fast_picker_test_cases = machine_fast_picker_test_cases();
+    BUSTER_TEST(arguments, fast_picker_test_cases & MACHINE_FAST_PICK_TEST_PREFERRED_FREE);
+    BUSTER_TEST(arguments, fast_picker_test_cases & MACHINE_FAST_PICK_TEST_LOWEST_OTHER_FREE);
+    BUSTER_TEST(arguments, fast_picker_test_cases & MACHINE_FAST_PICK_TEST_DEAD_FIRST);
+    BUSTER_TEST(arguments, fast_picker_test_cases & MACHINE_FAST_PICK_TEST_LRU_ORDER);
+    BUSTER_TEST(arguments, fast_picker_test_cases & MACHINE_FAST_PICK_TEST_CTZ_GUARD);
+
     MachineRef ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, MACHINE_REF_PAYLOAD_LIMIT - 1u);
     BUSTER_TEST(arguments, machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER);
     BUSTER_TEST(arguments, machine_ref_payload(ref) == MACHINE_REF_PAYLOAD_LIMIT - 1u);

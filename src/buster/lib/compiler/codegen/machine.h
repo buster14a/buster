@@ -1490,6 +1490,16 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFun
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 
 #if BUSTER_INCLUDE_TESTS
+typedef enum MachineFastPickerTestCase
+{
+    MACHINE_FAST_PICK_TEST_PREFERRED_FREE = 1u << 0,
+    MACHINE_FAST_PICK_TEST_LOWEST_OTHER_FREE = 1u << 1,
+    MACHINE_FAST_PICK_TEST_DEAD_FIRST = 1u << 2,
+    MACHINE_FAST_PICK_TEST_LRU_ORDER = 1u << 3,
+    MACHINE_FAST_PICK_TEST_CTZ_GUARD = 1u << 4,
+} MachineFastPickerTestCase;
+BUSTER_F_DECL u32 machine_fast_picker_test_cases(void);
+
 // Test-only byte seam for the AArch64 unsigned memory helpers. It keeps the
 // generated-form differential tests independent of the private encoder state
 // while preserving the production-only machine API surface.
