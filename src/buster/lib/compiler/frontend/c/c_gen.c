@@ -941,6 +941,22 @@ BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId enti
 }
 
 typedef struct CIntegerIrBuilder CIntegerIrBuilder;
+typedef struct CIrConstantEntityIndex CIrConstantEntityIndex;
+
+// Constant-expression identifier fallback uses the oldest entity with an
+// exact spelling.  The parse name buckets retain that ordering, but following
+// their entity links is a cold pointer chase for every unresolved token.  A
+// lowering owns one optional, lazily-built symbol index instead: it is only
+// allocated when this fallback actually runs, and its ascending construction
+// preserves the historical oldest-entity rule without an always-hot table on
+// the parse result.
+struct CIrConstantEntityIndex
+{
+    CEntityId* oldest_by_symbol;
+    u32 symbol_count;
+    bool built;
+    bool usable;
+};
 typedef struct CIrLabel CIrLabel;
 struct CIrLabel
 {
@@ -1400,6 +1416,7 @@ struct CIntegerIrBuilder
     CPreprocessResult preprocess;
     CParseResult parse;
     CEntityId* token_entities;
+    CIrConstantEntityIndex* constant_entity_index;
     IrFunction** declaration_functions;
     IrSymbolId* entity_symbols;
     CIrLowerMachine lower_machine;
@@ -25253,9 +25270,139 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_relocation_capacity(CIntegerIrB
 
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, u32 token_index);
+
 u64 c_test_ir_initializer_slot_count(IrType* type)
 {
     return c_ir_constant_initializer_slot_count(type);
+}
+
+CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult preprocess,
+                                       CEntityId* token_entities, u32 token_index)
+{
+    if (!parse)
+    {
+        return C_ENTITY_ID_INVALID;
+    }
+    CIrConstantEntityIndex constant_entity_index = {0};
+    CIntegerIrBuilder builder = {
+        .arena = parse->arena,
+        .temporary_arena = parse->arena,
+        .preprocess = preprocess,
+        .parse = *parse,
+        .token_entities = token_entities,
+        .constant_entity_index = &constant_entity_index,
+    };
+    return c_ir_constant_entity_at(&builder, token_index);
+}
+
+bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocessResult preprocess,
+                                                CEntityId* token_entities, u32 token_count)
+{
+    if (!parse || token_count > preprocess.token_count)
+    {
+        return false;
+    }
+    CIrConstantEntityIndex constant_entity_index = {0};
+    CIntegerIrBuilder builder = {
+        .arena = parse->arena,
+        .temporary_arena = parse->arena,
+        .preprocess = preprocess,
+        .parse = *parse,
+        .token_entities = token_entities,
+        .constant_entity_index = &constant_entity_index,
+    };
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        String8 name = c_token_spelling(preprocess.spelling_base, token);
+        CEntityId expected = C_ENTITY_ID_INVALID;
+        for (u32 entity_index = 0; entity_index < parse->entity_count; entity_index += 1)
+        {
+            if (string_equal(parse->entities[entity_index].name, name))
+            {
+                expected = (CEntityId){.value = entity_index};
+                break;
+            }
+        }
+        if (c_ir_constant_entity_at(&builder, token_index).value != expected.value)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessResult preprocess,
+                                              CEntityId* token_entities, u32 token_count)
+{
+    if (!parse || !parse->arena || token_count > preprocess.token_count)
+    {
+        return false;
+    }
+    Arena* rewindable_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+    if (!rewindable_arena)
+    {
+        return false;
+    }
+    TemporalArena temporary = arena_begin_temporal(rewindable_arena);
+    CIrConstantEntityIndex constant_entity_index = {0};
+    CIntegerIrBuilder builder = {
+        .arena = parse->arena,
+        .temporary_arena = rewindable_arena,
+        .preprocess = preprocess,
+        .parse = *parse,
+        .token_entities = token_entities,
+        .constant_entity_index = &constant_entity_index,
+    };
+    CEntityId expected = C_ENTITY_ID_INVALID;
+    CEntityId first = C_ENTITY_ID_INVALID;
+    u32 fallback_token = UINT32_MAX;
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        CEntityId actual = c_ir_constant_entity_at(&builder, token_index);
+        if (!constant_entity_index.built)
+        {
+            continue;
+        }
+        String8 name = c_token_spelling(preprocess.spelling_base, token);
+        for (u32 entity_index = 0; entity_index < parse->entity_count; entity_index += 1)
+        {
+            if (string_equal(parse->entities[entity_index].name, name))
+            {
+                expected = (CEntityId){.value = entity_index};
+                break;
+            }
+        }
+        if (expected.value == C_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        first = actual;
+        fallback_token = token_index;
+        break;
+    }
+    bool result = fallback_token != UINT32_MAX && constant_entity_index.oldest_by_symbol && expected.value != C_ID_UNDERLYING_INVALID && first.value == expected.value;
+    u32 overwrite_count = constant_entity_index.symbol_count ? constant_entity_index.symbol_count : 1;
+    scratch_end(temporary);
+    CEntityId* overwrite = arena_allocate(rewindable_arena, CEntityId, overwrite_count);
+    memset(overwrite, 0xa5, sizeof(*overwrite) * (u64)overwrite_count);
+    if (result)
+    {
+        CEntityId after = c_ir_constant_entity_at(&builder, fallback_token);
+        result = after.value == expected.value;
+    }
+    bool destroyed = arena_destroy(rewindable_arena, 1);
+    return result && destroyed;
 }
 
 bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
@@ -27299,6 +27446,55 @@ BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, CIrConsta
     return c_ir_constant_type_is_integer(type) && ((value.integer & c_ir_integer_type_mask(type)) != 0 || value.integer_high != 0);
 }
 
+BUSTER_C_INTERNAL bool c_ir_constant_entity_index_build(CIntegerIrBuilder* builder)
+{
+    CIrConstantEntityIndex* index = builder->constant_entity_index;
+    if (!index)
+    {
+        return false;
+    }
+    if (index->built)
+    {
+        return index->usable;
+    }
+    index->built = true;
+    CSymbolTable* symbols = builder->parse.symbols;
+    if (!symbols || !symbols->names || !builder->arena || symbols->count == UINT32_MAX)
+    {
+        return false;
+    }
+    u32 symbol_count = symbols->count + 1;
+    CEntityId* oldest_by_symbol = arena_allocate(builder->arena, CEntityId, symbol_count);
+    if (!oldest_by_symbol)
+    {
+        return false;
+    }
+    memset(oldest_by_symbol, 0xff, sizeof(*oldest_by_symbol) * (u64)symbol_count);
+    bool usable = true;
+    for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = builder->parse.entities + entity_index;
+        if (entity->name.length)
+        {
+            u32 symbol = entity->symbol;
+            if (!symbol || symbol >= symbol_count || symbol >= symbols->name_capacity ||
+                !string_equal(symbols->names[symbol], entity->name))
+            {
+                usable = false;
+                continue;
+            }
+            if (oldest_by_symbol[symbol].value == C_ID_UNDERLYING_INVALID)
+            {
+                oldest_by_symbol[symbol] = (CEntityId){.value = entity_index};
+            }
+        }
+    }
+    index->oldest_by_symbol = oldest_by_symbol;
+    index->symbol_count = symbol_count;
+    index->usable = usable;
+    return usable;
+}
+
 BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, u32 token_index)
 {
     CEntityId result = c_ir_identifier_entity_or_lookup(builder, token_index);
@@ -27306,9 +27502,78 @@ BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, 
     {
         return result;
     }
+
+    String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
+    u32 symbol = builder->parse.symbols ? builder->preprocess.tokens[token_index].symbol : 0;
+    if (!symbol && builder->parse.symbols)
+    {
+        symbol = c_parse_name_symbol(&builder->parse, name);
+    }
+    bool token_symbol_matches_name = builder->parse.symbols && symbol && builder->parse.symbols->names && symbol <= builder->parse.symbols->count &&
+                                     symbol < builder->parse.symbols->name_capacity && string_equal(builder->parse.symbols->names[symbol], name);
+    // A complete symbol table gives every spelling one canonical key.  Build
+    // the narrow oldest-entity index once, then answer misses without walking
+    // the cold name-chain pointers.  Verify the spelling before returning so
+    // malformed or hand-built parse results still take the compatibility path.
+    if (token_symbol_matches_name && c_ir_constant_entity_index_build(builder))
+    {
+        CIrConstantEntityIndex* index = builder->constant_entity_index;
+        if (symbol < index->symbol_count)
+        {
+            CEntityId oldest = index->oldest_by_symbol[symbol];
+            if (oldest.value < builder->parse.entity_count && string_equal(builder->parse.entities[oldest.value].name, name))
+            {
+                return oldest;
+            }
+            if (oldest.value == C_ID_UNDERLYING_INVALID)
+            {
+                return oldest;
+            }
+        }
+    }
+    if (builder->parse.name_lookup_buckets && builder->parse.entity_lookup_bucket_count &&
+        (!builder->parse.symbols || !symbol || token_symbol_matches_name))
+    {
+        // The name chain is newest-first. Keep the last exact-spelling match
+        // so this remains the oldest entity, just like the old table scan, but
+        // only when the bounded chain retains that canonical descending-ID
+        // order. Malformed chains fall through to the ascending scan below.
+        u32 bucket = (u32)c_parse_name_hash(symbol, name) & (builder->parse.entity_lookup_bucket_count - 1);
+        CEntityId oldest = C_ENTITY_ID_INVALID;
+        CEntityId entity = builder->parse.name_lookup_buckets[bucket];
+        u32 previous_entity = UINT32_MAX;
+        u32 chain_length = 0;
+        bool chain_valid = true;
+        while (entity.value != C_ID_UNDERLYING_INVALID && chain_length < builder->parse.entity_count)
+        {
+            if (entity.value >= builder->parse.entity_count || entity.value >= previous_entity)
+            {
+                chain_valid = false;
+                break;
+            }
+            previous_entity = entity.value;
+            if (string_equal(builder->parse.entities[entity.value].name, name))
+            {
+                oldest = entity;
+            }
+            entity = builder->parse.entities[entity.value].next_by_name;
+            chain_length += 1;
+        }
+        if (entity.value != C_ID_UNDERLYING_INVALID)
+        {
+            chain_valid = false;
+        }
+        if (chain_valid && oldest.value != C_ID_UNDERLYING_INVALID)
+        {
+            return oldest;
+        }
+    }
+
+    // Hand-built parse results do not carry the index. Keep the original
+    // ascending scan as the compatibility path for those callers.
     for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
     {
-        if (string_equal(builder->parse.entities[entity_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index])))
+        if (string_equal(builder->parse.entities[entity_index].name, name))
         {
             return (CEntityId){.value = entity_index};
         }
@@ -29886,6 +30151,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     {
         entity_symbols[entity_index] = IR_SYMBOL_ID_INVALID;
     }
+    CIrConstantEntityIndex constant_entity_index = {0};
     CIntegerIrBuilder constant_builder = {
         .arena = arena,
         .scratch_arena = temporary_arena,
@@ -29895,6 +30161,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .preprocess = preprocess,
         .parse = parse,
         .token_entities = token_entities,
+        .constant_entity_index = &constant_entity_index,
         .declaration_functions = declaration_functions,
         .entity_symbols = entity_symbols,
         .cleanup_functions = cleanup_functions,
@@ -31171,6 +31438,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .preprocess = preprocess,
             .parse = parse,
             .token_entities = token_entities,
+            .constant_entity_index = &constant_entity_index,
             .declaration_functions = declaration_functions,
             .entity_symbols = entity_symbols,
             .cleanup_functions = cleanup_functions,

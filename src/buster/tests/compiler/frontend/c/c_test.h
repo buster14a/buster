@@ -14,6 +14,12 @@ BUSTER_F_DECL u64 c_parse_name_hash(u32 symbol, String8 name);
 BUSTER_F_DECL u32 c_parse_name_symbol(CParseResult* result, String8 name);
 BUSTER_F_DECL bool c_test_translate_plain_run_paths_agree(String8 source);
 BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type);
+BUSTER_F_DECL CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult preprocess,
+                                                      CEntityId* token_entities, u32 token_index);
+BUSTER_F_DECL bool c_test_ir_constant_entity_index_equivalent(CParseResult* parse, CPreprocessResult preprocess,
+                                                               CEntityId* token_entities, u32 token_count);
+BUSTER_F_DECL bool c_test_ir_constant_entity_index_lifetime(CParseResult* parse, CPreprocessResult preprocess,
+                                                             CEntityId* token_entities, u32 token_count);
 BUSTER_F_DECL bool c_test_lex_compact_tables_ready(void);
 BUSTER_F_DECL u64 c_test_lex_punctuator_nfa_mismatches(void);
 BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
