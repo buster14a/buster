@@ -6846,7 +6846,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_no_operand_size_override &&
                                  (form->prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form->prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
 
-    u8 bytes[16] = {0};
+    u8 bytes[16];
     u32 byte_count = 0;
 #define BUSTER_X86_METADATA_FAST_PUSH_BYTE(value) \
     do { if (byte_count >= BUSTER_ARRAY_LENGTH(bytes)) { result->status = BUSTER_X86_METADATA_ENCODE_INSTRUCTION_LENGTH; return true; } \

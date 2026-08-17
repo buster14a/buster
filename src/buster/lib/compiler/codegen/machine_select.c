@@ -363,6 +363,7 @@ MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, Ir
     result.value_use_blocks = arena_allocate(arena, u32, value_capacity);
     u8* visited = arena_allocate(arena, u8, instruction_capacity);
     memset(visited, 0, instruction_capacity);
+    u32 visited_count = 0;
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         result.value_definitions[value_index] = IR_INSTRUCTION_ID_INVALID;
@@ -382,6 +383,7 @@ MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, Ir
                 return result;
             }
             visited[id.value] = 1;
+            visited_count += 1;
             IrInstruction* instruction = function->instructions + id.value;
             if (instruction->operand_count && !instruction->operands)
             {
@@ -430,13 +432,10 @@ MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, Ir
             return result;
         }
     }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    if (visited_count != function->instruction_count)
     {
-        if (!visited[instruction_index])
-        {
-            result.error = MACHINE_SELECTION_PREPASS_OWNERSHIP;
-            return result;
-        }
+        result.error = MACHINE_SELECTION_PREPASS_OWNERSHIP;
+        return result;
     }
     result.valid = true;
     return result;

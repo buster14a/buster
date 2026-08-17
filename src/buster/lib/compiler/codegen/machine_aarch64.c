@@ -1726,35 +1726,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     }
     // Local promotion, the mem2reg the machine path was built for: a
     // scalar local whose address never leaves a load or a store needs no
-    // memory at all. Two passes — eligibility by type (a 4- or 8-byte
-    // scalar register type), then disqualification by any use that is not
+    // memory at all. Eligibility by type is derived from the stable
+    // value-definition table while the target-order arrays below are
+    // initialized; disqualification still happens on every use that is not
     // the place operand of a same-width scalar load or store: a field or
     // index selection, an address handed to a call, a mixed-width access,
     // and the volatile forms all keep the local in its slot. The byte size
     // is recorded so the width check needs no second type walk.
     u8* promotable_locals = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        promotable_locals[value_index] = 0;
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
-        {
-            IrInstruction* instruction = function->instructions + id.value;
-            if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
-                instruction->result.value >= function->value_count)
-            {
-                continue;
-            }
-            IrType* local_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
-            if (machine_a64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
-            {
-                promotable_locals[instruction->result.value] = (u8)local_type->layout.size;
-            }
-        }
-    }
     // Definition identity, ownership, and use counts are keyed by stable
     // IR value/instruction IDs. The shared prepass already computes them in
     // one source-array walk; retain only target-order ordinals locally
@@ -1768,9 +1747,23 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
+        promotable_locals[value_index] = 0;
         value_last_use_ordinals[value_index] = 0;
         local_store_counts[value_index] = 0;
         value_def_ordinals[value_index] = 0;
+        IrInstructionId definition = value_definitions[value_index];
+        if (definition.value < function->instruction_count)
+        {
+            IrInstruction* instruction = function->instructions + definition.value;
+            if (instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
+            {
+                IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+                if (machine_a64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
+                {
+                    promotable_locals[value_index] = (u8)local_type->layout.size;
+                }
+            }
+        }
     }
     u32 walk_ordinal = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)

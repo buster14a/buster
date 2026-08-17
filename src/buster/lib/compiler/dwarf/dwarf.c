@@ -880,6 +880,7 @@ struct DwarfModelRefPatch
     u8 reserved[3];
 };
 
+typedef struct DwarfModelScopeFrame DwarfModelScopeFrame;
 typedef struct DwarfModelWriter DwarfModelWriter;
 struct DwarfModelWriter
 {
@@ -902,6 +903,7 @@ struct DwarfModelWriter
     u32* function_offsets;
     u32* scope_child_offsets;
     u32* scope_children;
+    DwarfModelScopeFrame* scope_stack;
 };
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_relocation(DwarfModelWriter* writer, DwarfRelocation relocation)
@@ -1437,13 +1439,10 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_inline(DwarfModelWriter* writer, Debug
     dwarf_model_emit_ranges_attribute(writer, site->start, site->end);
 }
 
-typedef struct DwarfModelScopeFrame DwarfModelScopeFrame;
 struct DwarfModelScopeFrame
 {
     DebugScopeId scope;
     u32 next_child;
-    bool entered;
-    u8 reserved[3];
 };
 
 // Scope emission asks for a scope's children both to choose its abbreviation
@@ -1470,6 +1469,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_build_scope_children(DwarfModelWriter* writ
     }
     u32 child_count = writer->scope_child_offsets[scope_count];
     writer->scope_children = child_count ? arena_allocate(writer->arena, u32, child_count) : 0;
+    writer->scope_stack = arena_allocate(writer->arena, DwarfModelScopeFrame, (u64)scope_count + 1);
     u32* cursors = scope_count ? arena_allocate(writer->arena, u32, scope_count) : 0;
     if (cursors)
     {
@@ -1497,9 +1497,9 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
     {
         return;
     }
-    DwarfModelScopeFrame* stack = arena_allocate(writer->arena, DwarfModelScopeFrame, writer->model->scope_count + 1);
+    DwarfModelScopeFrame* stack = writer->scope_stack;
     u32 stack_count = 1;
-    stack[0] = (DwarfModelScopeFrame){.scope = root, .next_child = writer->scope_child_offsets[root], .entered = true};
+    stack[0] = (DwarfModelScopeFrame){.scope = root, .next_child = writer->scope_child_offsets[root]};
     for (;;)
     {
         DwarfModelScopeFrame* frame = stack + stack_count - 1;
