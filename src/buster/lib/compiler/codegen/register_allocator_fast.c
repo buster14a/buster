@@ -707,6 +707,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
 // with ordinary mask arithmetic.  Wider vector files consume the same kernel
 // in sixteen-register chunks, while non-AVX-512 targets retain the bounded
 // scalar walk.
+#if BUSTER_SIMD_512
 BUSTER_GLOBAL_LOCAL u32 machine_fast_compact_u32_mask(Mask64 byte_mask)
 {
     Mask64 words = byte_mask & (byte_mask >> 1) & (byte_mask >> 2) & (byte_mask >> 3) & UINT64_C(0x1111111111111111);
@@ -716,6 +717,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_compact_u32_mask(Mask64 byte_mask)
     words = (words | (words >> 24)) & UINT64_C(0x000000000000ffff);
     return (u32)words;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u64 candidates)
 {
