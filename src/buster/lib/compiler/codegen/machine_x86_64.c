@@ -8337,594 +8337,568 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 switch (instruction->opcode)
                 {
-                break;
-            case MACHINE_X64_SDIV32:
-            case MACHINE_X64_SDIV64:
-            case MACHINE_X64_SREM32:
-            case MACHINE_X64_SREM64:
-            case MACHINE_X64_UDIV32:
-            case MACHINE_X64_UDIV64:
-            case MACHINE_X64_UREM32:
-            case MACHINE_X64_UREM64:
-            {
-                // Dividend and result live in RAX (operand slot 0); the
-                // divisor is in RCX (slot 1); RDX is clobbered, exactly like
-                // the canonical divide sequences.
-                bool wide = instruction->opcode == MACHINE_X64_SDIV64 || instruction->opcode == MACHINE_X64_SREM64 ||
+                    break;
+                    case MACHINE_X64_SDIV32:
+                    case MACHINE_X64_SDIV64:
+                    case MACHINE_X64_SREM32:
+                    case MACHINE_X64_SREM64:
+                    case MACHINE_X64_UDIV32:
+                    case MACHINE_X64_UDIV64:
+                    case MACHINE_X64_UREM32:
+                    case MACHINE_X64_UREM64:
+                    {
+                        // Dividend and result live in RAX (operand slot 0); the
+                        // divisor is in RCX (slot 1); RDX is clobbered, exactly like
+                        // the canonical divide sequences.
+                        bool wide = instruction->opcode == MACHINE_X64_SDIV64 || instruction->opcode == MACHINE_X64_SREM64 ||
                             instruction->opcode == MACHINE_X64_UDIV64 || instruction->opcode == MACHINE_X64_UREM64;
-                bool is_signed = instruction->opcode == MACHINE_X64_SDIV32 || instruction->opcode == MACHINE_X64_SDIV64 ||
-                                 instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64;
-                bool remainder = instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64 ||
-                                 instruction->opcode == MACHINE_X64_UREM32 || instruction->opcode == MACHINE_X64_UREM64;
-                if (is_signed)
-                {
-                    (void)machine_x64_emit_metadata_instruction(&encoder, wide ? S8("CQO") : S8("CDQ"), 0, 0,
-                                                                 (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
-                }
-                else
-                {
-                    (void)machine_x64_emit_metadata_registers(&encoder, S8("XOR"), MACHINE_X64_RDX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
-                }
-                (void)machine_x64_emit_metadata_register(&encoder, is_signed ? S8("IDIV") : S8("DIV"), MACHINE_X64_RCX, wide ? 64 : 32, 0);
-                if (remainder)
-                {
-                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
-                }
-            }
-            break;
-            case MACHINE_X64_RET:
-            {
-                // No vzeroupper over a live 512-bit return: it would zero
-                // bits 128+ of the ZMM0 the caller is about to read.
-                if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
-                {
-                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
-                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
-                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
-                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
-                }
-                if (placement->callee_saved_mask)
-                {
-                    // Point RSP at the pushed registers, restore them in
-                    // reverse push order, then unwind the frame base. Where
-                    // the saves precede the frame pointer they already sit
-                    // at it, so a plain move is the whole adjustment.
-                    u32 push_count = 0;
-                    for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
-                    {
-                        push_count += (placement->callee_saved_mask >> push_register) & 1u;
-                    }
-                    if (function->target && function->target->saves_precede_frame_pointer)
-                    {
-                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
-                    }
-                    else
-                    {
-                        (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP,
-                                                                         -(s64)(8u * push_count), 64, 64, 0);
-                    }
-                    for (u32 pop_reverse = MACHINE_X64_ZMM0; pop_reverse > 0; pop_reverse -= 1)
-                    {
-                        u32 pop_register = pop_reverse - 1;
-                        if (placement->callee_saved_mask & (1ull << pop_register))
+                        bool is_signed = instruction->opcode == MACHINE_X64_SDIV32 || instruction->opcode == MACHINE_X64_SDIV64 ||
+                            instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64;
+                        bool remainder = instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64 ||
+                            instruction->opcode == MACHINE_X64_UREM32 || instruction->opcode == MACHINE_X64_UREM64;
+                        if (is_signed)
                         {
-                            (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), pop_register, 64, 0);
-                        }
-                    }
-                }
-                else
-                {
-                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
-                }
-                (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_RBP, 64, 0);
-                (void)machine_x64_emit_metadata_instruction(&encoder, S8("RET"), 0, 0,
-                                                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
-            }
-            break;
-            case MACHINE_X64_CALL_DIRECT:
-            {
-                // No vzeroupper over staged ZMM arguments: the callee reads
-                // them whole, exactly like the canonical path, whose lazy
-                // vzeroupper fires before its call staging rather than after.
-                if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
-                {
-                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
-                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
-                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
-                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
-                }
-                if (instruction->flags & 1)
-                {
-                    // Variadic System V call: AL carries the count of XMM
-                    // registers holding arguments.
-                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
-                                                                       instruction->flags >> 1, 32, 32, 0);
-                }
-                u32 call_start = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("CALL"), 0, 32, 0);
-                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
-                *site = (MachineCallSite){
-                    .code_offset = call_start + 1,
-                    .target = instruction->payload,
-                };
-            }
-            break;
-            case MACHINE_X64_CALL_INDIRECT:
-            {
-                if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
-                {
-                    (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
-                                                                 (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
-                                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
-                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0);
-                }
-                if (instruction->flags & 1)
-                {
-                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
-                                                                       instruction->flags >> 1, 32, 32, 0);
-                }
-                (void)machine_x64_emit_metadata_register(&encoder, S8("CALL"), operand_registers[0], 64, 0);
-            }
-            break;
-            case MACHINE_X64_LEA_TLS:
-            {
-                // mov dest, fs:[0] — the thread pointer — then
-                // lea dest, [dest + tpoff] with the displacement patched
-                // thread-locally, byte-for-byte the canonical sequence.
-                u32 destination = operand_registers[0];
-                BusterX86MetadataPhysicalOperand fs_operands[2] = {
-                    machine_x64_exact_gpr_operand(destination, 64),
-                    {
-                        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-                        .width = 64,
-                        .memory = {
-                            .displacement = 0,
-                            .address_size = 64,
-                            .scale = 1,
-                            .segment = BUSTER_X86_METADATA_SEGMENT_FS,
-                            .has_displacement = true,
-                            .has_segment = true,
-                        },
-                    },
-                };
-                (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), fs_operands, 2,
-                                                             (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
-                MachineX64PreparedExactOpcode const* lea_entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
-                BusterX86MetadataPhysicalOperand lea_operands[2] = {
-                    machine_x64_exact_gpr_operand(destination, 64),
-                    machine_x64_exact_memory_operand(destination, 64, 0, true),
-                };
-                if (!lea_entry || !lea_entry->descriptor || !lea_entry->plan_valid ||
-                    !machine_x64_emit_exact_form(&encoder, lea_entry->metadata_tokens[0], lea_operands, 2, true, false, 0, false, 0))
-                {
-                    encoder.overflow = true;
-                }
-                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
-                *site = (MachineCallSite){
-                    .code_offset = encoder.count - 4,
-                    .target = instruction->payload,
-                    .is_thread_local = 1,
-                };
-            }
-            break;
-            case MACHINE_X64_COPY_FRAME_FROM_FRAME:
-            {
-                u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
-                u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
-                u32 copied = 0;
-                while (copied < instruction->payload)
-                {
-                    u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, source_offset - copied, chunk, 0);
-                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
-                    copied += chunk;
-                }
-            }
-            break;
-            case MACHINE_X64_COPY_FRAME_FROM_PTR:
-            {
-                u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
-                u32 source_register = operand_registers[1];
-                u32 copied = 0;
-                while (copied < instruction->payload)
-                {
-                    u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, source_register, copied, chunk, 0);
-                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
-                    copied += chunk;
-                }
-            }
-            break;
-            case MACHINE_X64_COPY_PTR_FROM_FRAME:
-            {
-                u32 destination_register = operand_registers[0];
-                u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
-                u32 copied = 0;
-                while (copied < instruction->payload)
-                {
-                    u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, source_offset - copied, chunk, 0);
-                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, destination_register, copied, chunk, 0);
-                    copied += chunk;
-                }
-            }
-            break;
-            case MACHINE_X64_CVT_U64_TO_F32:
-            case MACHINE_X64_CVT_U64_TO_F64:
-            {
-                // Canonical branchy form: non-negative converts directly;
-                // a set sign bit halves with a sticky rounding bit, then
-                // doubles the float.  The selector leaves the two operands
-                // unconstrained; RCX is the row's declared integer scratch,
-                // while the destination carries the resulting float bits.
-                bool to_f64 = instruction->opcode == MACHINE_X64_CVT_U64_TO_F64;
-                u32 source = operand_registers[1];
-                u32 destination = operand_registers[0];
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, source, 64, 0);
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("TEST"), source, source, 64, 0);
-                u32 non_negative_branch = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JNS"), 0, 8, 0);
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), destination, source, 64, 0);
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SHR"), destination, 1, 64, 8, 0);
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX, 1, 32, 8, 0);
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
-                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, destination,
-                                                         to_f64 ? 64 : 32, 64, 0);
-                (void)machine_x64_emit_metadata_xmm_registers(&encoder, to_f64 ? S8("ADDSD") : S8("ADDSS"), 0, 0,
-                                                               to_f64 ? 64 : 32, 0);
-                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
-                u32 end_branch = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
-                u32 direct_conversion = encoder.count;
-                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, source,
-                                                         to_f64 ? 64 : 32, 64, 0);
-                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
-                u32 conversion_end = encoder.count;
-                encoder.bytes[non_negative_branch + 1] = (u8)(direct_conversion - (non_negative_branch + 2));
-                encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
-            }
-            break;
-            case MACHINE_X64_CVT_F32_TO_U64:
-            case MACHINE_X64_CVT_F64_TO_U64:
-            {
-                // Canonical threshold form: values below 2^63 convert
-                // directly, larger ones subtract the threshold first and
-                // set the top bit after.  The row's operands are free to use
-                // any allocatable GPR; RCX is reserved as the final scratch.
-                bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_U64;
-                u32 source = operand_registers[1];
-                u32 destination = operand_registers[0];
-                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
-                (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
-                                                              from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x4f000000), 0);
-                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
-                (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
-                                                              from_f64 ? 64 : 32, 0);
-                u32 direct_branch = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
-                (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("SUBSD") : S8("SUBSS"), 0, 1,
-                                                              from_f64 ? 64 : 32, 0);
-                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
-                                                        from_f64 ? 64 : 32, 0);
-                // The threshold path already converted x-2^63 to a signed
-                // 64-bit result; restore the unsigned high bit, not merely
-                // bit 31 (the latter is only the f32 result width).
-                (void)machine_x64_emit_exact_immediate_value(&encoder, MACHINE_X64_RCX, UINT64_C(0x8000000000000000), 0);
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
-                u32 end_branch = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
-                u32 direct_conversion = encoder.count;
-                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
-                                                        from_f64 ? 64 : 32, 0);
-                u32 conversion_end = encoder.count;
-                encoder.bytes[direct_branch + 1] = (u8)(direct_conversion - (direct_branch + 2));
-                encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
-            }
-            break;
-            case MACHINE_X64_CVT_F32_TO_I64:
-            case MACHINE_X64_CVT_F64_TO_I64:
-            {
-                bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_I64;
-                (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, operand_registers[1], 64, 64, 0);
-                (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), operand_registers[0], 0, 64, 128, 0);
-            }
-            break;
-            case MACHINE_X64_VA_SAVE:
-            {
-                u32 save_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
-                static u8 const gp_registers[6] = {
-                    MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RDX, MACHINE_X64_RCX, MACHINE_X64_R8, MACHINE_X64_R9,
-                };
-                for (u32 gp_index = 0; gp_index < BUSTER_ARRAY_LENGTH(gp_registers); gp_index += 1)
-                {
-                    u32 save_displacement = save_offset - gp_index * 8u;
-                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, gp_registers[gp_index], save_displacement, 8, 0);
-                }
-                for (u32 float_index = 0; float_index < 8; float_index += 1)
-                {
-                    u32 xmm = float_index;
-                    u32 save_displacement = save_offset - 48u - float_index * 16u;
-                    (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm, MACHINE_X64_RBP,
-                                                                -(s64)(s32)save_displacement, true, 64, 0);
-                }
-            }
-            break;
-            case MACHINE_X64_VA_ARG:
-            {
-                MachineVaArg* metadata = function->va_args + instruction->payload;
-                u32 list = operand_registers[0];
-                u32 result_register = operand_registers[1];
-                u32 result_offset = metadata->result_is_frame ? placement->stack_slot_offsets[metadata->result_slot] : 0;
-                // A mixed aggregate can exhaust either class independently.
-                // Both class checks branch to the same overflow sequence, so
-                // retain every displacement field rather than silently
-                // leaving the second Jcc's zero displacement unpatched.
-                u32 overflow_patches[2] = {UINT32_MAX, UINT32_MAX};
-                u32 overflow_patch_count = 0;
-                u32 end_patch = UINT32_MAX;
-                bool register_path = metadata->part_count && !metadata->parts[0].is_memory;
-                u32 integer_parts = 0;
-                u32 float_parts = 0;
-                for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
-                {
-                    integer_parts += !metadata->parts[part_index].is_float && !metadata->parts[part_index].is_memory;
-                    float_parts += metadata->parts[part_index].is_float && !metadata->parts[part_index].is_memory;
-                    register_path &= !metadata->parts[part_index].is_memory;
-                }
-                if (register_path)
-                {
-                    if (integer_parts)
-                    {
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 0, 4, 0);
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RDX,
-                                                                            48u - integer_parts * 8u, 32, 32, 0);
-                        u32 branch_start = encoder.count;
-                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
-                        if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
-                        {
-                            overflow_patches[overflow_patch_count++] = branch_start + 2;
-                        }
-                    }
-                    if (float_parts)
-                    {
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R9, list, 4, 4, 0);
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_R9,
-                                                                            176u - float_parts * 16u, 32, 32, 0);
-                        u32 branch_start = encoder.count;
-                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
-                        if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
-                        {
-                            overflow_patches[overflow_patch_count++] = branch_start + 2;
-                        }
-                    }
-                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R8, list, 16, 8, 0);
-                    for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
-                    {
-                        MachineVaArgPart* part = metadata->parts + part_index;
-                        u32 offset_register = part->is_float ? MACHINE_X64_R9 : MACHINE_X64_RDX;
-                        // Keep R8 as the immutable reg_save_area base.  Build
-                        // each part address in the scratch R11 register so
-                        // mixed GP/FP values do not accumulate one class's
-                        // cursor into the save-area base.
-                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R11, MACHINE_X64_R8, 64, 0);
-                        (void)machine_x64_emit_metadata_registers(&encoder, S8("ADD"), MACHINE_X64_R11, offset_register, 64, 0);
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_R11, part->save_offset,
-                                                                      part->size >= 8 ? 8 : part->size, 0);
-                        if (metadata->result_is_frame)
-                        {
-                            (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - part->value_offset,
-                                                                      part->size >= 8 ? 8 : part->size, 0);
+                            (void)machine_x64_emit_metadata_instruction(&encoder, wide ? S8("CQO") : S8("CDQ"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
                         }
                         else
                         {
-                            // Scalar VA_ARG values are one part and the
-                            // constrained result register is RCX.
-                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), result_register, MACHINE_X64_R10,
-                                                                       part->size >= 8 ? 64 : 32, 0);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("XOR"), MACHINE_X64_RDX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
+                        }
+                        (void)machine_x64_emit_metadata_register(&encoder, is_signed ? S8("IDIV") : S8("DIV"), MACHINE_X64_RCX, wide ? 64 : 32, 0);
+                        if (remainder)
+                        {
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
                         }
                     }
-                    if (integer_parts)
+                    break; case MACHINE_X64_RET:
                     {
-                        u32 amount = integer_parts * 8u;
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, amount, 32,
-                                                                          amount <= INT8_MAX ? 8 : 32, 0);
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 0, 4, 0);
+                        // No vzeroupper over a live 512-bit return: it would zero
+                        // bits 128+ of the ZMM0 the caller is about to read.
+                        if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
+                        {
+                            (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                    .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                    (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        }
+                        if (placement->callee_saved_mask)
+                        {
+                            // Point RSP at the pushed registers, restore them in
+                            // reverse push order, then unwind the frame base. Where
+                            // the saves precede the frame pointer they already sit
+                            // at it, so a plain move is the whole adjustment.
+                            u32 push_count = 0;
+                            for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                            {
+                                push_count += (placement->callee_saved_mask >> push_register) & 1u;
+                            }
+                            if (function->target && function->target->saves_precede_frame_pointer)
+                            {
+                                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
+                            }
+                            else
+                            {
+                                (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP,
+                                        -(s64)(8u * push_count), 64, 64, 0);
+                            }
+                            for (u32 pop_reverse = MACHINE_X64_ZMM0; pop_reverse > 0; pop_reverse -= 1)
+                            {
+                                u32 pop_register = pop_reverse - 1;
+                                if (placement->callee_saved_mask & (1ull << pop_register))
+                                {
+                                    (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), pop_register, 64, 0);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
+                        }
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_RBP, 64, 0);
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("RET"), 0, 0,
+                                (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
                     }
-                    if (float_parts)
+                    break; case MACHINE_X64_CALL_DIRECT:
                     {
-                        u32 amount = float_parts * 16u;
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_R9, amount, 32,
-                                                                          amount <= INT8_MAX ? 8 : 32, 0);
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_R9, list, 4, 4, 0);
+                        // No vzeroupper over staged ZMM arguments: the callee reads
+                        // them whole, exactly like the canonical path, whose lazy
+                        // vzeroupper fires before its call staging rather than after.
+                        if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
+                        {
+                            (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                    .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                    (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        }
+                        if (instruction->flags & 1)
+                        {
+                            // Variadic System V call: AL carries the count of XMM
+                            // registers holding arguments.
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
+                                    instruction->flags >> 1, 32, 32, 0);
+                        }
+                        u32 call_start = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("CALL"), 0, 32, 0);
+                        MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *site = (MachineCallSite){
+                            .code_offset = call_start + 1,
+                            .target = instruction->payload,
+                        };
                     }
-                    u32 end_branch_start = encoder.count;
-                    (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
-                    end_patch = end_branch_start + 1;
-                }
-                u32 overflow_start = encoder.count;
-                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 8, 8, 0);
-                if (metadata->alignment > 8)
-                {
-                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->alignment - 1,
-                                                                        64, (metadata->alignment - 1) <= INT8_MAX ? 8 : 32, 0);
-                    (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RDX,
-                                                                        (u64)(-(s64)metadata->alignment),
-                                                                        64, 32, 0);
-                }
-                if (metadata->result_is_frame)
-                {
-                    u32 copied = 0;
-                    while (copied < metadata->size)
+                    break; case MACHINE_X64_CALL_INDIRECT:
                     {
-                        u32 chunk = machine_x64_copy_chunk(metadata->size - copied);
-                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_RDX, copied, chunk, 0);
-                        (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - copied, chunk, 0);
-                        copied += chunk;
+                        if (function_has_vector && !(instruction->flags & MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE))
+                        {
+                            (void)machine_x64_emit_metadata_instruction(&encoder, S8("VZEROUPPER"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
+                                    .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
+                                    (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        }
+                        if (instruction->flags & 1)
+                        {
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), MACHINE_X64_RAX,
+                                    instruction->flags >> 1, 32, 32, 0);
+                        }
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("CALL"), operand_registers[0], 64, 0);
                     }
-                }
-                else
-                {
-                    (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, result_register, MACHINE_X64_RDX, 0,
-                                                                  metadata->scalar_size >= 8 ? 8 : metadata->scalar_size, 0);
-                }
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->stack_size,
-                                                                    64, metadata->stack_size <= INT8_MAX ? 8 : 32, 0);
-                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 8, 8, 0);
-                u32 end = encoder.count;
-                for (u32 patch_index = 0; patch_index < overflow_patch_count; patch_index += 1)
-                {
-                    u32 overflow_patch = overflow_patches[patch_index];
-                    u32 displacement = overflow_start - (overflow_patch + 4);
-                    for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                    break; case MACHINE_X64_LEA_TLS:
                     {
-                        encoder.bytes[overflow_patch + byte_index] = (u8)(displacement >> (byte_index * 8));
+                        // mov dest, fs:[0] — the thread pointer — then
+                        // lea dest, [dest + tpoff] with the displacement patched
+                        // thread-locally, byte-for-byte the canonical sequence.
+                        u32 destination = operand_registers[0];
+                        BusterX86MetadataPhysicalOperand fs_operands[2] = {
+                            machine_x64_exact_gpr_operand(destination, 64),
+                            {
+                                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                                .width = 64,
+                                .memory = {
+                                    .displacement = 0,
+                                    .address_size = 64,
+                                    .scale = 1,
+                                    .segment = BUSTER_X86_METADATA_SEGMENT_FS,
+                                    .has_displacement = true,
+                                    .has_segment = true,
+                                },
+                            },
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), fs_operands, 2,
+                                (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineX64PreparedExactOpcode const* lea_entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+                        BusterX86MetadataPhysicalOperand lea_operands[2] = {
+                            machine_x64_exact_gpr_operand(destination, 64),
+                            machine_x64_exact_memory_operand(destination, 64, 0, true),
+                        };
+                        if (!lea_entry || !lea_entry->descriptor || !lea_entry->plan_valid ||
+                                !machine_x64_emit_exact_form(&encoder, lea_entry->metadata_tokens[0], lea_operands, 2, true, false, 0, false, 0))
+                        {
+                            encoder.overflow = true;
+                        }
+                        MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *site = (MachineCallSite){
+                            .code_offset = encoder.count - 4,
+                            .target = instruction->payload,
+                            .is_thread_local = 1,
+                        };
                     }
-                }
-                if (end_patch != UINT32_MAX)
-                {
-                    u32 displacement = end - (end_patch + 4);
-                    for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                    break; case MACHINE_X64_COPY_FRAME_FROM_FRAME:
                     {
-                        encoder.bytes[end_patch + byte_index] = (u8)(displacement >> (byte_index * 8));
+                        u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
+                        u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                        u32 copied = 0;
+                        while (copied < instruction->payload)
+                        {
+                            u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, source_offset - copied, chunk, 0);
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
+                            copied += chunk;
+                        }
                     }
-                }
-            }
-            break;
-            case MACHINE_X64_STACK_ALLOCATE:
-            {
-                // The constrained row places the runtime byte count in RCX
-                // and receives the resulting RSP in RAX. Keep the count
-                // unsigned, round it exactly as the canonical emitter does,
-                // and touch every page before the final residual subtract so
-                // guard-page stacks cannot be skipped.
-                u32 stack_alignment = instruction->payload;
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RCX, stack_alignment - 1, 64, 32, 0);
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX,
-                                                                    (u64)(-(s64)stack_alignment), 64, 32, 0);
+                    break; case MACHINE_X64_COPY_FRAME_FROM_PTR:
+                    {
+                        u32 destination_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
+                        u32 source_register = operand_registers[1];
+                        u32 copied = 0;
+                        while (copied < instruction->payload)
+                        {
+                            u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
+                            (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, source_register, copied, chunk, 0);
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, destination_offset - copied, chunk, 0);
+                            copied += chunk;
+                        }
+                    }
+                    break; case MACHINE_X64_COPY_PTR_FROM_FRAME:
+                    {
+                        u32 destination_register = operand_registers[0];
+                        u32 source_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                        u32 copied = 0;
+                        while (copied < instruction->payload)
+                        {
+                            u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, source_offset - copied, chunk, 0);
+                            (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, destination_register, copied, chunk, 0);
+                            copied += chunk;
+                        }
+                    }
+                    break; case MACHINE_X64_CVT_U64_TO_F32: case MACHINE_X64_CVT_U64_TO_F64:
+                    {
+                        // Canonical branchy form: non-negative converts directly;
+                        // a set sign bit halves with a sticky rounding bit, then
+                        // doubles the float.  The selector leaves the two operands
+                        // unconstrained; RCX is the row's declared integer scratch,
+                        // while the destination carries the resulting float bits.
+                        bool to_f64 = instruction->opcode == MACHINE_X64_CVT_U64_TO_F64;
+                        u32 source = operand_registers[1];
+                        u32 destination = operand_registers[0];
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, source, 64, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("TEST"), source, source, 64, 0);
+                        u32 non_negative_branch = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JNS"), 0, 8, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), destination, source, 64, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SHR"), destination, 1, 64, 8, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX, 1, 32, 8, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
+                        (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, destination,
+                                to_f64 ? 64 : 32, 64, 0);
+                        (void)machine_x64_emit_metadata_xmm_registers(&encoder, to_f64 ? S8("ADDSD") : S8("ADDSS"), 0, 0,
+                                to_f64 ? 64 : 32, 0);
+                        (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
+                        u32 end_branch = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
+                        u32 direct_conversion = encoder.count;
+                        (void)machine_x64_emit_metadata_xmm_gpr(&encoder, to_f64 ? S8("CVTSI2SD") : S8("CVTSI2SS"), 0, source,
+                                to_f64 ? 64 : 32, 64, 0);
+                        (void)machine_x64_emit_metadata_gpr_xmm(&encoder, S8("MOVQ"), destination, 0, 64, 128, 0);
+                        u32 conversion_end = encoder.count;
+                        encoder.bytes[non_negative_branch + 1] = (u8)(direct_conversion - (non_negative_branch + 2));
+                        encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
+                    }
+                    break; case MACHINE_X64_CVT_F32_TO_U64: case MACHINE_X64_CVT_F64_TO_U64:
+                    {
+                        // Canonical threshold form: values below 2^63 convert
+                        // directly, larger ones subtract the threshold first and
+                        // set the top bit after.  The row's operands are free to use
+                        // any allocatable GPR; RCX is reserved as the final scratch.
+                        bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_U64;
+                        u32 source = operand_registers[1];
+                        u32 destination = operand_registers[0];
+                        (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
+                        (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
+                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x4f000000), 0);
+                        (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
+                        (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
+                                from_f64 ? 64 : 32, 0);
+                        u32 direct_branch = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
+                        (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("SUBSD") : S8("SUBSS"), 0, 1,
+                                from_f64 ? 64 : 32, 0);
+                        (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
+                                from_f64 ? 64 : 32, 0);
+                        // The threshold path already converted x-2^63 to a signed
+                        // 64-bit result; restore the unsigned high bit, not merely
+                        // bit 31 (the latter is only the f32 result width).
+                        (void)machine_x64_emit_exact_immediate_value(&encoder, MACHINE_X64_RCX, UINT64_C(0x8000000000000000), 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("OR"), destination, MACHINE_X64_RCX, 64, 0);
+                        u32 end_branch = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
+                        u32 direct_conversion = encoder.count;
+                        (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), destination, 0, 64,
+                                from_f64 ? 64 : 32, 0);
+                        u32 conversion_end = encoder.count;
+                        encoder.bytes[direct_branch + 1] = (u8)(direct_conversion - (direct_branch + 2));
+                        encoder.bytes[end_branch + 1] = (u8)(conversion_end - (end_branch + 2));
+                    }
+                    break; case MACHINE_X64_CVT_F32_TO_I64: case MACHINE_X64_CVT_F64_TO_I64:
+                    {
+                        bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_I64;
+                        (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, operand_registers[1], 64, 64, 0);
+                        (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), operand_registers[0], 0, 64, 128, 0);
+                    }
+                    break; case MACHINE_X64_VA_SAVE:
+                    {
+                        u32 save_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
+                        static u8 const gp_registers[6] = {
+                            MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RDX, MACHINE_X64_RCX, MACHINE_X64_R8, MACHINE_X64_R9,
+                        };
+                        for (u32 gp_index = 0; gp_index < BUSTER_ARRAY_LENGTH(gp_registers); gp_index += 1)
+                        {
+                            u32 save_displacement = save_offset - gp_index * 8u;
+                            (void)machine_x64_emit_exact_frame_chunk(&encoder, false, gp_registers[gp_index], save_displacement, 8, 0);
+                        }
+                        for (u32 float_index = 0; float_index < 8; float_index += 1)
+                        {
+                            u32 xmm = float_index;
+                            u32 save_displacement = save_offset - 48u - float_index * 16u;
+                            (void)machine_x64_emit_metadata_xmm_memory(&encoder, S8("MOVSD"), xmm, MACHINE_X64_RBP,
+                                    -(s64)(s32)save_displacement, true, 64, 0);
+                        }
+                    }
+                    break; case MACHINE_X64_VA_ARG:
+                    {
+                        MachineVaArg* metadata = function->va_args + instruction->payload;
+                        u32 list = operand_registers[0];
+                        u32 result_register = operand_registers[1];
+                        u32 result_offset = metadata->result_is_frame ? placement->stack_slot_offsets[metadata->result_slot] : 0;
+                        // A mixed aggregate can exhaust either class independently.
+                        // Both class checks branch to the same overflow sequence, so
+                        // retain every displacement field rather than silently
+                        // leaving the second Jcc's zero displacement unpatched.
+                        u32 overflow_patches[2] = {UINT32_MAX, UINT32_MAX};
+                        u32 overflow_patch_count = 0;
+                        u32 end_patch = UINT32_MAX;
+                        bool register_path = metadata->part_count && !metadata->parts[0].is_memory;
+                        u32 integer_parts = 0;
+                        u32 float_parts = 0;
+                        for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
+                        {
+                            integer_parts += !metadata->parts[part_index].is_float && !metadata->parts[part_index].is_memory;
+                            float_parts += metadata->parts[part_index].is_float && !metadata->parts[part_index].is_memory;
+                            register_path &= !metadata->parts[part_index].is_memory;
+                        }
+                        if (register_path)
+                        {
+                            if (integer_parts)
+                            {
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 0, 4, 0);
+                                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RDX,
+                                        48u - integer_parts * 8u, 32, 32, 0);
+                                u32 branch_start = encoder.count;
+                                (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
+                                if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
+                                {
+                                    overflow_patches[overflow_patch_count++] = branch_start + 2;
+                                }
+                            }
+                            if (float_parts)
+                            {
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R9, list, 4, 4, 0);
+                                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_R9,
+                                        176u - float_parts * 16u, 32, 32, 0);
+                                u32 branch_start = encoder.count;
+                                (void)machine_x64_emit_metadata_relative(&encoder, S8("JA"), 0, 32, 0);
+                                if (overflow_patch_count < BUSTER_ARRAY_LENGTH(overflow_patches))
+                                {
+                                    overflow_patches[overflow_patch_count++] = branch_start + 2;
+                                }
+                            }
+                            (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R8, list, 16, 8, 0);
+                            for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
+                            {
+                                MachineVaArgPart* part = metadata->parts + part_index;
+                                u32 offset_register = part->is_float ? MACHINE_X64_R9 : MACHINE_X64_RDX;
+                                // Keep R8 as the immutable reg_save_area base.  Build
+                                // each part address in the scratch R11 register so
+                                // mixed GP/FP values do not accumulate one class's
+                                // cursor into the save-area base.
+                                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R11, MACHINE_X64_R8, 64, 0);
+                                (void)machine_x64_emit_metadata_registers(&encoder, S8("ADD"), MACHINE_X64_R11, offset_register, 64, 0);
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_R11, part->save_offset,
+                                        part->size >= 8 ? 8 : part->size, 0);
+                                if (metadata->result_is_frame)
+                                {
+                                    (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - part->value_offset,
+                                            part->size >= 8 ? 8 : part->size, 0);
+                                }
+                                else
+                                {
+                                    // Scalar VA_ARG values are one part and the
+                                    // constrained result register is RCX.
+                                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), result_register, MACHINE_X64_R10,
+                                            part->size >= 8 ? 64 : 32, 0);
+                                }
+                            }
+                            if (integer_parts)
+                            {
+                                u32 amount = integer_parts * 8u;
+                                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, amount, 32,
+                                        amount <= INT8_MAX ? 8 : 32, 0);
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 0, 4, 0);
+                            }
+                            if (float_parts)
+                            {
+                                u32 amount = float_parts * 16u;
+                                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_R9, amount, 32,
+                                        amount <= INT8_MAX ? 8 : 32, 0);
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_R9, list, 4, 4, 0);
+                            }
+                            u32 end_branch_start = encoder.count;
+                            (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
+                            end_patch = end_branch_start + 1;
+                        }
+                        u32 overflow_start = encoder.count;
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RDX, list, 8, 8, 0);
+                        if (metadata->alignment > 8)
+                        {
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->alignment - 1,
+                                    64, (metadata->alignment - 1) <= INT8_MAX ? 8 : 32, 0);
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RDX,
+                                    (u64)(-(s64)metadata->alignment),
+                                    64, 32, 0);
+                        }
+                        if (metadata->result_is_frame)
+                        {
+                            u32 copied = 0;
+                            while (copied < metadata->size)
+                            {
+                                u32 chunk = machine_x64_copy_chunk(metadata->size - copied);
+                                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_R10, MACHINE_X64_RDX, copied, chunk, 0);
+                                (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_R10, result_offset - copied, chunk, 0);
+                                copied += chunk;
+                            }
+                        }
+                        else
+                        {
+                            (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, result_register, MACHINE_X64_RDX, 0,
+                                    metadata->scalar_size >= 8 ? 8 : metadata->scalar_size, 0);
+                        }
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RDX, metadata->stack_size,
+                                64, metadata->stack_size <= INT8_MAX ? 8 : 32, 0);
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, false, MACHINE_X64_RDX, list, 8, 8, 0);
+                        u32 end = encoder.count;
+                        for (u32 patch_index = 0; patch_index < overflow_patch_count; patch_index += 1)
+                        {
+                            u32 overflow_patch = overflow_patches[patch_index];
+                            u32 displacement = overflow_start - (overflow_patch + 4);
+                            for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                            {
+                                encoder.bytes[overflow_patch + byte_index] = (u8)(displacement >> (byte_index * 8));
+                            }
+                        }
+                        if (end_patch != UINT32_MAX)
+                        {
+                            u32 displacement = end - (end_patch + 4);
+                            for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                            {
+                                encoder.bytes[end_patch + byte_index] = (u8)(displacement >> (byte_index * 8));
+                            }
+                        }
+                    }
+                    break; case MACHINE_X64_STACK_ALLOCATE:
+                    {
+                        // The constrained row places the runtime byte count in RCX
+                        // and receives the resulting RSP in RAX. Keep the count
+                        // unsigned, round it exactly as the canonical emitter does,
+                        // and touch every page before the final residual subtract so
+                        // guard-page stacks cannot be skipped.
+                        u32 stack_alignment = instruction->payload;
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RCX, stack_alignment - 1, 64, 32, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX,
+                                (u64)(-(s64)stack_alignment), 64, 32, 0);
 
-                u32 compare_offset = encoder.count;
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RCX, 4096, 64, 32, 0);
-                u32 short_exit = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
-                (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
-                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RCX, 4096, 64, 32, 0);
-                u32 loop_back = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
-                u32 residual = encoder.count;
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("SUB"), MACHINE_X64_RSP, MACHINE_X64_RCX, 64, 0);
-                (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RSP, 64, 0);
-                encoder.bytes[short_exit + 1] = (u8)(residual - (short_exit + 2));
-                encoder.bytes[loop_back + 1] = (u8)(compare_offset - (loop_back + 2));
-            }
-            break;
-            case MACHINE_X64_ATOMIC_RMW:
-            {
-                // Sized load, then a lock cmpxchg retry loop with R8 holding
-                // the proposed value, mirroring the canonical sequence.
-                u32 size = instruction->payload & 0xff;
-                u32 atomic_operation = instruction->payload >> 8;
-                (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, MACHINE_X64_RCX, 0, size, 0);
-                u32 retry_offset = encoder.count;
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RAX, (u16)(size * 8u), 0);
-                if (atomic_operation == IR_ATOMIC_EXCHANGE)
-                {
-                    (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
-                }
-                else
-                {
-                    String8 operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
-                                        : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
-                                        : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
-                                        : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
-                                                                                   : S8("XOR");
-                    (void)machine_x64_emit_metadata_registers(&encoder, operation, MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
-                }
-                (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_R8,
-                                                                        (u16)(size * 8u), 0);
-                u32 retry_branch = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JNE"), 0, 32, 0);
-                u32 displacement = retry_offset - (retry_branch + 6);
-                for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
-                {
-                    encoder.bytes[retry_branch + 2 + byte_index] = (u8)(displacement >> (byte_index * 8));
-                }
-            }
-            break;
-            case MACHINE_X64_ATOMIC_CMPXCHG:
-            {
-                u32 size = instruction->payload & 0xff;
-                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, 64, 0);
-                (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_RSI,
-                                                                        (u16)(size * 8u), 0);
-            }
-            break;
-            case MACHINE_X64_ATOMIC_CMPXCHG16:
-            {
-                u32 result_slot = machine_ref_payload(instruction->operands[0]);
-                u32 expected_slot = machine_ref_payload(instruction->operands[1]);
-                u32 desired_slot = machine_ref_payload(instruction->operands[2]);
-                u32 address = operand_registers[3];
-                u32 result_offset = placement->stack_slot_offsets[result_slot];
-                u32 expected_offset = placement->stack_slot_offsets[expected_slot];
-                u32 desired_offset = placement->stack_slot_offsets[desired_slot];
-                // CMPXCHG16B's implicit pairs are RAX:RDX (expected/result)
-                // and RBX:RCX (desired). The result stores happen after the
-                // instruction, preserving the old memory image on both the
-                // success and failure paths.
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, expected_offset, 8, 0);
-                // Frame slots grow toward lower addresses: aggregate byte
-                // offset 8 is represented by the slot offset minus eight.
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, expected_offset - 8, 8, 0);
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RBX, desired_offset, 8, 0);
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RCX, desired_offset - 8, 8, 0);
-                (void)machine_x64_emit_metadata_atomic_memory(&encoder, S8("CMPXCHG16B"), address, 128, 0);
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, result_offset, 8, 0);
-                (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RDX, result_offset - 8, 8, 0);
-            }
-            break;
-            case MACHINE_X64_UD2:
-                (void)machine_x64_emit_metadata_instruction(&encoder, S8("UD2"), 0, 0,
-                                                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
-                break;
-            case MACHINE_X64_SWITCH:
-            {
-                // The canonical compare chain: the condition sits in the
-                // operand scratch, each case constant is materialized in
-                // RCX, equality jumps to the case block, and the tail jump
-                // takes the default edge.
-                u32 condition = operand_registers[0];
-                // A switch row has no explicit scratch operand.  RCX is the
-                // normal constant carrier, but the allocator may place the
-                // condition there; use RAX in that case so materializing a
-                // case value never destroys the value being compared.
-                u32 compare_register = condition == MACHINE_X64_RCX ? MACHINE_X64_RAX : MACHINE_X64_RCX;
-                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
-                {
-                    MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
-                    (void)machine_x64_emit_exact_movabs(&encoder, compare_register, case_row->value, 0);
-                    (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 64, 0);
-                    u32 branch_start = encoder.count;
-                    (void)machine_x64_emit_metadata_relative(&encoder, S8("JZ"), 0, 32, 0);
-                    MachineX64BranchFixup* case_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
-                    *case_fixup = (MachineX64BranchFixup){
-                        .patch_offset = branch_start + 2,
-                        .block = case_row->target_block,
-                    };
-                }
-                u32 default_branch_start = encoder.count;
-                (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
-                MachineX64BranchFixup* default_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
-                *default_fixup = (MachineX64BranchFixup){
-                    .patch_offset = default_branch_start + 1,
-                    .block = machine_ref_payload(instruction->operands[1]),
-                };
-            }
-            break;
-            default:
-                machine_x64_exact_counters_assign(&result, exact_counters);
-                return result;
+                        u32 compare_offset = encoder.count;
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RCX, 4096, 64, 32, 0);
+                        u32 short_exit = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JB"), 0, 8, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
+                        (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
+                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RCX, 4096, 64, 32, 0);
+                        u32 loop_back = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 8, 0);
+                        u32 residual = encoder.count;
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("SUB"), MACHINE_X64_RSP, MACHINE_X64_RCX, 64, 0);
+                        (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RSP, 64, 0);
+                        encoder.bytes[short_exit + 1] = (u8)(residual - (short_exit + 2));
+                        encoder.bytes[loop_back + 1] = (u8)(compare_offset - (loop_back + 2));
+                    }
+                    break; case MACHINE_X64_ATOMIC_RMW:
+                    {
+                        // Sized load, then a lock cmpxchg retry loop with R8 holding
+                        // the proposed value, mirroring the canonical sequence.
+                        u32 size = instruction->payload & 0xff;
+                        u32 atomic_operation = instruction->payload >> 8;
+                        (void)machine_x64_emit_metadata_pointer_chunk(&encoder, true, MACHINE_X64_RAX, MACHINE_X64_RCX, 0, size, 0);
+                        u32 retry_offset = encoder.count;
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RAX, (u16)(size * 8u), 0);
+                        if (atomic_operation == IR_ATOMIC_EXCHANGE)
+                        {
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
+                        }
+                        else
+                        {
+                            String8 operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
+                                : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
+                                : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                                : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
+                                : S8("XOR");
+                            (void)machine_x64_emit_metadata_registers(&encoder, operation, MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
+                        }
+                        (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_R8,
+                                (u16)(size * 8u), 0);
+                        u32 retry_branch = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JNE"), 0, 32, 0);
+                        u32 displacement = retry_offset - (retry_branch + 6);
+                        for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                        {
+                            encoder.bytes[retry_branch + 2 + byte_index] = (u8)(displacement >> (byte_index * 8));
+                        }
+                    }
+                    break; case MACHINE_X64_ATOMIC_CMPXCHG:
+                    {
+                        u32 size = instruction->payload & 0xff;
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, 64, 0);
+                        (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_RSI,
+                                (u16)(size * 8u), 0);
+                    }
+                    break; case MACHINE_X64_ATOMIC_CMPXCHG16:
+                    {
+                        u32 result_slot = machine_ref_payload(instruction->operands[0]);
+                        u32 expected_slot = machine_ref_payload(instruction->operands[1]);
+                        u32 desired_slot = machine_ref_payload(instruction->operands[2]);
+                        u32 address = operand_registers[3];
+                        u32 result_offset = placement->stack_slot_offsets[result_slot];
+                        u32 expected_offset = placement->stack_slot_offsets[expected_slot];
+                        u32 desired_offset = placement->stack_slot_offsets[desired_slot];
+                        // CMPXCHG16B's implicit pairs are RAX:RDX (expected/result)
+                        // and RBX:RCX (desired). The result stores happen after the
+                        // instruction, preserving the old memory image on both the
+                        // success and failure paths.
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RAX, expected_offset, 8, 0);
+                        // Frame slots grow toward lower addresses: aggregate byte
+                        // offset 8 is represented by the slot offset minus eight.
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RDX, expected_offset - 8, 8, 0);
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RBX, desired_offset, 8, 0);
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, true, MACHINE_X64_RCX, desired_offset - 8, 8, 0);
+                        (void)machine_x64_emit_metadata_atomic_memory(&encoder, S8("CMPXCHG16B"), address, 128, 0);
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RAX, result_offset, 8, 0);
+                        (void)machine_x64_emit_exact_frame_chunk(&encoder, false, MACHINE_X64_RDX, result_offset - 8, 8, 0);
+                    }
+                    break; case MACHINE_X64_UD2: (void)machine_x64_emit_metadata_instruction(&encoder, S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                    break; case MACHINE_X64_SWITCH:
+                    {
+                        // The canonical compare chain: the condition sits in the
+                        // operand scratch, each case constant is materialized in
+                        // RCX, equality jumps to the case block, and the tail jump
+                        // takes the default edge.
+                        u32 condition = operand_registers[0];
+                        // A switch row has no explicit scratch operand.  RCX is the
+                        // normal constant carrier, but the allocator may place the
+                        // condition there; use RAX in that case so materializing a
+                        // case value never destroys the value being compared.
+                        u32 compare_register = condition == MACHINE_X64_RCX ? MACHINE_X64_RAX : MACHINE_X64_RCX;
+                        for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                        {
+                            MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
+                            (void)machine_x64_emit_exact_movabs(&encoder, compare_register, case_row->value, 0);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 64, 0);
+                            u32 branch_start = encoder.count;
+                            (void)machine_x64_emit_metadata_relative(&encoder, S8("JZ"), 0, 32, 0);
+                            MachineX64BranchFixup* case_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                            *case_fixup = (MachineX64BranchFixup){
+                                .patch_offset = branch_start + 2,
+                                .block = case_row->target_block,
+                            };
+                        }
+                        u32 default_branch_start = encoder.count;
+                        (void)machine_x64_emit_metadata_relative(&encoder, S8("JMP"), 0, 32, 0);
+                        MachineX64BranchFixup* default_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                        *default_fixup = (MachineX64BranchFixup){
+                            .patch_offset = default_branch_start + 1,
+                            .block = machine_ref_payload(instruction->operands[1]),
+                        };
+                    }
+                    break; default: machine_x64_exact_counters_assign(&result, exact_counters); return result;
                 }
             }
             MachinePoint after = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
