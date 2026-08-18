@@ -1551,6 +1551,7 @@ struct MachineX64ExactMapAudit
     u32 immediate_patch_tables;
     u32 memory_base_tables;
     u32 displacement_patch_tables;
+    u32 variable_memory_encoding_tables;
     bool valid;
     u8 reserved[3];
 };

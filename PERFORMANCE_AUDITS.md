@@ -18,6 +18,55 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18l` (Linux x86_64, Zen 4 7940HS; **classify variable base-memory
+rows into zero/disp8/disp32 lanes**).  A direct trusted-compiler census found
+225,949 remaining simple variable-displacement emissions in the unity
+self-compile: 191,947 pointer chunks (28,775 zero, 85,886 disp8, 77,286
+disp32) and 34,002 LEAs (27,572 disp8, 6,430 disp32).  Serial exact prewarm now
+recognizes the nine two-operand GPR/base-memory shapes and publishes a dense
+16x16 register/base population for each of the three architectural
+displacement classes.  Each record remains the existing fixed sixteen-byte
+encoding unit.  The worker classifies once, indexes one homogeneous table,
+copies the metadata-authored bytes, and patches only the trailing one or four
+little-endian displacement bytes.
+
+Publication is fail-closed.  Prewarm asks the metadata encoder for every one of
+the 6,912 active records and uses a second displacement in each nonzero class
+to prove identical length and prefix plus exactly the expected trailing patch.
+Zero displacement retains the metadata authority's RBP/R13 special encoding;
+disp8 probes include both signs; disp32 probes use two unrelated bit patterns.
+Only one GPR plus one simple base-memory operand, fixed 8/16/32/64-bit widths,
+and no dynamic policy flags qualify.  Arbitrary addressing, symbols, large
+pointer offsets, malformed rows, and any failed proof retain the complete
+metadata path.  The nine active tables occupy 110,592 bytes of the reserved
+contiguous BSS; the trusted compiler grows 1,783 text bytes and 198,976 BSS
+bytes.  This deliberately spends cold immutable storage to remove repeated
+hot metadata interpretation and creates fixed-width lanes suitable for later
+batched stores without introducing a sparse command stream.
+
+Seven same-source, CPU-pinned, non-multiplexed instruction pairs are byte-
+identical and reduce the median from 12,973,917,957 to 12,643,021,016,
+**-330,896,941 (-2.5505%)**; every paired delta lies between -330.69M and
+-331.11M.  Branches fall 2,428,961,243 -> 2,372,373,712 (**-2.3297%**) and
+L1d loads fall 4,627,257,066 -> 4,524,727,563 (**-2.2158%**).  Branch misses
+fall 27,969,751 -> 27,784,610 (**-0.6619%**), while L1d misses rise slightly
+133,939,726 -> 134,296,531 (**+0.2664%**).  Nine cycle pairs all favor the
+candidate and reduce the independent median 4,879,047,911 -> 4,800,326,550,
+**-1.6135%** (paired median -1.5426%).
+
+This is the intended recursive “when there is one, there are many” conversion:
+the prior zero/forced-disp32 lanes exposed a second, larger homogeneous
+population, measurement ranked its three states, and one compact projection
+removed the repeated decision tree.  The next step should again census the
+remaining generic exact population and classify a coherent batch; do not add
+per-instruction command objects or vectorize pointer-rich metadata traversal.
+
+Final `test_self_host` reaches a byte-identical 35,542,408-byte fixed point:
+stage 1 retires 12,643,171,563 instructions, stage 2 retires 89,183,956,811,
+and all 1,443,424 exact attempts succeed.  Release `test_all` passes 309,180
+assertions in all 39 modules, including the focused nine-table publication
+audit.  Clang static analysis reports zero warnings.
+
 `2026-08-18k` (Linux x86_64, Zen 4 7940HS; **move the dominant exact memory
 population into dense base/displacement lanes**).  The serial exact prewarm
 now recognizes two homogeneous memory shapes.  Zero-displacement pointer

@@ -6225,6 +6225,7 @@ typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
 BUSTER_CT_CHECK(MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY <= UINT8_MAX);
 typedef struct MachineX64GprEncoding MachineX64GprEncoding;
 typedef struct MachineX64GprEncodingTable MachineX64GprEncodingTable;
+typedef struct MachineX64VariableMemoryEncodingTable MachineX64VariableMemoryEncodingTable;
 struct MachineX64GprEncoding
 {
     u8 bytes[15];
@@ -6251,6 +6252,22 @@ BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTable
     machine_x64_gpr_encoding_tables[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u32 machine_x64_gpr_encoding_table_count;
 
+// Variable base-register memory forms are another closed population.  Keep
+// their zero, disp8, and disp32 encodings in separate homogeneous lanes so the
+// worker classifies the displacement once and consumes a fixed-stride record.
+#define MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY 16u
+#define MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT 3u
+BUSTER_CT_CHECK(MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY <= UINT8_MAX);
+struct MachineX64VariableMemoryEncodingTable
+{
+    MachineX64GprEncoding encodings[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT][256];
+    u8 gpr_operand_slot;
+    u8 memory_operand_slot;
+};
+BUSTER_GLOBAL_LOCAL MachineX64VariableMemoryEncodingTable
+    machine_x64_variable_memory_encoding_tables[MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_variable_memory_encoding_table_count;
+
 struct MachineX64PreparedExactOpcode
 {
     MachineX64ExactRecipe const* descriptor;
@@ -6261,6 +6278,8 @@ struct MachineX64PreparedExactOpcode
     // One-based index into machine_x64_gpr_encoding_tables per form variant;
     // zero keeps the ordinary exact metadata transform.
     u8 gpr_encoding_tables[16];
+    // One-based index into the displacement-class tables above.
+    u8 variable_memory_encoding_tables[16];
     BusterX86MetadataMachineExactToken sequence_tokens[MACHINE_X64_EXACT_SEQUENCE_MAX_VARIANTS * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS];
     u8 exact_required;
     u8 sequence_required;
@@ -6675,6 +6694,132 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
     return (u8)machine_x64_gpr_encoding_table_count;
 }
 
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
+    MachineX64ExactRecipeVariant const* variant, BusterX86MetadataMachineExactToken token)
+{
+    if (!variant || variant->operand_count != 2 || variant->flags ||
+        machine_x64_variable_memory_encoding_table_count >= MACHINE_X64_VARIABLE_MEMORY_TABLE_CAPACITY)
+        return 0;
+
+    u32 gpr_operand_index = UINT32_MAX;
+    u32 memory_operand_index = UINT32_MAX;
+    for (u32 operand_index = 0; operand_index < variant->operand_count; operand_index += 1)
+    {
+        MachineX64ExactOperandProjection kind = (MachineX64ExactOperandProjection)variant->operand_kinds[operand_index];
+        if (kind == MACHINE_X64_EXACT_OPERAND_GPR && gpr_operand_index == UINT32_MAX)
+        {
+            gpr_operand_index = operand_index;
+        }
+        else if ((kind == MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO ||
+                  kind == MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD) &&
+                 memory_operand_index == UINT32_MAX)
+        {
+            memory_operand_index = operand_index;
+        }
+        else
+        {
+            return 0;
+        }
+        u16 width = variant->operand_widths[operand_index];
+        if ((width != 8 && width != 16 && width != 32 && width != 64) ||
+            variant->operand_slots[operand_index] >= 4)
+            return 0;
+    }
+    if (gpr_operand_index == UINT32_MAX || memory_operand_index == UINT32_MAX) return 0;
+
+    MachineX64VariableMemoryEncodingTable* table =
+        machine_x64_variable_memory_encoding_tables + machine_x64_variable_memory_encoding_table_count;
+    s32 const class_displacements[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT] = {
+        0,
+        INT32_C(0x5a),
+        INT32_C(0x12345678),
+    };
+    s32 const probe_displacements[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT] = {
+        0,
+        -INT32_C(0x5b),
+        INT32_C(0x5aa55aa5),
+    };
+    u8 const patch_widths[MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT] = {0, 1, 4};
+
+    for (u32 displacement_class = 0; displacement_class < MACHINE_X64_MEMORY_DISPLACEMENT_CLASS_COUNT; displacement_class += 1)
+    {
+        for (u32 register_key = 0; register_key < 256; register_key += 1)
+        {
+            u32 data_register = register_key & 15u;
+            u32 base_register = register_key >> 4;
+            BusterX86MetadataPhysicalOperand operands[2];
+            operands[gpr_operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = variant->operand_widths[gpr_operand_index],
+                .reg = {
+                    .index = (u16)data_register,
+                    .width = variant->operand_widths[gpr_operand_index],
+                    .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                },
+            };
+            operands[memory_operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = variant->operand_widths[memory_operand_index],
+                .memory = {
+                    .base = {
+                        .index = (u16)base_register,
+                        .width = 64,
+                        .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+                    },
+                    .displacement = class_displacements[displacement_class],
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = displacement_class != 0,
+                },
+            };
+
+            MachineX64GprEncoding* encoding = table->encodings[displacement_class] + register_key;
+            BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+                .operands = operands,
+                .operand_count = variant->operand_count,
+                .output = encoding->bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(encoding->bytes),
+            });
+            if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
+                emitted.byte_count > BUSTER_ARRAY_LENGTH(encoding->bytes))
+                return 0;
+            encoding->byte_count = (u8)emitted.byte_count;
+
+            u32 patch_width = patch_widths[displacement_class];
+            if (patch_width)
+            {
+                if (emitted.byte_count < patch_width) return 0;
+                operands[memory_operand_index].memory.displacement = probe_displacements[displacement_class];
+                u8 probe_bytes[15];
+                BusterX86MetadataEmitResult probe = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+                    .operands = operands,
+                    .operand_count = variant->operand_count,
+                    .output = probe_bytes,
+                    .output_capacity = BUSTER_ARRAY_LENGTH(probe_bytes),
+                });
+                if (probe.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || probe.relocation_count != 0 ||
+                    probe.byte_count != emitted.byte_count)
+                    return 0;
+                u32 patch_offset = emitted.byte_count - patch_width;
+                u32 probe_value = (u32)probe_displacements[displacement_class];
+                for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
+                {
+                    u8 expected = byte_index >= patch_offset
+                                      ? (u8)(probe_value >> ((byte_index - patch_offset) * 8u))
+                                      : encoding->bytes[byte_index];
+                    if (probe_bytes[byte_index] != expected) return 0;
+                }
+            }
+        }
+    }
+
+    table->gpr_operand_slot = variant->operand_slots[gpr_operand_index];
+    table->memory_operand_slot = variant->operand_slots[memory_operand_index];
+    machine_x64_variable_memory_encoding_table_count += 1;
+    return (u8)machine_x64_variable_memory_encoding_table_count;
+}
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64PreparedExactOpcode* entry,
                                                                MachineX64EmitRegistryEntry const* registry_entry,
                                                                BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
@@ -6705,6 +6850,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
         entry->gpr_encoding_tables[variant_index] = variant_valid
             ? machine_x64_exact_prepare_gpr_encoding_table(&variant, entry->metadata_tokens[variant_index])
             : 0;
+        entry->variable_memory_encoding_tables[variant_index] = variant_valid
+            ? machine_x64_exact_prepare_variable_memory_encoding_table(&variant, entry->metadata_tokens[variant_index])
+            : 0;
         if (variant_valid) entry->variant_valid_mask |= (u16)(1u << variant_index);
         else descriptor_valid = false;
     }
@@ -6726,6 +6874,10 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
         }
         entry->variant_count = 0;
         entry->single_gpr_encoding_table = 0;
+        for (u32 table_index = 0; table_index < BUSTER_ARRAY_LENGTH(entry->variable_memory_encoding_tables); table_index += 1)
+        {
+            entry->variable_memory_encoding_tables[table_index] = 0;
+        }
         entry->variant_valid_mask = 0;
         entry->plan_valid = false;
     }
@@ -6771,6 +6923,7 @@ void machine_x86_64_exact_prewarm(void)
     BusterX86MetadataExactPlan prepared[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     machine_x64_gpr_encoding_table_count = 0;
+    machine_x64_variable_memory_encoding_table_count = 0;
     machine_x64_exact_collect_plan_keys(keys, key_found);
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
@@ -6843,6 +6996,7 @@ MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
     result.valid &= result.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT;
     result.valid &= result.expansion_nonexact_rows == result.expansion_rows;
     result.dense_encoding_tables = machine_x64_gpr_encoding_table_count;
+    result.variable_memory_encoding_tables = machine_x64_variable_memory_encoding_table_count;
     for (u32 table_index = 0; table_index < machine_x64_gpr_encoding_table_count; table_index += 1)
     {
         result.immediate_patch_tables +=
@@ -7923,9 +8077,66 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[2], operands, variant.operand_count, false, false, 0, false, counters);
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
+    MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
+    MachineX64ExactEmitCounters* counters)
+{
+    if (!table_plus_one || table_plus_one > machine_x64_variable_memory_encoding_table_count || reg >= 16 || base >= 16)
+        return false;
+
+    u32 displacement_class = displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
+    MachineX64VariableMemoryEncodingTable const* table =
+        machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
+    MachineX64GprEncoding const* encoding =
+        table->encodings[displacement_class] + reg + (base << 4);
+    u32 byte_count = encoding->byte_count;
+    if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+    {
+        encoder->overflow = true;
+        if (counters)
+        {
+            counters->attempts += 1;
+            counters->fallbacks += 1;
+        }
+        return false;
+    }
+
+    memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
+    if (displacement_class == 1)
+    {
+        encoder->bytes[encoder->count + byte_count - 1u] = (u8)displacement;
+    }
+    else if (displacement_class == 2)
+    {
+        u32 patch_offset = encoder->count + byte_count - (u32)sizeof(u32);
+        u32 value = (u32)displacement;
+        for (u32 byte_index = 0; byte_index < sizeof(u32); byte_index += 1)
+        {
+            encoder->bytes[patch_offset + byte_index] = (u8)(value >> (byte_index * 8u));
+        }
+    }
+    encoder->count += byte_count;
+    if (counters)
+    {
+        counters->attempts += 1;
+        counters->successes += 1;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
                                                                   MachineX64ExactEmitCounters* counters)
 {
+    u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
+                                                                                                               : MACHINE_X64_LOAD_PTR64)
+                      : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16 : chunk == 4 ? MACHINE_X64_STORE_PTR32
+                                                                                                                 : MACHINE_X64_STORE_PTR64);
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
+    if (offset <= INT32_MAX && entry && entry->plan_valid && entry->variant_count &&
+        machine_x64_emit_variable_memory_encoding(encoder, entry->variable_memory_encoding_tables[0], reg, base, (s32)offset, counters))
+        return true;
+    if (encoder->overflow) return false;
+
     u16 width = (u16)(chunk * 8u);
     if (load)
     {
@@ -8095,6 +8306,19 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             if (counters) counters->successes += 1;
             return true;
         }
+    }
+    u8 variable_memory_table_plus_one = entry->variable_memory_encoding_tables[variant_index];
+    if (variable_memory_table_plus_one &&
+        variable_memory_table_plus_one <= machine_x64_variable_memory_encoding_table_count)
+    {
+        MachineX64VariableMemoryEncodingTable const* table =
+            machine_x64_variable_memory_encoding_tables + (variable_memory_table_plus_one - 1u);
+        if (machine_x64_emit_variable_memory_encoding(
+                encoder, variable_memory_table_plus_one,
+                operand_registers[table->gpr_operand_slot], operand_registers[table->memory_operand_slot],
+                (s32)payload, counters))
+            return true;
+        if (encoder->overflow) return false;
     }
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
     if ((variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
