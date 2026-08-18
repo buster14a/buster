@@ -8,6 +8,7 @@
 #define MACHINE_FAST_OPERAND_USE_SHIFT 12u
 #define MACHINE_FAST_OPERAND_DEFINE_SHIFT 16u
 #define MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT 20u
+#define MACHINE_FAST_OPERAND_SIMPLE_ROW (1u << 24)
 #define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
@@ -1011,6 +1012,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 return prepass;
             }
             prepass.callee_saved_clobber_mask |= info->clobber_mask & description->callee_saved_mask;
+            bool constrained = machine_opcode_has_constraints(info);
             u32 operand_masks = 0;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
@@ -1043,7 +1045,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 // A tied operand still has a legal coalescing path in FAST,
                 // but pinning it globally would hide the source/destination
                 // register relation from QUALITY's split probes.
-                prepass.disqualified[virtual_register] |= machine_opcode_has_constraints(info) ? 1u : 0u;
+                prepass.disqualified[virtual_register] |= constrained ? 1u : 0u;
                 if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
                 {
                     if (prepass.definition_blocks[virtual_register] == UINT32_MAX)
@@ -1069,6 +1071,12 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         use_blocks[virtual_register] = use_block == UINT16_MAX || use_block == block_index ? (u16)block_index : UINT16_MAX - 1u;
                     }
                 }
+            }
+            if (!constrained && !(info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) && !info->clobber_mask &&
+                !(operand_masks & ((MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_PHYSICAL_SHIFT) |
+                                   (MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_BLOCK_SHIFT))))
+            {
+                operand_masks |= MACHINE_FAST_OPERAND_SIMPLE_ROW;
             }
             prepass.operand_masks[instruction_index] = operand_masks;
         }
@@ -1542,7 +1550,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // scan's file — the span invariant owns it — and loading it as a
         // local owner would have the opening eviction store it back
         // spuriously at a point every iteration passes.
-        u64 head_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
+        u64 head_pin_active = state.pinned_registers && block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
         for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
         {
             u32 value = entry_owner[contract_register];
@@ -1558,15 +1566,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         {
             u32 instruction_index = block->first_instruction + offset;
             MachineInstruction* instruction = function->instructions + instruction_index;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            if (!info)
-            {
-                return placement;
-            }
             u32 operand_masks = prepass->operand_masks[instruction_index];
-            u32 physical_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
             u32 virtual_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_VIRTUAL_SHIFT);
-            u32 block_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_BLOCK_SHIFT);
             u32 use_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_SHIFT);
             u32 define_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_DEFINE_SHIFT);
             u32 use_define_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT);
@@ -1598,7 +1599,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // the eviction only fires where a span opens mid-block — at a
             // pinned value's definition — which is a point that cannot
             // re-execute without passing the block head again.
-            u64 pins_opening = machine_fast_pin_active(&state, instruction_index);
+            u64 pins_opening = state.pinned_registers ? machine_fast_pin_active(&state, instruction_index) : 0;
             for (u32 physical_register = 0; pins_opening; physical_register += 1)
             {
                 if (pins_opening & (1ull << physical_register))
@@ -1612,6 +1613,73 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             }
             u8* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
             memset(operand_registers, 0xff, 4);
+            // Most selected rows are virtual-only, unconstrained dataflow.
+            // Keep that homogeneous population on a compact mask kernel;
+            // fixed registers, clobbers and control flow stay in the general
+            // path below instead of taxing every common row with their state.
+            if (operand_masks & MACHINE_FAST_OPERAND_SIMPLE_ROW)
+            {
+                for (u32 remaining = virtual_slots & use_slots; remaining; remaining &= remaining - 1u)
+                {
+                    u32 slot = machine_fast_first_set(remaining);
+                    MachineRef ref = instruction->operands[slot];
+                    u32 virtual_register = machine_ref_payload(ref);
+                    if (state.pinned_registers && machine_fast_pin_covers(&state, virtual_register, instruction_index))
+                    {
+                        operand_registers[slot] = (u8)state.pinned_registers[virtual_register];
+                        continue;
+                    }
+                    u32 used = machine_fast_ensure(&state, virtual_register, UINT32_MAX, 0);
+                    operand_registers[slot] = (u8)used;
+                    if (use_define_slots & (1u << slot))
+                    {
+                        state.dirty[used] = true;
+                    }
+                }
+                for (u32 remaining = virtual_slots & define_slots; remaining; remaining &= remaining - 1u)
+                {
+                    u32 slot = machine_fast_first_set(remaining);
+                    MachineRef ref = instruction->operands[slot];
+                    u32 virtual_register = machine_ref_payload(ref);
+                    if (state.pinned_registers && machine_fast_pin_covers(&state, virtual_register, instruction_index))
+                    {
+                        operand_registers[slot] = (u8)state.pinned_registers[virtual_register];
+                        continue;
+                    }
+                    u32 target;
+                    if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&
+                        (virtual_slots & (1u << 1)) && machine_ref_payload(instruction->operands[1]) != virtual_register &&
+                        operand_registers[1] != UINT8_MAX &&
+                        (!state.pinned_registers || !((machine_fast_pin_active(&state, instruction_index) >> operand_registers[1]) & 1u)) &&
+                        machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
+                    {
+                        target = operand_registers[1];
+                        u32 dying = machine_ref_payload(instruction->operands[1]);
+                        state.owner[target] = UINT32_MAX;
+                        state.dirty[target] = false;
+                        state.virtual_register_locations[dying] = UINT32_MAX;
+                    }
+                    else
+                    {
+                        target = machine_fast_pick(&state, machine_fast_class_mask(&state, virtual_register), 0,
+                                                   machine_fast_crosses_call(&state, virtual_register));
+                    }
+                    machine_fast_bind(&state, virtual_register, target);
+                    operand_registers[slot] = (u8)target;
+                }
+                state.uses_consumed = true;
+                continue;
+            }
+            // The prepass validated every opcode before publishing a simple
+            // row. Only the irregular population needs its full descriptor
+            // again during placement.
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (!info)
+            {
+                return placement;
+            }
+            u32 physical_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
+            u32 block_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_BLOCK_SHIFT);
             bool constrained = machine_opcode_has_constraints(info);
             bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
             bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;

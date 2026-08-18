@@ -1470,8 +1470,10 @@ struct MachineFastPrepass
     u32* next_call;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
-    // the prepass has classified the row once; FAST and QUALITY scans consume
-    // these homogeneous facts instead of repeatedly decoding tagged refs.
+    // the prepass has classified the row once. A high state bit separates
+    // unconstrained virtual-only dataflow from irregular rows; FAST and
+    // QUALITY consume the compact homogeneous facts instead of repeatedly
+    // decoding tagged refs and opcode policy.
     u32* operand_masks;
     u32* predecessor_offsets;
     u32* predecessor_list;
