@@ -6634,7 +6634,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             if (probe.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || probe.relocation_count != 0 ||
                 probe.byte_count != emitted.byte_count)
                 return 0;
-            u32 displacement_offset = emitted.byte_count - sizeof(u32);
+            u32 displacement_offset = emitted.byte_count - (u32)sizeof(u32);
             for (u32 byte_index = 0; byte_index < emitted.byte_count; byte_index += 1)
             {
                 u8 expected = byte_index >= displacement_offset
@@ -8084,7 +8084,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             }
             if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
             {
-                u32 displacement_offset = encoder->count + byte_count - sizeof(u32);
+                u32 displacement_offset = encoder->count + byte_count - (u32)sizeof(u32);
                 u32 value = (u32)displacement;
                 for (u32 byte_index = 0; byte_index < sizeof(u32); byte_index += 1)
                 {
