@@ -18,6 +18,44 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18h` (Linux x86_64, Zen 4 7940HS; **keep compact GPR rows in their
+homogeneous table until the generic lane is actually needed**).  The dense GPR
+table's existing state byte now carries both the compact-copy and self-copy
+policies.  The exact worker can therefore resolve the assigned registers,
+handle a no-op self copy, and emit the table's prepared bytes before
+materializing `MachineX64ExactRecipeVariant`.  That larger descriptor projection
+is now cold fallback state for a register index outside the closed population;
+the metadata transform remains the serial authority that produced every table
+member.  No per-row fact, table stride, public structure, or encoder status
+changed.  The trusted compiler's text grows by 80 bytes while BSS shrinks by 80
+bytes, leaving the total image size unchanged.
+
+This is the data-oriented boundary the next SIMD work should keep.  A stable
+whole-function command stream was also implemented and measured: the existing
+capacity walk classified compact rows into `(instruction_index, encoding_word)`
+commands and the ordered emission loop merged that sparse stream.  Although
+all outputs were identical, three instruction pairs regressed by a consistent
+**+37.35 million (+0.259%)**.  The extra allocation, index stores, and merge
+predicate cost far more than a vector byte constructor can recover.  It was
+reverted.  Future 16-lane work must publish or consume homogeneous state without
+building a second sparse instruction stream during encoding; do not retry this
+command architecture or arbitrary encoded-record gathers.
+
+Seven same-source, CPU-pinned, non-multiplexed instruction pairs are
+byte-identical and reduce the median from 14,406,244,785 to 14,402,294,648,
+**-3,950,137 (-0.0274%)**; every pair favors the candidate.  Branches fall
+2,668,827,204 -> 2,667,222,280 (**-0.0601%**) and L1d loads fall
+5,168,440,880 -> 5,157,679,479 (**-0.2082%**).  L1d misses fall
+134,592,885 -> 133,460,104 (**-0.8416%**).  Branch misses rise
+27,665,479 -> 28,007,714 (**+1.2370%**).  Nine cycle pairs reduce the
+independent median from 5,307,193,829 to 5,266,237,783 (**-0.7717%**).
+
+Final `test_self_host` reaches a byte-identical 35,502,136-byte fixed point:
+stage 1 retires 14,402,508,847 instructions, stage 2 retires
+101,234,736,200, and all 1,440,401 exact attempts succeed.  Release `test_all`
+passes 309,175 assertions in all 39 modules, and Clang static analysis reports
+zero warnings.
+
 `2026-08-18g` (Linux x86_64, Zen 4 7940HS; **make the common dense GPR
 encoding a four-byte unit, and measure the population before batching**).
 Serial prewarm now classifies each complete 16x16 GPR table once. When every

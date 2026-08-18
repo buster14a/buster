@@ -6230,8 +6230,10 @@ struct MachineX64GprEncodingTable
     MachineX64GprEncoding encodings[256];
     u8 operand_slots[2];
     u8 operand_count;
-    u8 compact;
+    u8 flags;
 };
+#define MACHINE_X64_GPR_ENCODING_TABLE_COMPACT 0x1u
+#define MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP 0x2u
 BUSTER_CT_CHECK(sizeof(MachineX64GprEncoding) == 16);
 BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTable
     machine_x64_gpr_encoding_tables[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY];
@@ -6499,7 +6501,10 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
     table->operand_slots[0] = operand_slots[0];
     table->operand_slots[1] = operand_slots[1];
     table->operand_count = register_operand_count;
-    table->compact = compact;
+    table->flags = (compact ? MACHINE_X64_GPR_ENCODING_TABLE_COMPACT : 0u) |
+                   ((register_operand_count == 2 && (variant->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP))
+                        ? MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP
+                        : 0u);
     machine_x64_gpr_encoding_table_count += 1;
     return (u8)machine_x64_gpr_encoding_table_count;
 }
@@ -7819,17 +7824,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         if (counters) counters->fallbacks += 1;
         return false;
     }
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
-    if ((variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
-        operand_registers[variant.operand_slots[0]] == operand_registers[variant.operand_slots[1]])
-    {
-        if (counters)
-        {
-            counters->attempts += 1;
-            counters->successes += 1;
-        }
-        return true;
-    }
     u8 gpr_table_plus_one = entry->gpr_encoding_tables[variant_index];
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
@@ -7838,6 +7832,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
         {
+            if ((table->flags & MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP) && low_register == high_register)
+            {
+                if (counters)
+                {
+                    counters->attempts += 1;
+                    counters->successes += 1;
+                }
+                return true;
+            }
             MachineX64GprEncoding const* encoding = table->encodings + low_register + ((u32)high_register << 4);
             u32 byte_count = encoding->byte_count;
             if (counters) counters->attempts += 1;
@@ -7847,7 +7850,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                 if (counters) counters->fallbacks += 1;
                 return false;
             }
-            if (table->compact && encoder->capacity - encoder->count >= sizeof(u32))
+            if ((table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT) &&
+                encoder->capacity - encoder->count >= sizeof(u32))
             {
                 memcpy(encoder->bytes + encoder->count, encoding->bytes, sizeof(u32));
             }
@@ -7859,6 +7863,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             if (counters) counters->successes += 1;
             return true;
         }
+    }
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
+    if ((variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
+        operand_registers[variant.operand_slots[0]] == operand_registers[variant.operand_slots[1]])
+    {
+        if (counters)
+        {
+            counters->attempts += 1;
+            counters->successes += 1;
+        }
+        return true;
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
