@@ -7992,29 +7992,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_opcode_registers(MachineX64Encod
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, false, false, 0, false, counters);
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_opcode_frame(MachineX64Encoder* encoder, u16 opcode, u32 reg, u32 offset, u16 width,
-                                                             bool store, MachineX64ExactEmitCounters* counters)
-{
-    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
-    if (!entry || !entry->descriptor || !entry->plan_valid || !entry->variant_count)
-    {
-        return machine_x64_exact_reject(encoder, counters);
-    }
-    BusterX86MetadataPhysicalOperand operands[2] = {0};
-    if (store)
-    {
-        operands[0] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
-        operands[1] = machine_x64_exact_gpr_operand(reg, width);
-    }
-    else
-    {
-        operands[0] = machine_x64_exact_gpr_operand(reg, width);
-        operands[1] = machine_x64_exact_rbp_memory_operand(-(s64)(s32)offset, width, true);
-    }
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
-}
-
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encoder* encoder, u32 reg, u64 value,
                                                                 MachineX64ExactEmitCounters* counters)
 {
@@ -8033,9 +8010,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encode
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, false, false, 0, false, counters);
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
+    MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
+    bool force_disp32, MachineX64ExactEmitCounters* counters);
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
                                                              MachineX64ExactEmitCounters* counters)
 {
+    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
+    // pointer memory.  Preserve their canonical frame shape by selecting the
+    // already-proven disp32 lane rather than rebuilding physical operands.
+    u16 pointer_opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
+                                                                                                                       : MACHINE_X64_LOAD_PTR64)
+                              : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16
+                                                            : chunk == 4       ? MACHINE_X64_STORE_PTR32
+                                                                               : MACHINE_X64_STORE_PTR64);
+    MachineX64PreparedExactOpcode const* pointer_entry = machine_x64_exact_opcode_for_opcode(pointer_opcode);
+    if (pointer_entry && pointer_entry->plan_valid && pointer_entry->variant_count &&
+        machine_x64_emit_variable_memory_encoding(
+            encoder, pointer_entry->variable_memory_encoding_tables[0], reg, MACHINE_X64_RBP,
+            (s32)(0u - offset), true, counters))
+        return true;
+    if (encoder->overflow) return false;
+
     u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
                                                                            : MACHINE_X64_LOAD_FRAME)
                       : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
@@ -8079,12 +8076,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encode
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
-    MachineX64ExactEmitCounters* counters)
+    bool force_disp32, MachineX64ExactEmitCounters* counters)
 {
     if (!table_plus_one || table_plus_one > machine_x64_variable_memory_encoding_table_count || reg >= 16 || base >= 16)
         return false;
 
-    u32 displacement_class = displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
+    u32 displacement_class = force_disp32 ? 2 : displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
     MachineX64VariableMemoryEncodingTable const* table =
         machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
     MachineX64GprEncoding const* encoding =
@@ -8133,7 +8130,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encod
                                                                                                                  : MACHINE_X64_STORE_PTR64);
     MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
     if (offset <= INT32_MAX && entry && entry->plan_valid && entry->variant_count &&
-        machine_x64_emit_variable_memory_encoding(encoder, entry->variable_memory_encoding_tables[0], reg, base, (s32)offset, counters))
+        machine_x64_emit_variable_memory_encoding(encoder, entry->variable_memory_encoding_tables[0], reg, base, (s32)offset, false, counters))
         return true;
     if (encoder->overflow) return false;
 
@@ -8316,7 +8313,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         if (machine_x64_emit_variable_memory_encoding(
                 encoder, variable_memory_table_plus_one,
                 operand_registers[table->gpr_operand_slot], operand_registers[table->memory_operand_slot],
-                (s32)payload, counters))
+                (s32)payload, false, counters))
             return true;
         if (encoder->overflow) return false;
     }
@@ -8726,9 +8723,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             }
             else
             {
-                u16 opcode = store ? MACHINE_X64_STORE_FRAME64 : MACHINE_X64_LOAD_FRAME;
-                (void)machine_x64_emit_exact_opcode_frame(encoder, opcode, edit->location,
-                                                          placement->virtual_register_offsets[edit->subject], 64, store, 0);
+                (void)machine_x64_emit_exact_frame_chunk(
+                    encoder, !store, edit->location, placement->virtual_register_offsets[edit->subject], 8, 0);
             }
         }
         edit_cursor += 1;
