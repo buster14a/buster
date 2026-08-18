@@ -6212,9 +6212,10 @@ typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
 // Register-only exact forms have a closed 16x16 physical population. Serial
 // prewarm asks the metadata authority for every member once and publishes the
 // result as a dense 16-byte record: fifteen architectural bytes plus its
-// count. The power-of-two stride keeps the scalar lookup cheap. SIMD batches
-// must construct homogeneous SoA bytes rather than gather these AoS records;
-// PERFORMANCE_AUDITS.md records why gather-then-compress loses on Zen 4.
+// count. Tables whose complete population fits three bytes also place that
+// count in byte three. Their first dword is a fixed scalar store and the
+// compact encoding unit consumed by future homogeneous SIMD command batches;
+// longer tables keep the same uniform stride.
 #define MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY 64u
 BUSTER_CT_CHECK(MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY <= UINT8_MAX);
 typedef struct MachineX64GprEncoding MachineX64GprEncoding;
@@ -6229,7 +6230,7 @@ struct MachineX64GprEncodingTable
     MachineX64GprEncoding encodings[256];
     u8 operand_slots[2];
     u8 operand_count;
-    u8 reserved;
+    u8 compact;
 };
 BUSTER_CT_CHECK(sizeof(MachineX64GprEncoding) == 16);
 BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTable
@@ -6451,6 +6452,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
     if (!machine_x64_exact_gpr_variant_slots(variant, operand_slots, &register_operand_count)) return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    bool compact = true;
     for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
     {
         u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
@@ -6485,10 +6487,19 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             emitted.byte_count > BUSTER_ARRAY_LENGTH(encoding->bytes))
             return 0;
         encoding->byte_count = (u8)emitted.byte_count;
+        compact &= emitted.byte_count <= 3;
+    }
+    if (compact)
+    {
+        for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+        {
+            table->encodings[register_key].bytes[3] = table->encodings[register_key].byte_count;
+        }
     }
     table->operand_slots[0] = operand_slots[0];
     table->operand_slots[1] = operand_slots[1];
     table->operand_count = register_operand_count;
+    table->compact = compact;
     machine_x64_gpr_encoding_table_count += 1;
     return (u8)machine_x64_gpr_encoding_table_count;
 }
@@ -7828,15 +7839,23 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         if (low_register < 16 && high_register < 16)
         {
             MachineX64GprEncoding const* encoding = table->encodings + low_register + ((u32)high_register << 4);
+            u32 byte_count = encoding->byte_count;
             if (counters) counters->attempts += 1;
-            if (encoder->count > encoder->capacity || encoding->byte_count > encoder->capacity - encoder->count)
+            if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
             {
                 encoder->overflow = true;
                 if (counters) counters->fallbacks += 1;
                 return false;
             }
-            memcpy(encoder->bytes + encoder->count, encoding->bytes, encoding->byte_count);
-            encoder->count += encoding->byte_count;
+            if (table->compact && encoder->capacity - encoder->count >= sizeof(u32))
+            {
+                memcpy(encoder->bytes + encoder->count, encoding->bytes, sizeof(u32));
+            }
+            else
+            {
+                memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
+            }
+            encoder->count += byte_count;
             if (counters) counters->successes += 1;
             return true;
         }
