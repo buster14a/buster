@@ -7975,41 +7975,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_xmm_memory(MachineX64Encoder*
                                                  (BusterX86MetadataPhysicalAttributes){0}, counters);
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_opcode_registers(MachineX64Encoder* encoder, u16 opcode, u32 destination, u32 source,
-                                                                 u16 width, MachineX64ExactEmitCounters* counters)
-{
-    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
-    if (!entry || !entry->descriptor || !entry->plan_valid || !entry->variant_count)
-    {
-        return machine_x64_exact_reject(encoder, counters);
-    }
-    MachineX64ExactRecipe const* descriptor = entry->descriptor;
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, 0);
-    BusterX86MetadataPhysicalOperand operands[2] = {
-        machine_x64_exact_gpr_operand(destination, width),
-        machine_x64_exact_gpr_operand(source, width),
-    };
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, false, false, 0, false, counters);
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encoder* encoder, u32 reg, u64 value,
-                                                                MachineX64ExactEmitCounters* counters)
-{
-    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
-    if (!entry || !entry->descriptor || !entry->plan_valid || entry->variant_count < 3)
-    {
-        return machine_x64_exact_reject(encoder, counters);
-    }
-    u32 variant_index = value <= UINT32_MAX ? 0 : value >= UINT64_C(0xffffffff80000000) ? 1 : 2;
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
-    BusterX86MetadataPhysicalOperand operands[2] = {
-        machine_x64_exact_gpr_operand(reg, variant.operand_widths[0]),
-        variant.key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID ? machine_x64_exact_unsigned_immediate_operand(value, variant.operand_widths[1])
-                                                                        : machine_x64_exact_immediate_operand((s64)(s32)value, variant.operand_widths[1]),
-    };
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, false, false, 0, false, counters);
-}
-
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
@@ -8167,7 +8132,7 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcod
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
                                                        MachineInstruction const* instruction, MachineStackPlacement const* placement,
                                                        u8 const* operand_registers, u32 payload, u64 immediate_value,
-                                                       MachineX64ExactEmitCounters* counters)
+                                                       bool emit_self_copy, MachineX64ExactEmitCounters* counters)
 {
     MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
     u32 variant_index = 0;
@@ -8222,7 +8187,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
         {
-            if ((table->flags & MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP) && low_register == high_register)
+            if (!emit_self_copy && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP) && low_register == high_register)
             {
                 if (counters)
                 {
@@ -8318,7 +8283,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         if (encoder->overflow) return false;
     }
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
-    if ((variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
+    if (!emit_self_copy && (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
         operand_registers[variant.operand_slots[0]] == operand_registers[variant.operand_slots[1]])
     {
         if (counters)
@@ -8469,6 +8434,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         }
     }
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
+}
+
+// Allocator copies and rematerializations are not a separate encoding
+// population.  Feed them through the same prepared recipe lane as ordinary
+// machine rows so they consume its dense register tables and patch kernels.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_register_copy(MachineX64Encoder* encoder, u32 destination, u32 source,
+                                                              MachineX64ExactEmitCounters* counters)
+{
+    if (destination >= 16 || source >= 16) return machine_x64_exact_reject(encoder, counters);
+    u8 operand_registers[4] = {(u8)destination, (u8)source};
+    return machine_x64_emit_exact_recipe(
+        encoder, machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RR), 0, 0,
+        operand_registers, 0, 0, true, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encoder* encoder, u32 reg, u64 value,
+                                                                MachineX64ExactEmitCounters* counters)
+{
+    if (reg >= 16) return machine_x64_exact_reject(encoder, counters);
+    u8 operand_registers[4] = {(u8)reg};
+    return machine_x64_emit_exact_recipe(
+        encoder, machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI), 0, 0,
+        operand_registers, 0, value, false, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
@@ -8700,7 +8688,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             }
             else
             {
-                (void)machine_x64_emit_exact_opcode_registers(encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
+                (void)machine_x64_emit_exact_register_copy(encoder, edit->location, edit->subject, 0);
             }
         }
         else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
@@ -8914,7 +8902,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                          ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
                                                                            instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
                                          : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
-                                                                         instruction->payload, exact_immediate, &exact_counters);
+                                                                         instruction->payload, exact_immediate, false, &exact_counters);
                 }
                 if (!exact_entry)
                 {

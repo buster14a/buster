@@ -18,6 +18,53 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18n` (Linux x86_64, Zen 4 7940HS; **make allocator copies and
+rematerializations consume the prepared register lanes**).  After
+`2026-08-18m`, the final self-host still contained 136,908 allocator register
+copies and 31,353 immediate rematerializations.  Both command populations had
+private exact wrappers which rebuilt physical operands and entered the full
+metadata token validator even though ordinary MOV_RR/MOV_RI rows already used
+the serially published 16x16 register tables and immediate patch lanes.  A
+fresh Release profile attributed 0.31% of cycles directly to the copy wrapper
+inside the allocator edit run; its work also appeared in the shared exact-form
+encoder.
+
+The two allocator helpers now call the same prepared recipe worker as ordinary
+machine rows.  Their four-byte physical-register projection is local and
+bounded, and malformed register indices still fail closed before narrowing.
+The recipe worker takes one explicit `emit_self_copy` fact because allocator
+edit streams historically emitted physical MOVs even when both registers were
+equal, while ordinary MIR rows deliberately elide that case.  This preserves
+the old byte stream without reintroducing a second encoding authority.  No new
+table, command row, opcode bytes, metadata identity, or public state was added;
+the trusted compiler loses 632 text bytes and 4,880 file bytes.
+
+Seven same-source, CPU-pinned, non-multiplexed instruction pairs are byte-
+identical and reduce the median from 11,592,281,985 to 11,458,285,070,
+**-133,996,915 (-1.1559%)**.  Branches fall 2,190,932,924 -> 2,172,754,971
+(**-0.8297%**) and L1d loads fall 4,130,395,115 -> 4,088,128,427
+(**-1.0233%**).  Branch misses rise 27,200,567 -> 27,287,572
+(**+0.3199%**) and L1d misses rise 129,981,267 -> 130,989,394
+(**+0.7756%**); both miss counters are noisy and remain secondary to the
+stable retired-work and load reductions.  Twelve additional cycle pairs,
+alternating which compiler runs first, favor the candidate in eleven rounds
+and reduce the independent midpoint median 4,453,726,007 -> 4,405,613,817,
+**-1.0803%** (paired midpoint median about -1.41%).  Every measured artifact
+was compared byte for byte.
+
+This is the recursive data-oriented rule again: allocator edits were already
+a compact homogeneous command stream, but their consumer discarded the exact
+form knowledge prepared for the same MOV population.  Restoring that context
+removed 168k repeated metadata decisions without batching pointer-rich rows or
+adding speculative SIMD syntax.  The next audit should profile the now smaller
+encoder and find another repeated consumer of an existing dense lane before
+adding a new projection.
+
+Final `test_self_host` reaches a byte-identical 35,533,208-byte fixed point:
+stage 1 retires 11,458,502,560 instructions, stage 2 retires 81,309,565,643,
+and all 1,442,862 exact attempts succeed.  Release `test_all` passes 309,180
+assertions in all 39 modules.  Clang static analysis reports zero warnings.
+
 `2026-08-18m` (Linux x86_64, Zen 4 7940HS; **make allocator frame traffic
 consume the prepared memory lane**).  After `2026-08-18l`, a fresh Release
 profile still attributed 2.65% of cycles to the exact metadata encoder and
