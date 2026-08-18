@@ -18,6 +18,82 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18b` (Linux x86_64, Zen 4 7940HS; **compact width lanes,
+active-arity selection, wide sentinel fills, and scope-local debug storage**).
+The post-18a trusted Release profile attributes 5.51% of self cycles to
+`buster_x86_metadata_emit_exact_machine`, 5.33% to machine selection, 4.64%
+to generic metadata scratch emission, 4.17% to FAST placement, 3.65% to the
+x86 machine encoder, 2.23% to metadata binding, 2.13% to exact frame-chunk
+emission, 1.69% to FAST prepass, and 0.71% to minimal selection prepass. This
+round deliberately improves compact, branch-regular lanes and wide contiguous
+storage without attempting SIMD gathers over the large union-backed physical
+operand rows.
+
+The machine-fast metadata writer now probes the first ordered data-width
+binding directly. A valid 16/32/64-bit first lane skips the remaining compact
+index list; only an unusable first lane enters the masked fallback beginning at
+index one. Zero-count and first-valid ordering are unchanged. Seven
+interleaved instruction rounds with byte-identical output reduce
+14,773,861,647 -> 14,745,275,100, **-28,586,547 (-0.1935%)** by independent
+medians; the paired median is -28,589,807.
+
+Machine selection uses the signature parameter count as the active lane count
+when capturing incoming arguments on x86 and AArch64, instead of scanning the
+full 24- or 8-slot ABI arrays twice and branching over their inactive tails.
+The fixed arrays and malformed-tail initialization stay intact. The isolated
+median is 14,775,196,485 -> 14,773,232,512,
+**-1,963,973 (-0.0133%)**, with all seven paired outputs identical.
+
+Both selectors now initialize their contiguous `u32` virtual-register
+definition maps with one guarded all-ones fill. `MACHINE_POINT_INVALID` is
+exactly `UINT32_MAX`, so the wide fill preserves every element without struct
+padding or partial-record concerns. The isolated median is 14,744,370,294 ->
+14,739,106,761, **-5,263,533 (-0.0357%)**; the paired median is -5,284,115.
+
+Exact frame-chunk emission no longer clears two physical-operand records
+before both load and store paths overwrite both active lanes completely.
+Invalid prepared plans return before the array is consumed. The profile put
+more than half of this helper's local samples on the redundant AVX-512 clear
+stores; removing them saves 14,778,227,135 -> 14,775,288,935,
+**-2,938,200 (-0.0199%)** by independent medians and -2,978,876 by paired
+median, with byte-identical output.
+
+Debug-model scope storage is now local to the data it can own: the root
+reserves the module's global count, while function and lexical scopes reserve
+only their function's debug-local count. The model-wide scope/variable arrays,
+IDs, ordering, and public API are unchanged, and no extra counting pass is
+added. The isolated instruction median is 14,745,616,649 -> 14,745,001,001,
+**-615,648 (-0.0042%)**. More importantly, the cumulative compile's median
+page faults fall 2,334 -> 1,841 (**-21.1%**).
+
+The clean merged-main versus final-candidate A/B uses seven interleaved
+non-multiplexed rounds per instruction/branch/L1d/cache/fault group and nine
+cycle rounds, with byte-identical output in every pair. Median instructions
+are 14,778,385,613 -> 14,739,009,100,
+**-39,376,513 (-0.2665%)**; branches 2,722,171,645 -> 2,712,129,574
+(**-0.3689%**); L1d loads 5,303,933,569 -> 5,295,794,432
+(**-0.1535%**); L1d misses 134,482,732 -> 133,612,529
+(**-0.6471%**); general cache references 314,560,553 -> 312,287,938
+(**-0.7225%**); and cache misses 8,912,244 -> 8,829,489
+(**-0.9286%**). Branch misses move 27,804,935 -> 28,000,630
+(**+0.7038%**) and are recorded as the adverse signal. Candidate cycles are
+lower in eight of nine pairs; sorted medians fall 5,328,936,882 ->
+5,226,958,436 (**-1.91%**) and the paired median falls 1.61%.
+
+Three source-plausible lane changes were measured and reverted. Removing the
+clear from the spill/reload exact-frame wrapper adds 567,638 instructions
+(**+0.0038%**). Bounding only the selector's shape/placement copy adds
+248,357 (**+0.0017%**), and combining that bound with removal of the signature
+array clears still adds 133,152 (**+0.0009%**). These remain scalar-throughput
+losses rather than being retained merely for SIMD-shaped source.
+
+Final `test_self_host` reaches a byte-identical 35,500,824-byte fixed point:
+stage 1 retires 14,739,286,571 instructions, stage 2 retires
+103,432,330,074, and all 1,440,412 exact attempts succeed. Release `test_all`
+passes 309,175 assertions in all 39 modules. The complete local combination
+matrix passes its canonical 309,177 assertions in all 39 modules, and Clang
+static analysis reports zero warnings.
+
 `2026-08-18a` (Linux x86_64, Zen 4 7940HS; **exact-recipe scratch,
 selector storage reuse, and dead debug traversal**). The post-17h trusted
 Release profile still centers native code generation on

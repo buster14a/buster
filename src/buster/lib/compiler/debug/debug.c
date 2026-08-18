@@ -349,7 +349,8 @@ DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelIn
 
 
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* model, DebugModelInput* input, DebugFunction* function,
-                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 variable_capacity)
+                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity,
+                                                    u32 scope_variable_capacity)
 {
     if (!ir_function)
     {
@@ -367,11 +368,11 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             continue;
         }
         u32 desired_depth = BUSTER_MIN(local->scope_depth, scope_capacity - 1);
-        while (scope_depth < desired_depth && model->scope_count < model->function_count + variable_capacity + 1)
+        while (scope_depth < desired_depth && model->scope_count < model_scope_capacity)
         {
             scope_depth += 1;
             scopes[scope_depth] = debug_scope_add(arena, model, scopes[scope_depth - 1], DEBUG_SCOPE_LEXICAL, debug_source_from_ir(arena, input->program, local->source),
-                                                  function->code_offset, function->code_offset + function->code_size, variable_capacity);
+                                                  function->code_offset, function->code_offset + function->code_size, scope_variable_capacity);
         }
         DebugScope* scope = model->scopes + scopes[desired_depth];
         DebugVariableKind kind = local->is_parameter ? DEBUG_VARIABLE_PARAMETER : DEBUG_VARIABLE_LOCAL;
@@ -384,7 +385,6 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             function->variable_count += 1;
         }
     }
-    (void)variable_capacity;
 }
 
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* model, DebugModelInput* input, u32 variable_capacity)
@@ -493,7 +493,8 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         .line = 1,
         .column = 1,
     };
-    result.root_scope = debug_scope_add(arena, &result, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_LEXICAL, root_declaration, 0, 1, variable_capacity);
+    u32 root_variable_capacity = input.module ? input.module->global_count + 1 : variable_capacity;
+    result.root_scope = debug_scope_add(arena, &result, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_LEXICAL, root_declaration, 0, 1, root_variable_capacity);
 
     for (u32 type_index = 0; type_index < result.type_count; type_index += 1)
     {
@@ -537,11 +538,21 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         {
             function->name = result.source_paths[declaration.source];
         }
-        function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
-                                          function->code_offset + function->code_size, variable_capacity);
+        u32 function_variable_capacity = 1;
         if (input.module && function_index < input.module->function_count)
         {
-            debug_add_canonical_locals(arena, &result, &input, function, seed, input.module->functions + function_index, variable_capacity);
+            function_variable_capacity = input.module->functions[function_index].debug_local_count;
+            if (!function_variable_capacity)
+            {
+                function_variable_capacity = 1;
+            }
+        }
+        function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
+                                          function->code_offset + function->code_size, function_variable_capacity);
+        if (input.module && function_index < input.module->function_count)
+        {
+            debug_add_canonical_locals(arena, &result, &input, function, seed, input.module->functions + function_index, scope_capacity,
+                                       function_variable_capacity);
         }
     }
     debug_add_canonical_globals(arena, &result, &input, variable_capacity);

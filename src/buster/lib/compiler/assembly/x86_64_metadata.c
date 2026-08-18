@@ -6801,7 +6801,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     }
 
     u16 data_width = 0;
-    for (u32 width_index = 0; width_index < plan->machine_fast_data_width_count; width_index += 1)
+    u32 width_index = 0;
+    if (plan->machine_fast_data_width_count)
+    {
+        u8 binding_index = plan->machine_fast_data_width_bindings[0];
+        BusterX86MetadataPhysicalOperand physical = query.operands[binding_index];
+        u16 width = physical.width;
+        if (!width && plan->machine_fast_binding_kind[binding_index] == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_REGISTER)
+            width = physical.reg.width;
+        if (width == 16 || width == 32 || width == 64)
+        {
+            data_width = width;
+        }
+        width_index = data_width ? plan->machine_fast_data_width_count : 1;
+    }
+    for (; width_index < plan->machine_fast_data_width_count; width_index += 1)
     {
         u8 binding_index = plan->machine_fast_data_width_bindings[width_index];
         BusterX86MetadataPhysicalOperand physical = query.operands[binding_index];

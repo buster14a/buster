@@ -4440,9 +4440,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
     selector.virtual_register_definitions = arena_allocate(arena, u32, selector.virtual_register_count);
-    for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
+    if (selector.virtual_register_count)
     {
-        selector.virtual_register_definitions[register_index] = MACHINE_POINT_INVALID;
+        memset(selector.virtual_register_definitions, 0xff,
+               sizeof(*selector.virtual_register_definitions) * selector.virtual_register_count);
     }
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
@@ -4485,7 +4486,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
             {
                 bool float_pass = capture_pass == 1;
-                for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
+                for (u32 argument_index = 0; argument_index < function_type->parameter_count; argument_index += 1)
                 {
                     u32 argument_value = selector.argument_values[argument_index];
                     if (argument_value == IR_ID_UNDERLYING_INVALID)
@@ -7583,7 +7584,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     {
         return machine_x64_exact_reject(encoder, counters);
     }
-    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    BusterX86MetadataPhysicalOperand operands[2];
     if (load)
     {
         operands[0] = machine_x64_exact_gpr_operand(reg, chunk <= 2 ? 64 : width);
