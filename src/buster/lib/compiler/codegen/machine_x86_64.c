@@ -6253,6 +6253,9 @@ struct MachineX64PreparedExactOpcode
     u8 exact_required;
     u8 sequence_required;
     u8 variant_count;
+    // Direct single-variant GPR rows bypass the generic variant selector and
+    // validity projection; zero retains the ordinary exact lane.
+    u8 single_gpr_encoding_table;
     u16 variant_valid_mask;
     u8 plan_valid;
 };
@@ -6545,6 +6548,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
     if (descriptor_valid && entry->variant_valid_mask == (u16)((1u << variant_total) - 1u))
     {
         entry->descriptor = descriptor;
+        entry->single_gpr_encoding_table = variant_total == 1 ? entry->gpr_encoding_tables[0] : 0;
         entry->plan_valid = true;
     }
     else
@@ -6558,6 +6562,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
             entry->metadata_tokens[token_index] = (BusterX86MetadataMachineExactToken){0};
         }
         entry->variant_count = 0;
+        entry->single_gpr_encoding_table = 0;
         entry->variant_valid_mask = 0;
         entry->plan_valid = false;
     }
@@ -7784,47 +7789,51 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                                                        MachineX64ExactEmitCounters* counters)
 {
     MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
-    if (!descriptor || !entry->plan_valid)
-    {
-        if (counters) counters->attempts += 1;
-        if (counters) counters->fallbacks += 1;
-        return false;
-    }
     u32 variant_index = 0;
-    if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE)
+    u8 gpr_table_plus_one = entry ? entry->single_gpr_encoding_table : 0;
+    if (!gpr_table_plus_one)
     {
-        variant_index = immediate_value <= UINT32_MAX ? 0 : immediate_value >= UINT64_C(0xffffffff80000000) ? 1 : 2;
-    }
-    else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE)
-    {
-        s64 signed_immediate = (s64)immediate_value;
-        variant_index = signed_immediate >= INT8_MIN && signed_immediate <= INT8_MAX ? 0 : 1;
-    }
-    else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_VBINARY)
-    {
-        switch (payload)
+        if (!descriptor || !entry->plan_valid)
         {
-        case 0xfcu: variant_index = 0; break;
-        case 0xfdu: variant_index = 1; break;
-        case 0xfeu: variant_index = 2; break;
-        case 0x1d4u: variant_index = 3; break;
-        case 0xf8u: variant_index = 4; break;
-        case 0xf9u: variant_index = 5; break;
-        case 0xfau: variant_index = 6; break;
-        case 0x1fbu: variant_index = 7; break;
-        case 0xdbu: variant_index = 8; break;
-        case 0xebu: variant_index = 9; break;
-        case 0xefu: variant_index = 10; break;
-        default: variant_index = UINT32_MAX; break;
+            if (counters) counters->attempts += 1;
+            if (counters) counters->fallbacks += 1;
+            return false;
         }
+        if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE)
+        {
+            variant_index = immediate_value <= UINT32_MAX ? 0 : immediate_value >= UINT64_C(0xffffffff80000000) ? 1 : 2;
+        }
+        else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE)
+        {
+            s64 signed_immediate = (s64)immediate_value;
+            variant_index = signed_immediate >= INT8_MIN && signed_immediate <= INT8_MAX ? 0 : 1;
+        }
+        else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_VBINARY)
+        {
+            switch (payload)
+            {
+            case 0xfcu: variant_index = 0; break;
+            case 0xfdu: variant_index = 1; break;
+            case 0xfeu: variant_index = 2; break;
+            case 0x1d4u: variant_index = 3; break;
+            case 0xf8u: variant_index = 4; break;
+            case 0xf9u: variant_index = 5; break;
+            case 0xfau: variant_index = 6; break;
+            case 0x1fbu: variant_index = 7; break;
+            case 0xdbu: variant_index = 8; break;
+            case 0xebu: variant_index = 9; break;
+            case 0xefu: variant_index = 10; break;
+            default: variant_index = UINT32_MAX; break;
+            }
+        }
+        if (variant_index >= entry->variant_count || !(entry->variant_valid_mask & (u16)(1u << variant_index)))
+        {
+            if (counters) counters->attempts += 1;
+            if (counters) counters->fallbacks += 1;
+            return false;
+        }
+        gpr_table_plus_one = entry->gpr_encoding_tables[variant_index];
     }
-    if (variant_index >= entry->variant_count || !(entry->variant_valid_mask & (u16)(1u << variant_index)))
-    {
-        if (counters) counters->attempts += 1;
-        if (counters) counters->fallbacks += 1;
-        return false;
-    }
-    u8 gpr_table_plus_one = entry->gpr_encoding_tables[variant_index];
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
