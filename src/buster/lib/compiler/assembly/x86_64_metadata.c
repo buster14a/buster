@@ -3186,7 +3186,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
                                                               BusterX86MetadataExactPlanRecord const* plan)
 {
 #define form (*form_pointer)
-    BusterX86MetadataPatternSemantics pattern_storage = {0};
+    BusterX86MetadataPatternSemantics pattern_storage;
     BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : 0;
     bool pattern_valid = false;
     if (plan)
@@ -5154,7 +5154,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // retained for the tile address form.  Keep this narrowly scoped to
     // standard AMX tile-memory rows and relax only the stale fixed-MOD token;
     // address range, SIB, and all other pattern controls remain authoritative.
-    BusterX86MetadataPatternSemantics amx_standard_pattern = {0};
+    BusterX86MetadataPatternSemantics amx_standard_pattern;
     if (pattern_valid && form.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX &&
         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
         (form.amx_flags & BUSTER_X86_METADATA_AMX_TILE_MEMORY) &&
