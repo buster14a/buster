@@ -6208,6 +6208,34 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_id_for_recipe_variant(MachineEmitR
 // descriptor/status portion is a static projection of the source registry;
 // the token and validity fields are filled and published by serial prewarm.
 typedef struct MachineX64PreparedExactOpcode MachineX64PreparedExactOpcode;
+
+// Register-only exact forms have a closed 16x16 physical population. Serial
+// prewarm asks the metadata authority for every member once and publishes the
+// result as a dense 16-byte record: fifteen architectural bytes plus its
+// count. The power-of-two stride keeps the scalar lookup cheap. SIMD batches
+// must construct homogeneous SoA bytes rather than gather these AoS records;
+// PERFORMANCE_AUDITS.md records why gather-then-compress loses on Zen 4.
+#define MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY 64u
+BUSTER_CT_CHECK(MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY <= UINT8_MAX);
+typedef struct MachineX64GprEncoding MachineX64GprEncoding;
+typedef struct MachineX64GprEncodingTable MachineX64GprEncodingTable;
+struct MachineX64GprEncoding
+{
+    u8 bytes[15];
+    u8 byte_count;
+};
+struct MachineX64GprEncodingTable
+{
+    MachineX64GprEncoding encodings[256];
+    u8 operand_slots[2];
+    u8 operand_count;
+    u8 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineX64GprEncoding) == 16);
+BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTable
+    machine_x64_gpr_encoding_tables[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_gpr_encoding_table_count;
+
 struct MachineX64PreparedExactOpcode
 {
     MachineX64ExactRecipe const* descriptor;
@@ -6215,6 +6243,9 @@ struct MachineX64PreparedExactOpcode
     // Tokens are resolved beside each descriptor variant's feature policy
     // during serial prewarm and remain opaque to the machine layer.
     BusterX86MetadataMachineExactToken metadata_tokens[16];
+    // One-based index into machine_x64_gpr_encoding_tables per form variant;
+    // zero keeps the ordinary exact metadata transform.
+    u8 gpr_encoding_tables[16];
     BusterX86MetadataMachineExactToken sequence_tokens[MACHINE_X64_EXACT_SEQUENCE_MAX_VARIANTS * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS];
     u8 exact_required;
     u8 sequence_required;
@@ -6383,6 +6414,85 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_sequence_entry(MachineX64Prep
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_gpr_variant_slots(MachineX64ExactRecipeVariant const* variant,
+                                                              u8 operand_slots[2], u8* operand_count)
+{
+    if (!variant || variant->operand_count == 0 ||
+        (variant->flags & ~MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP))
+        return false;
+    u8 count = 0;
+    for (u32 operand_index = 0; operand_index < variant->operand_count; operand_index += 1)
+    {
+        MachineX64ExactOperandProjection kind = (MachineX64ExactOperandProjection)variant->operand_kinds[operand_index];
+        if (kind == MACHINE_X64_EXACT_OPERAND_GPR)
+        {
+            if (count >= 2 || variant->operand_slots[operand_index] >= 4) return false;
+            operand_slots[count++] = variant->operand_slots[operand_index];
+        }
+        else if (kind != MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX &&
+                 kind != MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX && kind != MACHINE_X64_EXACT_OPERAND_FIXED_RSP)
+        {
+            return false;
+        }
+        u16 width = variant->operand_widths[operand_index];
+        if (width != 8 && width != 16 && width != 32 && width != 64) return false;
+    }
+    if (!count) return false;
+    *operand_count = count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
+    MachineX64ExactRecipeVariant const* variant, BusterX86MetadataMachineExactToken token)
+{
+    if (machine_x64_gpr_encoding_table_count >= MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY) return 0;
+    u8 operand_slots[2] = {0};
+    u8 register_operand_count = 0;
+    if (!machine_x64_exact_gpr_variant_slots(variant, operand_slots, &register_operand_count)) return 0;
+
+    MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    {
+        u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
+        u32 register_value_index = 0;
+        BusterX86MetadataPhysicalOperand operands[4];
+        for (u32 operand_index = 0; operand_index < variant->operand_count; operand_index += 1)
+        {
+            u32 reg = 0;
+            switch ((MachineX64ExactOperandProjection)variant->operand_kinds[operand_index])
+            {
+            case MACHINE_X64_EXACT_OPERAND_GPR: reg = register_values[register_value_index++]; break;
+            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX: reg = MACHINE_X64_RAX; break;
+            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX: reg = MACHINE_X64_RDX; break;
+            case MACHINE_X64_EXACT_OPERAND_FIXED_RSP: reg = MACHINE_X64_RSP; break;
+            default: return 0;
+            }
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = width,
+                .reg = {.index = (u16)reg, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            };
+        }
+        MachineX64GprEncoding* encoding = table->encodings + register_key;
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
+            .operands = operands,
+            .operand_count = variant->operand_count,
+            .output = encoding->bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(encoding->bytes),
+        });
+        if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.relocation_count != 0 ||
+            emitted.byte_count > BUSTER_ARRAY_LENGTH(encoding->bytes))
+            return 0;
+        encoding->byte_count = (u8)emitted.byte_count;
+    }
+    table->operand_slots[0] = operand_slots[0];
+    table->operand_slots[1] = operand_slots[1];
+    table->operand_count = register_operand_count;
+    machine_x64_gpr_encoding_table_count += 1;
+    return (u8)machine_x64_gpr_encoding_table_count;
+}
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64PreparedExactOpcode* entry,
                                                                MachineX64EmitRegistryEntry const* registry_entry,
                                                                BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
@@ -6410,6 +6520,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
                 (BusterX86MetadataFeatureInput){.names = variant.features, .count = variant.feature_count},
                 &entry->metadata_tokens[variant_index]);
         }
+        entry->gpr_encoding_tables[variant_index] = variant_valid
+            ? machine_x64_exact_prepare_gpr_encoding_table(&variant, entry->metadata_tokens[variant_index])
+            : 0;
         if (variant_valid) entry->variant_valid_mask |= (u16)(1u << variant_index);
         else descriptor_valid = false;
     }
@@ -6473,6 +6586,7 @@ void machine_x86_64_exact_prewarm(void)
     bool key_found[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     BusterX86MetadataExactPlan prepared[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
+    machine_x64_gpr_encoding_table_count = 0;
     machine_x64_exact_collect_plan_keys(keys, key_found);
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
@@ -7704,6 +7818,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             counters->successes += 1;
         }
         return true;
+    }
+    u8 gpr_table_plus_one = entry->gpr_encoding_tables[variant_index];
+    if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
+    {
+        MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
+        u8 low_register = operand_registers[table->operand_slots[0]];
+        u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
+        if (low_register < 16 && high_register < 16)
+        {
+            MachineX64GprEncoding const* encoding = table->encodings + low_register + ((u32)high_register << 4);
+            if (counters) counters->attempts += 1;
+            if (encoder->count > encoder->capacity || encoding->byte_count > encoder->capacity - encoder->count)
+            {
+                encoder->overflow = true;
+                if (counters) counters->fallbacks += 1;
+                return false;
+            }
+            memcpy(encoder->bytes + encoder->count, encoding->bytes, encoding->byte_count);
+            encoder->count += encoding->byte_count;
+            if (counters) counters->successes += 1;
+            return true;
+        }
     }
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
