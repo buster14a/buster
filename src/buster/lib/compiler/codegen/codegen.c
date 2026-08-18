@@ -6912,7 +6912,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 u32 reason = selected.failed_opcode <= IR_OPCODE_COUNT ? (u32)selected.failed_opcode : (u32)IR_OPCODE_COUNT;
                 result.statistics.fallback_opcode_counts[reason] += 1;
             }
-            MachineVerifyError verify_error = selected.supported ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            // The target selectors publish a complete machine function only
+            // after their typed builder streams and side tables are closed.
+            // Keep the verifier as the authority for replayed/manual machine
+            // IR, but do not reread every freshly selected row before its
+            // immediate allocator consumer.
+            MachineVerifyError verify_error = selected.supported && !selected.selector_certified ? machine_verify_function(&selected.function).error
+                                                                                                  : MACHINE_VERIFY_NONE;
             if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
             {
                 result.statistics.fallback_verify_count += 1;

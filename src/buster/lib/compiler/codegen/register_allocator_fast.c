@@ -936,26 +936,17 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     // SSA uses on their corresponding incoming edge; account for both before
     // scanning instruction rows so liveness and escape decisions include
     // loop-carried values even when the edge has no terminator operand.
-    for (u32 parameter_index = 0; parameter_index < function->block_parameter_count; parameter_index += 1)
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
-        u32 virtual_register = function->block_parameters[parameter_index].virtual_register;
-        if (virtual_register >= register_count)
+        MachineBlock const* block = function->blocks + block_index;
+        for (u32 parameter_index = 0; parameter_index < block->parameter_count; parameter_index += 1)
         {
-            continue;
-        }
-        u32 block_index = UINT32_MAX;
-        for (u32 candidate = 0; candidate < function->block_count; candidate += 1)
-        {
-            MachineBlock const* block = function->blocks + candidate;
-            if (parameter_index >= block->parameter_offset && parameter_index < block->parameter_offset + block->parameter_count)
+            u32 virtual_register = function->block_parameters[block->parameter_offset + parameter_index].virtual_register;
+            if (virtual_register >= register_count)
             {
-                block_index = candidate;
-                break;
+                continue;
             }
-        }
-        if (block_index != UINT32_MAX)
-        {
-            u32 definition = function->blocks[block_index].first_instruction;
+            u32 definition = block->first_instruction;
             prepass.definition_blocks[virtual_register] = block_index;
             prepass.interval_starts[virtual_register] = BUSTER_MIN(prepass.interval_starts[virtual_register], definition);
             prepass.interval_ends[virtual_register] = BUSTER_MAX(prepass.interval_ends[virtual_register], definition);

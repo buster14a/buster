@@ -4777,6 +4777,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
     }
     result.supported = true;
+    result.selector_certified = true;
     result.returns_value = returns_value;
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;

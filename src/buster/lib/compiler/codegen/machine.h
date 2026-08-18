@@ -1148,7 +1148,11 @@ struct MachineSelectResult
     IrOpcode failed_opcode;
     bool supported;
     bool returns_value;
-    u8 reserved[2];
+    // Set only after a target selector has finished all typed-builder streams
+    // and side tables. Replayed or manually assembled machine IR keeps this
+    // false and must pass the structural verifier before consumption.
+    bool selector_certified;
+    u8 reserved;
     // Selector expansion statistics: typed instructions consumed and machine
     // rows produced. SIMD operations are counted during that same typed-IR
     // walk so accepted machine functions need no source-IR rescan.

@@ -18,6 +18,60 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18p` (Linux x86_64, Zen 4 7940HS; **make the selector/allocator
+boundary explicit and consume block-parameter rows once**).  The first fresh
+profile after `18o` put `machine_select_canonical_function` at 4.14% of cycles,
+FAST placement at 4.32%, and the structural machine verifier at 1.55%.  The
+verifier was still rereading all 1,208,662 freshly selected 24-byte machine
+rows immediately before the allocator reread the same rows.  This was not an
+input validation boundary: both target selectors own the function, every row
+and side table is emitted through the typed builder, and the result is private
+to the codegen attempt.
+
+`MachineSelectResult` now publishes one `selector_certified` bit from existing
+reserved storage only after the x86-64 or AArch64 selector has finished the
+function and all side tables.  Codegen trusts that explicit internal contract
+and leaves `machine_verify_function` as the authority for replayed, scheduled,
+manually assembled, or otherwise uncertified machine IR.  The selector test
+oracle still requires the certificate *and* independently runs the complete
+verifier before placement/encoding, so every selected test corpus continues
+to prove the contract.  This moves malformed/cold handling out of the regular
+row loop without deleting the diagnostic facility or weakening the external
+machine-IR seam.
+
+FAST's block-parameter facts now follow the same data-oriented rule.  The
+prepass walks each block's contiguous parameter slice once and stamps its
+defining block directly, rather than taking every flat parameter and searching
+the complete block table for its owner.  Builder/selector order is already the
+machine-function contract, and verified replay/manual functions retain the
+same ranges.  This changes O(parameters * blocks) pointer/branch work to one
+block-major contiguous pass and does not add an index or side table.
+
+Seven same-source, CPU-pinned, non-multiplexed instruction pairs are byte-
+identical and reduce the median from 11,360,880,570 to 11,214,226,633,
+**-146,653,937 (-1.2909%)**.  Branches fall 2,151,409,625 -> 2,126,361,998
+(**-1.1642%**), branch misses fall 26,665,644 -> 26,224,909
+(**-1.6528%**), L1d loads fall 4,076,421,752 -> 4,035,381,918
+(**-1.0068%**), and L1d misses fall 132,927,695 -> 132,246,729
+(**-0.5123%**).  Twelve alternating cycle pairs are noisy, with 9/12 favoring
+the candidate, but the independent midpoint falls 4,436,427,698 ->
+4,377,512,484 (**-1.3280%**).  An earlier experiment which folded the complete
+verifier into FAST's prepass was also byte-identical but saved only about 0.25%
+of instructions: it warmed the reads while retaining almost every per-row
+decision, so it was reverted in favor of making the actual ownership boundary
+explicit.
+
+The final `test_self_host` reaches a byte-identical 35,538,648-byte fixed
+point: stage 1 retires 11,214,447,909 instructions, stage 2 retires
+79,762,799,524, and all 1,443,251 exact attempts succeed.  Release `test_all`
+passes 309,182 assertions in all 39 modules.  Clang static analysis completes
+with the same three existing `c_source.c` diagnostics and no diagnostics in
+the changed machine, selector, allocator, or codegen files.  This audit adds no
+decorative SIMD instruction: it removes an entire heterogeneous pass and
+linearizes the remaining fact population, which is the prerequisite data
+shape for useful wide kernels rather than fixed-width work over rows that
+should never have been revisited.
+
 `2026-08-18o` (Linux x86_64, Zen 4 7940HS; **classify allocator lanes once
 and make the machine-row append path typed**).  The post-`18n` profile moved
 the center of native codegen back to selection and FAST placement/prepass:

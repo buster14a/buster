@@ -77,7 +77,7 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
     {
         *select_out = selected;
     }
-    if (!selected.supported || machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+    if (!selected.supported || !selected.selector_certified || machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
     {
         return encoded;
     }
@@ -1587,6 +1587,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult lean_selected =
                 machine_select_canonical_function(arguments->arena, schedule_program, lean_function, schedule_targets[target_index]);
             BUSTER_TEST(arguments, tree_selected.supported && lean_selected.supported);
+            BUSTER_TEST(arguments, tree_selected.selector_certified && lean_selected.selector_certified);
             if (!tree_selected.supported || !lean_selected.supported)
             {
                 continue;
