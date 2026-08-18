@@ -1549,6 +1549,8 @@ struct MachineX64ExactMapAudit
     u32 expansion_nonexact_rows;
     u32 dense_encoding_tables;
     u32 immediate_patch_tables;
+    u32 memory_base_tables;
+    u32 displacement_patch_tables;
     bool valid;
     u8 reserved[3];
 };
