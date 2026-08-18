@@ -1294,6 +1294,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.sequence_variant_valid_rows == exact_map.sequence_rows);
     BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_tables == 46);
+    BUSTER_TEST(arguments, exact_map.immediate_patch_tables == 7);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 166);
