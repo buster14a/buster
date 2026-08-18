@@ -50,6 +50,78 @@ Keep the measurement discipline explicit: record SIMD-readiness and miss-rate
 improvements, but do not describe a scalar throughput regression as a current
 speedup merely because a proxy improved.
 
+### Data-oriented compiler design
+
+- Optimize the real workload, especially its common cases, rather than every
+  theoretically possible case. Organize and measure the data before optimizing
+  the code that transforms it.
+- Where there is one, look for many — including along the time axis. Before
+  designing a scalar one-off path, look for the population across instructions,
+  values, blocks, functions, modules, repeated queries, or successive compiler
+  phases, and preserve enough context to process that population together.
+- Put frequently processed values together and separate different states and
+  cold metadata. Maximize useful information per cache line; avoid large hot
+  objects, padding, scattered flags, and pointer graphs that spend bandwidth
+  carrying data the current operation does not use.
+- Replace per-object, last-minute decisions with explicit classification
+  followed by homogeneous batch processing. Prefer masks, compact indices,
+  active counts, command buffers, state-specific arrays, and other forms that
+  can evolve into SIMD lanes over repeatedly testing independent booleans.
+- Do not reread or recompute facts already available. Hoist invariant reads,
+  calls, and branches even when an optimizing compiler might discover the same
+  transformation. Make constraints explicit so hot interfaces retain the
+  context needed to avoid generic work.
+- Precompute offline or during serial prewarm whenever practical. The cheapest
+  runtime operation is one that no longer exists; keep cold malformed-input and
+  fallback handling outside regular hot loops where the public contract allows
+  it.
+- Estimate before implementing: organize the cases, rank them by
+  `probability * count`, calculate approximate memory and compute cost, then
+  measure. Track useful information per cache line and passes per item, not
+  merely time attributed to a function.
+- Apply the process recursively. After improving one hot data transformation,
+  inspect the next largest remaining source of waste. Preserve maintainability,
+  debuggability, determinism, concurrency, and portability while doing so;
+  good data organization should improve all of them.
+- For buster, favor SoA or compact projections for hot compiler facts, explicit
+  active-lane masks and counts instead of fixed-maximum scans, grouped machine
+  instruction states where ordering permits, and prewarmed compact plans rather
+  than repeated metadata interpretation. Treat AVX-512 as a consequence of a
+  sound data layout, not the starting point: a compiler can optimize the final
+  instruction sequence, but it cannot repair wasteful data movement or context
+  that the program discarded.
+
+### SIMD transformation rules
+
+- Choose the data layout before choosing SIMD instructions. Prefer SoA for
+  homogeneous transforms, use hybrid/tiled layouts only when measurements show
+  a scalar/SIMD tradeoff, and locally project fixed external AoS input into the
+  compact form a hot transform needs. Public interfaces do not have to mirror
+  internal storage.
+- For small divergent operations, compute candidate results and select with a
+  mask. For larger or more expensive divergence, first partition or compact
+  stable indices, then run a dedicated homogeneous kernel over each set. A hot
+  data-dependent branch needs strong measured predictability; a predictable
+  loop branch is not a problem merely because it is a branch.
+- Treat compare masks as useful data. Prefer compare -> mask -> compact/select
+  pipelines, advance compact outputs by mask population count, and use
+  precomputed permutation controls when a direct compress instruction is not
+  available. Preserve stable order whenever output order is observable.
+- Do not add software prefetch to linear streams the hardware already handles.
+  Consider it only for measured, sufficiently distant irregular pointer/index
+  accesses, and validate every supported microarchitecture. Likewise, avoid
+  habitual unrolling beyond the natural SIMD width: inspect generated code,
+  register pressure, and spills first.
+- Use non-temporal loads or stores only to prevent demonstrated cache pollution,
+  after the ordinary kernel is correct. Their ordering and visibility require
+  an explicit fence and ownership proof; they are never a cosmetic replacement
+  for normal memory operations.
+- Inspect the generated instructions for every explicit SIMD kernel. Count
+  useful lanes, loads/stores, shuffles, dependencies, spills, and work per
+  iteration. Wider code is a win only when the measured bottleneck is compute
+  rather than memory bandwidth and the target hardware executes that width
+  economically.
+
 ## Self-hosting — reproduce first
 
 All contributors—humans and coding agents—should reproduce the current

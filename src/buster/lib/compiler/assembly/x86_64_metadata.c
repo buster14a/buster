@@ -6616,6 +6616,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
         return true;
     }
 
+    bool has_qword_register = false;
+    bool needs_low_byte_rex = false;
     for (u32 binding_index = 0; binding_index < plan->machine_fast_binding_count; binding_index += 1)
     {
         u8 metadata_index = plan->machine_fast_binding_metadata[binding_index];
@@ -6644,6 +6646,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             }
             if (physical->reg.index >= 16 || physical->reg.high_byte)
                 return false;
+            has_qword_register |= physical->reg.width == 64;
+            needs_low_byte_rex |= physical->reg.width == 8 && !physical->reg.high_byte &&
+                                  physical->reg.index >= 4 && physical->reg.index < 8;
         }
         else if (binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_MEMORY ||
                  binding_kind == BUSTER_X86_METADATA_MACHINE_FAST_BINDING_ADDRESS_GENERATOR)
@@ -6833,16 +6838,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
                                         (buster_x86_metadata_string_input_equal(form->iclass.offset, S8("FISTTP")) &&
                                          data_width == 16);
     bool rex_w = plan->pattern->w != 0;
-    bool needs_low_byte_rex = false;
     bool has_r = false;
     bool has_b = false;
-    for (u32 register_index = 0; register_index < plan->machine_fast_register_count; register_index += 1)
-    {
-        BusterX86MetadataPhysicalOperand physical = query.operands[plan->machine_fast_register_bindings[register_index]];
-        if (plan->pattern->has_modrm && physical.reg.width == 64 && !x87_form) rex_w = true;
-        if (physical.reg.width == 8 && !physical.reg.high_byte && physical.reg.index >= 4 && physical.reg.index < 8)
-            needs_low_byte_rex = true;
-    }
+    if (plan->pattern->has_modrm && has_qword_register && !x87_form) rex_w = true;
     if (form->encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY && query.source_semantics &&
         (buster_x86_metadata_block_memory_source_authoritative(*form, query) ||
          buster_x86_metadata_aggregate_memory_source_authoritative(*form, query)))
