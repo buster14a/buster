@@ -8053,6 +8053,63 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_copy_chunk(u64 remaining)
     return remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
 }
 
+// Allocation edits are already a compact point-sorted command stream. Keep
+// their interpretation outside the machine-row dispatcher so the common row
+// path does not duplicate spill/reload/copy/rematerialization policy around
+// every instruction.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encoder* encoder, MachineFunction* function,
+                                                                MachineStackPlacement* placement, u32 edit_cursor,
+                                                                MachinePoint point, bool default_store)
+{
+    while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == point)
+    {
+        MachineEdit* edit = placement->edits + edit_cursor;
+        bool vector_location = edit->location >= MACHINE_X64_ZMM0;
+        if (edit->kind == MACHINE_EDIT_COPY)
+        {
+            if (vector_location)
+            {
+                (void)machine_x64_emit_metadata_zmm_registers(
+                    encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, edit->subject - MACHINE_X64_ZMM0, 512,
+                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                    0);
+            }
+            else
+            {
+                (void)machine_x64_emit_exact_opcode_registers(encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
+            }
+        }
+        else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
+        {
+            (void)machine_x64_emit_exact_immediate_value(encoder, edit->location, function->immediates[edit->subject], 0);
+        }
+        else
+        {
+            // Allocators emit only SPILL/RELOAD here. Preserve the previous
+            // phase-specific fallback for malformed internal edit streams.
+            bool store = edit->kind == MACHINE_EDIT_SPILL || (edit->kind != MACHINE_EDIT_RELOAD && default_store);
+            if (vector_location)
+            {
+                (void)machine_x64_emit_metadata_zmm_memory(
+                    encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
+                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], store, 512, 8,
+                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
+                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
+                    0);
+            }
+            else
+            {
+                u16 opcode = store ? MACHINE_X64_STORE_FRAME64 : MACHINE_X64_LOAD_FRAME;
+                (void)machine_x64_emit_exact_opcode_frame(encoder, opcode, edit->location,
+                                                          placement->virtual_register_offsets[edit->subject], 64, store, 0);
+            }
+        }
+        edit_cursor += 1;
+    }
+    return edit_cursor;
+}
+
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
     MachineEncodeResult result = {0};
@@ -8193,62 +8250,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             u8 const* operand_registers = placement->operand_registers + (u64)instruction_index * 4;
             result.row_offsets[instruction_index] = encoder.count;
             MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
-            while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
+            if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {
-                MachineEdit* edit = placement->edits + edit_cursor;
-                // Vector-file locations (the unified indices past the
-                // general file) move through the 64-byte vmovdqu8 forms;
-                // rematerializations never target them because vector
-                // definitions are never constant materializations.
-                if (edit->kind == MACHINE_EDIT_SPILL)
-                {
-                    if (edit->location >= MACHINE_X64_ZMM0)
-                    {
-                        (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
-                                                                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], true, 512, 8,
-                                                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                    0);
-                    }
-                    else
-                    {
-                        (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_STORE_FRAME64, edit->location,
-                                                                  placement->virtual_register_offsets[edit->subject], 64, true, 0);
-                    }
-                }
-                else if (edit->kind == MACHINE_EDIT_COPY)
-                {
-                    if (edit->location >= MACHINE_X64_ZMM0)
-                    {
-                        (void)machine_x64_emit_metadata_zmm_registers(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0,
-                                                                       edit->subject - MACHINE_X64_ZMM0, 512,
-                                                                       (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                                      .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                       0);
-                    }
-                    else
-                    {
-                        (void)machine_x64_emit_exact_opcode_registers(&encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
-                    }
-                }
-                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
-                {
-                    (void)machine_x64_emit_exact_immediate_value(&encoder, edit->location, function->immediates[edit->subject], 0);
-                }
-                else if (edit->location >= MACHINE_X64_ZMM0)
-                {
-                    (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
-                                                                -(s64)(s32)placement->virtual_register_offsets[edit->subject], false, 512, 8,
-                                                                (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                               .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                0);
-                }
-                else
-                {
-                    (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_LOAD_FRAME, edit->location,
-                                                              placement->virtual_register_offsets[edit->subject], 64, false, 0);
-                }
-                edit_cursor += 1;
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false);
             }
             MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(instruction->opcode);
             bool exact_required = exact_entry && exact_entry->exact_required;
@@ -8902,58 +8906,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
             }
             MachinePoint after = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
-            while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
+            if (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
-                MachineEdit* edit = placement->edits + edit_cursor;
-                if (edit->kind == MACHINE_EDIT_RELOAD)
-                {
-                    if (edit->location >= MACHINE_X64_ZMM0)
-                    {
-                        (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
-                                                                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], false, 512, 8,
-                                                                    (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                                   .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                    0);
-                    }
-                    else
-                    {
-                        (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_LOAD_FRAME, edit->location,
-                                                                  placement->virtual_register_offsets[edit->subject], 64, false, 0);
-                    }
-                }
-                else if (edit->kind == MACHINE_EDIT_COPY)
-                {
-                    if (edit->location >= MACHINE_X64_ZMM0)
-                    {
-                        (void)machine_x64_emit_metadata_zmm_registers(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0,
-                                                                       edit->subject - MACHINE_X64_ZMM0, 512,
-                                                                       (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                                      .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                       0);
-                    }
-                    else
-                    {
-                        (void)machine_x64_emit_exact_opcode_registers(&encoder, MACHINE_X64_MOV_RR, edit->location, edit->subject, 64, 0);
-                    }
-                }
-                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
-                {
-                    (void)machine_x64_emit_exact_immediate_value(&encoder, edit->location, function->immediates[edit->subject], 0);
-                }
-                else if (edit->location >= MACHINE_X64_ZMM0)
-                {
-                    (void)machine_x64_emit_metadata_zmm_memory(&encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
-                                                                -(s64)(s32)placement->virtual_register_offsets[edit->subject], true, 512, 8,
-                                                                (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
-                                                                                               .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
-                                                                0);
-                }
-                else
-                {
-                    (void)machine_x64_emit_exact_opcode_frame(&encoder, MACHINE_X64_STORE_FRAME64, edit->location,
-                                                              placement->virtual_register_offsets[edit->subject], 64, true, 0);
-                }
-                edit_cursor += 1;
+                edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, after, true);
             }
         }
     }

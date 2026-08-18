@@ -18,6 +18,46 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18e` (Linux x86_64, Zen 4 7940HS; **separate the allocator-edit
+command stream from x86 row emission**). `machine_encode_x86_64` previously
+interpreted the same point-sorted `MachineEdit` command population twice:
+once before a machine row and again after it. The two copies carried separate
+spill/reload defaults and repeated the complete scalar/vector copy,
+rematerialization, and frame-transfer dispatch inside the already-large row
+emitter.
+
+One shared edit-run interpreter now owns that classification. The row loop
+keeps its existing cheap point checks and enters the interpreter only when an
+edit is present; the interpreter consumes the homogeneous run at that point in
+stable order. Spill versus reload is an explicit store fact, vector locations
+retain the same VMOVDQU8 path, scalar locations retain the exact-form frame
+path, and the former phase-specific malformed-edit fallback is preserved. The
+optimized helper is fully inlined, while the source owns the transformation
+once. This is the first architectural split of the x86 encoder: allocator
+commands are no longer duplicated around the machine-row dispatcher, and the
+hot `machine_encode_x86_64` body shrinks 42,067 -> 39,250 bytes
+(**-2,817 bytes, -6.70%**).
+
+Seven alternating-order, CPU-pinned, non-multiplexed instruction pairs compile
+the same final unity source with the parent and candidate trusted Release
+compilers. Every output is byte-identical. Median instructions fall
+14,641,168,832 -> 14,632,154,506, **-9,014,326 (-0.0616%)**, and every paired
+delta is negative. Branches fall 2,706,290,356 -> 2,704,179,899
+(**-0.0780%**), L1d loads fall 5,280,450,998 -> 5,237,233,736
+(**-0.8184%**), L1d misses fall 136,120,718 -> 134,981,297
+(**-0.8371%**), cache references fall 320,102,606 -> 318,398,288
+(**-0.5324%**), and cache misses fall 9,574,774 -> 9,507,923
+(**-0.6982%**). Branch misses rise 28,122,543 -> 28,242,308
+(**+0.4259%**) and are recorded as the adverse signal. Nine cycle pairs are
+noisy and split four candidate wins to five losses: independent medians move
+**-0.1356%**, while the paired median is 22,704,767 cycles higher, so no cycle
+claim is made.
+
+Final `test_self_host` reaches a byte-identical 35,492,160-byte fixed point:
+stage 1 retires 14,632,483,890 instructions, stage 2 retires
+102,713,012,776, and all 1,439,388 exact attempts succeed. Release `test_all`
+passes 309,175 assertions in all 39 modules.
+
 `2026-08-18d` (Linux x86_64, Zen 4 7940HS; **remove dead generic-encoder
 state**). The post-18c trusted Release profile attributes 5.21% of self cycles
 to generic x86 metadata scratch emission, 4.53% to exact metadata emission,
