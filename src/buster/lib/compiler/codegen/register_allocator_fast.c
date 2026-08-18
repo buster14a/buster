@@ -2,6 +2,19 @@
 #include <buster/lib/os.h>
 #include <buster/lib/simd.h>
 
+#define MACHINE_FAST_OPERAND_PHYSICAL_SHIFT 0u
+#define MACHINE_FAST_OPERAND_VIRTUAL_SHIFT 4u
+#define MACHINE_FAST_OPERAND_BLOCK_SHIFT 8u
+#define MACHINE_FAST_OPERAND_USE_SHIFT 12u
+#define MACHINE_FAST_OPERAND_DEFINE_SHIFT 16u
+#define MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT 20u
+#define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
+
+BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
+{
+    return (operand_masks >> shift) & MACHINE_FAST_OPERAND_LANE_MASK;
+}
+
 // FRA stage 4: local fast register allocation over the compact machine IR.
 // Included by machine.c in the backend-implementation-file pattern. A
 // forward scan keeps values in registers between their uses inside one
@@ -903,6 +916,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     prepass.last_use = arena_allocate(arena, u32, register_count ? register_count : 1);
     prepass.escapes = arena_allocate(arena, u8, register_count ? register_count : 1);
     prepass.next_call = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    prepass.operand_masks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     prepass.interval_starts = arena_allocate(arena, u32, register_count ? register_count : 1);
     prepass.interval_ends = arena_allocate(arena, u32, register_count ? register_count : 1);
     prepass.disqualified = arena_allocate(arena, u8, register_count ? register_count : 1);
@@ -997,12 +1011,19 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 return prepass;
             }
             prepass.callee_saved_clobber_mask |= info->clobber_mask & description->callee_saved_mask;
+            u32 operand_masks = 0;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
                 MachineRef ref = instruction->operands[slot];
                 MachineRefKind kind = machine_ref_kind(ref);
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                                 << (MACHINE_FAST_OPERAND_USE_SHIFT + slot);
+                operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_DEFINE) << (MACHINE_FAST_OPERAND_DEFINE_SHIFT + slot);
+                operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_USE_DEFINE) << (MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT + slot);
                 if (kind == MACHINE_REF_BLOCK)
                 {
+                    operand_masks |= 1u << (MACHINE_FAST_OPERAND_BLOCK_SHIFT + slot);
                     block_references_only_in_terminators &= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
                     u32 successor = machine_ref_payload(ref);
                     prepass.predecessor_offsets[successor + 1] += 1;
@@ -1011,8 +1032,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
                 if (kind != MACHINE_REF_VIRTUAL_REGISTER)
                 {
+                    operand_masks |= (u32)(kind == MACHINE_REF_PHYSICAL_REGISTER) << (MACHINE_FAST_OPERAND_PHYSICAL_SHIFT + slot);
                     continue;
                 }
+                operand_masks |= 1u << (MACHINE_FAST_OPERAND_VIRTUAL_SHIFT + slot);
                 u32 virtual_register = machine_ref_payload(ref);
                 prepass.interval_starts[virtual_register] = BUSTER_MIN(prepass.interval_starts[virtual_register], instruction_index);
                 prepass.interval_ends[virtual_register] = BUSTER_MAX(prepass.interval_ends[virtual_register], instruction_index);
@@ -1021,7 +1044,6 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 // but pinning it globally would hide the source/destination
                 // register relation from QUALITY's split probes.
                 prepass.disqualified[virtual_register] |= machine_opcode_has_constraints(info) ? 1u : 0u;
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
                 if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
                 {
                     if (prepass.definition_blocks[virtual_register] == UINT32_MAX)
@@ -1048,6 +1070,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                     }
                 }
             }
+            prepass.operand_masks[instruction_index] = operand_masks;
         }
     }
     for (u32 register_index = 0; use_blocks && register_index < register_count; register_index += 1)
@@ -1540,6 +1563,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             {
                 return placement;
             }
+            u32 operand_masks = prepass->operand_masks[instruction_index];
+            u32 physical_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
+            u32 virtual_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_VIRTUAL_SHIFT);
+            u32 block_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_BLOCK_SHIFT);
+            u32 use_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_SHIFT);
+            u32 define_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_DEFINE_SHIFT);
+            u32 use_define_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT);
             state.current_point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             state.uses_consumed = false;
             // Split write-backs land at this row's head: the landing pad
@@ -1581,6 +1611,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
             }
             u8* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
+            memset(operand_registers, 0xff, 4);
             bool constrained = machine_opcode_has_constraints(info);
             bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
             bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
@@ -1591,19 +1622,24 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // Fixed physical operands and the constrained layout vacate
             // their registers first so uses cannot land on them.
             u64 reserved_mask = info->clobber_mask;
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            u32 reservation_slots =
+                (physical_slots | info->fixed_register_mask | (constrained ? virtual_slots : 0u)) & MACHINE_FAST_OPERAND_LANE_MASK;
+            for (u32 remaining = reservation_slots; remaining; remaining &= remaining - 1u)
             {
+                u32 slot = machine_fast_first_set(remaining);
                 MachineRef ref = instruction->operands[slot];
-                if (machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER)
+                u32 lane = 1u << slot;
+                if (physical_slots & lane)
                 {
                     reserved_mask |= 1ull << machine_ref_payload(ref);
+                    operand_registers[slot] = (u8)machine_ref_payload(ref);
                 }
                 u32 fixed = machine_opcode_fixed_register(info, slot);
                 if (fixed != UINT32_MAX && fixed < MACHINE_TARGET_REGISTER_LIMIT)
                 {
                     reserved_mask |= 1ull << fixed;
                 }
-                else if (constrained && machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                else if (constrained && (virtual_slots & lane))
                 {
                     reserved_mask |= 1ull << machine_fast_slot_scratch(&state, info, slot);
                 }
@@ -1616,7 +1652,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 MachineRef destination_ref = instruction->operands[tied_destination];
                 MachineRef source_ref = instruction->operands[tied_source];
                 u32 fixed_destination = machine_opcode_fixed_register(info, tied_destination);
-                if (machine_ref_kind(destination_ref) == MACHINE_REF_PHYSICAL_REGISTER)
+                if (physical_slots & (1u << tied_destination))
                 {
                     tied_target = machine_ref_payload(destination_ref);
                 }
@@ -1628,7 +1664,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 {
                     tied_target = machine_fast_slot_scratch(&state, info, tied_destination);
                 }
-                if (machine_ref_kind(source_ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                if (virtual_slots & (1u << tied_source))
                 {
                     u32 source_virtual = machine_ref_payload(source_ref);
                     tied_source_dies = machine_fast_source_dies_here(&state, source_virtual);
@@ -1644,45 +1680,26 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         {
                             forbidden |= 1ull << source_location;
                         }
-                        u32 destination_virtual = machine_ref_kind(destination_ref) == MACHINE_REF_VIRTUAL_REGISTER
+                        u32 destination_virtual = (virtual_slots & (1u << tied_destination))
                                                        ? machine_ref_payload(destination_ref)
                                                        : source_virtual;
                         tied_target = machine_fast_pick(&state, machine_fast_class_mask(&state, destination_virtual), forbidden,
                                                         machine_fast_crosses_call(&state, destination_virtual));
                     }
                 }
-                else if (machine_ref_kind(source_ref) == MACHINE_REF_PHYSICAL_REGISTER && tied_target == UINT32_MAX)
+                else if ((physical_slots & (1u << tied_source)) && tied_target == UINT32_MAX)
                 {
                     tied_target = machine_ref_payload(source_ref);
                 }
             }
             // Uses first: constrained slots force their scratch register,
             // free slots keep or pick any register.
-            for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
+            for (u32 remaining = virtual_slots & use_slots; remaining; remaining &= remaining - 1u)
             {
-                operand_registers[slot] = UINT8_MAX;
-                if (slot >= info->operand_count)
-                {
-                    continue;
-                }
+                u32 slot = machine_fast_first_set(remaining);
                 MachineRef ref = instruction->operands[slot];
-                MachineRefKind kind = machine_ref_kind(ref);
-                if (kind == MACHINE_REF_PHYSICAL_REGISTER)
-                {
-                    operand_registers[slot] = (u8)machine_ref_payload(ref);
-                    continue;
-                }
-                if (kind != MACHINE_REF_VIRTUAL_REGISTER)
-                {
-                    continue;
-                }
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                if (role != MACHINE_OPERAND_ROLE_USE && role != MACHINE_OPERAND_ROLE_USE_DEFINE)
-                {
-                    continue;
-                }
                 u32 fixed = machine_opcode_fixed_register(info, slot);
-                if (slot == tied_source && tied_target != UINT32_MAX && machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                if (slot == tied_source && tied_target != UINT32_MAX)
                 {
                     machine_fast_materialize_tied(&state, machine_ref_payload(ref), tied_target, tied_source_dies);
                     operand_registers[slot] = (u8)tied_target;
@@ -1705,7 +1722,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // same way: a reload landing on an already-staged ZMM
                 // argument register would destroy it.
                 if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 1 &&
-                    machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
+                    (physical_slots & 1u))
                 {
                     target = machine_ref_payload(instruction->operands[0]);
                 }
@@ -1716,40 +1733,34 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 u32 used = machine_fast_ensure(&state, machine_ref_payload(ref), target,
                                                target == UINT32_MAX ? reserved_mask : 0);
                 operand_registers[slot] = (u8)used;
-                if (role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                if (use_define_slots & (1u << slot))
                 {
                     state.dirty[used] = true;
                 }
             }
             // Fixed physical destinations and encoder-internal clobbers
             // evict their owners before the instruction writes them.
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            for (u32 remaining = physical_slots & define_slots; remaining; remaining &= remaining - 1u)
             {
+                u32 slot = machine_fast_first_set(remaining);
                 MachineRef ref = instruction->operands[slot];
-                if (machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER)
+                u32 physical_register = machine_ref_payload(ref);
+                if (state.owner[physical_register] != UINT32_MAX)
                 {
-                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                    u32 physical_register = machine_ref_payload(ref);
-                    if (role == MACHINE_OPERAND_ROLE_DEFINE && state.owner[physical_register] != UINT32_MAX)
-                    {
-                        // Overwriting a live owner: the spill store lands
-                        // before this instruction writes the register, and
-                        // any same-instruction use was already consumed.
-                        machine_fast_spill(&state, physical_register);
-                    }
+                    // Overwriting a live owner: the spill store lands before
+                    // this instruction writes the register, and any
+                    // same-instruction use was already consumed.
+                    machine_fast_spill(&state, physical_register);
                 }
             }
             // Early-clobber definitions cannot share a register with any
             // live input, even when the input's textual use was placed first.
             // Rebind the definition to a free register (or spill the input)
             // before its write executes.
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            u32 early_clobber_slots = info->early_clobber_mask & (~use_slots | use_define_slots) & MACHINE_FAST_OPERAND_LANE_MASK;
+            for (u32 remaining = early_clobber_slots; remaining; remaining &= remaining - 1u)
             {
-                if (!machine_opcode_operand_is_early_clobber(info, slot) ||
-                    (info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u)) == MACHINE_OPERAND_ROLE_USE)
-                {
-                    continue;
-                }
+                u32 slot = machine_fast_first_set(remaining);
                 u32 destination = operand_registers[slot];
                 if (destination == UINT8_MAX)
                 {
@@ -1772,7 +1783,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         continue;
                     }
                     MachineRef destination_ref = instruction->operands[slot];
-                    if (machine_ref_kind(destination_ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                    if (virtual_slots & (1u << slot))
                     {
                         machine_fast_spill(&state, destination);
                         u32 destination_virtual = machine_ref_payload(destination_ref);
@@ -1801,18 +1812,10 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
             }
             // Vreg definitions bind their register lazily dirty.
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            for (u32 remaining = virtual_slots & define_slots; remaining; remaining &= remaining - 1u)
             {
+                u32 slot = machine_fast_first_set(remaining);
                 MachineRef ref = instruction->operands[slot];
-                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-                {
-                    continue;
-                }
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                if (role != MACHINE_OPERAND_ROLE_DEFINE)
-                {
-                    continue;
-                }
                 if (machine_fast_pin_covers(&state, machine_ref_payload(ref), instruction_index))
                 {
                     operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
@@ -1833,7 +1836,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     target = machine_fast_slot_scratch(&state, info, slot);
                 }
                 else if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&
-                         machine_ref_kind(instruction->operands[1]) == MACHINE_REF_PHYSICAL_REGISTER &&
+                         (physical_slots & (1u << 1)) &&
                          ((description->allocatable_mask | description->vector_allocatable_mask) >> machine_ref_payload(instruction->operands[1])) & 1u)
                 {
                     // A capture of a fixed physical register (incoming
@@ -1845,7 +1848,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     target = machine_ref_payload(instruction->operands[1]);
                 }
                 else if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&
-                         machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                         (virtual_slots & (1u << 1)) &&
                          machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
                          operand_registers[1] != UINT8_MAX && !((machine_fast_pin_active(&state, instruction_index) >> operand_registers[1]) & 1u) &&
                          machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
@@ -1897,12 +1900,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
                 else
                 {
-                    for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                    for (u32 remaining = block_slots; remaining; remaining &= remaining - 1u)
                     {
-                        if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK)
-                        {
-                            continue;
-                        }
+                        u32 slot = machine_fast_first_set(remaining);
                         u32 successor = machine_ref_payload(instruction->operands[slot]);
                         MachineEdge const* successor_edge = 0;
                         for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)

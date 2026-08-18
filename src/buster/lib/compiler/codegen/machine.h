@@ -1468,6 +1468,11 @@ struct MachineFastPrepass
     u32* last_use;
     u8* escapes;
     u32* next_call;
+    // One compact SoA word per instruction. Six four-bit lane masks record
+    // physical, virtual, block, use, define, and use-define operands after
+    // the prepass has classified the row once; FAST and QUALITY scans consume
+    // these homogeneous facts instead of repeatedly decoding tagged refs.
+    u32* operand_masks;
     u32* predecessor_offsets;
     u32* predecessor_list;
     u8* cold_blocks;

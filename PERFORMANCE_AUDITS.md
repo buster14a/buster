@@ -18,6 +18,51 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-18q` (Linux x86_64, Zen 4 7940HS; **project operand lanes once,
+then scan only active homogeneous sets**).  The first profile after `18p` put
+FAST placement at 4.69% of cycles and its prepass at 2.95%.  The prepass
+already classified every operand of all 1,208,644 fixed four-lane machine
+rows, but placement decoded the same tagged references and roles again in
+five separate loops: reservation, uses, physical definitions, early
+clobbers, virtual definitions, and again for terminator block references.
+Most rows have no physical, fixed-register, early-clobber, or block lanes, so
+the fixed maximum loops spent branches proving that empty state repeatedly.
+
+`MachineFastPrepass` now publishes one contiguous `u32` SoA word per
+instruction.  Six four-bit masks carry physical, virtual, block, use, define,
+and use-define lanes.  The masks are accumulated inside the existing operand
+walk, so no new classification pass exists.  FAST and QUALITY load the word
+once per row, initialize the four output-register bytes with one contiguous
+store, and iterate only the relevant lane masks in ascending order.
+Reservation combines physical, fixed, and constrained-virtual masks before
+entering its loop; the overwhelmingly empty early-clobber population bypasses
+its loop entirely.  Tied/copy/terminator paths reuse the same facts.  The
+original typed machine refs and opcode metadata remain authoritative, and the
+prepass still fails closed before placement for invalid replay/manual rows.
+
+Seven same-source, CPU-pinned, non-multiplexed instruction pairs are byte-
+identical (one 35,539,504-byte output hash) and reduce the median from
+11,213,989,321 to 11,102,499,571, **-111,489,750 (-0.9942%)**.  Branches fall
+2,126,259,005 -> 2,078,125,759 (**-2.2638%**), branch misses fall 26,331,613
+-> 26,188,652 (**-0.5429%**), L1d loads fall 4,036,341,937 -> 4,006,960,249
+(**-0.7279%**), and L1d misses fall 131,851,486 -> 131,045,423
+(**-0.6113%**).  Twelve alternating cycle pairs are noisy but 9/12 favor the
+candidate; the independent midpoint falls 4,413,803,922 -> 4,369,024,227
+(**-1.0145%**).  A staged A/B showed that the compact facts alone save about
+46.0 M instructions (0.41%), while skipping empty reservation and
+early-clobber populations contributes another 65.5 M (0.59%).
+
+The final `test_self_host` reaches a byte-identical 35,539,512-byte fixed
+point: stage 1 retires 11,106,797,369 instructions, stage 2 retires
+79,310,759,201, and all 1,443,325 exact attempts succeed.  Release `test_all`
+passes 309,182 assertions in all 39 modules; sanitized Debug passes 307,383
+assertions in all 39 modules.  Clang static analysis completes with the same
+three existing `c_source.c` diagnostics and no diagnostics in the changed
+machine/allocator files.  This is the Acton/Fredriksson shape:
+classify the population once into dense masks, keep cold/empty states outside
+the common loop, and make the scalar consumer mask-driven now so wider batch
+kernels can consume the same explicit lane facts later.
+
 `2026-08-18p` (Linux x86_64, Zen 4 7940HS; **make the selector/allocator
 boundary explicit and consume block-parameter rows once**).  The first fresh
 profile after `18o` put `machine_select_canonical_function` at 4.14% of cycles,
