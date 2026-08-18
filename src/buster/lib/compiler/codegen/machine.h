@@ -1293,6 +1293,8 @@ struct MachineFunctionBuilder
 {
     Arena* arena;
     MachineBuilderStream instructions;
+    MachineInstruction* instruction_cursor;
+    MachineInstruction* instruction_end;
     MachineBuilderStream virtual_registers;
     MachineBuilderStream blocks;
     MachineBuilderStream edges;

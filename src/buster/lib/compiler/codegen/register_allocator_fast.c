@@ -1,5 +1,6 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/os.h>
+#include <buster/lib/simd.h>
 
 // FRA stage 4: local fast register allocation over the compact machine IR.
 // Included by machine.c in the backend-implementation-file pattern. A
@@ -699,6 +700,49 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
 #endif
 }
 
+// The allocator's common scalar file is exactly sixteen u32 owner lanes.  A
+// free-register query is therefore one contiguous 512-bit equality, not
+// sixteen independent owner tests.  The byte vocabulary already lowers on
+// every supported build; collapse four equal bytes back into one u32 lane
+// with ordinary mask arithmetic.  Wider vector files consume the same kernel
+// in sixteen-register chunks, while non-AVX-512 targets retain the bounded
+// scalar walk.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_compact_u32_mask(Mask64 byte_mask)
+{
+    Mask64 words = byte_mask & (byte_mask >> 1) & (byte_mask >> 2) & (byte_mask >> 3) & UINT64_C(0x1111111111111111);
+    words = (words | (words >> 3)) & UINT64_C(0x0303030303030303);
+    words = (words | (words >> 6)) & UINT64_C(0x000f000f000f000f);
+    words = (words | (words >> 12)) & UINT64_C(0x000000ff000000ff);
+    words = (words | (words >> 24)) & UINT64_C(0x000000000000ffff);
+    return (u32)words;
+}
+
+BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u64 candidates)
+{
+#if BUSTER_SIMD_512
+    u64 free = 0;
+    for (u32 base = 0; base < state->active_register_count; base += 16)
+    {
+        u32 active = (u32)((candidates >> base) & UINT64_C(0xffff));
+        if (!active) continue;
+        Mask64 free_bytes = simd512_equal_byte(
+            simd512_load(state->owner + base), simd512_splat(UINT8_MAX));
+        free |= (u64)(machine_fast_compact_u32_mask(free_bytes) & active) << base;
+    }
+    return free;
+#else
+    u64 free = 0;
+    for (u64 remaining = candidates; remaining; remaining &= remaining - 1)
+    {
+        u32 physical_register = machine_fast_first_set(remaining);
+        u64 bit = 1ull << physical_register;
+        u64 is_free = (u64)(state->owner[physical_register] == UINT32_MAX);
+        free |= bit & (0u - is_free);
+    }
+    return free;
+#endif
+}
+
 // Picks a free allocatable register, else evicts the least recently used
 // owner — a probe bounded by the register-file size. Call-crossing values
 // reach for the callee-saved members; everything else only touches them
@@ -715,17 +759,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mas
         candidates = without_unpaid ? without_unpaid : candidates;
     }
     u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
-    // Discover free candidates on demand without a per-owner branch. The
-    // ctz walk is bounded by the small candidate set, and the resulting mask
-    // preserves the original lowest-register preference order exactly.
-    u64 free = 0;
-    for (u64 remaining = candidates; remaining; remaining &= remaining - 1)
-    {
-        u32 physical_register = machine_fast_first_set(remaining);
-        u64 bit = 1ull << physical_register;
-        u64 is_free = (u64)(state->owner[physical_register] == UINT32_MAX);
-        free |= bit & (0u - is_free);
-    }
+    u64 free = machine_fast_free_candidates(state, candidates);
     u64 preferred_free = free & preferred_class;
     if (preferred_free)
     {
@@ -877,6 +911,14 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         return prepass;
     }
     u8* definition_seen = arena_allocate(arena, u8, register_count ? register_count : 1);
+    // Most functions fit a defining/use block identity in sixteen bits. Keep
+    // that transient classification dense; pathological block counts retain
+    // the original all-row escape scan instead of widening every common row.
+    u16* use_blocks = function->block_count < UINT16_MAX - 1u ? arena_allocate(arena, u16, register_count ? register_count : 1) : 0;
+    if (use_blocks && register_count)
+    {
+        memset(use_blocks, 0xff, (u64)register_count * sizeof(*use_blocks));
+    }
     for (u32 register_index = 0; register_index < register_count; register_index += 1)
     {
         prepass.rematerialize_immediates[register_index] = UINT32_MAX;
@@ -948,6 +990,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         prepass.predecessor_offsets[block_index] = 0;
     }
     u32 backward_edge_count = 0;
+    bool block_references_only_in_terminators = true;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
@@ -967,6 +1010,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 MachineRefKind kind = machine_ref_kind(ref);
                 if (kind == MACHINE_REF_BLOCK)
                 {
+                    block_references_only_in_terminators &= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
                     u32 successor = machine_ref_payload(ref);
                     prepass.predecessor_offsets[successor + 1] += 1;
                     backward_edge_count += successor <= block_index;
@@ -1004,9 +1048,19 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
                 {
                     prepass.last_use[virtual_register] = BUSTER_MAX(prepass.last_use[virtual_register], instruction_index);
+                    if (use_blocks)
+                    {
+                        u16 use_block = use_blocks[virtual_register];
+                        use_blocks[virtual_register] = use_block == UINT16_MAX || use_block == block_index ? (u16)block_index : UINT16_MAX - 1u;
+                    }
                 }
             }
         }
+    }
+    for (u32 register_index = 0; use_blocks && register_index < register_count; register_index += 1)
+    {
+        u16 use_block = use_blocks[register_index];
+        prepass.escapes[register_index] |= use_block != UINT16_MAX && use_block != prepass.definition_blocks[register_index];
     }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -1037,7 +1091,8 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        u32 first_offset = use_blocks && block_references_only_in_terminators && block->instruction_count ? block->instruction_count - 1u : 0;
+        for (u32 offset = first_offset; offset < block->instruction_count; offset += 1)
         {
             MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
             MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
@@ -1064,7 +1119,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         prepass.loop_span_count += 1;
                     }
                 }
-                else if (kind == MACHINE_REF_VIRTUAL_REGISTER)
+                else if (!use_blocks && kind == MACHINE_REF_VIRTUAL_REGISTER)
                 {
                     u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
                     if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&

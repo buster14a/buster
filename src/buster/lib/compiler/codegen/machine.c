@@ -1191,7 +1191,19 @@ u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruct
     {
         builder->point_capacity_exceeded = true;
     }
-    MachineInstruction* row = (MachineInstruction*)machine_stream_append(builder->arena, &builder->instructions);
+    MachineInstruction* row = builder->instruction_cursor;
+    if (row == builder->instruction_end)
+    {
+        row = (MachineInstruction*)machine_stream_append(builder->arena, &builder->instructions);
+        builder->instruction_cursor = row + 1;
+        builder->instruction_end = (MachineInstruction*)(builder->instructions.last + 1) + builder->instructions.chunk_capacity;
+    }
+    else
+    {
+        builder->instruction_cursor = row + 1;
+        builder->instructions.last->count += 1;
+        builder->instructions.total_count += 1;
+    }
     *row = instruction;
     return index;
 }
