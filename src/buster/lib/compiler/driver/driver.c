@@ -2224,7 +2224,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         goto end;
     }
     IrModule* module = &lowered.program->modules[0];
-    IrValidationResult validation = ir_validate_canonical_module(lowered.program, module);
+    IrValidationResult validation = lowered.canonical_ir_certified
+                                        ? (IrValidationResult){
+                                              .function = IR_FUNCTION_ID_INVALID,
+                                              .block = IR_BLOCK_ID_INVALID,
+                                              .instruction = IR_INSTRUCTION_ID_INVALID,
+                                          }
+                                        : ir_validate_canonical_module(lowered.program, module);
     if (validation.error != IR_VALIDATION_NONE)
     {
         String8 function_name = validation.function.value < module->function_count ? module->functions[validation.function.value].name : S8("<invalid>");

@@ -928,6 +928,11 @@ struct CIRLowerResult
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
+    // Published only after the C lowerer finishes every function and global
+    // through its typed builders without a rejected row. The driver may trust
+    // this private producer boundary; public/manual IR still uses the full
+    // canonical validator.
+    bool canonical_ir_certified;
 };
 
 // Fills the C frontend's remaining first-use tables on the calling thread.

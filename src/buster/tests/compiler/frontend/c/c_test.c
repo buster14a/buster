@@ -506,6 +506,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
             memcpy(&value, duplicate_designator_global->bytes.pointer + 12, sizeof(value));
             BUSTER_TEST(arguments, value == 5);
         }
+        BUSTER_TEST(arguments, local_static_ir.canonical_ir_certified);
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_static_ir.program, module).error == IR_VALIDATION_NONE);
     }
     scratch_end(local_static_temporary);
@@ -1587,6 +1588,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_union_initializer(UnitTestArgu
     BUSTER_TEST(arguments, union_invalid_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, union_invalid_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, union_invalid_ir.diagnostic_count == 1);
+    BUSTER_TEST(arguments, !union_invalid_ir.canonical_ir_certified);
     scratch_end(union_invalid_temporary);
     return result;
 }

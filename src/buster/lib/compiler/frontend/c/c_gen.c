@@ -31600,5 +31600,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     arena_destroy(lowering_arena, 1);
     scratch_end(temporary);
+    result.canonical_ir_certified = result.program && !result.diagnostic_count &&
+                                    !program->rejected_function_count && !module->rejected_function_count;
     return result;
 }
