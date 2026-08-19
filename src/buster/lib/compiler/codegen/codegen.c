@@ -6391,11 +6391,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             {
                 function_value_bytes += slot_size;
             }
-            u64 remainder = function_value_bytes % slot_alignment;
-            if (remainder)
-            {
-                function_value_bytes += slot_alignment - remainder;
-            }
+            // slot_alignment is always a power of two: type layout alignments
+            // bottom out in target_data_layout's 1..16 table (aggregates take
+            // a max of member alignments, vectors a power-of-two byte size),
+            // and requested value alignments pass c_ir_alignment_evaluate's
+            // power-of-two check. That licenses aligning up with a mask here
+            // and in the offset-assignment loop below; a `%` compiles to a
+            // hardware divide in a loop that visits every value of every
+            // function.
+            function_value_bytes = (function_value_bytes + slot_alignment - 1) & ~(slot_alignment - 1);
             if (target.cpu_arch == CPU_ARCH_AARCH64)
             {
                 function_value_bytes += slot_size;
@@ -6627,11 +6631,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             {
                 value_bytes += slot_size;
             }
-            u64 remainder = value_bytes % slot_alignment;
-            if (remainder)
-            {
-                value_bytes += slot_alignment - remainder;
-            }
+            // Power-of-two slot_alignment; see the capacity-estimation loop.
+            value_bytes = (value_bytes + slot_alignment - 1) & ~(slot_alignment - 1);
             if (value_bytes > UINT32_MAX)
             {
                 result.error = CODEGEN_ERROR_CAPACITY;
