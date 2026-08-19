@@ -173,7 +173,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //   simd512_compress_store_byte(address, mask, value)
 //                                                  the same compaction straight
 //                                                  to memory, writing exactly
-//                                                  mask64_count(mask) bytes
+//                                                  mask64_count(mask) bytes.
+//                                                  Zen 4 microcodes the
+//                                                  memory-destination form of
+//                                                  vpcompressb (~256 uops vs 2
+//                                                  for the register form;
+//                                                  Lemire, 2025-02-14), so hot
+//                                                  kernels must instead pair
+//                                                  simd512_compress_byte with
+//                                                  simd512_store or
+//                                                  simd512_store_masked. Use
+//                                                  this only on cold paths or
+//                                                  where every target machine
+//                                                  is known to be Zen 5 or
+//                                                  Intel, which are unaffected
 //   simd512_widen_byte(value, quarter)          -> Simd512
 //                                                  vpmovzxbd: the 16 bytes of
 //                                                  one quarter zero-extended
@@ -250,6 +263,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_permute2_byte(mask, low, indices, high)                                                                                                        \
     ((Simd512)_mm512_maskz_permutex2var_epi8((__mmask64)(mask), (__m512i)(low), (__m512i)(indices), (__m512i)(high)))
 #define simd512_compress_byte(mask, value) ((Simd512)_mm512_maskz_compress_epi8((__mmask64)(mask), (__m512i)(value)))
+// Microcoded on Zen 4 -- see the operation list above before adding a caller.
 #define simd512_compress_store_byte(address, mask, value) _mm512_mask_compressstoreu_epi8((address), (__mmask64)(mask), (__m512i)(value))
 #define simd512_widen_byte(value, quarter) ((Simd512)_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32((__m512i)(value), (quarter))))
 #define simd512_shift_left_word(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
