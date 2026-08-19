@@ -18,6 +18,59 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-19b` (Linux x86_64, Zen 4 7940HS; **fold validated selection facts
+into the population that already owns them, and keep the common debug-line
+operation local**).  The first profile after `19a` put
+`machine_select_canonical_function` at 4.17% of cycles, FAST placement at
+3.84%, FAST prepass at 2.61%, and the minimal selection prepass at 1.21%.
+The production path had already crossed the new certified/validated IR
+boundary, but each target selector still ran a standalone linked-row pass to
+revalidate ownership and materialize four value arrays before immediately
+walking the same rows in target order for promotion and ordinals.
+
+Production codegen now calls an explicit validated selector entry point.
+Manual, replayed, test, and other unvalidated callers retain the complete
+minimal prepass as their fail-closed oracle.  On the validated path, x86-64
+and AArch64 use the authoritative `IrValue.definition` field and accumulate
+definition block, use count, and use-block state inside their already-required
+target-order walk.  These facts live in three compact value-indexed SoA
+streams, initialized with contiguous fills, rather than a larger generic
+prepass record.  A differential test compares checked and validated selection
+through the normalized machine stream.  This applies "where there is one,
+find the many" at the correct unit: the useful population is every value fact
+for the complete certified function, not another scalar visit to one row.
+
+The same profile exposed `codegen_record_line` as an out-of-line seven-argument
+call on every emitted debug-line transition.  Production call sites now use a
+translation-unit-local inline helper, while the public/test seam remains a
+checked wrapper with identical behavior.  That preserves the external seam
+and removes repeated call/stack ABI work from the mandatory `-g` common path.
+Staged same-source measurements attribute about 53.0 M retired instructions
+to removing the selector pass and another 63.3 M to keeping the line operation
+local.
+
+Seven alternating same-source, CPU-pinned, non-multiplexed instruction pairs
+are byte-identical and reduce the median from 10,709,286,742 to
+10,593,020,063, **-116,266,679 (-1.0857%)**.  Branches fall 1,991,781,651 ->
+1,964,814,662 (**-1.3539%**), branch misses fall 25,457,662 -> 24,839,510
+(**-2.4282%**), L1d loads fall 3,882,563,169 -> 3,818,293,485
+(**-1.6553%**), and L1d misses fall 126,910,373 -> 124,278,157
+(**-2.0741%**).  Eleven alternating cycle pairs favor the candidate in 8/11
+runs; their independent median falls 4,238,590,416 -> 4,215,244,472
+(**-0.5508%**).
+
+The final `test_self_host` reaches a byte-identical 35,543,112-byte fixed
+point: stage 1 retires 10,593,252,166 instructions (versus the merged
+10,707,813,389 baseline, **-114,561,223 / -1.0699%**), stage 2 retires
+76,179,770,555, and all 1,444,094 exact attempts succeed.  Release `test_all`
+passes 309,187 assertions in all 39 modules; sanitized Debug passes 307,388
+assertions in all 39 modules; Clang static analysis checks the unity
+translation unit with zero analyzer warnings.  No decorative vector
+intrinsics were added: one heterogeneous pointer traversal disappeared, its
+surviving hot facts became dense SoA streams, and a per-entry generic boundary
+became local work.  That is the data movement and state separation a later
+wide kernel can consume without first undoing scalar architecture.
+
 `2026-08-19a` (Linux x86_64, Zen 4 7940HS; **make the successful C
 producer/consumer boundary explicit and remove a complete heterogeneous
 validation pass**).  The first profile after `18r` put

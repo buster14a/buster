@@ -85,12 +85,25 @@ struct MachineSelectionPrepass
 #define MACHINE_SELECTION_INVALID_INDEX UINT32_MAX
 #define MACHINE_SELECTION_MULTIPLE_BLOCKS (UINT32_MAX - 1u)
 
+// Dense value facts accumulated by a validated target selector while it
+// already walks the canonical rows for target-specific ordering and local
+// promotion. Keeping these as three SoA streams lets that existing pass
+// replace the standalone ownership/definition/use traversal.
+typedef struct MachineSelectionValueFacts MachineSelectionValueFacts;
+struct MachineSelectionValueFacts
+{
+    u32* definition_blocks;
+    u32* use_counts;
+    u32* use_blocks;
+};
+
 BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function);
 // Production selectors consume only the ID-keyed definition/use facts below.
 // Keep the full builder above for diagnostics and the declarative matcher;
 // this variant retains validation while omitting unconsumed per-instruction
 // classifications, ordinals, and value flags.
 BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, IrProgram* program, IrFunction* function);
+BUSTER_F_DECL MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count);
 BUSTER_F_DECL bool machine_selection_prepass_value_flag(MachineSelectionPrepass const* prepass, IrValueId value, MachineSelectionValueFlag flag);
 BUSTER_F_DECL bool machine_selection_prepass_instruction_owned_by(MachineSelectionPrepass const* prepass, IrInstructionId instruction, u32 block_index);
 BUSTER_F_DECL MachineSelectionResultClass machine_selection_result_class(MachineSelectionPrepass const* prepass, IrInstructionId instruction);

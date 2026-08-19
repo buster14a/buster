@@ -337,6 +337,23 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
     return result;
 }
 
+MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count)
+{
+    u32 capacity = value_count ? value_count : 1;
+    MachineSelectionValueFacts result = {
+        .definition_blocks = arena_allocate(arena, u32, capacity),
+        .use_counts = arena_allocate(arena, u32, capacity),
+        .use_blocks = arena_allocate(arena, u32, capacity),
+    };
+    if (value_count)
+    {
+        memset(result.definition_blocks, 0xff, (u64)value_count * sizeof(*result.definition_blocks));
+        memset(result.use_counts, 0, (u64)value_count * sizeof(*result.use_counts));
+        memset(result.use_blocks, 0xff, (u64)value_count * sizeof(*result.use_blocks));
+    }
+    return result;
+}
+
 MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, IrProgram* program, IrFunction* function)
 {
     MachineSelectionPrepass result = {

@@ -397,6 +397,11 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
                               minimal_prepass.value_use_blocks[value_index] == prepass.value_use_blocks[value_index];
     }
     BUSTER_TEST(arguments, minimal_facts_match);
+    MachineSelectResult checked_selection = machine_select_canonical_function(arguments->arena, program, add, x86_target);
+    MachineSelectResult validated_selection = machine_select_validated_canonical_function(arguments->arena, program, add, x86_target);
+    BUSTER_TEST(arguments, checked_selection.supported && validated_selection.supported);
+    BUSTER_TEST(arguments, checked_selection.failed_opcode == validated_selection.failed_opcode);
+    BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked_selection, &validated_selection));
     BUSTER_TEST(arguments, minimal_prepass.instruction_owner_blocks == 0 && minimal_prepass.instruction_ordinals == 0 &&
                                minimal_prepass.value_definition_ordinals == 0 && minimal_prepass.value_first_use_ordinals == 0 &&
                                minimal_prepass.value_last_use_ordinals == 0 && minimal_prepass.value_local_store_counts == 0 &&

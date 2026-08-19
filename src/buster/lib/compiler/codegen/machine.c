@@ -1933,13 +1933,24 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/register_allocator_fast.c>
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 
-MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                                                    bool assume_validated)
 {
     if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
-        return machine_select_canonical_function_aarch64(arena, program, function, target);
+        return machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
     }
-    return machine_select_canonical_function_x86_64(arena, program, function, target);
+    return machine_select_canonical_function_x86_64(arena, program, function, target, assume_validated);
+}
+
+MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+{
+    return machine_select_canonical_function_internal(arena, program, function, target, false);
+}
+
+MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+{
+    return machine_select_canonical_function_internal(arena, program, function, target, true);
 }
 
 #if BUSTER_INCLUDE_TESTS

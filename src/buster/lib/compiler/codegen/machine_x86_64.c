@@ -73,7 +73,6 @@ struct MachineX64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
-    MachineSelectionPrepass selection_prepass;
     MachineSelectionCounters selection_counters;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
@@ -3761,7 +3760,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     return false;
 }
 
-MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                              bool assume_validated)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -3827,11 +3827,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
-    selector.selection_prepass = machine_selection_prepass_build_minimal(arena, program, function);
-    if (!selector.selection_prepass.valid)
+    if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
     {
         return result;
     }
+    MachineSelectionValueFacts value_facts = machine_selection_value_facts_allocate(arena, function->value_count);
     machine_stream_initialize(&selector.immediates, sizeof(u64));
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
@@ -3883,6 +3883,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                          .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                          .typed_origin = parameter->value.value,
                                                                      });
+            value_facts.definition_blocks[parameter->value.value] = function->blocks[block_index].id.value;
         }
     }
     for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
@@ -3899,16 +3900,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // and the atomic forms all keep the local in its slot. The byte size
     // is recorded so the width check needs no second type walk.
     u8* promotable_locals = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    // Definition identity, ownership, and use counts are keyed by the
-    // stable IR value/instruction IDs. The shared prepass already computes
-    // them in one source-array walk; retain only the target-order ordinals
-    // locally because fusion and aliasing follow each block's linked list.
+    // Definition identity is already carried by IrValue. Accumulate its block
+    // and the use facts in the target-order walk below so selection never
+    // rereads the complete canonical row population solely for these facts.
     u32* value_last_use_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* value_use_blocks = selector.selection_prepass.value_use_blocks;
+    u32* value_use_blocks = value_facts.use_blocks;
     u32* local_store_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* value_use_counts = selector.selection_prepass.value_use_counts;
-    IrInstructionId* value_definitions = selector.selection_prepass.value_definitions;
-    u32* value_def_blocks = selector.selection_prepass.value_definition_blocks;
+    u32* value_use_counts = value_facts.use_counts;
+    u32* value_def_blocks = value_facts.definition_blocks;
     u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
@@ -3916,7 +3915,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         value_last_use_ordinals[value_index] = 0;
         local_store_counts[value_index] = 0;
         value_def_ordinals[value_index] = 0;
-        IrInstructionId definition = value_definitions[value_index];
+        IrInstructionId definition = function->values[value_index].definition;
         if (definition.value < function->instruction_count)
         {
             IrInstruction* instruction = function->instructions + definition.value;
@@ -3950,6 +3949,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
             {
                 value_def_ordinals[instruction->result.value] = walk_ordinal;
+                value_def_blocks[instruction->result.value] = block->id.value;
             }
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
@@ -3957,6 +3957,15 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 if (used >= function->value_count)
                 {
                     continue;
+                }
+                value_use_counts[used] += 1;
+                if (value_use_blocks[used] == MACHINE_SELECTION_INVALID_INDEX)
+                {
+                    value_use_blocks[used] = block->id.value;
+                }
+                else if (value_use_blocks[used] != block->id.value)
+                {
+                    value_use_blocks[used] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
                 }
                 value_last_use_ordinals[used] = walk_ordinal;
                 if (!promotable_locals[used])
@@ -4281,11 +4290,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             while (absorbed_count < BUSTER_ARRAY_LENGTH(absorbed_members))
             {
                 if (chain_value >= function->value_count || value_use_counts[chain_value] != 1 || value_def_blocks[chain_value] != block_index ||
-                    value_definitions[chain_value].value == UINT32_MAX)
+                    function->values[chain_value].definition.value == UINT32_MAX)
                 {
                     break;
                 }
-                IrInstruction* member = function->instructions + value_definitions[chain_value].value;
+                IrInstruction* member = function->instructions + function->values[chain_value].definition.value;
                 if (member->opcode == IR_OPCODE_BINARY && member->operand_count >= 2 && member->operands[0].value < function->value_count &&
                     member->operands[1].value < function->value_count)
                 {
@@ -4308,11 +4317,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                         {
                             u32 constant_value = member->operands[side].value;
                             u32 through_cast = UINT32_MAX;
-                            if (value_definitions[constant_value].value == UINT32_MAX)
+                            if (function->values[constant_value].definition.value == UINT32_MAX)
                             {
                                 continue;
                             }
-                            IrInstruction* side_definition = function->instructions + value_definitions[constant_value].value;
+                            IrInstruction* side_definition = function->instructions + function->values[constant_value].definition.value;
                             if (side_definition->opcode == IR_OPCODE_CAST && side_definition->operand_count >= 1 &&
                                 side_definition->operands[0].value < function->value_count &&
                                 (side_definition->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
@@ -4321,11 +4330,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                             {
                                 through_cast = constant_value;
                                 constant_value = side_definition->operands[0].value;
-                                if (value_definitions[constant_value].value == UINT32_MAX)
+                                if (function->values[constant_value].definition.value == UINT32_MAX)
                                 {
                                     continue;
                                 }
-                                side_definition = function->instructions + value_definitions[constant_value].value;
+                                side_definition = function->instructions + function->values[constant_value].definition.value;
                             }
                             if (side_definition->opcode == IR_OPCODE_CONSTANT_INTEGER && side_definition->immediate_count && side_definition->immediates &&
                                 side_definition->immediates[0] == 0)

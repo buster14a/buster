@@ -2361,7 +2361,8 @@ BUSTER_GLOBAL_LOCAL bool x64_vector_comparison_condition(IrBinaryOperation opera
 }
 
 
-void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void codegen_record_line_hot(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source,
+                                                               u32 line, u32 column)
 {
     if (!entries || !line || *count >= capacity)
     {
@@ -2386,6 +2387,11 @@ void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u3
         .column = stored_column,
     };
     *count += 1;
+}
+
+void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
+{
+    codegen_record_line_hot(entries, count, capacity, code_offset, source, line, column);
 }
 
 
@@ -6539,8 +6545,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // A row at the function start makes the prologue map to the
             // declaration line instead of falling outside the line table.
             IrSourcePosition declaration = ir_source_position(program, function->source);
-            codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count, function->source.source.value,
-                                declaration.line, declaration.column);
+            codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
+                                    function->source.source.value, declaration.line, declaration.column);
         }
         // The declaration row is not an instruction's; the next instruction
         // must still be able to record one.
@@ -6904,7 +6910,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             MachineSelectResult selected = {0};
             if (!label_address_target)
             {
-                selected = machine_select_canonical_function(machine_scratch.arena, program, function, target);
+                selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target);
                 machine_simd_operation_count = selected.simd_operation_count;
             }
             if (!selected.supported)
@@ -7103,8 +7109,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                                 .source = {.value = mark->source},
                                                                                                 .offset = mark->offset,
                                                                                             });
-                                    codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity,
-                                                        (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line, position.column);
+                                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity,
+                                                            (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line,
+                                                            position.column);
                                 }
                             }
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -7205,8 +7212,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                                 .source = {.value = mark->source},
                                                                                                 .offset = mark->offset,
                                                                                             });
-                                    codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity,
-                                                        (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line, position.column);
+                                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity,
+                                                            (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line,
+                                                            position.column);
                                 }
                             }
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -7521,8 +7529,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     recorded_source = canonical_source;
                     IrSourcePosition position = ir_source_position(program, canonical_source);
-                    codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                        canonical_source.source.value, position.line, position.column);
+                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
+                                            canonical_source.source.value, position.line, position.column);
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))
