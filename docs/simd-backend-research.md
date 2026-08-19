@@ -38,6 +38,15 @@ backend — everything after canonical IR — is roughly 27% of stage-1 cycles:
 less. The QUALITY allocator and `machine_schedule.c` do not appear: the
 default pipeline runs FAST, so scheduling work is a quality-mode lever only.
 
+Amdahl bounds every plan here: even a perfect 2× on all of selection,
+allocation, and encoding (~20% of stage 1 together) is a ~1.11× compile
+speedup, and per-phase 2× ceilings are one to three percent each. That is
+why the ordering below keeps interleaving kernels with boundary/layout
+removals in the `19a`/`19b` style — the audit record shows those routinely
+beat same-phase vectorization (the `18m` prepared-memory-lane change alone,
+retiring 277,447 reload/spill chunks through a prepared record, was worth
+more than every explicit-SIMD experiment to date combined).
+
 Populations, from the audit record: 1,493,600 machine rows per stage-1
 compile, of which 1,049,817 are unconstrained virtual-only "simple" rows
 (`2026-08-18r`/`19a`); 1,461,577 exact-recipe emissions, 1,136,155 of them
@@ -101,6 +110,7 @@ width changes):
 | `simd512_permute2_word` | `vpermt2d` | 24-byte row deinterleave |
 | `simd512_conflict_word` | `vpconflictd` | in-batch same-vreg detection |
 | `simd512_add_word`/`subtract_word` | `vpaddd`/`vpsubd` | index arithmetic |
+| `simd512_popcount_quad` | `vpopcntq` | >64-value scheduler bitsets only |
 
 Each addition follows the full checklist from `AGENTS.md`: an
 `IrSimdOperation`, its arity in `ir_simd_operation_shape`, validation, the
@@ -149,6 +159,20 @@ prepass-owned per-block edge index so the two `for (edge_index <
 edge_count)` linear searches in contract construction stop rescanning the
 whole edge array per predecessor (`MachineEdge` is 16 bytes; the scan is
 also a fine `vpcmpeqq`-over-pairs kernel, but an index removes it).
+
+A further mirror makes the eviction path lane-testable: victim eligibility
+today chases `owner[physical] -> last_use[owner]/escapes[owner]` per
+candidate (`machine_fast_owner_is_dead`), which no dword vector can follow.
+Maintaining a contiguous `u32 death_index[48]` beside `owner` — updated at
+the same bind/spill/flush sites that already write `owner`, holding
+`UINT32_MAX` for free or escaping owners and the first index past the last
+use otherwise — turns "which candidates hold dead values" into one unsigned
+`vpcmpud`-below-or-equal against a broadcast of the current index, three
+compares for the full file. The mirror's update cost must be measured
+against its query savings, and the *final* choice stays a bounded scalar
+scan either way: iterating only the set candidate bits was already measured
+at +0.022% against the predictable 48-entry walk, so the mask output feeds
+the existing scan shape rather than replacing it.
 
 The serial core of the scan — LRU pick, bind, spill per row — stays
 scalar; `18r`'s run-length experiment already proved the row-to-row
@@ -225,18 +249,36 @@ already stores four bytes unconditionally. Per `18g`, re-batching the
   deleting this interpretation first.
 - **Batch the homogeneous GPR population, if runs are long enough.**
   1,136,155 emitted rows are dense GPR-table units of ≤4 bytes whose
-  operands placement already resolved. The `18g`-sanctioned design is:
-  during a run of consecutive compact rows uninterrupted by edits,
-  fixups, or expansion rows, compute the encoding dwords sixteen at a
-  time (table base per opcode from the template column, index
-  `low + high·16` from the operand-register bytes placement wrote, one
-  `vpgatherdd` against L1-resident tables), then pack the variable ≤4-byte
-  units with `vpcompressb` under a length-derived mask — Muła's packed-
-  varint shape ("AVX512VBMI2 and packed varuint format") — with one store
-  and cursor advance per 16 rows. **Estimate before implementing**: count
-  the run-length distribution of edit-free compact rows first (a one-off
-  census like `18r`'s); if median runs are short, the merge predicate
-  eats the win and this stays closed.
+  operands placement already resolved, and `18g`'s census already sized
+  the batchable core: 90.1% of dense-register hits use compact tables,
+  58.0% of all dense hits have a *separable* `base ^ low[16] ^ high[16]`
+  encoding, and grouping the separable population by table over a whole
+  function averages 7.59 lanes with 62.1% of lanes in complete 16-lane
+  batches. For those tables the byte constructor needs no gather at all:
+  two register-resident 16-entry projections per table make 16 records
+  `vpermd(low_index) ^ vpermd(high_index) ^ broadcast(base)` — two
+  cross-lane permutes and logic, comfortably inside Zen 5's two
+  complex-shuffles-per-cycle budget. The variable ≤4-byte units then pack
+  with a length-derived byte mask and register-form `vpcompressb` —
+  Muła's packed-varint shape — one store and cursor advance per batch.
+  What `18g` did *not* establish is source-order density: whole-function
+  grouping requires the stable command stream that was separately
+  measured negative. **Estimate before implementing**: census the
+  *consecutive* run lengths of same-table, edit-free compact rows first
+  (a one-off like `18r`'s); if median runs are short, the merge
+  predicate eats the win and this stays closed.
+- **Compression policy for any packer.** Compress in a register and store
+  with an ordinary bounded store, never the memory-destination
+  `vpcompress*` forms: on Zen 4 the memory form is a microcoded
+  catastrophe (~256 uops for `vpcompressw` versus 2 for the register
+  form — Lemire measured a 15× end-to-end difference in simdjson's
+  minifier), while Zen 5 and Intel are unaffected. This matters to the
+  vocabulary today: `simd512_compress_store_byte`'s host lowering is
+  `_mm512_mask_compressstoreu_epi8`. It currently has no production
+  callers, so nothing regresses, but any new kernel must reach for
+  `simd512_compress_byte` + `simd512_store`/`store_masked` instead, and
+  the proposed `compress_word` addition should ship register-form only.
+  The header deserves a constraint comment saying exactly this.
 - **Wide-store patching.** The immediate and displacement patch loops in
   `machine_x64_emit_exact_recipe` write byte-at-a-time; the capacity
   budget (24 B/row) already guarantees room for an unconditional 8-byte
@@ -280,30 +322,66 @@ removal in the `19a`/`19b` style than a lane kernel.
 ## 7. QUALITY and scheduling (cold today, catalogued for when they matter)
 
 The default pipeline never runs `machine_schedule.c` or the QUALITY
-allocator, so nothing here moves the stage-1 gate. When quality-mode
-compile time matters: per-block pressure modeling is a +1/−1 event
-prefix-sum (a textbook 16-lane scan), the greedy ready-set choice is an
-argmin over compact keys (`vpminud` reduction), QUALITY's foreclosure
-pass shares the prepass template/deinterleave kernels wholesale, and
-interval-overlap probes over the sorted span arrays are
-`vpcmpud`-mask counts. The allocation-side levers on the self-host
-workload were declared exhausted at `11l`; these are throughput levers
-for the pass itself, not for its output.
+allocator, so nothing here moves the stage-1 gate — and the scheduler
+additionally gates itself out of any function whose largest block fits
+the register file ("the gate almost every function leaves through",
+`machine_schedule_function`). When quality-mode compile time matters,
+the highest-value change is algorithmic before it is wide: the pressure
+and demand machinery re-decodes machine rows and opcode metadata at
+every transition (window building, queue growth, touch lists, and each
+emitted unit). Mapping each scheduled block's touched virtual registers
+to dense block-local IDs and building every scheduling unit's unique
+use/def sets *once* reduces a demand transition to bitset arithmetic —
+for blocks with ≤64 local values, plain `u64` work on the scalar ALUs:
+
+    growth = popcount(unit_use & ~demand) - popcount(unit_def & demand)
+    demand = (demand & ~unit_def) | unit_use
+
+which is exactly the mask discipline `simd.h` already institutionalizes.
+Only past 64 local values does the AVX-512 form earn its keep — the sets
+become 8×`u64` lanes in one ZMM, the update one `vpternlogq`, the counts
+one `vpopcntq` plus a horizontal add — so `simd512_popcount_quad` joins
+the vocabulary with this kernel and not before. Beyond that: QUALITY's
+foreclosure pass shares the prepass template/deinterleave kernels
+wholesale, interval-overlap probes over the sorted span arrays are
+`vpcmpud`-mask counts, and the greedy ready-set choice is a `vpminud`
+argmin. The allocation-side levers on the self-host workload were
+declared exhausted at `11l`; these are throughput levers for the pass
+itself, not for its output.
 
 ## Zen 4 / Zen 5 economics the kernels assume
 
 Per the AGENTS tuning rules: kernels are written at 512 bits, validated
 on Zen 4 (double-pumped, break-even required), shaped for Zen 5 (native
-width, roughly 2× the same code). Specifics leaned on above: `vpcmpd`/
-`vpternlogd`/`vpermt2d`/`vpcompressd` are full-rate or near it on both;
-`vpcompressb` is ~9 cycles on Zen 4 vs ~5 on Zen 5 (safe, per AGENTS);
-gathers are ~1 lane/cycle on Zen 4 and materially faster on Zen 5, so
-gather-based variants should be A/B'd per generation; scatters stay out;
-one 512-bit store per cycle on Zen 4 makes store-bound batches (the
-encoder packer) Zen 5-biased by construction; masks stay `u64` on the
-scalar ALUs per the existing vocabulary contract. Keep hot streamed
-buffers 64-byte aligned; check uops.info before adopting any two-source
-permute or conflict-detection instruction in a hot loop.
+width, roughly 2× the same code). "Zen 5 4×512" is an execution maximum
+for the simple instruction classes, not four universal ZMM pipes; the
+empirical model kernels should be costed against (Yee's Granite Ridge
+teardown, AMD SOG 58455):
+
+- ~4/cycle: simple 512-bit integer add/bitwise, simple in-lane shuffles.
+- ~2/cycle: cross-128-bit shuffles (`vpermt2b`/`vpermt2d`/`vpermd`),
+  512-bit shifts, mask-register operations, 512-bit *loads*.
+- ~1/cycle: 512-bit stores — store-bound batches (the encoder packer,
+  wide temporary tiles) hit this wall first on both generations.
+- Many one-cycle Zen 4 vector ops are two-cycle on Zen 5 at doubled
+  throughput: a recurrence sees no width win; independent lanes and
+  multiple accumulators do.
+- `vpcompressb` register form is ~9 cycles Zen 4 / ~5 Zen 5 (safe, per
+  AGENTS); the memory-destination `vpcompress*` forms are microcoded
+  disasters on Zen 4 (~40× the register form) and banned above.
+- Gathers are ~1 lane/cycle on Zen 4 and materially faster on Zen 5, so
+  gather-based variants get A/B'd per generation; scatters stay out.
+
+Product and tooling caveats: "Zen 5" is not a sufficient dispatch key —
+Strix Point executes ZMM on a 256-bit datapath, and EPYC 9005 firmware
+can select a sequential 2×256 mode, so the full-width assumption holds
+for Granite Ridge desktops and the znver5 CI box but must be verified,
+not inferred from CPUID. `llvm-mca -mcpu=znver5` currently costs against
+LLVM's Znver4 schedule model and is a sanity check, not a Zen 5 oracle.
+Masks stay `u64` on the scalar ALUs per the existing vocabulary
+contract; keep hot streamed buffers 64-byte aligned; check uops.info
+before adopting any two-source permute or conflict-detection
+instruction in a hot loop.
 
 ## Scalar finds recorded in passing (fund the SIMD work)
 
@@ -325,15 +403,21 @@ Noticed while profiling, all pre-SIMD in the doctrine's ordering:
 
 1. Dword vocabulary seed (`splat_word`, `equal_word`) + rewrite
    `machine_fast_free_candidates` on it — smallest change, direct
-   measured motivation, unlocks everything in section 2.
+   measured motivation, unlocks everything in section 2. In the same
+   batch, stamp the Zen 4 memory-destination `vpcompress*` constraint
+   into `simd.h` beside `simd512_compress_store_byte` before any kernel
+   grows a caller.
 2. Prepared plans for prologue/edit emission (section 4, first bullet) —
    the largest single expected win; no vectors required.
 3. Scalar finds 1–2 above (each a one-evening change with a clean A/B).
-4. Register-file kernels + dirty-bitmask/edge-index layout (section 2).
+4. Register-file kernels + dirty-bitmask/edge-index layout (section 2),
+   then the death-threshold mirror behind its own A/B (its update cost
+   is real and must be paid for by the eviction-path savings).
 5. Prepass opcode-template table, then the 8-row deinterleave batch
    (section 3), extending the vocabulary as the kernels demand.
-6. GPR run-length census; build the batch packer only if the census says
-   the runs are there (section 4, second bullet).
+6. GPR consecutive-run census; build the separable two-`vpermd` packer
+   only if the census says the source-order runs are there (section 4,
+   second bullet).
 7. DWARF LEB batch emitter (section 5) as a self-contained exercise of
    the varint kernel the packer also wants.
 
@@ -342,3 +426,23 @@ every lane count, the differential scalar fallbacks compiled and tested
 via `-march=x86-64`, `test_all_combinations_ci` locally before push, and
 numbers quoted only from clang-built binaries under the seven-pair
 pinned-instruction protocol.
+
+## External references
+
+Beyond the project-endorsed catalogues already named in `AGENTS.md`
+(Muła's 0x80.pl notes — plain HTTP, the host's HTTPS certificate is
+broken — Validark's lexing lineage, Lemire's simdjson kernels, Muratori's
+measurement discipline), the hardware claims above rest on:
+
+- AMD, *Software Optimization Guide for the AMD Zen 5 Microarchitecture*
+  (publication 58455) — the authoritative pipe/latency reference.
+- Alexander Yee, *Zen 5's AVX512 Teardown* (numberworld.org, 2024) —
+  empirical Granite Ridge/Strix Point throughputs quoted in the
+  economics section.
+- Daniel Lemire, *AVX-512 gotcha: avoid compressing words to memory with
+  AMD Zen 4 processors* (lemire.me, 2025-02-14) — the memory-destination
+  `vpcompress*` pathology (~256 uops vs 2 on Zen 4, Zen 5 unaffected)
+  behind the register-compress-then-store rule.
+- LLVM `llvm/lib/Target/X86/X86.td` — `znver5` still costs against the
+  Znver4 schedule model, which is why `llvm-mca` is only a sanity check
+  here.
