@@ -285,6 +285,7 @@ typedef enum IrSimdOperation
     IR_SIMD_WIDEN_BYTE_TO_WORD, // (vector, quarter) -> vector of 16 zero-extended u32 lanes
     IR_SIMD_SHIFT_LEFT_WORD,    // (vector, count) -> vector, per u32 lane
     IR_SIMD_TERNARY_WORD,       // (vector, vector, vector, table) -> vector, per-bit truth table
+    IR_SIMD_COMPARE_EQUAL_WORD, // (vector, vector) -> mask of the 16 u32 lanes in the low bits
     IR_SIMD_COUNT,
 } IrSimdOperation;
 

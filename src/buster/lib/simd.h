@@ -205,6 +205,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  is a&b&c and 0x96 is a^b^c.
 //                                                  One instruction where a
 //                                                  chain would be three.
+//   simd512_equal_word(left, right)             -> Mask64
+//                                                  vpcmpeqd: one bit per u32
+//                                                  lane in the low sixteen,
+//                                                  the rest zero -- a compare
+//                                                  over sixteen dword lanes
+//                                                  needs no byte-mask collapse
 // ---------------------------------------------------------------------------
 
 // Lanewise arithmetic and bitwise operations. On the vector path these are the
@@ -248,6 +254,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
 #define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
 #define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
+#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
 
 #elif BUSTER_SIMD_512
 
@@ -268,6 +275,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) ((Simd512)_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32((__m512i)(value), (quarter))))
 #define simd512_shift_left_word(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
 #define simd512_ternary_word(a, b, c, table) ((Simd512)_mm512_ternarylogic_epi32((__m512i)(a), (__m512i)(b), (__m512i)(c), (table)))
+#define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
 
 #else
 
@@ -286,6 +294,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) simd512_widen_byte_fallback((value), (quarter))
 #define simd512_shift_left_word(value, count) simd512_shift_left_word_fallback((value), (count))
 #define simd512_ternary_word(a, b, c, table) simd512_ternary_word_fallback((a), (b), (c), (table))
+#define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 {
@@ -507,6 +516,18 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_ternary_word_fallback(Sim
             produced |= (u8)(((table >> selector) & 1) << bit);
         }
         result.bytes[lane] = produced;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_word_fallback(Simd512 left, Simd512 right)
+{
+    Mask64 result = 0;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        bool equal = left.bytes[word * 4] == right.bytes[word * 4] && left.bytes[word * 4 + 1] == right.bytes[word * 4 + 1] &&
+                     left.bytes[word * 4 + 2] == right.bytes[word * 4 + 2] && left.bytes[word * 4 + 3] == right.bytes[word * 4 + 3];
+        result |= equal ? (Mask64)1 << word : 0;
     }
     return result;
 }

@@ -2871,12 +2871,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         case IR_SIMD_COMPARE_EQUAL_BYTE:
         case IR_SIMD_COMPARE_LESS_BYTE:
         case IR_SIMD_TEST_MASK_BYTE:
+        case IR_SIMD_COMPARE_EQUAL_WORD:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? 0u : operation == IR_SIMD_COMPARE_LESS_BYTE ? 1u : 2u,
+                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? 0u : operation == IR_SIMD_COMPARE_LESS_BYTE ? 1u
+                                                                      : operation == IR_SIMD_TEST_MASK_BYTE   ? 2u
+                                                                                                              : 3u,
                                                            .opcode = MACHINE_X64_VPCMP_MASK,
                                                        });
             machine_x64_define(selector, result_register, row);
@@ -6033,6 +6036,14 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_test_seq
     {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
      .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
 };
+// vpcmpeqd writes 16 mask bits and zeroes the rest of k1, so the shared
+// 64-bit KMOVQ step delivers the exact Mask64 the dword compare defines.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_equal_word_sequence_steps[] = {
+    {.key = {7540u, UINT64_C(0x2c3485903430167f)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+     .operand_count = 3, .operand_slots = {0, 1, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512, 512}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vload_ptr_masked_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vload_ptr_masked_sequence_steps}};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vstore_ptr_masked_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vstore_ptr_masked_sequence_steps}};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vcompress_store_ptr_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vcompress_store_ptr_sequence_steps}};
@@ -6040,6 +6051,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpcmp_seque
     {.step_count = 2, .steps = machine_x64_vpcmp_equal_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_less_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_test_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_equal_word_sequence_steps},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovb2m_sequence_steps[] = {
     {.key = {6183u, UINT64_C(0x845181de5363cb8d)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
@@ -6088,7 +6100,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     [36] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 36, .variant_count = 1, .variants = machine_x64_vload_ptr_masked_sequence_variants},
     [37] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 37, .variant_count = 1, .variants = machine_x64_vstore_ptr_masked_sequence_variants},
     [38] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 38, .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
-    [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 3, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
+    [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 4, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
     [40] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 40, .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
     [41] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 41, .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
     [42] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 42, .variant_count = 1, .variants = machine_x64_vcompressb_sequence_variants},

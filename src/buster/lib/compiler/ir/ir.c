@@ -322,6 +322,7 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
     case IR_SIMD_COMPARE_EQUAL_BYTE:
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
+    case IR_SIMD_COMPARE_EQUAL_WORD:
         return (IrSimdShape){.operand_count = 2, .has_result = true};
     case IR_SIMD_SIGN_MASK_BYTE:
         return (IrSimdShape){.operand_count = 1, .has_result = true};
@@ -376,6 +377,8 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.shift_left_word");
     case IR_SIMD_TERNARY_WORD:
         return S8("simd.ternary_word");
+    case IR_SIMD_COMPARE_EQUAL_WORD:
+        return S8("simd.compare_equal_word");
     case IR_SIMD_COUNT:
         break;
     }
@@ -496,6 +499,7 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
     case IR_SIMD_COMPARE_EQUAL_BYTE:
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
+    case IR_SIMD_COMPARE_EQUAL_WORD:
         return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
     case IR_SIMD_SIGN_MASK_BYTE:
         return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);

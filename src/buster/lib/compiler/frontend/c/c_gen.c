@@ -1276,6 +1276,10 @@ BUSTER_C_INTERNAL CIrSimdBuiltin const c_ir_simd_builtins[] = {
       IR_SIMD_TERNARY_WORD,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
       256 },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_word"),
+      IR_SIMD_COMPARE_EQUAL_WORD,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
 };
 
 #define C_IR_SIMD_BUILTIN_NONE UINT32_MAX
@@ -9433,6 +9437,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_simd_result_type(CIntegerIrBuilder* builder, IrS
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_SIGN_MASK_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
+    case IR_SIMD_COMPARE_EQUAL_WORD:
         return builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
     case IR_SIMD_LOAD:
     case IR_SIMD_LOAD_MASKED:

@@ -432,8 +432,9 @@ typedef enum MachineOpcode
     MACHINE_X64_VSTORE_PTR_MASKED,    // use address, use mask, use vec
     MACHINE_X64_VCOMPRESS_STORE_PTR,  // use address, use mask, use vec
     MACHINE_X64_VSPLATB,      // def vec, use general; vpbroadcastb from r32
-    // Byte compares producing a Mask64 in a general register; payload is
-    // 0 = vpcmpeqb, 1 = vpcmpub/lt-unsigned, 2 = vptestmb.
+    // Lane compares producing a Mask64 in a general register; payload is
+    // 0 = vpcmpeqb, 1 = vpcmpub/lt-unsigned, 2 = vptestmb, 3 = vpcmpeqd
+    // (16 mask bits, rest zeroed by the compare).
     MACHINE_X64_VPCMP_MASK,   // def general mask, use vec, use vec
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the

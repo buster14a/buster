@@ -142,6 +142,24 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, simd512_test_byte(value, simd512_splat(3)) == UINT64_C(0xEEEEEEEEEEEEEEEE));
     BUSTER_TEST(arguments, simd512_test_byte(value, simd512_zero()) == 0);
 
+    // The dword compare answers one bit per u32 lane in the low sixteen and
+    // zeroes the rest -- the property the allocator's free-register kernel
+    // consumes without any byte-mask collapse. A lane differing in a single
+    // byte must not match, and the all-ones free sentinel is reachable
+    // through the byte splat because the bit pattern is width-agnostic.
+    BUSTER_TEST(arguments, simd512_equal_word(value, value) == 0xFFFF);
+    SimdTestLanes word_probe;
+    word_probe.vector = value;
+    word_probe.bytes[4 * 5] ^= 1;
+    BUSTER_TEST(arguments, simd512_equal_word(value, word_probe.vector) == (0xFFFF & ~((Mask64)1 << 5)));
+    SimdTestLanes free_file;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        free_file.words[word] = word & 1 ? UINT32_MAX : word;
+    }
+    BUSTER_TEST(arguments, simd512_equal_word(free_file.vector, simd512_splat(UINT8_MAX)) == 0xAAAA);
+    BUSTER_TEST(arguments, simd512_equal_word(value, simd512_zero()) == 0);
+
     // vpermt2b indexes a 128-byte table split across two vectors; the indices
     // count down from 127, so lane 0 selects the last byte of the high half.
     lanes_match = true;

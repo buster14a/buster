@@ -4805,14 +4805,19 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
     case IR_SIMD_COMPARE_EQUAL_BYTE:
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
+    case IR_SIMD_COMPARE_EQUAL_WORD:
     {
         String8 mnemonic = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? S8("VPCMPEQB")
                             : operation == IR_SIMD_COMPARE_LESS_BYTE ? S8("VPCMPUB")
+                            : operation == IR_SIMD_COMPARE_EQUAL_WORD ? S8("VPCMPEQD")
                                                                       : S8("VPTESTMB");
+        // The dword compare writes 16 mask bits and zeroes the rest of the k
+        // register, so the shared 64-bit KMOVQ spill stays exact for it.
+        u16 element_width = operation == IR_SIMD_COMPARE_EQUAL_WORD ? 32 : 8;
         if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
                                                         (BusterX86MetadataPhysicalAttributes){0}) ||
             !codegen_canonical_x64_simd_emit_mask_zmm_memory(buffer, mnemonic, X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST,
-                                                             X64_REGISTER_RBP, slots[1], 8, operation == IR_SIMD_COMPARE_LESS_BYTE ? 1 : 0,
+                                                             X64_REGISTER_RBP, slots[1], element_width, operation == IR_SIMD_COMPARE_LESS_BYTE ? 1 : 0,
                                                              operation == IR_SIMD_COMPARE_LESS_BYTE) ||
             !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
         {

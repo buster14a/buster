@@ -715,24 +715,12 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
 }
 
 // The allocator's common scalar file is exactly sixteen u32 owner lanes.  A
-// free-register query is therefore one contiguous 512-bit equality, not
-// sixteen independent owner tests.  The byte vocabulary already lowers on
-// every supported build; collapse four equal bytes back into one u32 lane
-// with ordinary mask arithmetic.  Wider vector files consume the same kernel
-// in sixteen-register chunks, while non-AVX-512 targets retain the bounded
+// free-register query is therefore one contiguous 512-bit dword equality
+// whose mask arrives one bit per lane — no byte-mask collapse.  The all-ones
+// free sentinel is the same bit pattern at any lane width, so the byte splat
+// builds the comparand.  Wider vector files consume the same kernel in
+// sixteen-register chunks, while non-AVX-512 targets retain the bounded
 // scalar walk.
-#if BUSTER_SIMD_512
-BUSTER_GLOBAL_LOCAL u32 machine_fast_compact_u32_mask(Mask64 byte_mask)
-{
-    Mask64 words = byte_mask & (byte_mask >> 1) & (byte_mask >> 2) & (byte_mask >> 3) & UINT64_C(0x1111111111111111);
-    words = (words | (words >> 3)) & UINT64_C(0x0303030303030303);
-    words = (words | (words >> 6)) & UINT64_C(0x000f000f000f000f);
-    words = (words | (words >> 12)) & UINT64_C(0x000000ff000000ff);
-    words = (words | (words >> 24)) & UINT64_C(0x000000000000ffff);
-    return (u32)words;
-}
-#endif
-
 BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u64 candidates)
 {
 #if BUSTER_SIMD_512
@@ -741,9 +729,9 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u6
     {
         u32 active = (u32)((candidates >> base) & UINT64_C(0xffff));
         if (!active) continue;
-        Mask64 free_bytes = simd512_equal_byte(
+        Mask64 free_words = simd512_equal_word(
             simd512_load(state->owner + base), simd512_splat(UINT8_MAX));
-        free |= (u64)(machine_fast_compact_u32_mask(free_bytes) & active) << base;
+        free |= (u64)((u32)free_words & active) << base;
     }
     return free;
 #else

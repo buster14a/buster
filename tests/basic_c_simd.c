@@ -47,6 +47,7 @@ typedef u64 Mask64;
 #define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
 #define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
 #define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
+#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
 #define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
 
 #define mask64_prefix(count) ((count) >= 64 ? ~(Mask64)0 : (((Mask64)1 << (count)) - 1))
@@ -556,6 +557,30 @@ int main(void)
         {
             return 57;
         }
+    }
+    // The dword compare answers one bit per u32 lane in the low sixteen and
+    // zeroes the rest; a lane differing in one byte must not match, and the
+    // all-ones sentinel is the byte splat because the pattern is
+    // width-agnostic.
+    if (simd512_equal_word(value, value) != 0xFFFF)
+    {
+        return 61;
+    }
+    Lanes word_probe;
+    word_probe.vector = value;
+    word_probe.bytes[4 * 5] ^= 1;
+    if (simd512_equal_word(value, word_probe.vector) != (0xFFFF & ~((Mask64)1 << 5)))
+    {
+        return 62;
+    }
+    Lanes free_file;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        free_file.words[word] = word & 1 ? 0xFFFFFFFFu : word;
+    }
+    if (simd512_equal_word(free_file.vector, simd512_splat(255)) != 0xAAAA)
+    {
+        return 63;
     }
     return 0;
 }
