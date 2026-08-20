@@ -139,6 +139,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -6395,11 +6396,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // bottom out in target_data_layout's 1..16 table (aggregates take
             // a max of member alignments, vectors a power-of-two byte size),
             // and requested value alignments pass c_ir_alignment_evaluate's
-            // power-of-two check. That licenses aligning up with a mask here
-            // and in the offset-assignment loop below; a `%` compiles to a
+            // power-of-two check. That licenses align_forward's mask here and
+            // in the offset-assignment loop below; a `%` compiles to a
             // hardware divide in a loop that visits every value of every
             // function.
-            function_value_bytes = (function_value_bytes + slot_alignment - 1) & ~(slot_alignment - 1);
+            function_value_bytes = align_forward(function_value_bytes, slot_alignment);
             if (target.cpu_arch == CPU_ARCH_AARCH64)
             {
                 function_value_bytes += slot_size;
@@ -6632,7 +6633,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 value_bytes += slot_size;
             }
             // Power-of-two slot_alignment; see the capacity-estimation loop.
-            value_bytes = (value_bytes + slot_alignment - 1) & ~(slot_alignment - 1);
+            value_bytes = align_forward(value_bytes, slot_alignment);
             if (value_bytes > UINT32_MAX)
             {
                 result.error = CODEGEN_ERROR_CAPACITY;

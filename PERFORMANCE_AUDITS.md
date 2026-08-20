@@ -36,8 +36,11 @@ element and a power-of-two element count so their byte size stays a power of
 two, arrays inherit their element's alignment, and every requested value
 alignment passes `c_ir_alignment_evaluate`'s explicit
 `requested & (requested - 1)` rejection.  With that proven, both align-ups
-became `(x + a - 1) & ~(a - 1)`; the comment at the first site now records
-the invariant.  Hardware `div` instructions in the symbol fall 9 -> 5 (each
+became calls to the existing `align_forward` mask helper from
+`buster/lib/integer.h` (inlined in the unity build; three verification pairs
+put the helper within +-53 K instructions of the open-coded mask); the
+comment at the first site now records the invariant.  Hardware `div`
+instructions in the symbol fall 9 -> 5 (each
 `%` had compiled to a 64-bit divide plus a 32-bit fast-path divide).
 
 Seven alternating same-source, CPU-pinned, non-multiplexed instruction pairs
