@@ -2875,10 +2875,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
     case IR_SIMD_LOAD_MASKED:
     {
         bool masked = operation == IR_SIMD_LOAD_MASKED;
+        // The mask ref is built before the row, not inside it: only the masked
+        // shape has a second operand, so an unmasked load must not reach
+        // operand_registers[1] at all.
+        MachineRef mask_operand = masked ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]) : 0;
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                                    masked ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]) : 0},
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]), mask_operand},
                                                        .opcode = masked ? MACHINE_X64_VLOAD_PTR_MASKED : MACHINE_X64_VLOAD_PTR,
                                                    });
         machine_x64_define(selector, result_register, row);
