@@ -59,49 +59,49 @@ String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity)
 X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperation operation, u32 target_register, u32 source_register)
 {
     X86_64EncodedInstruction result = {0};
-    if (operation >= X86_64_REGISTER_OPERATION_COUNT || target_register >= 32 || source_register >= 32)
+    if (operation < X86_64_REGISTER_OPERATION_COUNT && target_register < 32 && source_register < 32)
     {
-        return result;
-    }
-    String8 const mnemonics[] = {
-        S8("MOV"),
-        S8("ADD"),
-        S8("SUB"),
-        S8("AND"),
-        S8("OR"),
-        S8("XOR"),
-    };
-    BusterX86MetadataPhysicalOperand operands[2] = {
+        String8 const mnemonics[] = {
+            S8("MOV"),
+            S8("ADD"),
+            S8("SUB"),
+            S8("AND"),
+            S8("OR"),
+            S8("XOR"),
+        };
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 64,
+                .reg = {.index = (u16)target_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            },
+            {
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 64,
+                .reg = {.index = (u16)source_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            },
+        };
+        String8 apx_features[1] = {S8("APX_F")};
+        BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = {
+                .mnemonic = mnemonics[operation],
+                .operands = operands,
+                .operand_count = BUSTER_ARRAY_LENGTH(operands),
+                .features = {.names = (target_register >= 16 || source_register >= 16) ? apx_features : 0,
+                             .count = (target_register >= 16 || source_register >= 16) ? 1u : 0u},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+                .source_semantics = false,
+            },
+            .output = result.bytes,
+            .output_capacity = sizeof(result.bytes),
+        });
+        if (encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count <= sizeof(result.bytes))
         {
-            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-            .width = 64,
-            .reg = {.index = (u16)target_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-        },
-        {
-            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-            .width = 64,
-            .reg = {.index = (u16)source_register, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-        },
-    };
-    String8 apx_features[1] = {S8("APX_F")};
-    BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
-        .physical = {
-            .mnemonic = mnemonics[operation],
-            .operands = operands,
-            .operand_count = BUSTER_ARRAY_LENGTH(operands),
-            .features = {.names = (target_register >= 16 || source_register >= 16) ? apx_features : 0,
-                         .count = (target_register >= 16 || source_register >= 16) ? 1u : 0u},
-            .address_size = 64,
-            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-            .source_semantics = false,
-        },
-        .output = result.bytes,
-        .output_capacity = sizeof(result.bytes),
-    });
-    if (encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count <= sizeof(result.bytes))
-    {
-        result.length = (u8)encoded.byte_count;
+            result.length = (u8)encoded.byte_count;
+        }
     }
+
     return result;
 }
 

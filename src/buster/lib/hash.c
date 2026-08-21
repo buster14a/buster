@@ -64,74 +64,77 @@ u64 buster_hash_64(u8* pointer, u64 length)
     u64 xxhash = XXH3_64bits(pointer, length);
     return xxhash ? xxhash : 1;
 #else
+    u64 hash;
     if (length == 0)
     {
-        u64 empty_hash = buster_hash_avalanche(2870177450012600261ULL);
-        return empty_hash ? empty_hash : 1;
-    }
-
-    // The cursor is a byte offset rather than a pointer: comparing derived
-    // pointers (P + C1 < P + C2) trips gcc's -Wstrict-overflow=5 whenever the
-    // length constant-propagates into a specialized clone.
-    u64 i = 0;
-    u64 hash = 0;
-
-    if (length >= 32)
-    {
-        u64 v1 = 11400714785074694791ULL + 14029467366897019727ULL;
-        u64 v2 = 14029467366897019727ULL;
-        u64 v3 = 0;
-        u64 v4 = 0 - 11400714785074694791ULL;
-
-        do
-        {
-            v1 = buster_hash_round(v1, buster_hash_read_u64(pointer + i));
-            i += 8;
-            v2 = buster_hash_round(v2, buster_hash_read_u64(pointer + i));
-            i += 8;
-            v3 = buster_hash_round(v3, buster_hash_read_u64(pointer + i));
-            i += 8;
-            v4 = buster_hash_round(v4, buster_hash_read_u64(pointer + i));
-            i += 8;
-        } while (length - i >= 32);
-
-        hash = buster_hash_rotl64(v1, 1) + buster_hash_rotl64(v2, 7) + buster_hash_rotl64(v3, 12) + buster_hash_rotl64(v4, 18);
-
-        hash = buster_hash_merge_round(hash, v1);
-        hash = buster_hash_merge_round(hash, v2);
-        hash = buster_hash_merge_round(hash, v3);
-        hash = buster_hash_merge_round(hash, v4);
+        hash = buster_hash_avalanche(2870177450012600261ULL);
     }
     else
     {
-        hash = 2870177450012600261ULL;
+        // The cursor is a byte offset rather than a pointer: comparing derived
+        // pointers (P + C1 < P + C2) trips gcc's -Wstrict-overflow=5 whenever the
+        // length constant-propagates into a specialized clone.
+        u64 i = 0;
+        hash = 0;
+
+        if (length >= 32)
+        {
+            u64 v1 = 11400714785074694791ULL + 14029467366897019727ULL;
+            u64 v2 = 14029467366897019727ULL;
+            u64 v3 = 0;
+            u64 v4 = 0 - 11400714785074694791ULL;
+
+            do
+            {
+                v1 = buster_hash_round(v1, buster_hash_read_u64(pointer + i));
+                i += 8;
+                v2 = buster_hash_round(v2, buster_hash_read_u64(pointer + i));
+                i += 8;
+                v3 = buster_hash_round(v3, buster_hash_read_u64(pointer + i));
+                i += 8;
+                v4 = buster_hash_round(v4, buster_hash_read_u64(pointer + i));
+                i += 8;
+            } while (length - i >= 32);
+
+            hash = buster_hash_rotl64(v1, 1) + buster_hash_rotl64(v2, 7) + buster_hash_rotl64(v3, 12) + buster_hash_rotl64(v4, 18);
+
+            hash = buster_hash_merge_round(hash, v1);
+            hash = buster_hash_merge_round(hash, v2);
+            hash = buster_hash_merge_round(hash, v3);
+            hash = buster_hash_merge_round(hash, v4);
+        }
+        else
+        {
+            hash = 2870177450012600261ULL;
+        }
+
+        hash += length;
+
+        while (length - i >= 8)
+        {
+            u64 k1 = buster_hash_round(0, buster_hash_read_u64(pointer + i));
+            hash ^= k1;
+            hash = buster_hash_rotl64(hash, 27) * 11400714785074694791ULL + 9650029242287828579ULL;
+            i += 8;
+        }
+
+        if (length - i >= 4)
+        {
+            hash ^= (u64)buster_hash_read_u32(pointer + i) * 11400714785074694791ULL;
+            hash = buster_hash_rotl64(hash, 23) * 14029467366897019727ULL + 1609587929392839161ULL;
+            i += 4;
+        }
+
+        while (i < length)
+        {
+            hash ^= (u64)pointer[i] * 2870177450012600261ULL;
+            hash = buster_hash_rotl64(hash, 11) * 11400714785074694791ULL;
+            i += 1;
+        }
+
+        hash = buster_hash_avalanche(hash);
     }
 
-    hash += length;
-
-    while (length - i >= 8)
-    {
-        u64 k1 = buster_hash_round(0, buster_hash_read_u64(pointer + i));
-        hash ^= k1;
-        hash = buster_hash_rotl64(hash, 27) * 11400714785074694791ULL + 9650029242287828579ULL;
-        i += 8;
-    }
-
-    if (length - i >= 4)
-    {
-        hash ^= (u64)buster_hash_read_u32(pointer + i) * 11400714785074694791ULL;
-        hash = buster_hash_rotl64(hash, 23) * 14029467366897019727ULL + 1609587929392839161ULL;
-        i += 4;
-    }
-
-    while (i < length)
-    {
-        hash ^= (u64)pointer[i] * 2870177450012600261ULL;
-        hash = buster_hash_rotl64(hash, 11) * 11400714785074694791ULL;
-        i += 1;
-    }
-
-    hash = buster_hash_avalanche(hash);
     return hash ? hash : 1;
 #endif
 }

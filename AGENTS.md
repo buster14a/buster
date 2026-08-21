@@ -595,6 +595,21 @@ history.
   genuinely one-off format field keeps its literal with a comment naming it.
   Comments state constraints the code cannot show; a claim that has not been
   verified against the code does not get written down.
+- **One return per function.** A function has a single exit: compute the
+  answer into one result variable, let control flow converge, and `return` it
+  once at the end. Guard clauses, mid-loop `return`s, and per-case `return`s in
+  a `switch` all become assignments to that variable followed by ordinary
+  structured flow — an `else`, a loop condition, a `break`. Prefer restructuring
+  the condition over adding nesting; where an early exit skipped work that is
+  now merely wasted, keep it skipped with a `done` flag or a loop guard rather
+  than reintroducing a second `return`. A single exit is what makes an epilogue
+  — a cleanup, a trace point, an arena reset — impossible to leak past. `goto`
+  to a shared tail is a second exit spelled differently; it is allowed only for
+  the error-unwind ladders that already exist, never as a way to keep an early
+  return. Returns in mutually exclusive `#if`/`#elif`/`#else` arms are one
+  return — every configuration compiles exactly one of them — so a
+  platform-dispatch body already satisfies this rule and does not need a result
+  variable threaded through the preprocessor.
 - `BUSTER_F_DECL` belongs on header declarations only. In a `.c` file, a
   module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
   already declares carries no macro at all — the header declaration is what

@@ -221,62 +221,51 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
 
 bool string_equal(String8 s1, String8 s2)
 {
-    if (s1.length != s2.length)
+    // Length, emptiness and pointer identity settle the answer without looking
+    // at any byte; only a same-length, distinct, non-empty pair reaches the
+    // comparison itself.
+    bool result = s1.length == s2.length;
+    if (result && s1.length)
     {
-        return false;
-    }
-    if (!s1.length)
-    {
-        return true;
-    }
-    if (!s1.pointer || !s2.pointer)
-    {
-        return false;
-    }
-    if (s1.pointer == s2.pointer)
-    {
-        return true;
-    }
-#if BUSTER_OPTIMIZE
-    return memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
-#else
-    for (u64 i = 0; i < s1.length; i += 1)
-    {
-        if (s1.pointer[i] != s2.pointer[i])
+        if (!s1.pointer || !s2.pointer)
         {
-            return false;
+            result = false;
+        }
+        else if (s1.pointer != s2.pointer)
+        {
+#if BUSTER_OPTIMIZE
+            result = memory_compare(s1.pointer, s2.pointer, s1.length * sizeof(char8));
+#else
+            for (u64 i = 0; i < s1.length && result; i += 1)
+            {
+                result = s1.pointer[i] == s2.pointer[i];
+            }
+#endif
         }
     }
-    return true;
-#endif
+
+    return result;
 }
 
 bool string16_equal(String16 s1, String16 s2)
 {
-    if (s1.length != s2.length)
+    bool result = s1.length == s2.length;
+    if (result && s1.length)
     {
-        return false;
-    }
-    if (!s1.length)
-    {
-        return true;
-    }
-    if (!s1.pointer || !s2.pointer)
-    {
-        return false;
-    }
-    if (s1.pointer == s2.pointer)
-    {
-        return true;
-    }
-    for (u64 i = 0; i < s1.length; i += 1)
-    {
-        if (s1.pointer[i] != s2.pointer[i])
+        if (!s1.pointer || !s2.pointer)
         {
-            return false;
+            result = false;
+        }
+        else if (s1.pointer != s2.pointer)
+        {
+            for (u64 i = 0; i < s1.length && result; i += 1)
+            {
+                result = s1.pointer[i] == s2.pointer[i];
+            }
         }
     }
-    return true;
+
+    return result;
 }
 
 bool string_ends_with_sequence(String8 string, String8 ending)

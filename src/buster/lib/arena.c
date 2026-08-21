@@ -206,14 +206,20 @@ bool arena_destroy(Arena* arena, u64 count)
 {
     count = count == 0 ? 1 : count;
     u64 reserved_size = arena->reserved_size;
+    bool result;
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
         *(Arena**)((u8*)arena + arena_minimum_position) = arena_pool_head;
         arena_pool_head = arena;
         arena_pool_count += 1;
-        return true;
+        result = true;
     }
-    return arena_destroy_extended(arena, count, reserved_size);
+    else
+    {
+        result = arena_destroy_extended(arena, count, reserved_size);
+    }
+
+    return result;
 }
 
 Arena* arena_create(ArenaCreation original_creation)
@@ -232,6 +238,9 @@ Arena* arena_create(ArenaCreation original_creation)
     BUSTER_CHECK(creation.initial_size >= arena_minimum_position);
     BUSTER_CHECK(creation.initial_size <= individual_reserved_size);
 
+    // A pooled arena short-circuits the fresh reservation below; `reused` is how
+    // that decision reaches the single exit without a second return.
+    Arena* reused = 0;
     if (arena_pool_eligible(individual_reserved_size, count, creation.flags))
     {
         Arena* previous = 0;
@@ -267,40 +276,45 @@ Arena* arena_create(ArenaCreation original_creation)
                     .granularity = creation.granularity,
                     .flags = creation.flags,
                 };
-                return pooled;
+                reused = pooled;
+                break;
             }
             arena_destroy_extended(pooled, 1, individual_reserved_size);
             break;
         }
     }
 
-    ProtectionFlags protection_flags = {.read = 1, .write = 1, .execute = creation.flags.execute};
-    MapFlags map_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0};
-    u8* result = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
-
-    if (result)
+    u8* result = (u8*)reused;
+    if (!reused)
     {
-        for (u64 i = 0; i < count; i += 1)
-        {
-            Arena* arena = (Arena*)(result + (individual_reserved_size * i));
+        ProtectionFlags protection_flags = {.read = 1, .write = 1, .execute = creation.flags.execute};
+        MapFlags map_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0};
+        result = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
 
-            bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.lock_pages);
-            if (commit_result)
+        if (result)
+        {
+            for (u64 i = 0; i < count; i += 1)
             {
-                *arena = (Arena){
-                    .reserved_size = individual_reserved_size,
-                    .position = arena_minimum_position,
-                    .os_position = arena_os_position_after_commit(creation.initial_size, individual_reserved_size),
-                    .granularity = creation.granularity,
-                    .flags = creation.flags,
-                };
-            }
-            else
-            {
-                bool destroy_result = arena_destroy_extended((Arena*)result, count, individual_reserved_size);
-                result = 0;
-                BUSTER_CHECK(destroy_result);
-                break;
+                Arena* arena = (Arena*)(result + (individual_reserved_size * i));
+
+                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.lock_pages);
+                if (commit_result)
+                {
+                    *arena = (Arena){
+                        .reserved_size = individual_reserved_size,
+                        .position = arena_minimum_position,
+                        .os_position = arena_os_position_after_commit(creation.initial_size, individual_reserved_size),
+                        .granularity = creation.granularity,
+                        .flags = creation.flags,
+                    };
+                }
+                else
+                {
+                    bool destroy_result = arena_destroy_extended((Arena*)result, count, individual_reserved_size);
+                    result = 0;
+                    BUSTER_CHECK(destroy_result);
+                    break;
+                }
             }
         }
     }
