@@ -490,6 +490,15 @@ left untaken, and the traps an earlier audit already paid for. Record a new
 audit there, not here; this file keeps the method, that file keeps the
 history.
 
+An audit is a **new file**, `docs/performance-audits/<id>.md`, plus one line at
+the top of the index in `PERFORMANCE_AUDITS.md`. Never append an entry into an
+existing audit file and never rewrite one: the split exists so that two audit
+branches open at once touch disjoint files, which is what the single prepended
+history could not do. The index line is the only shared text, and
+`.gitattributes` marks `PERFORMANCE_AUDITS.md` `merge=union` so concurrent
+inserts keep both lines rather than conflicting — after such a merge, check
+that the newest id is on top, because union does not know which line is newer.
+
 ## Core rules
 
 ## Machine instruction selection and scheduling
@@ -1028,7 +1037,8 @@ Top level:
 | `tests/` | Runtime compiler fixture corpus: `.bbb` language programs and C frontend/driver fixtures. Test implementations themselves live under `src/buster/tests/`. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
 | `.forgejo/workflows/ci.yml` | CI pipeline for correctness, sanitizer/fuzz, self-host, and mobile tests. |
-| `PERFORMANCE_AUDITS.md` | Performance audit history, newest first: what was measured, what was fixed, and the reference numbers the next audit starts from. |
+| `PERFORMANCE_AUDITS.md` | Index of the performance audit history, newest first. |
+| `docs/performance-audits/` | One audit per file, named for its id: what was measured, what was fixed, and the reference numbers the next audit starts from. |
 | `lsan.supp` | LeakSanitizer suppressions. |
 | `build/` | Generated build output (ninja files, per-config dirs, `compile_commands.json`, `build/build`). Never edit. |
 

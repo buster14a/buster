@@ -583,6 +583,15 @@ left untaken, and the traps an earlier audit already paid for. Record a new
 audit there, not here; this file keeps the method, that file keeps the
 history.
 
+An audit is a **new file**, `docs/performance-audits/<id>.md`, plus one line at
+the top of the index in `PERFORMANCE_AUDITS.md`. Never append an entry into an
+existing audit file and never rewrite one: the split exists so that two audit
+branches open at once touch disjoint files, which is what the single prepended
+history could not do. The index line is the only shared text, and
+`.gitattributes` marks `PERFORMANCE_AUDITS.md` `merge=union` so concurrent
+inserts keep both lines rather than conflicting — after such a merge, check
+that the newest id is on top, because union does not know which line is newer.
+
 ## Core rules
 
 - **Code must stay human-maintainable.** Every major file opens with an
@@ -926,7 +935,8 @@ Top level:
 | `src/buster/tests/` | In-process unit/module tests. |
 | `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
 | `.forgejo/` | Forgejo CI workflows and scripts. |
-| `PERFORMANCE_AUDITS.md` | Append-only measurement history; older entries may describe components that no longer exist. |
+| `PERFORMANCE_AUDITS.md` | Index of the append-only measurement history; one line per audit. |
+| `docs/performance-audits/` | One file per audit, named for its id; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |
 | `LLVM_BITCODE.md` | Direct LLVM bitcode output, driver usage, emitter API, validation, and current limitations. |
 | `docs/uefi-target.md` | Freestanding UEFI target contract, driver usage, firmware ABI, image layout, relocations, and limitations. |

@@ -14,3 +14,8 @@
 *.jpg   binary
 *.zip   binary
 *.exe   binary
+
+# The audit index takes a one-line insert per audit, always at the top, from
+# branches that are open at the same time. Union merge keeps both lines instead
+# of conflicting; the audits themselves are one file each and never collide.
+PERFORMANCE_AUDITS.md merge=union

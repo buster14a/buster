@@ -7,7 +7,8 @@ Zen 4 7940HS development machine against the post-`2026-08-19b` tree
 This is a research catalogue, not an audit: nothing here has landed, and
 every proposal below still owes the full same-source A/B measurement
 protocol before it may claim a number. Audit history and the negative
-results this document must not re-litigate live in `PERFORMANCE_AUDITS.md`.
+results this document must not re-litigate live in `docs/performance-audits/`,
+indexed by `PERFORMANCE_AUDITS.md`.
 
 ## Method and reference profile
 
