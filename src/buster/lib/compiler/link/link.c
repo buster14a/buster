@@ -843,16 +843,22 @@ BUSTER_GLOBAL_LOCAL void link_write_u32(u8* bytes, u64 offset, u32 value)
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_branch_encode(A64Opcode opcode, s64 displacement, u32* word)
 {
+    bool result;
     if (opcode != A64_OPCODE_B && opcode != A64_OPCODE_BL)
     {
-        return false;
+        result = false;
     }
-    A64MCInst instruction = {
-        .operands = {{.value = displacement, .kind = A64_MC_OPERAND_PC_RELATIVE}},
-        .opcode = opcode,
-        .operand_count = 1,
-    };
-    return a64_mc_encode(&instruction, word);
+    else
+    {
+        A64MCInst instruction = {
+            .operands = {{.value = displacement, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+            .opcode = opcode,
+            .operand_count = 1,
+        };
+        result = a64_mc_encode(&instruction, word);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_branch_relocate(ObjectRelocationKind kind, u32 instruction, s64 displacement, u32* word)
@@ -1125,12 +1131,18 @@ BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice byte
                                               .write = 1,
                                               .execute = 1,
                                           });
+    bool result;
     if (!file)
     {
-        return false;
+        result = false;
     }
-    os_file_write(file, bytes);
-    return os_file_close(file);
+    else
+    {
+        os_file_write(file, bytes);
+        result = os_file_close(file);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)

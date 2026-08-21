@@ -1564,12 +1564,18 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
 
 static u64 llvm_bc_encode_signed_relative(s64 value)
 {
+    u64 result;
     if (value >= 0)
     {
-        return (u64)value << 1;
+        result = (u64)value << 1;
     }
-    u64 magnitude = (u64)(-(value + 1)) + 1;
-    return (magnitude << 1) | 1;
+    else
+    {
+        u64 magnitude = (u64)(-(value + 1)) + 1;
+        result = (magnitude << 1) | 1;
+    }
+
+    return result;
 }
 
 static u32 llvm_bc_symbol_value_id(LlvmBcContext* context, IrSymbolId symbol)
@@ -3049,25 +3055,31 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 
 static bool llvm_bc_emit_constants_block(LlvmBcContext* context)
 {
+    bool result;
     if (!context->constant_count)
     {
-        return true;
+        result = true;
     }
-    llvm_bc_enter_block(&context->stream, LLVM_BC_CONSTANTS_BLOCK, 4);
-    u32 current_type = LLVM_BC_INVALID_ID;
-    for (u32 index = 0; index < context->constant_count; index += 1)
+    else
     {
-        LlvmBcConstant* constant = context->constants + index;
-        if (constant->type_id != current_type)
+        llvm_bc_enter_block(&context->stream, LLVM_BC_CONSTANTS_BLOCK, 4);
+        u32 current_type = LLVM_BC_INVALID_ID;
+        for (u32 index = 0; index < context->constant_count; index += 1)
         {
-            u64 type = constant->type_id;
-            llvm_bc_record(&context->stream, LLVM_BC_CST_SETTYPE, &type, 1);
-            current_type = constant->type_id;
+            LlvmBcConstant* constant = context->constants + index;
+            if (constant->type_id != current_type)
+            {
+                u64 type = constant->type_id;
+                llvm_bc_record(&context->stream, LLVM_BC_CST_SETTYPE, &type, 1);
+                current_type = constant->type_id;
+            }
+            llvm_bc_record(&context->stream, constant->code, constant->operands, constant->operand_count);
         }
-        llvm_bc_record(&context->stream, constant->code, constant->operands, constant->operand_count);
+        llvm_bc_exit_block(&context->stream);
+        result = !context->stream.failed;
     }
-    llvm_bc_exit_block(&context->stream);
-    return !context->stream.failed;
+
+    return result;
 }
 
 static bool llvm_bc_emit_named_value(LlvmBcContext* context, u32 value_id, String8 name)

@@ -4713,14 +4713,20 @@ BUSTER_C_INTERNAL CSourceLocation c_preprocess_logical_location(CPreprocessSourc
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first)
 {
     CPreprocessSourceFrame* frame = first->builtin_frame;
+    u32 result;
     if (!frame)
     {
-        return first->builtin_line;
+        result = first->builtin_line;
     }
-    CToken probe = {
-        .offset = first->builtin_token_offset,
-    };
-    return c_preprocess_logical_location(frame, c_lex_token_location(&frame->lex, probe)).line;
+    else
+    {
+        CToken probe = {
+            .offset = first->builtin_token_offset,
+        };
+        result = c_preprocess_logical_location(frame, c_lex_token_location(&frame->lex, probe)).line;
+    }
+
+    return result;
 }
 
 typedef struct CPreprocessFileTable CPreprocessFileTable;
@@ -4736,37 +4742,43 @@ struct CPreprocessFileTable
 
 BUSTER_C_INTERNAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable* table, String8 path)
 {
+    u32 result;
     if (table->count && table->memo_path.pointer == path.pointer && table->memo_path.length == path.length)
     {
-        return table->memo_index;
+        result = table->memo_index;
     }
-    u32 index = table->count;
-    for (u32 existing = 0; existing < table->count; existing += 1)
+    else
     {
-        if (string_equal(table->files[existing], path))
+        u32 index = table->count;
+        for (u32 existing = 0; existing < table->count; existing += 1)
         {
-            index = existing;
-            break;
-        }
-    }
-    if (index == table->count)
-    {
-        if (table->count == table->capacity)
-        {
-            u32 capacity = table->capacity ? table->capacity * 2 : 16;
-            String8* files = arena_allocate(arena, String8, capacity);
-            if (table->count)
+            if (string_equal(table->files[existing], path))
             {
-                memcpy(files, table->files, table->count * sizeof(*files));
+                index = existing;
+                break;
             }
-            table->files = files;
-            table->capacity = capacity;
         }
-        table->files[table->count++] = path;
+        if (index == table->count)
+        {
+            if (table->count == table->capacity)
+            {
+                u32 capacity = table->capacity ? table->capacity * 2 : 16;
+                String8* files = arena_allocate(arena, String8, capacity);
+                if (table->count)
+                {
+                    memcpy(files, table->files, table->count * sizeof(*files));
+                }
+                table->files = files;
+                table->capacity = capacity;
+            }
+            table->files[table->count++] = path;
+        }
+        table->memo_path = path;
+        table->memo_index = index;
+        result = index;
     }
-    table->memo_path = path;
-    table->memo_index = index;
-    return index;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL String8 c_path_directory(String8 path)
@@ -4799,17 +4811,23 @@ BUSTER_C_INTERNAL bool c_include_read(Arena* arena, String8 directory, String8 n
     String8 path = c_path_is_absolute(name) ? string_format_z(arena, S8("{S8}"), name) : string_format_z(arena, S8("{S8}/{S8}"), directory, name);
     FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
     ByteSlice bytes = map.bytes;
+    bool result;
     if (!bytes.pointer)
     {
-        return false;
+        result = false;
     }
-    *path_out = path;
-    *source_out = BYTE_SLICE_TO_STRING(8, bytes);
-    if (map_out)
+    else
     {
-        *map_out = map;
+        *path_out = path;
+        *source_out = BYTE_SLICE_TO_STRING(8, bytes);
+        if (map_out)
+        {
+            *map_out = map;
+        }
+        result = true;
     }
-    return true;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String8* source_out)
@@ -4926,13 +4944,19 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     {
         source = S8("#include_next <buster_test_builtin_include_next.h>\n");
     }
+    bool result;
     if (!source.length)
     {
-        return false;
+        result = false;
     }
-    *path_out = name;
-    *source_out = source;
-    return true;
+    else
+    {
+        *path_out = name;
+        *source_out = source;
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_include_resolve(Arena* arena, CPreprocessOptions options, String8 including_path, String8 name, bool quoted, String8* path_out,

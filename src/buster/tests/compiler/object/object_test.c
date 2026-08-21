@@ -28,16 +28,22 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_compact_section_rewrite(ByteSlice byte
         memcpy(&magic, bytes.pointer, sizeof(magic));
         memcpy(&command, bytes.pointer + 32, sizeof(command));
     }
+    bool result;
     if (bytes.length < section + 80 || magic != 0xfeedfacf || command != 0x19)
     {
-        return false;
+        result = false;
     }
-    memset(bytes.pointer + section, 0, 32);
-    memcpy(bytes.pointer + section, "__compact_unwind", sizeof("__compact_unwind") - 1);
-    memcpy(bytes.pointer + section + 16, "__LD", sizeof("__LD") - 1);
-    u32 flags = 0x020000;
-    memcpy(bytes.pointer + section + 64, &flags, sizeof(flags));
-    return true;
+    else
+    {
+        memset(bytes.pointer + section, 0, 32);
+        memcpy(bytes.pointer + section, "__compact_unwind", sizeof("__compact_unwind") - 1);
+        memcpy(bytes.pointer + section + 16, "__LD", sizeof("__LD") - 1);
+        u32 flags = 0x020000;
+        memcpy(bytes.pointer + section + 64, &flags, sizeof(flags));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void object_test_write_u16(ByteSlice bytes, u64 offset, u16 value)

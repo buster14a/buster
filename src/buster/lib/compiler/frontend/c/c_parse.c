@@ -3252,12 +3252,18 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess
 
 BUSTER_C_SHARED bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index)
 {
+    bool result;
     if (!tokens || !cursor || *cursor >= limit || !c_token_is_punctuator(&tokens[*cursor], C_PUNCTUATOR_COMMA))
     {
-        return true;
+        result = true;
     }
-    *cursor += 1;
-    return next_index != 0 && (*cursor >= limit || !c_token_is_punctuator(&tokens[*cursor], C_PUNCTUATOR_COMMA));
+    else
+    {
+        *cursor += 1;
+        result = next_index != 0 && (*cursor >= limit || !c_token_is_punctuator(&tokens[*cursor], C_PUNCTUATOR_COMMA));
+    }
+
+    return result;
 }
 
 BUSTER_C_SHARED bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end)
@@ -8122,61 +8128,31 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
         }
         scan += 1;
     }
+    bool result;
     if (!info->has_auto_type)
     {
-        return false;
+        result = false;
     }
-    scan = start;
-    while (scan < info->auto_index)
+    else
     {
-        u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, info->auto_index);
-        if (skipped != scan)
+        scan = start;
+        while (scan < info->auto_index)
         {
-            scan = skipped;
-            continue;
-        }
-        CToken token = preprocess.tokens[scan];
-        if (token.kind != C_TOKEN_IDENTIFIER || (!c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers) &&
-                                                  !c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info)))
-        {
-            info->conflicting_specifier = true;
-        }
-        scan += 1;
-    }
-    scan = info->auto_index + 1;
-    while (scan < specifier_end)
-    {
-        u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
-        if (skipped != scan)
-        {
-            scan = skipped;
-            continue;
-        }
-        CToken token = preprocess.tokens[scan];
-        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers))
-        {
+            u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, info->auto_index);
+            if (skipped != scan)
+            {
+                scan = skipped;
+                continue;
+            }
+            CToken token = preprocess.tokens[scan];
+            if (token.kind != C_TOKEN_IDENTIFIER || (!c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers) &&
+                                                      !c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info)))
+            {
+                info->conflicting_specifier = true;
+            }
             scan += 1;
-            continue;
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, token)))
-        {
-            info->conflicting_specifier = true;
-            scan += 1;
-            continue;
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info))
-        {
-            scan += 1;
-            continue;
-        }
-        info->name_index = scan;
-        break;
-    }
-    if (info->name_index < specifier_end && preprocess.tokens[info->name_index].kind == C_TOKEN_IDENTIFIER &&
-        !c_declaration_keyword(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index])) &&
-        !c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index]), preprocess.dialect))
-    {
-        scan = info->name_index + 1;
+        scan = info->auto_index + 1;
         while (scan < specifier_end)
         {
             u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
@@ -8185,44 +8161,80 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
                 scan = skipped;
                 continue;
             }
-            info->invalid_declarator = true;
+            CToken token = preprocess.tokens[scan];
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers))
+            {
+                scan += 1;
+                continue;
+            }
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, token)))
+            {
+                info->conflicting_specifier = true;
+                scan += 1;
+                continue;
+            }
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info))
+            {
+                scan += 1;
+                continue;
+            }
+            info->name_index = scan;
             break;
         }
-    }
-    else
-    {
-        info->invalid_declarator = true;
-    }
-    depth = 0;
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        if (info->name_index < specifier_end && preprocess.tokens[info->name_index].kind == C_TOKEN_IDENTIFIER &&
+            !c_declaration_keyword(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index])) &&
+            !c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index]), preprocess.dialect))
         {
-            depth += 1;
+            scan = info->name_index + 1;
+            while (scan < specifier_end)
+            {
+                u32 skipped = c_parse_auto_skip_specifier(preprocess, scan, specifier_end);
+                if (skipped != scan)
+                {
+                    scan = skipped;
+                    continue;
+                }
+                info->invalid_declarator = true;
+                break;
+            }
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        else
         {
-            depth -= depth != 0;
+            info->invalid_declarator = true;
         }
-        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        depth = 0;
+        for (u32 index = start; index < end; index += 1)
         {
-            info->has_multiple_declarators = true;
+            CToken token = preprocess.tokens[index];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                depth -= depth != 0;
+            }
+            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            {
+                info->has_multiple_declarators = true;
+            }
+            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) && !info->has_initializer)
+            {
+                info->has_initializer = true;
+                info->initializer_start = index + 1;
+            }
         }
-        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) && !info->has_initializer)
+        info->initializer_end = end;
+        if (info->initializer_end > start && c_token_is_punctuator(&preprocess.tokens[info->initializer_end - 1], C_PUNCTUATOR_SEMICOLON))
         {
-            info->has_initializer = true;
-            info->initializer_start = index + 1;
+            info->initializer_end -= 1;
         }
+        result = true;
     }
-    info->initializer_end = end;
-    if (info->initializer_end > start && c_token_is_punctuator(&preprocess.tokens[info->initializer_end - 1], C_PUNCTUATOR_SEMICOLON))
-    {
-        info->initializer_end -= 1;
-    }
-    return true;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type)

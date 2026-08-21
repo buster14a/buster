@@ -926,18 +926,24 @@ struct CIntegerIrLocal
 
 BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
 {
+    u32 result;
     if (!parse || entity.value >= parse->entity_count)
     {
-        return 0;
+        result = 0;
     }
-    CScopeId scope = parse->entities[entity.value].scope;
-    u32 depth = 0;
-    while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
+    else
     {
-        depth += 1;
-        scope = parse->scopes[scope.value].parent;
+        CScopeId scope = parse->entities[entity.value].scope;
+        u32 depth = 0;
+        while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
+        {
+            depth += 1;
+            scope = parse->scopes[scope.value].parent;
+        }
+        result = depth ? depth - 1 : 0;
     }
-    return depth ? depth - 1 : 0;
+
+    return result;
 }
 
 typedef struct CIntegerIrBuilder CIntegerIrBuilder;

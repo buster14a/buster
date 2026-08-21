@@ -373,32 +373,50 @@ BUSTER_GLOBAL_LOCAL u32 pdb_codeview_type_record_count(ByteSlice types, bool* va
 
 BUSTER_GLOBAL_LOCAL bool pdb_read_u16_checked(ByteSlice bytes, u64 offset, u16* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(u16) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool pdb_read_u32_checked(ByteSlice bytes, u64 offset, u32* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(u32) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool pdb_write_u32_checked(ByteSlice bytes, u64 offset, u32 value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(u32) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(bytes.pointer + offset, &value, sizeof(value));
-    return true;
+    else
+    {
+        memcpy(bytes.pointer + offset, &value, sizeof(value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool pdb_type_index_map(PdbTypeModule* module, ByteSlice bytes, u64 offset)

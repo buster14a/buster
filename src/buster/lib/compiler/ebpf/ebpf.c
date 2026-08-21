@@ -298,12 +298,18 @@ static String8 ebpf_symbol_name(IrSymbol* symbol)
 
 static u64 ebpf_align_up(u64 value, u64 alignment)
 {
+    u64 result;
     if (alignment <= 1)
     {
-        return value;
+        result = value;
     }
-    u64 mask = alignment - 1;
-    return (value + mask) & ~mask;
+    else
+    {
+        u64 mask = alignment - 1;
+        result = (value + mask) & ~mask;
+    }
+
+    return result;
 }
 
 static void ebpf_buffer_init(EbpfBuffer* buffer, Arena* arena)
@@ -359,13 +365,19 @@ static bool ebpf_buffer_bytes(EbpfBuffer* buffer, void const* bytes, u64 length)
 
 static bool ebpf_buffer_zeros(EbpfBuffer* buffer, u64 length)
 {
+    bool result;
     if (!ebpf_buffer_reserve(buffer, length))
     {
-        return false;
+        result = false;
     }
-    memset(buffer->data + buffer->length, 0, (size_t)length);
-    buffer->length += length;
-    return true;
+    else
+    {
+        memset(buffer->data + buffer->length, 0, (size_t)length);
+        buffer->length += length;
+        result = true;
+    }
+
+    return result;
 }
 
 static bool ebpf_buffer_u8(EbpfBuffer* buffer, u8 value)
@@ -2276,18 +2288,24 @@ static u32 ebpf_btf_type(EbpfContext* context, IrTypeId type_id);
 
 static u32 ebpf_btf_u32(EbpfContext* context)
 {
+    u32 result;
     if (context->btf_u32_type)
     {
-        return context->btf_u32_type;
+        result = context->btf_u32_type;
     }
-    u32 id = ebpf_btf_record_reserve(context);
-    EbpfBtfRecord record = {.name_offset = ebpf_btf_string(context, S8("unsigned int")),
-                            .info = ebpf_btf_info(EBPF_BTF_KIND_INT, 0, false), .size_or_type = 4};
-    ebpf_buffer_init(&record.extra, context->arena);
-    ebpf_buffer_u32(&record.extra, 32);
-    context->btf_records[id - 1] = record;
-    context->btf_u32_type = id;
-    return id;
+    else
+    {
+        u32 id = ebpf_btf_record_reserve(context);
+        EbpfBtfRecord record = {.name_offset = ebpf_btf_string(context, S8("unsigned int")),
+                                .info = ebpf_btf_info(EBPF_BTF_KIND_INT, 0, false), .size_or_type = 4};
+        ebpf_buffer_init(&record.extra, context->arena);
+        ebpf_buffer_u32(&record.extra, 32);
+        context->btf_records[id - 1] = record;
+        context->btf_u32_type = id;
+        result = id;
+    }
+
+    return result;
 }
 
 static bool ebpf_btf_type_supported(IrType* type)
@@ -2584,21 +2602,27 @@ static bool ebpf_build_btf(EbpfContext* context)
 
 static String8 ebpf_concat_section_name(EbpfContext* context, String8 prefix, String8 suffix)
 {
+    String8 result;
     if (prefix.length > UINT64_MAX - suffix.length)
     {
-        return (String8){0};
+        result = (String8){0};
     }
-    u64 length = prefix.length + suffix.length;
-    char8* bytes = arena_allocate(context->arena, char8, length ? length : 1);
-    if (prefix.length)
+    else
     {
-        memcpy(bytes, prefix.pointer, (size_t)prefix.length);
+        u64 length = prefix.length + suffix.length;
+        char8* bytes = arena_allocate(context->arena, char8, length ? length : 1);
+        if (prefix.length)
+        {
+            memcpy(bytes, prefix.pointer, (size_t)prefix.length);
+        }
+        if (suffix.length)
+        {
+            memcpy(bytes + prefix.length, suffix.pointer, (size_t)suffix.length);
+        }
+        result = (String8){.pointer = bytes, .length = length};
     }
-    if (suffix.length)
-    {
-        memcpy(bytes + prefix.length, suffix.pointer, (size_t)suffix.length);
-    }
-    return (String8){.pointer = bytes, .length = length};
+
+    return result;
 }
 
 static u32 ebpf_elf_string(EbpfBuffer* table, String8 string)

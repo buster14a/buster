@@ -140,16 +140,34 @@ bool buster_aarch64_system_semantic_lookup(String8 id, u32* row)
 
 bool buster_aarch64_system_op0_encode(u32 op0, u32* o0)
 {
-    if (!o0 || op0 < 2 || op0 > 3) return false;
-    *o0 = op0 - 2;
-    return true;
+    bool result;
+    if (!o0 || op0 < 2 || op0 > 3)
+    {
+        result = false;
+    }
+    else
+    {
+        *o0 = op0 - 2;
+        result = true;
+    }
+
+    return result;
 }
 
 bool buster_aarch64_system_op0_decode(u32 o0, u32* op0)
 {
-    if (!op0 || o0 > 1) return false;
-    *op0 = o0 + 2;
-    return true;
+    bool result;
+    if (!op0 || o0 > 1)
+    {
+        result = false;
+    }
+    else
+    {
+        *op0 = o0 + 2;
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_system_target_is_m1_profile(Target target)
@@ -170,22 +188,31 @@ BUSTER_GLOBAL_LOCAL bool a64_system_hint_allowed(Target target, u32 immediate)
     // this HINT encoding and must not be accepted as arbitrary raw words.
     bool allowed = (immediate <= 5) || immediate == 7 || immediate == 8 || immediate == 10 || immediate == 12 ||
                    immediate == 14 || immediate == 16 || immediate == 18 || immediate == 20 || (immediate >= 24 && immediate <= 31);
-    if (!allowed) return false;
-    TargetCpuFeature feature = TARGET_CPU_FEATURE_NONE;
-    if (immediate == 7 || immediate == 8 || immediate == 10 || immediate == 12 || immediate == 14 ||
-        (immediate >= 24 && immediate <= 31))
+    bool result;
+    if (!allowed)
     {
-        feature = TARGET_CPU_FEATURE_AARCH64_PAUTH;
+        result = false;
     }
-    else if (immediate == 16)
+    else
     {
-        feature = TARGET_CPU_FEATURE_AARCH64_RAS;
+        TargetCpuFeature feature = TARGET_CPU_FEATURE_NONE;
+        if (immediate == 7 || immediate == 8 || immediate == 10 || immediate == 12 || immediate == 14 ||
+            (immediate >= 24 && immediate <= 31))
+        {
+            feature = TARGET_CPU_FEATURE_AARCH64_PAUTH;
+        }
+        else if (immediate == 16)
+        {
+            feature = TARGET_CPU_FEATURE_AARCH64_RAS;
+        }
+        else if (immediate == 18)
+        {
+            feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4;
+        }
+        result = feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, feature);
     }
-    else if (immediate == 18)
-    {
-        feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4;
-    }
-    return feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, feature);
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_system_row_fixed(BusterAarch64SystemGeneratedRow const* row, u32 word)

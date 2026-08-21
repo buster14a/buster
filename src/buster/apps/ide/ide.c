@@ -574,21 +574,27 @@ BUSTER_GLOBAL_LOCAL String8 report_source_fill(Arena* arena, char8 character, u6
 // numbers have to be padded on the finished text instead.
 BUSTER_GLOBAL_LOCAL String8 report_source_cell(Arena* arena, String8 text, u64 width)
 {
+    String8 result;
     if (text.length >= width)
     {
-        return text;
+        result = text;
     }
-    u64 padding = width - text.length;
-    char8* cell = arena_allocate(arena, char8, width);
-    for (u64 index = 0; index < padding; index += 1)
+    else
     {
-        cell[index] = ' ';
+        u64 padding = width - text.length;
+        char8* cell = arena_allocate(arena, char8, width);
+        for (u64 index = 0; index < padding; index += 1)
+        {
+            cell[index] = ' ';
+        }
+        if (text.length)
+        {
+            memcpy(cell + padding, text.pointer, text.length);
+        }
+        result = (String8){.pointer = cell, .length = width};
     }
-    if (text.length)
-    {
-        memcpy(cell + padding, text.pointer, text.length);
-    }
-    return (String8){.pointer = cell, .length = width};
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 report_source_number(Arena* arena, u64 value, u64 width)
@@ -601,12 +607,18 @@ BUSTER_GLOBAL_LOCAL String8 report_source_number(Arena* arena, u64 value, u64 wi
 // empty rather than padded so no line ends in whitespace.
 BUSTER_GLOBAL_LOCAL String8 report_source_share(Arena* arena, u64 value, u64 total, bool trailing)
 {
+    String8 result;
     if (!total)
     {
-        return trailing ? (String8){0} : report_source_cell(arena, (String8){0}, REPORT_SOURCE_SHARE_WIDTH);
+        result = trailing ? (String8){0} : report_source_cell(arena, (String8){0}, REPORT_SOURCE_SHARE_WIDTH);
     }
-    u64 tenths = (value * 1000 + total / 2) / total;
-    return report_source_cell(arena, string_format(arena, S8("{u64}.{u64} %"), tenths / 10, tenths % 10), REPORT_SOURCE_SHARE_WIDTH);
+    else
+    {
+        u64 tenths = (value * 1000 + total / 2) / total;
+        result = report_source_cell(arena, string_format(arena, S8("{u64}.{u64} %"), tenths / 10, tenths % 10), REPORT_SOURCE_SHARE_WIDTH);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 report_source_label(Arena* arena, String8 label)

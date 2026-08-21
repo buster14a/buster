@@ -198,12 +198,18 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
 // and the key it reads carries the source beside the start it matched on.
 u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
+    u32 result;
     if (!map || !map->keys)
     {
-        return 0;
+        result = 0;
     }
-    IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    return map->keys[ir_source_map_region(map, offset, cursor ? cursor : &local_cursor)].source;
+    else
+    {
+        IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+        result = map->keys[ir_source_map_region(map, offset, cursor ? cursor : &local_cursor)].source;
+    }
+
+    return result;
 }
 
 IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
@@ -231,46 +237,52 @@ IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSo
 
 IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor)
 {
+    IrSourcePosition result;
     if (!text.pointer || offset > text.length)
     {
-        return (IrSourcePosition){.source = source};
+        result = (IrSourcePosition){.source = source};
     }
-    IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    if (!cursor)
+    else
     {
-        cursor = &local_cursor;
-    }
-    // The cursor's memo doubles as the scan's resume point: `memo_position`
-    // is the line and line start reached at `memo_offset`, so an ascending
-    // walk over one source counts every byte once across all its queries. A
-    // zero line means no position was ever recorded, which is also what an
-    // all-zero cursor reads as, so an uninitialized one simply rescans.
-    u32 scanned = 0;
-    u32 line = 1;
-    u32 line_start = 0;
-    if (cursor->memo_position.line && cursor->memo_position.source == source && cursor->memo_offset <= offset)
-    {
-        scanned = cursor->memo_offset;
-        line = cursor->memo_position.line;
-        line_start = cursor->memo_offset + 1 - cursor->memo_position.column;
-    }
-    for (; scanned < offset; scanned += 1)
-    {
-        if (text.pointer[scanned] == '\n')
+        IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+        if (!cursor)
         {
-            line += 1;
-            line_start = scanned + 1;
+            cursor = &local_cursor;
         }
+        // The cursor's memo doubles as the scan's resume point: `memo_position`
+        // is the line and line start reached at `memo_offset`, so an ascending
+        // walk over one source counts every byte once across all its queries. A
+        // zero line means no position was ever recorded, which is also what an
+        // all-zero cursor reads as, so an uninitialized one simply rescans.
+        u32 scanned = 0;
+        u32 line = 1;
+        u32 line_start = 0;
+        if (cursor->memo_position.line && cursor->memo_position.source == source && cursor->memo_offset <= offset)
+        {
+            scanned = cursor->memo_offset;
+            line = cursor->memo_position.line;
+            line_start = cursor->memo_offset + 1 - cursor->memo_position.column;
+        }
+        for (; scanned < offset; scanned += 1)
+        {
+            if (text.pointer[scanned] == '\n')
+            {
+                line += 1;
+                line_start = scanned + 1;
+            }
+        }
+        IrSourcePosition position = {
+            .source = source,
+            .offset = offset,
+            .line = line,
+            .column = offset - line_start + 1,
+        };
+        cursor->memo_offset = offset;
+        cursor->memo_position = position;
+        result = position;
     }
-    IrSourcePosition position = {
-        .source = source,
-        .offset = offset,
-        .line = line,
-        .column = offset - line_start + 1,
-    };
-    cursor->memo_offset = offset;
-    cursor->memo_position = position;
-    return position;
+
+    return result;
 }
 
 
@@ -647,51 +659,56 @@ IrInstructionExtra ir_instruction_extra(IrFunction* function, IrInstructionId in
 
 IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFunction* function, IrInstructionId instruction)
 {
+    IrInstructionExtra* result;
     if (!arena || !function)
     {
-        return 0;
+        result = 0;
     }
-    u32 low = 0;
-    u32 high = function->extra_count;
-    while (low < high)
+    else
     {
-        u32 middle = low + (high - low) / 2;
-        if (function->extra_instructions[middle].value < instruction.value)
+        u32 low = 0;
+        u32 high = function->extra_count;
+        while (low < high)
         {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    if (low >= function->extra_count || function->extra_instructions[low].value != instruction.value)
-    {
-        if (function->extra_count == function->extra_capacity)
-        {
-            u32 capacity = function->extra_capacity ? function->extra_capacity * 2 : 8;
-            IrInstructionId* instructions = arena_allocate(arena, IrInstructionId, capacity);
-            IrInstructionExtra* extras = arena_allocate(arena, IrInstructionExtra, capacity);
-            if (function->extra_count)
+            u32 middle = low + (high - low) / 2;
+            if (function->extra_instructions[middle].value < instruction.value)
             {
-                memcpy(instructions, function->extra_instructions, sizeof(*instructions) * function->extra_count);
-                memcpy(extras, function->extras, sizeof(*extras) * function->extra_count);
+                low = middle + 1;
             }
-            function->extra_instructions = instructions;
-            function->extras = extras;
-            function->extra_capacity = capacity;
+            else
+            {
+                high = middle;
+            }
         }
-        for (u32 move = function->extra_count; move > low; move -= 1)
+        if (low >= function->extra_count || function->extra_instructions[low].value != instruction.value)
         {
-            function->extra_instructions[move] = function->extra_instructions[move - 1];
-            function->extras[move] = function->extras[move - 1];
+            if (function->extra_count == function->extra_capacity)
+            {
+                u32 capacity = function->extra_capacity ? function->extra_capacity * 2 : 8;
+                IrInstructionId* instructions = arena_allocate(arena, IrInstructionId, capacity);
+                IrInstructionExtra* extras = arena_allocate(arena, IrInstructionExtra, capacity);
+                if (function->extra_count)
+                {
+                    memcpy(instructions, function->extra_instructions, sizeof(*instructions) * function->extra_count);
+                    memcpy(extras, function->extras, sizeof(*extras) * function->extra_count);
+                }
+                function->extra_instructions = instructions;
+                function->extras = extras;
+                function->extra_capacity = capacity;
+            }
+            for (u32 move = function->extra_count; move > low; move -= 1)
+            {
+                function->extra_instructions[move] = function->extra_instructions[move - 1];
+                function->extras[move] = function->extras[move - 1];
+            }
+            function->extra_instructions[low] = instruction;
+            function->extras[low] = (IrInstructionExtra){0};
+            function->extra_count += 1;
         }
-        function->extra_instructions[low] = instruction;
-        function->extras[low] = (IrInstructionExtra){0};
-        function->extra_count += 1;
+        result = function->extras + low;
     }
 
-    return function->extras + low;
+    return result;
 }
 
 IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction)
@@ -723,52 +740,57 @@ IrSourcePosition ir_source_position(IrProgram* program, IrSourceRange range)
 
 IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
 {
+    IrValueLabelMetadata* result;
     if (!arena || !function)
     {
-        return 0;
+        result = 0;
     }
-    u32 low = 0;
-    u32 high = function->label_metadata_count;
-    while (low < high)
+    else
     {
-        u32 middle = low + (high - low) / 2;
-        if (function->label_metadata_values[middle].value < value.value)
+        u32 low = 0;
+        u32 high = function->label_metadata_count;
+        while (low < high)
         {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    if (low >= function->label_metadata_count || function->label_metadata_values[low].value != value.value)
-    {
-        if (function->label_metadata_count == function->label_metadata_capacity)
-        {
-            u32 new_capacity = function->label_metadata_capacity ? function->label_metadata_capacity * 2 : 8;
-            IrValueId* new_values = arena_allocate(arena, IrValueId, new_capacity);
-            IrValueLabelMetadata* new_entries = arena_allocate(arena, IrValueLabelMetadata, new_capacity);
-            if (function->label_metadata_count)
+            u32 middle = low + (high - low) / 2;
+            if (function->label_metadata_values[middle].value < value.value)
             {
-                memcpy(new_values, function->label_metadata_values, sizeof(*new_values) * function->label_metadata_count);
-                memcpy(new_entries, function->label_metadata, sizeof(*new_entries) * function->label_metadata_count);
+                low = middle + 1;
             }
-            function->label_metadata_values = new_values;
-            function->label_metadata = new_entries;
-            function->label_metadata_capacity = new_capacity;
+            else
+            {
+                high = middle;
+            }
         }
-        u32 tail = function->label_metadata_count - low;
-        if (tail)
+        if (low >= function->label_metadata_count || function->label_metadata_values[low].value != value.value)
         {
-            memmove(function->label_metadata_values + low + 1, function->label_metadata_values + low, sizeof(*function->label_metadata_values) * tail);
-            memmove(function->label_metadata + low + 1, function->label_metadata + low, sizeof(*function->label_metadata) * tail);
+            if (function->label_metadata_count == function->label_metadata_capacity)
+            {
+                u32 new_capacity = function->label_metadata_capacity ? function->label_metadata_capacity * 2 : 8;
+                IrValueId* new_values = arena_allocate(arena, IrValueId, new_capacity);
+                IrValueLabelMetadata* new_entries = arena_allocate(arena, IrValueLabelMetadata, new_capacity);
+                if (function->label_metadata_count)
+                {
+                    memcpy(new_values, function->label_metadata_values, sizeof(*new_values) * function->label_metadata_count);
+                    memcpy(new_entries, function->label_metadata, sizeof(*new_entries) * function->label_metadata_count);
+                }
+                function->label_metadata_values = new_values;
+                function->label_metadata = new_entries;
+                function->label_metadata_capacity = new_capacity;
+            }
+            u32 tail = function->label_metadata_count - low;
+            if (tail)
+            {
+                memmove(function->label_metadata_values + low + 1, function->label_metadata_values + low, sizeof(*function->label_metadata_values) * tail);
+                memmove(function->label_metadata + low + 1, function->label_metadata + low, sizeof(*function->label_metadata) * tail);
+            }
+            function->label_metadata_values[low] = value;
+            function->label_metadata[low] = (IrValueLabelMetadata){0};
+            function->label_metadata_count += 1;
         }
-        function->label_metadata_values[low] = value;
-        function->label_metadata[low] = (IrValueLabelMetadata){0};
-        function->label_metadata_count += 1;
+        result = function->label_metadata + low;
     }
 
-    return function->label_metadata + low;
+    return result;
 }
 
 bool ir_label_provenance_valid(IrValueLabelMetadata* value)
@@ -2372,99 +2394,105 @@ BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAb
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
+    bool result;
     if (!root || !root->layout.resolved || !root->layout.size || root->layout.size > 16)
     {
-        return false;
+        result = false;
     }
-    TemporalArena temporary = scratch_begin(0, 0);
-    u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
-    IrAbiClassificationTask* tasks = arena_allocate(temporary.arena, IrAbiClassificationTask, capacity);
-    u32 count = 1;
-    tasks[0] = (IrAbiClassificationTask){
-        .type = root_type,
-    };
-    bool valid = true;
-    while (count && valid)
+    else
     {
-        IrAbiClassificationTask task = tasks[--count];
-        IrType* type = ir_type_from_id(&program->types, task.type);
-        if (!type || !type->layout.resolved || task.offset + type->layout.size > 16 || (type->layout.alignment && task.offset % type->layout.alignment))
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
+        IrAbiClassificationTask* tasks = arena_allocate(temporary.arena, IrAbiClassificationTask, capacity);
+        u32 count = 1;
+        tasks[0] = (IrAbiClassificationTask){
+            .type = root_type,
+        };
+        bool valid = true;
+        while (count && valid)
         {
-            valid = false;
-            break;
-        }
-        if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
-        {
-            if (count + type->field_count > capacity)
+            IrAbiClassificationTask task = tasks[--count];
+            IrType* type = ir_type_from_id(&program->types, task.type);
+            if (!type || !type->layout.resolved || task.offset + type->layout.size > 16 || (type->layout.alignment && task.offset % type->layout.alignment))
             {
                 valid = false;
                 break;
             }
-            for (u32 index = 0; index < type->field_count; index += 1)
+            if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
             {
-                IrField* field = type->fields + index;
-                tasks[count++] = (IrAbiClassificationTask){
-                    .type = field->type,
-                    .offset = task.offset + field->offset,
-                };
+                if (count + type->field_count > capacity)
+                {
+                    valid = false;
+                    break;
+                }
+                for (u32 index = 0; index < type->field_count; index += 1)
+                {
+                    IrField* field = type->fields + index;
+                    tasks[count++] = (IrAbiClassificationTask){
+                        .type = field->type,
+                        .offset = task.offset + field->offset,
+                    };
+                }
+                continue;
             }
-            continue;
-        }
-        if (type->kind == IR_TYPE_ARRAY)
-        {
-            IrType* element = ir_type_from_id(&program->types, type->element_type);
-            if (!element || !element->layout.resolved || type->element_count > capacity - count)
+            if (type->kind == IR_TYPE_ARRAY)
+            {
+                IrType* element = ir_type_from_id(&program->types, type->element_type);
+                if (!element || !element->layout.resolved || type->element_count > capacity - count)
+                {
+                    valid = false;
+                    break;
+                }
+                for (u64 index = 0; index < type->element_count; index += 1)
+                {
+                    tasks[count++] = (IrAbiClassificationTask){
+                        .type = type->element_type,
+                        .offset = task.offset + index * element->layout.size,
+                    };
+                }
+                continue;
+            }
+            if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16)
+            {
+                // SysV's 80-bit long double occupies two eightbytes: X87 for the
+                // value and X87_UP for the trailing storage/padding.  The layout
+                // alignment check above requires the X87 value to begin on a
+                // 16-byte boundary, as the target ABI does.
+                u32 first = (u32)(task.offset / 8);
+                if (first >= 2 || first + 1 >= 2)
+                {
+                    valid = false;
+                    break;
+                }
+                classes[first] = ir_system_v_abi_class_merge(classes[first], IR_ABI_CLASS_X87);
+                classes[first + 1] = ir_system_v_abi_class_merge(classes[first + 1], IR_ABI_CLASS_X87_UP);
+                continue;
+            }
+            IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER;
+            bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
+                          type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
+            if (!scalar)
             {
                 valid = false;
                 break;
             }
-            for (u64 index = 0; index < type->element_count; index += 1)
-            {
-                tasks[count++] = (IrAbiClassificationTask){
-                    .type = type->element_type,
-                    .offset = task.offset + index * element->layout.size,
-                };
-            }
-            continue;
-        }
-        if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16)
-        {
-            // SysV's 80-bit long double occupies two eightbytes: X87 for the
-            // value and X87_UP for the trailing storage/padding.  The layout
-            // alignment check above requires the X87 value to begin on a
-            // 16-byte boundary, as the target ABI does.
             u32 first = (u32)(task.offset / 8);
-            if (first >= 2 || first + 1 >= 2)
+            u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, (u64)1) - 1) / 8);
+            for (u32 part = first; part <= last; part += 1)
             {
-                valid = false;
-                break;
+                if (part >= 2)
+                {
+                    valid = false;
+                    break;
+                }
+                classes[part] = ir_system_v_abi_class_merge(classes[part], abi_class);
             }
-            classes[first] = ir_system_v_abi_class_merge(classes[first], IR_ABI_CLASS_X87);
-            classes[first + 1] = ir_system_v_abi_class_merge(classes[first + 1], IR_ABI_CLASS_X87_UP);
-            continue;
         }
-        IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER;
-        bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
-                      type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
-        if (!scalar)
-        {
-            valid = false;
-            break;
-        }
-        u32 first = (u32)(task.offset / 8);
-        u32 last = (u32)((task.offset + BUSTER_MAX(type->layout.size, (u64)1) - 1) / 8);
-        for (u32 part = first; part <= last; part += 1)
-        {
-            if (part >= 2)
-            {
-                valid = false;
-                break;
-            }
-            classes[part] = ir_system_v_abi_class_merge(classes[part], abi_class);
-        }
+        scratch_end(temporary);
+        result = valid;
     }
-    scratch_end(temporary);
-    return valid;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId root_type, IrTypeId* element_out, u32* count_out)
@@ -2524,13 +2552,19 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
         }
     }
     scratch_end(temporary);
+    bool result;
     if (!valid || !count)
     {
-        return false;
+        result = false;
     }
-    *element_out = element;
-    *count_out = count;
-    return true;
+    else
+    {
+        *element_out = element;
+        *count_out = count;
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, bool is_result,
@@ -2871,81 +2905,111 @@ void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention)
 IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
 {
     IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    IrAbiValue result;
     if (!type || convention >= IR_ABI_CONVENTION_COUNT || use >= IR_ABI_USE_COUNT)
     {
-        return (IrAbiValue){0};
+        result = (IrAbiValue){0};
     }
-    if (!type->abi || !type->abi->resolved[convention])
+    else
     {
-        ir_resolve_type_abi(program, type_id, convention);
+        if (!type->abi || !type->abi->resolved[convention])
+        {
+            ir_resolve_type_abi(program, type_id, convention);
+        }
+        result = type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
     }
-    return type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
+
+    return result;
 }
 
 IrTypeId ir_program_add_type(IrProgram* program, IrType type)
 {
+    IrTypeId result;
     if (!program || program->types.count >= program->types.capacity)
     {
-        return IR_TYPE_ID_INVALID;
+        result = IR_TYPE_ID_INVALID;
     }
-    IrTypeId id = {
-        .value = program->types.count++,
-    };
-    type.id = id;
-    program->types.types[id.value] = type;
-    return id;
+    else
+    {
+        IrTypeId id = {
+            .value = program->types.count++,
+        };
+        type.id = id;
+        program->types.types[id.value] = type;
+        result = id;
+    }
+
+    return result;
 }
 
 IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol)
 {
+    IrSymbolId result;
     if (!program || program->symbols.count >= program->symbols.capacity)
     {
-        return IR_SYMBOL_ID_INVALID;
+        result = IR_SYMBOL_ID_INVALID;
     }
-    IrSymbolId id = {
-        .value = program->symbols.count++,
-    };
-    symbol.id = id;
-    program->symbols.symbols[id.value] = symbol;
-    return id;
+    else
+    {
+        IrSymbolId id = {
+            .value = program->symbols.count++,
+        };
+        symbol.id = id;
+        program->symbols.symbols[id.value] = symbol;
+        result = id;
+    }
+
+    return result;
 }
 
 IrSourceId ir_program_add_source(IrProgram* program, IrSource source)
 {
+    IrSourceId result;
     if (!program || program->sources.count >= program->sources.capacity)
     {
-        return IR_SOURCE_ID_INVALID;
+        result = IR_SOURCE_ID_INVALID;
     }
-    IrSourceId id = {
-        .value = program->sources.count++,
-    };
-    source.id = id;
-    program->sources.sources[id.value] = source;
-    return id;
+    else
+    {
+        IrSourceId id = {
+            .value = program->sources.count++,
+        };
+        source.id = id;
+        program->sources.sources[id.value] = source;
+        result = id;
+    }
+
+    return result;
 }
 
 IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function)
 {
+    IrFunction* result;
     if (!arena || !module)
     {
-        return 0;
+        result = 0;
     }
-    if (module->function_count >= module->function_capacity)
+    else
     {
-        u32 capacity = module->function_capacity ? module->function_capacity * 2 : 8;
-        IrFunction* functions = arena_allocate(arena, IrFunction, capacity);
-        if (module->function_count)
+        if (module->function_count >= module->function_capacity)
         {
-            memcpy(functions, module->functions, sizeof(IrFunction) * module->function_count);
+            u32 capacity = module->function_capacity ? module->function_capacity * 2 : 8;
+            IrFunction* functions = arena_allocate(arena, IrFunction, capacity);
+            if (module->function_count)
+            {
+                memcpy(functions, module->functions, sizeof(IrFunction) * module->function_count);
+            }
+            module->functions = functions;
+            module->function_capacity = capacity;
         }
-        module->functions = functions;
-        module->function_capacity = capacity;
+        function.id = (IrFunctionId){
+            .value = module->function_count,
+        };
+        module->functions[module->function_count++] = function;
+        result = &module->functions[module->function_count - 1];
     }
-    function.id = (IrFunctionId){
-        .value = module->function_count,
-    };
-    module->functions[module->function_count++] = function;
-    return &module->functions[module->function_count - 1];
+
+    return result;
 }
 
 IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
@@ -2973,50 +3037,62 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
 
 IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block)
 {
+    IrBlock* result;
     if (!arena || !function)
     {
-        return 0;
+        result = 0;
     }
-    if (function->block_count >= function->block_capacity)
+    else
     {
-        u32 capacity = function->block_capacity ? function->block_capacity * 2 : 8;
-        IrBlock* blocks = arena_allocate(arena, IrBlock, capacity);
-        if (function->block_count)
+        if (function->block_count >= function->block_capacity)
         {
-            memcpy(blocks, function->blocks, sizeof(IrBlock) * function->block_count);
+            u32 capacity = function->block_capacity ? function->block_capacity * 2 : 8;
+            IrBlock* blocks = arena_allocate(arena, IrBlock, capacity);
+            if (function->block_count)
+            {
+                memcpy(blocks, function->blocks, sizeof(IrBlock) * function->block_count);
+            }
+            function->blocks = blocks;
+            function->block_capacity = capacity;
         }
-        function->blocks = blocks;
-        function->block_capacity = capacity;
+        block.id = (IrBlockId){
+            .value = function->block_count,
+        };
+        function->blocks[function->block_count++] = block;
+        result = &function->blocks[function->block_count - 1];
     }
-    block.id = (IrBlockId){
-        .value = function->block_count,
-    };
-    function->blocks[function->block_count++] = block;
-    return &function->blocks[function->block_count - 1];
+
+    return result;
 }
 
 IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value)
 {
+    IrValueId result;
     if (!arena || !function)
     {
-        return IR_VALUE_ID_INVALID;
+        result = IR_VALUE_ID_INVALID;
     }
-    if (function->value_count >= function->value_capacity)
+    else
     {
-        u32 capacity = function->value_capacity ? function->value_capacity * 2 : 16;
-        IrValue* values = arena_allocate(arena, IrValue, capacity);
-        if (function->value_count)
+        if (function->value_count >= function->value_capacity)
         {
-            memcpy(values, function->values, sizeof(IrValue) * function->value_count);
+            u32 capacity = function->value_capacity ? function->value_capacity * 2 : 16;
+            IrValue* values = arena_allocate(arena, IrValue, capacity);
+            if (function->value_count)
+            {
+                memcpy(values, function->values, sizeof(IrValue) * function->value_count);
+            }
+            function->values = values;
+            function->value_capacity = capacity;
         }
-        function->values = values;
-        function->value_capacity = capacity;
+        IrValueId id = {
+            .value = function->value_count++,
+        };
+        function->values[id.value] = value;
+        result = id;
     }
-    IrValueId id = {
-        .value = function->value_count++,
-    };
-    function->values[id.value] = value;
-    return id;
+
+    return result;
 }
 
 IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* instruction)
@@ -3030,39 +3106,45 @@ IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* inst
 
 IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source)
 {
+    IrInstructionId result;
     if (!arena || !function)
     {
-        return IR_INSTRUCTION_ID_INVALID;
+        result = IR_INSTRUCTION_ID_INVALID;
     }
-    if (function->instruction_count >= function->instruction_capacity)
+    else
     {
-        u32 capacity = function->instruction_capacity ? function->instruction_capacity * 2 : 16;
-        IrInstruction* instructions = arena_allocate(arena, IrInstruction, capacity);
-        if (function->instruction_count)
+        if (function->instruction_count >= function->instruction_capacity)
         {
-            memcpy(instructions, function->instructions, sizeof(IrInstruction) * function->instruction_count);
-        }
-        {
-            IrSourceRange* canonical_sources = arena_allocate(arena, IrSourceRange, capacity);
-            memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);
-            if (function->instruction_canonical_sources)
+            u32 capacity = function->instruction_capacity ? function->instruction_capacity * 2 : 16;
+            IrInstruction* instructions = arena_allocate(arena, IrInstruction, capacity);
+            if (function->instruction_count)
             {
-                memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);
+                memcpy(instructions, function->instructions, sizeof(IrInstruction) * function->instruction_count);
             }
-            function->instruction_canonical_sources = canonical_sources;
+            {
+                IrSourceRange* canonical_sources = arena_allocate(arena, IrSourceRange, capacity);
+                memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);
+                if (function->instruction_canonical_sources)
+                {
+                    memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);
+                }
+                function->instruction_canonical_sources = canonical_sources;
+            }
+            function->instructions = instructions;
+            function->instruction_capacity = capacity;
         }
-        function->instructions = instructions;
-        function->instruction_capacity = capacity;
+        IrInstructionId id = {
+            .value = function->instruction_count++,
+        };
+        function->instructions[id.value] = instruction;
+        if (function->instruction_canonical_sources)
+        {
+            function->instruction_canonical_sources[id.value] = canonical_source;
+        }
+        result = id;
     }
-    IrInstructionId id = {
-        .value = function->instruction_count++,
-    };
-    function->instructions[id.value] = instruction;
-    if (function->instruction_canonical_sources)
-    {
-        function->instruction_canonical_sources[id.value] = canonical_source;
-    }
-    return id;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError error, IrFunction* function, IrBlockId block, IrInstructionId instruction)

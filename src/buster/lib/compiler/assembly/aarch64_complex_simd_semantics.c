@@ -187,23 +187,35 @@ static bool buster_a64_complex_simd_value_uint(BusterA64SemanticVMValue value, u
 
 static bool buster_a64_complex_simd_field_local(BusterA64SemanticForm form, u32 field_id, u32* local)
 {
+    bool result;
     if (!local || field_id < form.field_first || field_id >= form.field_first + form.field_count)
     {
-        return false;
+        result = false;
     }
-    *local = field_id - form.field_first;
-    return true;
+    else
+    {
+        *local = field_id - form.field_first;
+        result = true;
+    }
+
+    return result;
 }
 
 static bool buster_a64_complex_simd_field_name(BusterA64SemanticForm form, u32 local, BusterA64SemanticString* name)
 {
     BusterA64SemanticField field = {0};
+    bool result;
     if (!name || local >= form.field_count || !buster_a64_semantic_field(form.field_first + local, &field))
     {
-        return false;
+        result = false;
     }
-    *name = field.name;
-    return true;
+    else
+    {
+        *name = field.name;
+        result = true;
+    }
+
+    return result;
 }
 
 static bool buster_a64_complex_simd_find_field(BusterA64SemanticForm form, BusterA64SemanticString name, u32* local)

@@ -2149,10 +2149,19 @@ static bool arm_a64_scalar_set_register(ArmA64ScalarProjectionRow* projection, A
 
 static bool arm_a64_scalar_set_immediate(ArmA64ScalarProjectionRow* projection)
 {
-    if (projection->operand_count >= BUSTER_ARRAY_LENGTH(projection->operands)) return false;
-    projection->operands[projection->operand_count++] = (ArmA64ScalarProjectionOperand){
-        .kind = ARM_A64_SCALAR_OPERAND_IMMEDIATE, .width = 0, .register31_role = ARM_A64_SCALAR_REGISTER31_ANY};
-    return true;
+    bool result;
+    if (projection->operand_count >= BUSTER_ARRAY_LENGTH(projection->operands))
+    {
+        result = false;
+    }
+    else
+    {
+        projection->operands[projection->operand_count++] = (ArmA64ScalarProjectionOperand){
+            .kind = ARM_A64_SCALAR_OPERAND_IMMEDIATE, .width = 0, .register31_role = ARM_A64_SCALAR_REGISTER31_ANY};
+        result = true;
+    }
+
+    return result;
 }
 
 static bool arm_a64_scalar_row_parse(Arena* arena, ArmA64CanonicalRow* row, ArmA64ScalarProjectionRow* result)

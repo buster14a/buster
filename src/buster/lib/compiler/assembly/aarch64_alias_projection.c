@@ -76,12 +76,18 @@ static bool alias_row_for_form(u32 form_id, u32* ordinal, BusterA64AliasGenerate
 
 static bool alias_field_local(BusterA64SemanticForm form, u32 field_id, u32* local)
 {
+    bool result;
     if (!local || field_id < form.field_first || field_id >= form.field_first + form.field_count)
     {
-        return false;
+        result = false;
     }
-    *local = field_id - form.field_first;
-    return true;
+    else
+    {
+        *local = field_id - form.field_first;
+        result = true;
+    }
+
+    return result;
 }
 
 static bool alias_field_name_equal(BusterA64SemanticString left, String8 right)

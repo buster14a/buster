@@ -674,22 +674,34 @@ static String8 wasm64_import_name(String8 link_name, String8 fallback)
 
 static Wasm64FunctionRecord* wasm64_function_record_for_symbol(Wasm64Context* context, IrSymbolId symbol)
 {
+    Wasm64FunctionRecord* result;
     if (symbol.value == IR_ID_UNDERLYING_INVALID || symbol.value >= context->program->symbols.count || !context->symbol_function_indices)
     {
-        return 0;
+        result = 0;
     }
-    u32 index = context->symbol_function_indices[symbol.value];
-    return index == UINT32_MAX || index >= context->function_count ? 0 : context->functions + index;
+    else
+    {
+        u32 index = context->symbol_function_indices[symbol.value];
+        result = index == UINT32_MAX || index >= context->function_count ? 0 : context->functions + index;
+    }
+
+    return result;
 }
 
 static Wasm64DataRecord* wasm64_data_record_for_symbol(Wasm64Context* context, IrSymbolId symbol)
 {
+    Wasm64DataRecord* result;
     if (symbol.value == IR_ID_UNDERLYING_INVALID || symbol.value >= context->program->symbols.count || !context->symbol_data_indices)
     {
-        return 0;
+        result = 0;
     }
-    u32 index = context->symbol_data_indices[symbol.value];
-    return index == UINT32_MAX || index >= context->data_count ? 0 : context->data_records + index;
+    else
+    {
+        u32 index = context->symbol_data_indices[symbol.value];
+        result = index == UINT32_MAX || index >= context->data_count ? 0 : context->data_records + index;
+    }
+
+    return result;
 }
 
 static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* function, IrSymbol* symbol, bool imported)

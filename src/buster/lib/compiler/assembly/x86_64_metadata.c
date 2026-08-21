@@ -1086,9 +1086,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_bracket_number(char8 con
 {
     u32 open = 0;
     while (open < length && token[open] != '[') open += 1;
-    if (open == length || length < open + 3 || token[length - 1] != ']') return false;
-    u32 bits = 0;
-    return buster_x86_metadata_emit_parse_number(token + open + 1, length - open - 2, value, &bits);
+    bool result;
+    if (open == length || length < open + 3 || token[length - 1] != ']')
+    {
+        result = false;
+    }
+    else
+    {
+        u32 bits = 0;
+        result = buster_x86_metadata_emit_parse_number(token + open + 1, length - open - 2, value, &bits);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_bracket_range(char8 const* token, u32 length, u32* minimum,
@@ -4724,9 +4733,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_df64_operands_match(BusterX86M
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_write_byte(BusterX86MetadataEncodeScratch* scratch, u8 value)
 {
-    if (scratch->byte_count >= BUSTER_ARRAY_LENGTH(scratch->bytes)) return false;
-    scratch->bytes[scratch->byte_count++] = value;
-    return true;
+    bool result;
+    if (scratch->byte_count >= BUSTER_ARRAY_LENGTH(scratch->bytes))
+    {
+        result = false;
+    }
+    else
+    {
+        scratch->bytes[scratch->byte_count++] = value;
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_write_le(BusterX86MetadataEncodeScratch* scratch, u64 value, u8 width)

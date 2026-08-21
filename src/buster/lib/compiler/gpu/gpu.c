@@ -735,12 +735,18 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_copy(GpuPlanBuilder* builder, String8 source, 
 
 BUSTER_GLOBAL_LOCAL String8 gpu_tool_path(String8 explicit_path, String8 environment_name, String8 fallback)
 {
+    String8 result;
     if (explicit_path.length)
     {
-        return explicit_path;
+        result = explicit_path;
     }
-    String8 environment = os_get_environment_variable(environment_name);
-    return environment.length ? environment : fallback;
+    else
+    {
+        String8 environment = os_get_environment_variable(environment_name);
+        result = environment.length ? environment : fallback;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 gpu_clang_path(GpuPipelineOptions options)
@@ -818,18 +824,24 @@ BUSTER_GLOBAL_LOCAL String8 gpu_output_suffix(GpuOutputFormat format)
 
 BUSTER_GLOBAL_LOCAL String8 gpu_default_output_path(Arena* arena, GpuPipelineOptions options, GpuOutputFormat format)
 {
+    String8 result;
     if (options.output_path.length || format == GPU_OUTPUT_NONE)
     {
-        return options.output_path;
+        result = options.output_path;
     }
-    String8 suffix = gpu_output_suffix(format);
-    String8 base = gpu_path_without_extension(options.input_paths[0]);
-    String8 output = string_format_z(arena, S8("{S8}{S8}"), base, suffix);
-    if (string_equal(output, options.input_paths[0]))
+    else
     {
-        output = string_format_z(arena, S8("{S8}.out{S8}"), base, suffix);
+        String8 suffix = gpu_output_suffix(format);
+        String8 base = gpu_path_without_extension(options.input_paths[0]);
+        String8 output = string_format_z(arena, S8("{S8}{S8}"), base, suffix);
+        if (string_equal(output, options.input_paths[0]))
+        {
+            output = string_format_z(arena, S8("{S8}.out{S8}"), base, suffix);
+        }
+        result = output;
     }
-    return output;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool gpu_output_format_is_text(GpuOutputFormat format)

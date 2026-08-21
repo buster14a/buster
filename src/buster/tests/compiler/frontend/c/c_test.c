@@ -87,36 +87,48 @@ BUSTER_GLOBAL_LOCAL u64 c_test_ir_bit_field_value(IrProgram* program, IrGlobal* 
 
 BUSTER_GLOBAL_LOCAL u32 c_test_ir_direct_call_count(IrProgram* program, IrFunction* function, String8 target_name)
 {
+    u32 result;
     if (!program || !function)
     {
-        return 0;
+        result = 0;
     }
-    u32 count = 0;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    else
     {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->opcode != IR_OPCODE_CALL)
+        u32 count = 0;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            continue;
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->opcode != IR_OPCODE_CALL)
+            {
+                continue;
+            }
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+            count += symbol && string_equal(symbol->name, target_name);
         }
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-        count += symbol && string_equal(symbol->name, target_name);
+        result = count;
     }
-    return count;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 c_test_ir_call_count(IrFunction* function)
 {
+    u32 result;
     if (!function)
     {
-        return 0;
+        result = 0;
     }
-    u32 count = 0;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    else
     {
-        count += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+        u32 count = 0;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            count += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+        }
+        result = count;
     }
-    return count;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 source, String8 source_path, Target target,

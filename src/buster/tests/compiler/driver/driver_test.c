@@ -445,14 +445,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 compiler_driver_test_x64_restore_rbx_
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_unconditional_jump(ByteSlice text, u64 offset, u64 function_end)
 {
+    bool result;
     if (!text.pointer || offset > function_end)
     {
-        return false;
+        result = false;
     }
-    u64 remaining = function_end - offset;
-    // Canonical metadata may select either the short or near unconditional
-    // branch when the target displacement permits it.
-    return (remaining >= 2 && text.pointer[offset] == 0xeb) || (remaining >= 5 && text.pointer[offset] == 0xe9);
+    else
+    {
+        u64 remaining = function_end - offset;
+        // Canonical metadata may select either the short or near unconditional
+        // branch when the target displacement permits it.
+        result = (remaining >= 2 && text.pointer[offset] == 0xeb) || (remaining >= 5 && text.pointer[offset] == 0xe9);
+    }
+
+    return result;
 }
 
 #endif

@@ -98,17 +98,26 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_equal(String8 left, String8 right)
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_less(String8 left, String8 right)
 {
-    if (!a64_sysreg_string_valid(left) || !a64_sysreg_string_valid(right)) return false;
-    u64 count = BUSTER_MIN(left.length, right.length);
-    int cmp = 0;
-    for (u64 index = 0; index < count; index += 1)
+    bool result;
+    if (!a64_sysreg_string_valid(left) || !a64_sysreg_string_valid(right))
     {
-        char8 a = left.pointer[index], b = right.pointer[index];
-        if (a >= 'a' && a <= 'z') a = (char8)(a - ('a' - 'A'));
-        if (b >= 'a' && b <= 'z') b = (char8)(b - ('a' - 'A'));
-        if (a != b) { cmp = a < b ? -1 : 1; break; }
+        result = false;
     }
-    return cmp < 0 || (cmp == 0 && left.length < right.length);
+    else
+    {
+        u64 count = BUSTER_MIN(left.length, right.length);
+        int cmp = 0;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            char8 a = left.pointer[index], b = right.pointer[index];
+            if (a >= 'a' && a <= 'z') a = (char8)(a - ('a' - 'A'));
+            if (b >= 'a' && b <= 'z') b = (char8)(b - ('a' - 'A'));
+            if (a != b) { cmp = a < b ? -1 : 1; break; }
+        }
+        result = cmp < 0 || (cmp == 0 && left.length < right.length);
+    }
+
+    return result;
 }
 
 bool aarch64_system_register_lookup_name(String8 name, Aarch64SystemRegisterLookup* result)
@@ -441,12 +450,21 @@ bool aarch64_system_register_expand_name(Arena* arena, String8 family, u32 index
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_encode_common(u16 packed, u32 rt, bool read, u32* word)
 {
-    if (!word || !a64_sysreg_encoding_valid(packed) || rt > 31u || ((packed >> 14) & 3u) < 2u) return false;
-    u32 op0 = (packed >> 14) & 3u, op1 = (packed >> 11) & 7u, crn = (packed >> 7) & 15u, crm = (packed >> 3) & 15u, op2 = packed & 7u;
-    u32 value = 0xd5000000u | (1u << 20) | (read ? (1u << 21) : 0u) | ((op0 - 2u) << 19) | (op1 << 16) | (crn << 12) |
-                (crm << 8) | (op2 << 5) | rt;
-    *word = value;
-    return true;
+    bool result;
+    if (!word || !a64_sysreg_encoding_valid(packed) || rt > 31u || ((packed >> 14) & 3u) < 2u)
+    {
+        result = false;
+    }
+    else
+    {
+        u32 op0 = (packed >> 14) & 3u, op1 = (packed >> 11) & 7u, crn = (packed >> 7) & 15u, crm = (packed >> 3) & 15u, op2 = packed & 7u;
+        u32 value = 0xd5000000u | (1u << 20) | (read ? (1u << 21) : 0u) | ((op0 - 2u) << 19) | (op1 << 16) | (crn << 12) |
+                    (crm << 8) | (op2 << 5) | rt;
+        *word = value;
+        result = true;
+    }
+
+    return result;
 }
 
 bool aarch64_system_register_encode_mrs(u16 packed_encoding, u32 rt, u32* word)

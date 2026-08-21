@@ -440,20 +440,26 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedF
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* raw_layout_complete)
 {
     BusterAarch64GeneratedForm generated = {0};
+    bool result;
     if (!a64_metadata_generated_form(form_id, &generated))
     {
-        return false;
+        result = false;
     }
-    bool is_raw_layout_complete = a64_metadata_form_raw_layout_complete(form_id, 0);
-    if (form)
+    else
     {
-        *form = generated;
+        bool is_raw_layout_complete = a64_metadata_form_raw_layout_complete(form_id, 0);
+        if (form)
+        {
+            *form = generated;
+        }
+        if (raw_layout_complete)
+        {
+            *raw_layout_complete = is_raw_layout_complete;
+        }
+        result = true;
     }
-    if (raw_layout_complete)
-    {
-        *raw_layout_complete = is_raw_layout_complete;
-    }
-    return true;
+
+    return result;
 }
 
 u32 buster_aarch64_metadata_schema_version(void)
@@ -1988,15 +1994,21 @@ bool a64_signed_scaled_immediate_decode(u32 encoded, u8 bits, u8 scale_log2, s64
 
 BUSTER_GLOBAL_LOCAL bool a64_mc_operand(A64MCInst const* instruction, u32 index, A64MCOperandKind kind, s64* value)
 {
+    bool result;
     if (!instruction || index >= instruction->operand_count || index >= A64_MC_MAX_OPERANDS || instruction->operands[index].kind != kind)
     {
-        return false;
+        result = false;
     }
-    if (value)
+    else
     {
-        *value = instruction->operands[index].value;
+        if (value)
+        {
+            *value = instruction->operands[index].value;
+        }
+        result = true;
     }
-    return true;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_pc_relative_insert(A64PCRelativeLayout layout, u32 word, s64 displacement, u32* patched)
@@ -2468,12 +2480,18 @@ bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 targe
 
 bool a64_condition_invert(u32 condition, u32* inverse)
 {
+    bool result;
     if (!inverse || condition > 13)
     {
-        return false;
+        result = false;
     }
-    *inverse = condition ^ 1;
-    return true;
+    else
+    {
+        *inverse = condition ^ 1;
+        result = true;
+    }
+
+    return result;
 }
 
 // -----------------------------------------------------------------------------

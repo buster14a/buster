@@ -231,16 +231,22 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
 {
     u32 owner = state->owner[physical_register];
+    bool result;
     if (owner == UINT32_MAX)
     {
-        return false;
+        result = false;
     }
-    u32 current_index = state->current_point >> 2;
-    u32 last = state->last_use[owner];
-    // A value confined to its defining block is redefined before every
-    // repeat of that block, so passing its last use retires it. Escaping
-    // values always reach their slots.
-    return !state->escapes[owner] && (state->uses_consumed ? current_index >= last : current_index > last);
+    else
+    {
+        u32 current_index = state->current_point >> 2;
+        u32 last = state->last_use[owner];
+        // A value confined to its defining block is redefined before every
+        // repeat of that block, so passing its last use retires it. Escaping
+        // values always reach their slots.
+        result = !state->escapes[owner] && (state->uses_consumed ? current_index >= last : current_index > last);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physical_register)

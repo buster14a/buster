@@ -1000,12 +1000,18 @@ MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordina
 
 MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
 {
+    MachineX64EmitRegistryEntry const* result;
     if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
     {
-        return 0;
+        result = 0;
     }
-    MachineX64EmitRegistryEntry const* entry = machine_x86_64_emit_registry + (opcode - MACHINE_X64_MOV_RI);
-    return entry->opcode == opcode ? entry : 0;
+    else
+    {
+        MachineX64EmitRegistryEntry const* entry = machine_x86_64_emit_registry + (opcode - MACHINE_X64_MOV_RI);
+        result = entry->opcode == opcode ? entry : 0;
+    }
+
+    return result;
 }
 
 u32 machine_x86_64_canonical_authority_site_count(void)
@@ -1030,12 +1036,17 @@ MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal)
 
 u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
 {
+    u16 result;
     if (!info)
     {
-        return 0;
+        result = 0;
     }
-    u16 forms = info->form_set;
-    return forms;
+    else
+    {
+        result = info->form_set;
+    }
+
+    return result;
 }
 
 MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info)
@@ -1074,23 +1085,35 @@ u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
 
 u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
 {
+    u32 result;
     if (!info || !info->memory_operand)
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    u32 slot = (u32)info->memory_operand - 1u;
-    return slot < info->operand_count ? slot : UINT32_MAX;
+    else
+    {
+        u32 slot = (u32)info->memory_operand - 1u;
+        result = slot < info->operand_count ? slot : UINT32_MAX;
+    }
+
+    return result;
 }
 
 bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot)
 {
+    bool result;
     if (!info || destination_slot >= 4 || source_slot >= 4)
     {
-        return false;
+        result = false;
     }
-    u32 encoded_destination = info->tied_pair & 0x0fu;
-    u32 encoded_source = (info->tied_pair >> 4) & 0x0fu;
-    return encoded_destination != 0 && encoded_source != 0 && encoded_destination - 1u == destination_slot && encoded_source - 1u == source_slot;
+    else
+    {
+        u32 encoded_destination = info->tied_pair & 0x0fu;
+        u32 encoded_source = (info->tied_pair >> 4) & 0x0fu;
+        result = encoded_destination != 0 && encoded_source != 0 && encoded_destination - 1u == destination_slot && encoded_source - 1u == source_slot;
+    }
+
+    return result;
 }
 
 bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot)

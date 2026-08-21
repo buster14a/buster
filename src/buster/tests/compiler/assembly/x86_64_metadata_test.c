@@ -1089,11 +1089,20 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_raw_conjunction_rejected(u32 form_
     BusterX86MetadataPhysicalOperand operands[16] = {0};
     char8 mnemonic_buffer[128] = {0};
     BusterX86MetadataPhysicalQuery query = {0};
-    if (!x86_64_metadata_test_build_gate_query(form_id, &query, operands, mnemonic_buffer)) return false;
-    String8 raw_features[1] = {raw_feature};
-    query.features.names = raw_features;
-    query.features.count = BUSTER_ARRAY_LENGTH(raw_features);
-    return buster_x86_metadata_select_form(query).status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+    bool result;
+    if (!x86_64_metadata_test_build_gate_query(form_id, &query, operands, mnemonic_buffer))
+    {
+        result = false;
+    }
+    else
+    {
+        String8 raw_features[1] = {raw_feature};
+        query.features.names = raw_features;
+        query.features.count = BUSTER_ARRAY_LENGTH(raw_features);
+        result = buster_x86_metadata_select_form(query).status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand x86_64_metadata_test_physical_imm(s64 value, u16 width)
@@ -1326,22 +1335,31 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_case(
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_missing_feature(BusterX86MetadataFormKey key)
 {
     BusterX86MetadataExactPlan plan = {0};
-    if (!buster_x86_metadata_exact_plan_for_key(key, &plan)) return false;
-    u8 checked_bytes[8] = {0};
-    u8 fast_bytes[8] = {0};
-    BusterX86MetadataExactQuery checked_query = {
-        .key = key,
-        .features = {0},
-        .address_size = 64,
-        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-        .output = checked_bytes,
-        .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
-    };
-    BusterX86MetadataExactQuery fast_query = checked_query;
-    fast_query.output = fast_bytes;
-    BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query(checked_query);
-    BusterX86MetadataEmitResult fast = buster_x86_metadata_emit_exact_prevalidated(plan, fast_query);
-    return x86_64_metadata_test_emit_result_equal(checked, fast);
+    bool result;
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan))
+    {
+        result = false;
+    }
+    else
+    {
+        u8 checked_bytes[8] = {0};
+        u8 fast_bytes[8] = {0};
+        BusterX86MetadataExactQuery checked_query = {
+            .key = key,
+            .features = {0},
+            .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            .output = checked_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+        };
+        BusterX86MetadataExactQuery fast_query = checked_query;
+        fast_query.output = fast_bytes;
+        BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query(checked_query);
+        BusterX86MetadataEmitResult fast = buster_x86_metadata_emit_exact_prevalidated(plan, fast_query);
+        result = x86_64_metadata_test_emit_result_equal(checked, fast);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_machine_fast_scalar_case(

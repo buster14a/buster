@@ -50,54 +50,60 @@ BUSTER_GLOBAL_LOCAL CodegenTestHostF80 codegen_test_host_f80_probe(CodegenTestHo
 
 BUSTER_GLOBAL_LOCAL bool codegen_test_promote_canonical_f64_to_f80(IrProgram* program)
 {
+    bool result;
     if (!program)
     {
-        return false;
+        result = false;
     }
-    bool promoted = false;
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    else
     {
-        IrType* type = program->types.types + type_index;
-        if (type->kind == IR_TYPE_FLOAT && type->bit_width == 64)
+        bool promoted = false;
+        for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
         {
-            type->bit_width = 80;
-            type->layout.size = 16;
-            type->layout.alignment = 16;
-            type->abi = 0;
-            promoted = true;
-        }
-    }
-    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
-    {
-        IrModule* module = program->modules + module_index;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-        {
-            IrFunction* function = module->functions + function_index;
-            for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+            IrType* type = program->types.types + type_index;
+            if (type->kind == IR_TYPE_FLOAT && type->bit_width == 64)
             {
-                IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-                if (value_type && value_type->kind == IR_TYPE_FLOAT && value_type->bit_width == 80 && function->values[value_index].alignment < 16)
-                {
-                    function->values[value_index].alignment = 16;
-                }
-            }
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-            {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
-                {
-                    u64* immediates = arena_allocate(program->arena, u64, 2);
-                    instruction->immediate_count = 2;
-                    instruction->immediate_is_negative = false;
-                    immediates[0] = UINT64_C(0x8000000000000000); // +1.0
-                    immediates[1] = UINT64_C(0x3fff);
-                    instruction->immediates = immediates;
-                }
+                type->bit_width = 80;
+                type->layout.size = 16;
+                type->layout.alignment = 16;
+                type->abi = 0;
+                promoted = true;
             }
         }
+        for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+        {
+            IrModule* module = program->modules + module_index;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+                {
+                    IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+                    if (value_type && value_type->kind == IR_TYPE_FLOAT && value_type->bit_width == 80 && function->values[value_index].alignment < 16)
+                    {
+                        function->values[value_index].alignment = 16;
+                    }
+                }
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
+                    {
+                        u64* immediates = arena_allocate(program->arena, u64, 2);
+                        instruction->immediate_count = 2;
+                        instruction->immediate_is_negative = false;
+                        immediates[0] = UINT64_C(0x8000000000000000); // +1.0
+                        immediates[1] = UINT64_C(0x3fff);
+                        instruction->immediates = immediates;
+                    }
+                }
+            }
+        }
+        result = promoted;
     }
-    return promoted;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_test_host_f80_set(CodegenTestHostF80* value, u64 significand, u16 sign_exponent)

@@ -546,12 +546,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_opcode_produces_address(IrOpcode opcode)
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_operand_register(MachineX64Selector* selector, IrValueId value, u32* register_out)
 {
+    bool result;
     if (value.value >= selector->function->value_count || selector->value_virtual_registers[value.value] == UINT32_MAX)
     {
-        return false;
+        result = false;
     }
-    *register_out = selector->value_virtual_registers[value.value];
-    return true;
+    else
+    {
+        *register_out = selector->value_virtual_registers[value.value];
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_row(MachineX64Selector* selector, MachineInstruction instruction)
@@ -8160,12 +8166,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encod
 
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode)
 {
+    MachineX64PreparedExactOpcode const* result;
     if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
     {
-        return 0;
+        result = 0;
     }
-    u32 ordinal = opcode - MACHINE_X64_MOV_RI;
-    return ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) ? machine_x64_exact_opcode_map + ordinal : 0;
+    else
+    {
+        u32 ordinal = opcode - MACHINE_X64_MOV_RI;
+        result = ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) ? machine_x64_exact_opcode_map + ordinal : 0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,

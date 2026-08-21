@@ -54,14 +54,20 @@ BUSTER_V_IMPL Target target_native = {
 BUSTER_GLOBAL_LOCAL bool target_cpu_feature_bit_index(TargetCpuFeature feature, u32* word_index, u32* bit_index)
 {
     u32 feature_index = (u32)feature;
+    bool result;
     if (!word_index || !bit_index || feature_index == (u32)TARGET_CPU_FEATURE_NONE || feature_index >= (u32)TARGET_CPU_FEATURE_COUNT)
     {
-        return false;
+        result = false;
     }
-    feature_index -= 1;
-    *word_index = feature_index / 64;
-    *bit_index = feature_index % 64;
-    return *word_index < TARGET_CPU_FEATURE_WORD_COUNT;
+    else
+    {
+        feature_index -= 1;
+        *word_index = feature_index / 64;
+        *bit_index = feature_index % 64;
+        result = *word_index < TARGET_CPU_FEATURE_WORD_COUNT;
+    }
+
+    return result;
 }
 
 TargetCpuFeatures target_cpu_features_empty(void)

@@ -75,15 +75,24 @@ BUSTER_GLOBAL_LOCAL bool buster_a64_semantic_bytes_ready;
 
 static u8 buster_a64_semantic_blob_decode(char8 const* blob, u32 blob_size, u32 index)
 {
-    if (index >= blob_size) return 0;
-    u32 group = index / 3;
-    u32 within = index % 3;
-    u32 encoded = group * 4;
-    u32 value = ((u32)buster_a64_semantic_base64_value(blob[encoded]) << 18) |
-                ((u32)buster_a64_semantic_base64_value(blob[encoded + 1]) << 12) |
-                ((u32)buster_a64_semantic_base64_value(blob[encoded + 2]) << 6) |
-                (u32)buster_a64_semantic_base64_value(blob[encoded + 3]);
-    return (u8)((value >> (16 - 8 * within)) & 0xff);
+    u8 result;
+    if (index >= blob_size)
+    {
+        result = 0;
+    }
+    else
+    {
+        u32 group = index / 3;
+        u32 within = index % 3;
+        u32 encoded = group * 4;
+        u32 value = ((u32)buster_a64_semantic_base64_value(blob[encoded]) << 18) |
+                    ((u32)buster_a64_semantic_base64_value(blob[encoded + 1]) << 12) |
+                    ((u32)buster_a64_semantic_base64_value(blob[encoded + 2]) << 6) |
+                    (u32)buster_a64_semantic_base64_value(blob[encoded + 3]);
+        result = (u8)((value >> (16 - 8 * within)) & 0xff);
+    }
+
+    return result;
 }
 
 static u8 buster_a64_semantic_blob_byte(char8 const* blob, u8 const* bytes, u32 blob_size, u32 index)

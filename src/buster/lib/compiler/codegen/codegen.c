@@ -1650,12 +1650,18 @@ BUSTER_GLOBAL_LOCAL bool codegen_unwind_action_append(CodegenFunctionDescriptor*
 
 BUSTER_GLOBAL_LOCAL bool codegen_epilog_offset_append(CodegenFunctionDescriptor* descriptor, u32 capacity, u32 code_offset)
 {
+    bool result;
     if (!descriptor || !descriptor->epilog_offsets || descriptor->epilog_count >= capacity)
     {
-        return false;
+        result = false;
     }
-    descriptor->epilog_offsets[descriptor->epilog_count++] = code_offset;
-    return true;
+    else
+    {
+        descriptor->epilog_offsets[descriptor->epilog_count++] = code_offset;
+        result = true;
+    }
+
+    return result;
 }
 
 String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode)
@@ -4184,12 +4190,18 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_unsigned(String8 value, u64* re
 BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_alignment(String8 operand, u64* alignment)
 {
     u64 exponent = 0;
+    bool result;
     if (!codegen_global_assembly_unsigned(operand, &exponent) || exponent > 12)
     {
-        return false;
+        result = false;
     }
-    *alignment = UINT64_C(1) << exponent;
-    return true;
+    else
+    {
+        *alignment = UINT64_C(1) << exponent;
+        result = true;
+    }
+
+    return result;
 }
 
 // Upper bound on the padding a source's `.p2align` directives can demand: each
@@ -6059,12 +6071,18 @@ BUSTER_GLOBAL_LOCAL u8* codegen_canonical_direct_call_uses(Arena* arena, IrFunct
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_value_is_global_place(IrFunction* function, u32 value_index)
 {
+    bool result;
     if (!function || value_index >= function->value_count)
     {
-        return false;
+        result = false;
     }
-    IrInstructionId definition = function->values[value_index].definition;
-    return definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
+    else
+    {
+        IrInstructionId definition = function->values[value_index].definition;
+        result = definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
+    }
+
+    return result;
 }
 
 // A branch whose target block was not placed when the branch was emitted. The
@@ -6111,13 +6129,19 @@ struct CCanonicalEmitter
 // capacity error and retries with a larger reservation.
 BUSTER_GLOBAL_LOCAL bool c_branch_patch_push(CCanonicalEmitter* emitter, CCanonicalBranchPatch patch)
 {
+    bool result;
     if (emitter->branch_patch_count >= emitter->branch_patch_capacity)
     {
-        return false;
+        result = false;
     }
-    emitter->branch_patches[emitter->branch_patch_count] = patch;
-    emitter->branch_patch_count += 1;
-    return true;
+    else
+    {
+        emitter->branch_patches[emitter->branch_patch_count] = patch;
+        emitter->branch_patch_count += 1;
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL s32 c_x64_frame_displacement(CCanonicalEmitter* emitter, u32 offset)

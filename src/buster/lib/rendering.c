@@ -1051,82 +1051,88 @@ bool rendering_command_stream_command_ends_batch(RenderingCommandStream* stream,
 
 u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
 {
+    u32 result;
     if (!rendering_command_stream_is_valid(stream))
     {
-        return 0;
+        result = 0;
     }
-    u32 event_count = 0;
-    for (u32 command_index = 0; command_index < stream->command_count; command_index += 1)
+    else
     {
-        RenderingCommand command = stream->commands[command_index];
-        RenderingReplayEvent event = {
-            .kind = RENDERING_REPLAY_EVENT_KIND_COUNT,
-            .pipeline = command.pipeline,
-            .command_index = command_index,
-            .batch_index = command.batch_index,
-            .texture = command.texture,
-            .clip = command.clip,
-            .blur_rect = command.blur_rect,
-            .blur_corner_radii = command.blur_corner_radii,
-            .resources = command.resources,
-            .target = command.target,
-            .radius = command.blur_radius,
-        };
-        bool emit = true;
-        switch (command.kind)
+        u32 event_count = 0;
+        for (u32 command_index = 0; command_index < stream->command_count; command_index += 1)
         {
-        case RENDERING_COMMAND_RECT:
-            if (rendering_command_stream_command_ends_batch(stream, command_index))
+            RenderingCommand command = stream->commands[command_index];
+            RenderingReplayEvent event = {
+                .kind = RENDERING_REPLAY_EVENT_KIND_COUNT,
+                .pipeline = command.pipeline,
+                .command_index = command_index,
+                .batch_index = command.batch_index,
+                .texture = command.texture,
+                .clip = command.clip,
+                .blur_rect = command.blur_rect,
+                .blur_corner_radii = command.blur_corner_radii,
+                .resources = command.resources,
+                .target = command.target,
+                .radius = command.blur_radius,
+            };
+            bool emit = true;
+            switch (command.kind)
             {
-                event.kind = RENDERING_REPLAY_DRAW;
-                if (command.batch_index < stream->batch_count)
+            case RENDERING_COMMAND_RECT:
+                if (rendering_command_stream_command_ends_batch(stream, command_index))
                 {
-                    RenderingBatch batch = stream->batches[command.batch_index];
-                    event.pipeline = batch.pipeline;
-                    event.batch_index = command.batch_index;
-                    event.texture = batch.texture;
-                    event.clip = batch.clip;
-                    event.resources = batch.resources;
-                    event.target = batch.target;
+                    event.kind = RENDERING_REPLAY_DRAW;
+                    if (command.batch_index < stream->batch_count)
+                    {
+                        RenderingBatch batch = stream->batches[command.batch_index];
+                        event.pipeline = batch.pipeline;
+                        event.batch_index = command.batch_index;
+                        event.texture = batch.texture;
+                        event.clip = batch.clip;
+                        event.resources = batch.resources;
+                        event.target = batch.target;
+                    }
                 }
-            }
-            else
-            {
+                else
+                {
+                    emit = false;
+                }
+                break;
+            case RENDERING_COMMAND_CLIP_PUSH:
+                event.kind = RENDERING_REPLAY_CLIP_PUSH;
+                break;
+            case RENDERING_COMMAND_CLIP_POP:
+                event.kind = RENDERING_REPLAY_CLIP_POP;
+                break;
+            case RENDERING_COMMAND_FLUSH:
+                event.kind = RENDERING_REPLAY_FLUSH;
+                break;
+            case RENDERING_COMMAND_RESOURCE:
+                event.kind = RENDERING_REPLAY_RESOURCE;
+                break;
+            case RENDERING_COMMAND_TARGET:
+                event.kind = RENDERING_REPLAY_TARGET;
+                break;
+            case RENDERING_COMMAND_BACKGROUND_BLUR:
+                event.kind = RENDERING_REPLAY_BACKGROUND_BLUR;
+                break;
+            case RENDERING_COMMAND_KIND_COUNT:
                 emit = false;
+                break;
             }
-            break;
-        case RENDERING_COMMAND_CLIP_PUSH:
-            event.kind = RENDERING_REPLAY_CLIP_PUSH;
-            break;
-        case RENDERING_COMMAND_CLIP_POP:
-            event.kind = RENDERING_REPLAY_CLIP_POP;
-            break;
-        case RENDERING_COMMAND_FLUSH:
-            event.kind = RENDERING_REPLAY_FLUSH;
-            break;
-        case RENDERING_COMMAND_RESOURCE:
-            event.kind = RENDERING_REPLAY_RESOURCE;
-            break;
-        case RENDERING_COMMAND_TARGET:
-            event.kind = RENDERING_REPLAY_TARGET;
-            break;
-        case RENDERING_COMMAND_BACKGROUND_BLUR:
-            event.kind = RENDERING_REPLAY_BACKGROUND_BLUR;
-            break;
-        case RENDERING_COMMAND_KIND_COUNT:
-            emit = false;
-            break;
-        }
-        if (emit)
-        {
-            if (event_count < capacity && events)
+            if (emit)
             {
-                events[event_count] = event;
+                if (event_count < capacity && events)
+                {
+                    events[event_count] = event;
+                }
+                event_count += 1;
             }
-            event_count += 1;
         }
+        result = event_count;
     }
-    return event_count;
+
+    return result;
 }
 
 RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStream* stream, RenderingBackendKind backend, RenderingReplayEvent* events,
@@ -1704,22 +1710,27 @@ BUSTER_GLOBAL_LOCAL f32 rendering_blur_kernel_raw_weight(u32 radius, s32 offset)
 f32 rendering_blur_kernel_weight(u32 radius, s32 offset)
 {
     radius = radius > RENDERING_MAX_BLUR_RADIUS ? RENDERING_MAX_BLUR_RADIUS : radius;
+    f32 result;
     if (offset < -(s32)radius || offset > (s32)radius)
     {
-        return 0.0f;
+        result = 0.0f;
+    }
+    else
+    {
+        f32 weight = rendering_blur_kernel_raw_weight(radius, offset);
+        f32 normalization = 0.0f;
+        for (s32 normalization_offset = -(s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset <= (s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset += 1)
+        {
+            if (normalization_offset < -(s32)radius || normalization_offset > (s32)radius)
+            {
+                continue;
+            }
+            normalization += rendering_blur_kernel_raw_weight(radius, normalization_offset);
+        }
+        result = normalization > 0.0f ? weight / normalization : 0.0f;
     }
 
-    f32 weight = rendering_blur_kernel_raw_weight(radius, offset);
-    f32 normalization = 0.0f;
-    for (s32 normalization_offset = -(s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset <= (s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset += 1)
-    {
-        if (normalization_offset < -(s32)radius || normalization_offset > (s32)radius)
-        {
-            continue;
-        }
-        normalization += rendering_blur_kernel_raw_weight(radius, normalization_offset);
-    }
-    return normalization > 0.0f ? weight / normalization : 0.0f;
+    return result;
 }
 
 u32 rendering_blur_kernel_weight_fixed16(u32 radius, s32 offset)
@@ -1730,35 +1741,40 @@ u32 rendering_blur_kernel_weight_fixed16(u32 radius, s32 offset)
 
 BUSTER_GLOBAL_LOCAL f32 rendering_rounded_rect_sdf(RenderingClipRect rect, float2 pixel_position, float4 corner_radii)
 {
+    f32 result;
     if (rendering_clip_rect_is_empty(rect))
     {
-        return 1.0f;
+        result = 1.0f;
+    }
+    else
+    {
+        f32 rect_x0 = (f32)rect.x0;
+        f32 rect_y0 = (f32)rect.y0;
+        f32 rect_x1 = (f32)rect.x1;
+        f32 rect_y1 = (f32)rect.y1;
+        float2 half_size = float2_make((rect_x1 - rect_x0) * 0.5f, (rect_y1 - rect_y0) * 0.5f);
+        float2 center = float2_make((rect_x1 + rect_x0) * 0.5f, (rect_y1 + rect_y0) * 0.5f);
+        u32 corner_index = float2_element(pixel_position, 0) < float2_element(center, 0)
+                                ? (float2_element(pixel_position, 1) < float2_element(center, 1) ? 0 : 1)
+                                : (float2_element(pixel_position, 1) < float2_element(center, 1) ? 2 : 3);
+        f32 radius = float4_element(corner_radii, corner_index);
+        if (radius < 0.0f || radius != radius)
+        {
+            radius = 0.0f;
+        }
+        f32 maximum_radius = float2_element(half_size, 0) < float2_element(half_size, 1) ? float2_element(half_size, 0) : float2_element(half_size, 1);
+        radius = radius > maximum_radius ? maximum_radius : radius;
+        float2 distance_without_radius = float2_make(fabs_f32(float2_element(center, 0) - float2_element(pixel_position, 0)) - float2_element(half_size, 0),
+                                                      fabs_f32(float2_element(center, 1) - float2_element(pixel_position, 1)) - float2_element(half_size, 1));
+        float2 distance_with_radius = float2_make(float2_element(distance_without_radius, 0) + radius, float2_element(distance_without_radius, 1) + radius);
+        f32 negative_distance = BUSTER_MIN(BUSTER_MAX(float2_element(distance_with_radius, 0), float2_element(distance_with_radius, 1)), 0.0f);
+        f32 positive_x = BUSTER_MAX(float2_element(distance_with_radius, 0), 0.0f);
+        f32 positive_y = BUSTER_MAX(float2_element(distance_with_radius, 1), 0.0f);
+        f32 positive_distance = sqrt_f32(positive_x * positive_x + positive_y * positive_y);
+        result = negative_distance + positive_distance - radius;
     }
 
-    f32 rect_x0 = (f32)rect.x0;
-    f32 rect_y0 = (f32)rect.y0;
-    f32 rect_x1 = (f32)rect.x1;
-    f32 rect_y1 = (f32)rect.y1;
-    float2 half_size = float2_make((rect_x1 - rect_x0) * 0.5f, (rect_y1 - rect_y0) * 0.5f);
-    float2 center = float2_make((rect_x1 + rect_x0) * 0.5f, (rect_y1 + rect_y0) * 0.5f);
-    u32 corner_index = float2_element(pixel_position, 0) < float2_element(center, 0)
-                            ? (float2_element(pixel_position, 1) < float2_element(center, 1) ? 0 : 1)
-                            : (float2_element(pixel_position, 1) < float2_element(center, 1) ? 2 : 3);
-    f32 radius = float4_element(corner_radii, corner_index);
-    if (radius < 0.0f || radius != radius)
-    {
-        radius = 0.0f;
-    }
-    f32 maximum_radius = float2_element(half_size, 0) < float2_element(half_size, 1) ? float2_element(half_size, 0) : float2_element(half_size, 1);
-    radius = radius > maximum_radius ? maximum_radius : radius;
-    float2 distance_without_radius = float2_make(fabs_f32(float2_element(center, 0) - float2_element(pixel_position, 0)) - float2_element(half_size, 0),
-                                                  fabs_f32(float2_element(center, 1) - float2_element(pixel_position, 1)) - float2_element(half_size, 1));
-    float2 distance_with_radius = float2_make(float2_element(distance_without_radius, 0) + radius, float2_element(distance_without_radius, 1) + radius);
-    f32 negative_distance = BUSTER_MIN(BUSTER_MAX(float2_element(distance_with_radius, 0), float2_element(distance_with_radius, 1)), 0.0f);
-    f32 positive_x = BUSTER_MAX(float2_element(distance_with_radius, 0), 0.0f);
-    f32 positive_y = BUSTER_MAX(float2_element(distance_with_radius, 1), 0.0f);
-    f32 positive_distance = sqrt_f32(positive_x * positive_x + positive_y * positive_y);
-    return negative_distance + positive_distance - radius;
+    return result;
 }
 
 f32 rendering_rounded_rect_mask_factor(RenderingClipRect rect, float2 pixel_position, float4 corner_radii)
@@ -1788,98 +1804,103 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_validate(Arena* scratch, u8* pixels, u32
 
 BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 channels, u32 radius)
 {
+    bool result;
     if (!rendering_blur_validate(scratch, pixels, width, height, stride, channels, radius))
     {
-        return false;
+        result = false;
     }
-    if (radius != 0)
+    else
     {
-        if (radius > RENDERING_MAX_BLUR_RADIUS)
+        if (radius != 0)
         {
-            radius = RENDERING_MAX_BLUR_RADIUS;
-        }
-
-        f32 kernel_weights[RENDERING_MAX_BLUR_RADIUS * 2 + 1] = {0};
-        for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
-        {
-            if (offset < -(s32)radius || offset > (s32)radius)
+            if (radius > RENDERING_MAX_BLUR_RADIUS)
             {
-                continue;
+                radius = RENDERING_MAX_BLUR_RADIUS;
             }
-            kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS] = rendering_blur_kernel_weight(radius, offset);
-        }
-        u64 pixel_count = (u64)width * height;
-        u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
-        for (u32 y = 0; y < height; y += 1)
-        {
-            for (u32 x = 0; x < width; x += 1)
+
+            f32 kernel_weights[RENDERING_MAX_BLUR_RADIUS * 2 + 1] = {0};
+            for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
             {
-                for (u32 channel = 0; channel < channels; channel += 1)
+                if (offset < -(s32)radius || offset > (s32)radius)
                 {
-                    f32 sum = 0.0f;
-                    f32 weight_sum = 0.0f;
-                    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
+                    continue;
+                }
+                kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS] = rendering_blur_kernel_weight(radius, offset);
+            }
+            u64 pixel_count = (u64)width * height;
+            u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
+            for (u32 y = 0; y < height; y += 1)
+            {
+                for (u32 x = 0; x < width; x += 1)
+                {
+                    for (u32 channel = 0; channel < channels; channel += 1)
                     {
-                        if (offset < -(s32)radius || offset > (s32)radius)
+                        f32 sum = 0.0f;
+                        f32 weight_sum = 0.0f;
+                        for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
                         {
-                            continue;
+                            if (offset < -(s32)radius || offset > (s32)radius)
+                            {
+                                continue;
+                            }
+                            s32 sample_x = (s32)x + offset;
+                            if (sample_x < 0)
+                            {
+                                sample_x = 0;
+                            }
+                            if (sample_x >= (s32)width)
+                            {
+                                sample_x = (s32)width - 1;
+                            }
+                            f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                            sum += (f32)pixels[(u64)y * stride + (u64)sample_x * channels + channel] * weight;
+                            weight_sum += weight;
                         }
-                        s32 sample_x = (s32)x + offset;
-                        if (sample_x < 0)
-                        {
-                            sample_x = 0;
-                        }
-                        if (sample_x >= (s32)width)
-                        {
-                            sample_x = (s32)width - 1;
-                        }
-                        f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
-                        sum += (f32)pixels[(u64)y * stride + (u64)sample_x * channels + channel] * weight;
-                        weight_sum += weight;
+                        f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                        value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                        horizontal[((u64)y * width + x) * channels + channel] = (u8)round_f32(value);
                     }
-                    f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
-                    value = BUSTER_CLAMP(0.0f, value, 255.0f);
-                    horizontal[((u64)y * width + x) * channels + channel] = (u8)round_f32(value);
+                }
+            }
+
+            for (u32 y = 0; y < height; y += 1)
+            {
+                for (u32 x = 0; x < width; x += 1)
+                {
+                    for (u32 channel = 0; channel < channels; channel += 1)
+                    {
+                        f32 sum = 0.0f;
+                        f32 weight_sum = 0.0f;
+                        for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
+                        {
+                            if (offset < -(s32)radius || offset > (s32)radius)
+                            {
+                                continue;
+                            }
+                            s32 sample_y = (s32)y + offset;
+                            if (sample_y < 0)
+                            {
+                                sample_y = 0;
+                            }
+                            if (sample_y >= (s32)height)
+                            {
+                                sample_y = (s32)height - 1;
+                            }
+                            f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                            sum += (f32)horizontal[((u64)sample_y * width + x) * channels + channel] * weight;
+                            weight_sum += weight;
+                        }
+                        f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                        value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                        pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)round_f32(value);
+                    }
                 }
             }
         }
-
-        for (u32 y = 0; y < height; y += 1)
-        {
-            for (u32 x = 0; x < width; x += 1)
-            {
-                for (u32 channel = 0; channel < channels; channel += 1)
-                {
-                    f32 sum = 0.0f;
-                    f32 weight_sum = 0.0f;
-                    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
-                    {
-                        if (offset < -(s32)radius || offset > (s32)radius)
-                        {
-                            continue;
-                        }
-                        s32 sample_y = (s32)y + offset;
-                        if (sample_y < 0)
-                        {
-                            sample_y = 0;
-                        }
-                        if (sample_y >= (s32)height)
-                        {
-                            sample_y = (s32)height - 1;
-                        }
-                        f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
-                        sum += (f32)horizontal[((u64)sample_y * width + x) * channels + channel] * weight;
-                        weight_sum += weight;
-                    }
-                    f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
-                    value = BUSTER_CLAMP(0.0f, value, 255.0f);
-                    pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)round_f32(value);
-                }
-            }
-        }
+        result = true;
     }
 
-    return true;
+    return result;
 }
 
 bool rendering_blur_rgba8(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 radius)

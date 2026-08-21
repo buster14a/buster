@@ -2099,12 +2099,18 @@ BUSTER_GLOBAL_LOCAL UI_MouseButtonKind ui_mouse_button_kind_from_key(WmKey key, 
 
 BUSTER_GLOBAL_LOCAL bool ui_box_contains_point(UI_Box* box, float2 point)
 {
+    bool result;
     if (!box || !box->visible)
     {
-        return false;
+        result = false;
     }
-    F32Interval2 effective_rect = ui_rect_intersect(box->rect, box->clip_rect);
-    return ui_rect_has_area(effective_rect) && ui_rect_contains(effective_rect, point);
+    else
+    {
+        F32Interval2 effective_rect = ui_rect_intersect(box->rect, box->clip_rect);
+        result = ui_rect_has_area(effective_rect) && ui_rect_contains(effective_rect, point);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(float2 point, UI_BoxFlags required_flags, bool allow_disabled, u64 build_index)
@@ -2218,38 +2224,44 @@ BUSTER_GLOBAL_LOCAL void ui_route_pointer_targets_at(float2 point, u64 build_ind
 
 BUSTER_GLOBAL_LOCAL bool ui_focus_navigation_event(UI_Event* event, UI_BoxFlags* axis_flag, UI_FocusDirection* direction)
 {
+    bool result;
     if (!event || event->kind != UI_EventKind_Press || !axis_flag || !direction)
     {
-        return false;
+        result = false;
     }
-    *axis_flag = 0;
-    *direction = UI_FocusDirection_LinearForward;
-    if (event->key == WM_KEY_TAB)
+    else
     {
-        *axis_flag = UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY;
-        *direction = (event->modifiers & (1u << WM_MODIFIER_SHIFT)) ? UI_FocusDirection_LinearBackward : UI_FocusDirection_LinearForward;
+        *axis_flag = 0;
+        *direction = UI_FocusDirection_LinearForward;
+        if (event->key == WM_KEY_TAB)
+        {
+            *axis_flag = UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY;
+            *direction = (event->modifiers & (1u << WM_MODIFIER_SHIFT)) ? UI_FocusDirection_LinearBackward : UI_FocusDirection_LinearForward;
+        }
+        else if (event->key == WM_KEY_LEFT)
+        {
+            *axis_flag = UI_BoxFlag_DefaultFocusNavX;
+            *direction = UI_FocusDirection_Left;
+        }
+        else if (event->key == WM_KEY_RIGHT)
+        {
+            *axis_flag = UI_BoxFlag_DefaultFocusNavX;
+            *direction = UI_FocusDirection_Right;
+        }
+        else if (event->key == WM_KEY_UP)
+        {
+            *axis_flag = UI_BoxFlag_DefaultFocusNavY;
+            *direction = UI_FocusDirection_Up;
+        }
+        else if (event->key == WM_KEY_DOWN)
+        {
+            *axis_flag = UI_BoxFlag_DefaultFocusNavY;
+            *direction = UI_FocusDirection_Down;
+        }
+        result = *axis_flag != 0;
     }
-    else if (event->key == WM_KEY_LEFT)
-    {
-        *axis_flag = UI_BoxFlag_DefaultFocusNavX;
-        *direction = UI_FocusDirection_Left;
-    }
-    else if (event->key == WM_KEY_RIGHT)
-    {
-        *axis_flag = UI_BoxFlag_DefaultFocusNavX;
-        *direction = UI_FocusDirection_Right;
-    }
-    else if (event->key == WM_KEY_UP)
-    {
-        *axis_flag = UI_BoxFlag_DefaultFocusNavY;
-        *direction = UI_FocusDirection_Up;
-    }
-    else if (event->key == WM_KEY_DOWN)
-    {
-        *axis_flag = UI_BoxFlag_DefaultFocusNavY;
-        *direction = UI_FocusDirection_Down;
-    }
-    return *axis_flag != 0;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)

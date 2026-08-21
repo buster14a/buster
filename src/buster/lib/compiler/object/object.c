@@ -560,12 +560,18 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_byte_range(ObjectAssemblyBuffer*
 
 BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_raw_instruction(ObjectAssemblyBuffer* buffer, ByteSlice data, u64 offset, u64 instruction_length)
 {
+    u64 result;
     if (!instruction_length || offset > data.length || instruction_length > data.length - offset)
     {
-        return 0;
+        result = 0;
     }
-    object_assembly_append_byte_range(buffer, data, offset, offset + instruction_length);
-    return instruction_length;
+    else
+    {
+        object_assembly_append_byte_range(buffer, data, offset, offset + instruction_length);
+        result = instruction_length;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 object_assembly_alignment_exponent(u32 alignment)
@@ -3227,42 +3233,66 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
 
 BUSTER_GLOBAL_LOCAL bool object_read_u16(ByteSlice bytes, u64 offset, u16* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_read_u32(ByteSlice bytes, u64 offset, u32* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_read_u64(ByteSlice bytes, u64 offset, u64* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_read_s64(ByteSlice bytes, u64 offset, s64* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_reader_arena_position_after(Arena* arena, u64 position, u64 size, u64 alignment, u64* result)
@@ -6675,77 +6705,82 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_fuzz_seed_write(Arena* arena, Target t
 
 s32 object_fuzz_test_input(const u8* pointer, size_t size)
 {
+    s32 result;
     if (size > BUSTER_KB(64) || (size && !pointer))
     {
-        return -1;
+        result = -1;
     }
-    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
-    if (arena)
+    else
     {
-        ByteSlice input = {.pointer = (u8*)pointer, .length = size};
-        Target targets[] = {
-            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
-            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
-            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
-            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
-            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
-            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
-        };
-        ObjectFormat formats[] = {
-            OBJECT_FORMAT_ELF64,
-            OBJECT_FORMAT_COFF,
-            OBJECT_FORMAT_MACH_O64,
-            OBJECT_FORMAT_ELF64,
-            OBJECT_FORMAT_COFF,
-            OBJECT_FORMAT_MACH_O64,
-        };
-        bool archive_input = size >= 8 && pointer && memcmp(pointer, "!<arch>\n", 8) == 0;
-        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+        if (arena)
         {
-            TemporalArena raw_scope = arena_begin_temporal(arena);
-            object_fuzz_read_candidate(arena, input, targets[target_index], archive_input);
-            arena_set_position(arena, raw_scope.position);
-        }
-        for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(targets); seed_index += 1)
-        {
-            TemporalArena seed_scope = arena_begin_temporal(arena);
-            ObjectArtifact seed = object_fuzz_seed_write(arena, targets[seed_index], formats[seed_index]);
-            if (seed.error == OBJECT_ERROR_NONE && seed.bytes.pointer && seed.bytes.length <= OBJECT_FUZZ_MAX_GENERATED_BYTES)
+            ByteSlice input = {.pointer = (u8*)pointer, .length = size};
+            Target targets[] = {
+                {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+                {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+            };
+            ObjectFormat formats[] = {
+                OBJECT_FORMAT_ELF64,
+                OBJECT_FORMAT_COFF,
+                OBJECT_FORMAT_MACH_O64,
+                OBJECT_FORMAT_ELF64,
+                OBJECT_FORMAT_COFF,
+                OBJECT_FORMAT_MACH_O64,
+            };
+            bool archive_input = size >= 8 && pointer && memcmp(pointer, "!<arch>\n", 8) == 0;
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
             {
-                TemporalArena parse_scope = arena_begin_temporal(arena);
-                object_fuzz_read_candidate(arena, seed.bytes, targets[seed_index], false);
-                arena_set_position(arena, parse_scope.position);
-                for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
-                {
-                    TemporalArena mutation_scope = arena_begin_temporal(arena);
-                    ByteSlice mutated = object_fuzz_mutate(arena, seed.bytes, pointer, size, formats[seed_index], false, mutation_index);
-                    object_fuzz_read_candidate(arena, mutated, targets[seed_index], false);
-                    arena_set_position(arena, mutation_scope.position);
-                }
-                for (u32 archive_kind = 0; archive_kind < 3; archive_kind += 1)
-                {
-                    TemporalArena archive_scope = arena_begin_temporal(arena);
-                    ByteSlice archive = object_fuzz_archive_make(arena, seed.bytes, archive_kind);
-                    if (archive.pointer)
-                    {
-                        object_fuzz_read_candidate(arena, archive, targets[seed_index], true);
-                        for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
-                        {
-                            TemporalArena mutation_scope = arena_begin_temporal(arena);
-                            ByteSlice mutated = object_fuzz_mutate(arena, archive, pointer, size, formats[seed_index], true, mutation_index);
-                            object_fuzz_read_candidate(arena, mutated, targets[seed_index], true);
-                            arena_set_position(arena, mutation_scope.position);
-                        }
-                    }
-                    arena_set_position(arena, archive_scope.position);
-                }
+                TemporalArena raw_scope = arena_begin_temporal(arena);
+                object_fuzz_read_candidate(arena, input, targets[target_index], archive_input);
+                arena_set_position(arena, raw_scope.position);
             }
-            arena_set_position(arena, seed_scope.position);
+            for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(targets); seed_index += 1)
+            {
+                TemporalArena seed_scope = arena_begin_temporal(arena);
+                ObjectArtifact seed = object_fuzz_seed_write(arena, targets[seed_index], formats[seed_index]);
+                if (seed.error == OBJECT_ERROR_NONE && seed.bytes.pointer && seed.bytes.length <= OBJECT_FUZZ_MAX_GENERATED_BYTES)
+                {
+                    TemporalArena parse_scope = arena_begin_temporal(arena);
+                    object_fuzz_read_candidate(arena, seed.bytes, targets[seed_index], false);
+                    arena_set_position(arena, parse_scope.position);
+                    for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+                    {
+                        TemporalArena mutation_scope = arena_begin_temporal(arena);
+                        ByteSlice mutated = object_fuzz_mutate(arena, seed.bytes, pointer, size, formats[seed_index], false, mutation_index);
+                        object_fuzz_read_candidate(arena, mutated, targets[seed_index], false);
+                        arena_set_position(arena, mutation_scope.position);
+                    }
+                    for (u32 archive_kind = 0; archive_kind < 3; archive_kind += 1)
+                    {
+                        TemporalArena archive_scope = arena_begin_temporal(arena);
+                        ByteSlice archive = object_fuzz_archive_make(arena, seed.bytes, archive_kind);
+                        if (archive.pointer)
+                        {
+                            object_fuzz_read_candidate(arena, archive, targets[seed_index], true);
+                            for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+                            {
+                                TemporalArena mutation_scope = arena_begin_temporal(arena);
+                                ByteSlice mutated = object_fuzz_mutate(arena, archive, pointer, size, formats[seed_index], true, mutation_index);
+                                object_fuzz_read_candidate(arena, mutated, targets[seed_index], true);
+                                arena_set_position(arena, mutation_scope.position);
+                            }
+                        }
+                        arena_set_position(arena, archive_scope.position);
+                    }
+                }
+                arena_set_position(arena, seed_scope.position);
+            }
+            arena_destroy(arena, 1);
         }
-        arena_destroy(arena, 1);
+        result = 0;
     }
 
-    return 0;
+    return result;
 }
 #endif
 
@@ -7557,53 +7592,58 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(
 
 BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* object, ObjectWindowsUnwindResult built)
 {
+    bool result;
     if (!built.valid || built.function_count > object->symbol_count)
     {
-        return false;
+        result = false;
     }
-    object->sections[OBJECT_SECTION_WINDOWS_PDATA].data = built.pdata;
-    object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
-    object->sections[OBJECT_SECTION_WINDOWS_XDATA].data = built.xdata;
-    object->sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = built.xdata.length;
-    if (built.function_count)
+    else
     {
-        u32 xdata_symbol = object->symbol_count++;
-        object->symbols[xdata_symbol] = (ObjectSymbol){
-            .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
-            .size = built.xdata.length,
-            .section = OBJECT_SECTION_WINDOWS_XDATA,
-            .kind = OBJECT_SYMBOL_DATA,
-        };
-        for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
+        object->sections[OBJECT_SECTION_WINDOWS_PDATA].data = built.pdata;
+        object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
+        object->sections[OBJECT_SECTION_WINDOWS_XDATA].data = built.xdata;
+        object->sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = built.xdata.length;
+        if (built.function_count)
         {
-            u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
-            object->relocations[object->relocation_count++] = (ObjectRelocation){
-                .offset = offset,
-                .section = OBJECT_SECTION_WINDOWS_PDATA,
-                .symbol = function_index,
-                .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+            u32 xdata_symbol = object->symbol_count++;
+            object->symbols[xdata_symbol] = (ObjectSymbol){
+                .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
+                .size = built.xdata.length,
+                .section = OBJECT_SECTION_WINDOWS_XDATA,
+                .kind = OBJECT_SYMBOL_DATA,
             };
-            if (!built.aarch64)
+            for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
             {
+                u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
                 object->relocations[object->relocation_count++] = (ObjectRelocation){
-                    .addend = (s64)object->symbols[function_index].size,
-                    .offset = offset + 4,
+                    .offset = offset,
                     .section = OBJECT_SECTION_WINDOWS_PDATA,
                     .symbol = function_index,
                     .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
                 };
+                if (!built.aarch64)
+                {
+                    object->relocations[object->relocation_count++] = (ObjectRelocation){
+                        .addend = (s64)object->symbols[function_index].size,
+                        .offset = offset + 4,
+                        .section = OBJECT_SECTION_WINDOWS_PDATA,
+                        .symbol = function_index,
+                        .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+                    };
+                }
+                object->relocations[object->relocation_count++] = (ObjectRelocation){
+                    .addend = (s64)built.xdata_offsets[function_index],
+                    .offset = offset + (built.aarch64 ? 4 : 8),
+                    .section = OBJECT_SECTION_WINDOWS_PDATA,
+                    .symbol = xdata_symbol,
+                    .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+                };
             }
-            object->relocations[object->relocation_count++] = (ObjectRelocation){
-                .addend = (s64)built.xdata_offsets[function_index],
-                .offset = offset + (built.aarch64 ? 4 : 8),
-                .section = OBJECT_SECTION_WINDOWS_PDATA,
-                .symbol = xdata_symbol,
-                .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
-            };
         }
+        result = true;
     }
 
-    return true;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)

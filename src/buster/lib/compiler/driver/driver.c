@@ -1360,22 +1360,34 @@ struct CompilerDriverDynamicLibraries
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u32(ByteSlice bytes, u64 offset, u32* value)
 {
+    bool result;
     if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
     {
-        return false;
+        result = false;
     }
-    memcpy(value, bytes.pointer + offset, sizeof(*value));
-    return true;
+    else
+    {
+        memcpy(value, bytes.pointer + offset, sizeof(*value));
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 section_table, u16 section_count, u32 rva, u64* offset_out)
