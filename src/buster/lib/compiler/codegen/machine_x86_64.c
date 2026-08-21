@@ -2925,163 +2925,162 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
     // stage through k1 inside the encoder.
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    if (!machine_x64_simd_supported(selector->target, operation) || instruction->operand_count != shape.operand_count ||
-        instruction->immediate_count != shape.immediate_count || (shape.immediate_count && !instruction->immediates) ||
-        (shape.has_result && result_register == UINT32_MAX))
-    {
-        return false;
-    }
+    bool selected = machine_x64_simd_supported(selector->target, operation) && instruction->operand_count == shape.operand_count &&
+                    instruction->immediate_count == shape.immediate_count && (!shape.immediate_count || instruction->immediates) &&
+                    (!shape.has_result || result_register != UINT32_MAX);
     u32 operand_registers[4];
-    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+    for (u32 operand_index = 0; operand_index < instruction->operand_count && selected; operand_index += 1)
     {
-        if (!machine_x64_operand_register(selector, instruction->operands[operand_index], operand_registers + operand_index))
+        selected = machine_x64_operand_register(selector, instruction->operands[operand_index], operand_registers + operand_index);
+    }
+    if (selected)
+    {
+        // Read after the verdict: a shape that wants an immediate has already
+        // been rejected here if the instruction carries no immediate array.
+        u32 immediate = shape.immediate_count ? (u32)instruction->immediates[0] : 0;
+        switch (operation)
         {
-            return false;
+        case IR_SIMD_LOAD:
+        case IR_SIMD_LOAD_MASKED:
+        {
+            bool masked = operation == IR_SIMD_LOAD_MASKED;
+            // The mask ref is built before the row, not inside it: only the masked
+            // shape has a second operand, so an unmasked load must not reach
+            // operand_registers[1] at all.
+            MachineRef mask_operand = masked ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]) : 0;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]), mask_operand},
+                                                           .opcode = masked ? MACHINE_X64_VLOAD_PTR_MASKED : MACHINE_X64_VLOAD_PTR,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_STORE:
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
+                                                 .opcode = MACHINE_X64_VSTORE_PTR,
+                                             });
+            break;
+        }
+        case IR_SIMD_STORE_MASKED:
+        case IR_SIMD_COMPRESS_STORE_BYTE:
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2])},
+                                                 .opcode = operation == IR_SIMD_STORE_MASKED ? MACHINE_X64_VSTORE_PTR_MASKED : MACHINE_X64_VCOMPRESS_STORE_PTR,
+                                             });
+            break;
+        }
+        case IR_SIMD_SPLAT_BYTE:
+        {
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
+                                                           .opcode = MACHINE_X64_VSPLATB,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_COMPARE_EQUAL_BYTE:
+        case IR_SIMD_COMPARE_LESS_BYTE:
+        case IR_SIMD_TEST_MASK_BYTE:
+        case IR_SIMD_COMPARE_EQUAL_WORD:
+        {
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
+                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? 0u : operation == IR_SIMD_COMPARE_LESS_BYTE ? 1u
+                                                                      : operation == IR_SIMD_TEST_MASK_BYTE   ? 2u
+                                                                                                              : 3u,
+                                                           .opcode = MACHINE_X64_VPCMP_MASK,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_SIGN_MASK_BYTE:
+        {
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
+                                                           .opcode = MACHINE_X64_VPMOVB2M,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_PERMUTE2_BYTE:
+        {
+            // vpermt2b reads the low table from its destination register
+            // and overwrites it, so the low table copies into the result
+            // first; the copy coalesces whenever the low value dies here.
+            u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
+                                                                .opcode = MACHINE_X64_VMOV_RR,
+                                                            });
+            machine_x64_define(selector, result_register, copy_row);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[3])},
+                                                 .opcode = MACHINE_X64_VPERMT2B,
+                                             });
+            break;
+        }
+        case IR_SIMD_COMPRESS_BYTE:
+        {
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
+                                                           .opcode = MACHINE_X64_VCOMPRESSB,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        case IR_SIMD_SHIFT_LEFT_WORD:
+        {
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
+                                                           .payload = immediate,
+                                                           .opcode = operation == IR_SIMD_WIDEN_BYTE_TO_WORD ? MACHINE_X64_VPMOVZXBD : MACHINE_X64_VPSLLD_RI,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            break;
+        }
+        case IR_SIMD_TERNARY_WORD:
+        {
+            // vpternlogd reads its first source from the destination, the
+            // same in-place shape as vpermt2b.
+            u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
+                                                                .opcode = MACHINE_X64_VMOV_RR,
+                                                            });
+            machine_x64_define(selector, result_register, copy_row);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2])},
+                                                 .payload = immediate,
+                                                 .opcode = MACHINE_X64_VPTERNLOGD,
+                                             });
+            break;
+        }
+        case IR_SIMD_COUNT:
+            selected = false;
+            break;
         }
     }
-    u32 immediate = shape.immediate_count ? (u32)instruction->immediates[0] : 0;
-    switch (operation)
-    {
-        break;
-    case IR_SIMD_LOAD:
-    case IR_SIMD_LOAD_MASKED:
-    {
-        bool masked = operation == IR_SIMD_LOAD_MASKED;
-        // The mask ref is built before the row, not inside it: only the masked
-        // shape has a second operand, so an unmasked load must not reach
-        // operand_registers[1] at all.
-        MachineRef mask_operand = masked ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]) : 0;
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]), mask_operand},
-                                                       .opcode = masked ? MACHINE_X64_VLOAD_PTR_MASKED : MACHINE_X64_VLOAD_PTR,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_STORE:
-    {
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                             .opcode = MACHINE_X64_VSTORE_PTR,
-                                         });
-        return true;
-    }
-    case IR_SIMD_STORE_MASKED:
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-    {
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2])},
-                                             .opcode = operation == IR_SIMD_STORE_MASKED ? MACHINE_X64_VSTORE_PTR_MASKED : MACHINE_X64_VCOMPRESS_STORE_PTR,
-                                         });
-        return true;
-    }
-    case IR_SIMD_SPLAT_BYTE:
-    {
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                       .opcode = MACHINE_X64_VSPLATB,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-    case IR_SIMD_COMPARE_LESS_BYTE:
-    case IR_SIMD_TEST_MASK_BYTE:
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-    {
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                       .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? 0u : operation == IR_SIMD_COMPARE_LESS_BYTE ? 1u
-                                                                  : operation == IR_SIMD_TEST_MASK_BYTE   ? 2u
-                                                                                                          : 3u,
-                                                       .opcode = MACHINE_X64_VPCMP_MASK,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_SIGN_MASK_BYTE:
-    {
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                       .opcode = MACHINE_X64_VPMOVB2M,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_PERMUTE2_BYTE:
-    {
-        // vpermt2b reads the low table from its destination register
-        // and overwrites it, so the low table copies into the result
-        // first; the copy coalesces whenever the low value dies here.
-        u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
-                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                            .opcode = MACHINE_X64_VMOV_RR,
-                                                        });
-        machine_x64_define(selector, result_register, copy_row);
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[3])},
-                                             .opcode = MACHINE_X64_VPERMT2B,
-                                         });
-        return true;
-    }
-    case IR_SIMD_COMPRESS_BYTE:
-    {
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                       .opcode = MACHINE_X64_VCOMPRESSB,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-    case IR_SIMD_SHIFT_LEFT_WORD:
-    {
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                       .payload = immediate,
-                                                       .opcode = operation == IR_SIMD_WIDEN_BYTE_TO_WORD ? MACHINE_X64_VPMOVZXBD : MACHINE_X64_VPSLLD_RI,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    case IR_SIMD_TERNARY_WORD:
-    {
-        // vpternlogd reads its first source from the destination, the
-        // same in-place shape as vpermt2b.
-        u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
-                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                            .opcode = MACHINE_X64_VMOV_RR,
-                                                        });
-        machine_x64_define(selector, result_register, copy_row);
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1]),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2])},
-                                             .payload = immediate,
-                                             .opcode = MACHINE_X64_VPTERNLOGD,
-                                         });
-        return true;
-    }
-    case IR_SIMD_COUNT:
-        return false;
-    }
-    return false;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_call(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
