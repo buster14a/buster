@@ -1492,242 +1492,261 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     return true;
 }
 
-bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_address_of(IrValueLabelMetadata* result)
 {
-    IrValue* result_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
-    if (!function || !result_slot)
+    return !result->is_label_value && !result->has_label_provenance && !result->label_blocks &&
+           !result->label_block_count && !result->label_paths && !result->label_path_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_load(IrProgram* program, IrValue* first_slot, IrValueLabelMetadata* result, IrValueLabelMetadata* first)
+{
+    bool valid;
+    if (!first)
     {
-        return false;
+        valid = false;
     }
-    if (result_slot->definition.value >= function->instruction_count)
+    else if (result->is_label_value)
     {
-        return true;
+        valid = first->has_label_provenance && !first->has_non_label_provenance && !ir_value_has_non_label_path(first) && !result->label_path_count &&
+               ir_label_block_sets_equal(result, first);
     }
-    IrInstruction* definition = function->instructions + result_slot->definition.value;
-    IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
-                              ? function->values + definition->operands[0].value
-                              : 0;
-    if (!function->label_metadata_count)
+    else if (!ir_label_metadata_storage_transfer_valid(program, result, first))
     {
-        // With no metadata anywhere in the function, the full checks below
-        // reduce to the operand-existence requirements of each transfer rule
-        // (and LABEL_ADDRESS can never validate a metadata-free result).
-        switch (definition->opcode)
-        {
-        case IR_OPCODE_LOAD:
-        case IR_OPCODE_ATOMIC_LOAD:
-        case IR_OPCODE_CAST:
-        case IR_OPCODE_FIELD:
-        case IR_OPCODE_INDEX:
-        case IR_OPCODE_DEREFERENCE:
-            return first_slot != 0;
-        case IR_OPCODE_ARRAY:
-        case IR_OPCODE_AGGREGATE:
-        {
-            if (!program)
-            {
-                return true;
-            }
-            for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
-            {
-                if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-        case IR_OPCODE_LABEL_ADDRESS:
-            return false;
-        default:
-            return true;
-        }
+        valid = false;
     }
-    IrValueLabelMetadata result_metadata = ir_value_label_metadata(function, value_id);
-    IrValueLabelMetadata* result = &result_metadata;
-    IrValueLabelMetadata first_metadata = first_slot ? ir_value_label_metadata(function, definition->operands[0]) : (IrValueLabelMetadata){0};
-    IrValueLabelMetadata* first = first_slot ? &first_metadata : 0;
-    switch (definition->opcode)
+    else if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
     {
-    case IR_OPCODE_ADDRESS_OF:
-        return !result->is_label_value && !result->has_label_provenance && !result->label_blocks &&
-               !result->label_block_count && !result->label_paths && !result->label_path_count;
-    case IR_OPCODE_LOAD:
-    case IR_OPCODE_ATOMIC_LOAD:
-        if (!first)
-        {
-            return false;
-        }
-        if (result->is_label_value)
-        {
-            return first->has_label_provenance && !first->has_non_label_provenance && !ir_value_has_non_label_path(first) && !result->label_path_count &&
-                   ir_label_block_sets_equal(result, first);
-        }
-        if (!ir_label_metadata_storage_transfer_valid(program, result, first))
-        {
-            return false;
-        }
-        if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
-        {
-            return true;
-        }
+        valid = true;
+    }
+    else
+    {
         IrType* load_source_type = program ? ir_type_from_id(&program->types, first_slot->canonical_type) : 0;
-        return !program || !load_source_type || !load_source_type->layout.resolved ||
-               ir_label_metadata_paths_transfer_exact(result, first, 0, load_source_type->layout.size);
-    case IR_OPCODE_CAST:
-        if (!first)
-        {
-            return false;
-        }
-        if (ir_label_metadata_has_label(first) || ir_label_metadata_has_label(result))
-        {
-            if (!program || !ir_canonical_void_pointer_type(program, first_slot->canonical_type) ||
-                !ir_canonical_void_pointer_type(program, result_slot->canonical_type) || first_slot->canonical_type.value != result_slot->canonical_type.value ||
-                definition->conversion_operation != IR_CONVERSION_IDENTITY)
-            {
-                return false;
-            }
-        }
-        if (result->is_label_value)
-        {
-            return first->is_label_value && !first->has_non_label_provenance && !ir_value_has_non_label_path(first) && !result->label_path_count &&
-                   ir_label_block_sets_equal(result, first);
-        }
-        if (!ir_label_metadata_storage_transfer_valid(program, result, first))
-        {
-            return false;
-        }
-        if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
-        {
-            return true;
-        }
-        IrType* cast_source_type = program ? ir_type_from_id(&program->types, first_slot->canonical_type) : 0;
-        return !program || !cast_source_type || !cast_source_type->layout.resolved ||
-               ir_label_metadata_paths_transfer_exact(result, first, 0, cast_source_type->layout.size);
-    case IR_OPCODE_FIELD:
-        if (!first || result->is_label_value)
-        {
-            return false;
-        }
-        if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
-        {
-            return true;
-        }
-        if (!program)
-        {
-            return !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
-        }
-        {
-            IrType* aggregate = ir_type_from_id(&program->types, first_slot->canonical_type);
-            u64 field_index = definition->immediate_count == 1 && definition->immediates ? definition->immediates[0] : UINT64_MAX;
-            if (!aggregate || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION) || field_index >= aggregate->field_count)
-            {
-                return !ir_label_metadata_has_label(result) && !result->label_path_count;
-            }
-            IrField* field = aggregate->fields + field_index;
-            IrType* field_type = ir_type_from_id(&program->types, field->type);
-            if (!field_type || !field_type->layout.resolved)
-            {
-                return !ir_label_metadata_has_label(result) && !result->label_path_count;
-            }
-            if (aggregate->kind == IR_TYPE_UNION && ir_label_metadata_has_label(first) &&
-                !(field_type->kind == IR_TYPE_POINTER && ir_canonical_void_pointer_type(program, field->type)))
-            {
-                return false;
-            }
-            if (!ir_label_metadata_storage_transfer_valid(program, result, first))
-            {
-                return false;
-            }
-            if (ir_label_metadata_has_label(result) && !first->label_path_count)
-            {
-                return false;
-            }
-            return ir_label_metadata_paths_transfer_exact(result, first, field->offset, field_type->layout.size);
-        }
-    case IR_OPCODE_INDEX:
-        if (!first || result->is_label_value)
-        {
-            return false;
-        }
-        if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
-        {
-            return true;
-        }
-        if (!program)
-        {
-            return !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
-        }
-        {
-            IrType* base_type = ir_type_from_id(&program->types, first_slot->canonical_type);
-            IrType* element_type = base_type ? ir_type_from_id(&program->types, base_type->element_type) : 0;
-            u64 index = 0;
-            bool constant = definition->operand_count == 2 && definition->operands && ir_constant_index_value(function, definition->operands[1], &index);
-            if (!base_type || !element_type || !element_type->layout.resolved || !element_type->layout.size)
-            {
-                return !ir_label_metadata_has_label(result) && !result->label_path_count;
-            }
-            if (base_type->kind == IR_TYPE_POINTER && ir_label_metadata_has_label(first))
-            {
-                return false;
-            }
-            if (!ir_label_metadata_storage_transfer_valid(program, result, first))
-            {
-                return false;
-            }
-            if (constant)
-            {
-                if ((base_type->kind != IR_TYPE_ARRAY && base_type->kind != IR_TYPE_VECTOR) || index >= base_type->element_count ||
-                    index > UINT64_MAX / element_type->layout.size)
-                {
-                    return !ir_label_metadata_has_label(result) && !result->label_path_count;
-                }
-                u64 offset = index * element_type->layout.size;
-                if (offset > base_type->layout.size || element_type->layout.size > base_type->layout.size - offset)
-                {
-                    return false;
-                }
-                if (ir_label_metadata_has_label(result) && !first->label_path_count)
-                {
-                    return false;
-                }
-                return ir_label_metadata_paths_transfer_exact(result, first, offset, element_type->layout.size);
-            }
-            if (base_type->kind != IR_TYPE_ARRAY && base_type->kind != IR_TYPE_VECTOR)
-            {
-                return !ir_label_metadata_has_label(result) && !result->label_path_count;
-            }
-            if (!base_type->element_count || element_type->layout.size > UINT64_MAX / base_type->element_count)
-            {
-                return !ir_label_metadata_has_label(result) && !result->label_path_count;
-            }
-            u64 array_size = element_type->layout.size * base_type->element_count;
-            if (array_size > base_type->layout.size)
-            {
-                return false;
-            }
-            if (element_type->kind == IR_TYPE_ARRAY || element_type->kind == IR_TYPE_STRUCT || element_type->kind == IR_TYPE_UNION)
-            {
-                // A dynamic aggregate element may contain label-bearing
-                // subobjects at offsets that are not representable by the
-                // scalar transfer below.  Do not accept either a forged
-                // result or a silently incomplete transfer: the frontend
-                // rejects this case until the metadata model grows a
-                // wildcard/subobject representation.
-                return !ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result);
-            }
-            return ir_label_metadata_dynamic_index_transfer_valid(result, first, array_size, element_type->layout.size);
-        }
-    case IR_OPCODE_DEREFERENCE:
-        return first && !ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result);
-    case IR_OPCODE_ARRAY:
-    case IR_OPCODE_AGGREGATE:
+        valid = !program || !load_source_type || !load_source_type->layout.resolved ||
+                ir_label_metadata_paths_transfer_exact(result, first, 0, load_source_type->layout.size);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_cast(
+    IrProgram* program, IrInstruction* definition, IrValue* result_slot, IrValue* first_slot, IrValueLabelMetadata* result, IrValueLabelMetadata* first)
+{
+    bool valid;
+    // A label that survives a cast may only pass through an identity cast
+    // between the same void pointer type, which is what the conjunction here
+    // says: the outer test selects the labelled case, the inner one rejects it.
+    if (!first)
     {
-        if (program)
+        valid = false;
+    }
+    else if ((ir_label_metadata_has_label(first) || ir_label_metadata_has_label(result)) &&
+             (!program || !ir_canonical_void_pointer_type(program, first_slot->canonical_type) ||
+              !ir_canonical_void_pointer_type(program, result_slot->canonical_type) ||
+              first_slot->canonical_type.value != result_slot->canonical_type.value ||
+              definition->conversion_operation != IR_CONVERSION_IDENTITY))
+    {
+        valid = false;
+    }
+    else if (result->is_label_value)
+    {
+        valid = first->is_label_value && !first->has_non_label_provenance && !ir_value_has_non_label_path(first) && !result->label_path_count &&
+                ir_label_block_sets_equal(result, first);
+    }
+    else if (!ir_label_metadata_storage_transfer_valid(program, result, first))
+    {
+        valid = false;
+    }
+    else if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
+    {
+        valid = true;
+    }
+    else
+    {
+        IrType* cast_source_type = program ? ir_type_from_id(&program->types, first_slot->canonical_type) : 0;
+        valid = !program || !cast_source_type || !cast_source_type->layout.resolved ||
+                ir_label_metadata_paths_transfer_exact(result, first, 0, cast_source_type->layout.size);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_field(IrProgram* program, IrInstruction* definition, IrValue* first_slot,
+                                                       IrValueLabelMetadata* result, IrValueLabelMetadata* first)
+{
+    bool valid;
+    if (!first || result->is_label_value)
+    {
+        valid = false;
+    }
+    else if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
+    {
+        valid = true;
+    }
+    else if (!program)
+    {
+        valid = !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
+    }
+    else
+    {
+        IrType* aggregate = ir_type_from_id(&program->types, first_slot->canonical_type);
+        u64 field_index = definition->immediate_count == 1 && definition->immediates ? definition->immediates[0] : UINT64_MAX;
+        bool addressable = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) && field_index < aggregate->field_count;
+        IrField* field = addressable ? aggregate->fields + field_index : 0;
+        IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
+        if (!field_type || !field_type->layout.resolved)
         {
-            return ir_label_metadata_aggregate_transfer_valid(program, function, definition, result);
+            // A field this pass cannot resolve carries no label through it.
+            valid = !ir_label_metadata_has_label(result) && !result->label_path_count;
         }
-        for (u32 block_index = 0; block_index < result->label_block_count; block_index += 1)
+        else if (aggregate->kind == IR_TYPE_UNION && ir_label_metadata_has_label(first) &&
+                 !(field_type->kind == IR_TYPE_POINTER && ir_canonical_void_pointer_type(program, field->type)))
+        {
+            valid = false;
+        }
+        else if (!ir_label_metadata_storage_transfer_valid(program, result, first))
+        {
+            valid = false;
+        }
+        else if (ir_label_metadata_has_label(result) && !first->label_path_count)
+        {
+            valid = false;
+        }
+        else
+        {
+            valid = ir_label_metadata_paths_transfer_exact(result, first, field->offset, field_type->layout.size);
+        }
+    }
+    return valid;
+}
+
+// The constant-index and dynamic-index cases differ enough to be worth naming;
+// both start from the element type the base resolves to.
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_constant_index(IrValueLabelMetadata* result, IrValueLabelMetadata* first, IrType* base_type,
+                                                                IrType* element_type, u64 index)
+{
+    bool valid;
+    if ((base_type->kind != IR_TYPE_ARRAY && base_type->kind != IR_TYPE_VECTOR) || index >= base_type->element_count ||
+        index > UINT64_MAX / element_type->layout.size)
+    {
+        valid = !ir_label_metadata_has_label(result) && !result->label_path_count;
+    }
+    else
+    {
+        u64 offset = index * element_type->layout.size;
+        if (offset > base_type->layout.size || element_type->layout.size > base_type->layout.size - offset)
+        {
+            valid = false;
+        }
+        else if (ir_label_metadata_has_label(result) && !first->label_path_count)
+        {
+            valid = false;
+        }
+        else
+        {
+            valid = ir_label_metadata_paths_transfer_exact(result, first, offset, element_type->layout.size);
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_dynamic_index(IrValueLabelMetadata* result, IrValueLabelMetadata* first, IrType* base_type,
+                                                               IrType* element_type)
+{
+    bool valid;
+    // Only read once the two tests above have ruled out the overflow that
+    // would make it meaningless.
+    u64 array_size = element_type->layout.size * base_type->element_count;
+    if (base_type->kind != IR_TYPE_ARRAY && base_type->kind != IR_TYPE_VECTOR)
+    {
+        valid = !ir_label_metadata_has_label(result) && !result->label_path_count;
+    }
+    else if (!base_type->element_count || element_type->layout.size > UINT64_MAX / base_type->element_count)
+    {
+        valid = !ir_label_metadata_has_label(result) && !result->label_path_count;
+    }
+    else if (array_size > base_type->layout.size)
+    {
+        valid = false;
+    }
+    else if (element_type->kind == IR_TYPE_ARRAY || element_type->kind == IR_TYPE_STRUCT || element_type->kind == IR_TYPE_UNION)
+    {
+        // A dynamic aggregate element may contain label-bearing subobjects at
+        // offsets that are not representable by the scalar transfer below. Do
+        // not accept either a forged result or a silently incomplete transfer:
+        // the frontend rejects this case until the metadata model grows a
+        // wildcard/subobject representation.
+        valid = !ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result);
+    }
+    else
+    {
+        valid = ir_label_metadata_dynamic_index_transfer_valid(result, first, array_size, element_type->layout.size);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_index(IrProgram* program, IrFunction* function, IrInstruction* definition, IrValue* first_slot,
+                                                       IrValueLabelMetadata* result, IrValueLabelMetadata* first)
+{
+    bool valid;
+    if (!first || result->is_label_value)
+    {
+        valid = false;
+    }
+    else if (!ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result))
+    {
+        valid = true;
+    }
+    else if (!program)
+    {
+        valid = !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
+    }
+    else
+    {
+        IrType* base_type = ir_type_from_id(&program->types, first_slot->canonical_type);
+        IrType* element_type = base_type ? ir_type_from_id(&program->types, base_type->element_type) : 0;
+        u64 index = 0;
+        bool constant = definition->operand_count == 2 && definition->operands && ir_constant_index_value(function, definition->operands[1], &index);
+        if (!base_type || !element_type || !element_type->layout.resolved || !element_type->layout.size)
+        {
+            valid = !ir_label_metadata_has_label(result) && !result->label_path_count;
+        }
+        else if (base_type->kind == IR_TYPE_POINTER && ir_label_metadata_has_label(first))
+        {
+            valid = false;
+        }
+        else if (!ir_label_metadata_storage_transfer_valid(program, result, first))
+        {
+            valid = false;
+        }
+        else if (constant)
+        {
+            valid = ir_label_transfer_valid_constant_index(result, first, base_type, element_type, index);
+        }
+        else
+        {
+            valid = ir_label_transfer_valid_dynamic_index(result, first, base_type, element_type);
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_dereference(IrValueLabelMetadata* result, IrValueLabelMetadata* first)
+{
+    return first && !ir_label_metadata_has_label(first) && !ir_label_metadata_has_label(result);
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_aggregate(IrProgram* program, IrFunction* function, IrInstruction* definition,
+                                                           IrValueLabelMetadata* result)
+{
+    bool valid;
+    if (program)
+    {
+        valid = ir_label_metadata_aggregate_transfer_valid(program, function, definition, result);
+    }
+    else
+    {
+        // Without a program to resolve types through, the check reduces to
+        // provenance: every block the result names must come from an operand.
+        valid = true;
+        for (u32 block_index = 0; block_index < result->label_block_count && valid; block_index += 1)
         {
             bool found = false;
             for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
@@ -1738,24 +1757,131 @@ bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, 
                     found = ir_label_block_set_contains(&operand_metadata, result->label_blocks[block_index]);
                 }
             }
-            if (!found)
+            valid = found;
+        }
+        valid = valid && !result->is_label_value;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_label_address(IrProgram* program, IrInstruction* definition, IrValueLabelMetadata* result)
+{
+    return (!program || ir_canonical_void_pointer_type(program, definition->canonical_type)) && ir_label_provenance_valid(result) &&
+           definition->target_count == 1 && definition->targets && result->label_block_count == 1 &&
+           result->label_blocks[0].value == definition->targets[0].value;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_local(IrValueLabelMetadata* result)
+{
+    return !result->is_label_value;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_default(IrValueLabelMetadata* result)
+{
+    return !result->is_label_value && !result->has_label_provenance && !result->label_block_count && !result->label_blocks && !result->label_path_count &&
+           !result->label_paths;
+}
+// With no metadata anywhere in the function, the full checks below reduce to
+// the operand-existence requirements of each transfer rule (and LABEL_ADDRESS
+// can never validate a metadata-free result).
+BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_without_metadata(IrProgram* program, IrFunction* function, IrInstruction* definition, IrValue* first_slot)
+{
+    bool valid;
+    switch (definition->opcode)
+    {
+    case IR_OPCODE_LOAD:
+    case IR_OPCODE_ATOMIC_LOAD:
+    case IR_OPCODE_CAST:
+    case IR_OPCODE_FIELD:
+    case IR_OPCODE_INDEX:
+    case IR_OPCODE_DEREFERENCE:
+        valid = first_slot != 0;
+        break;
+    case IR_OPCODE_ARRAY:
+    case IR_OPCODE_AGGREGATE:
+        valid = true;
+        for (u32 operand_index = 0; program && operand_index < definition->operand_count && valid; operand_index += 1)
+        {
+            valid = definition->operands && definition->operands[operand_index].value < function->value_count;
+        }
+        break;
+    case IR_OPCODE_LABEL_ADDRESS:
+        valid = false;
+        break;
+    default:
+        valid = true;
+        break;
+    }
+    return valid;
+}
+
+bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
+{
+    bool valid = false;
+    IrValue* result_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
+    if (function && result_slot)
+    {
+        if (result_slot->definition.value >= function->instruction_count)
+        {
+            valid = true;
+        }
+        else
+        {
+            IrInstruction* definition = function->instructions + result_slot->definition.value;
+            IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
+                                      ? function->values + definition->operands[0].value
+                                      : 0;
+            if (!function->label_metadata_count)
             {
-                return false;
+                valid = ir_label_transfer_valid_without_metadata(program, function, definition, first_slot);
+            }
+            else
+            {
+                IrValueLabelMetadata result_metadata = ir_value_label_metadata(function, value_id);
+                IrValueLabelMetadata* result = &result_metadata;
+                IrValueLabelMetadata first_metadata =
+                    first_slot ? ir_value_label_metadata(function, definition->operands[0]) : (IrValueLabelMetadata){0};
+                IrValueLabelMetadata* first = first_slot ? &first_metadata : 0;
+                switch (definition->opcode)
+                {
+            case IR_OPCODE_ADDRESS_OF:
+                valid = ir_label_transfer_valid_address_of(result);
+                break;
+            case IR_OPCODE_LOAD:
+            case IR_OPCODE_ATOMIC_LOAD:
+                valid = ir_label_transfer_valid_load(program, first_slot, result, first);
+                break;
+            case IR_OPCODE_CAST:
+                valid = ir_label_transfer_valid_cast(program, definition, result_slot, first_slot, result, first);
+                break;
+            case IR_OPCODE_FIELD:
+                valid = ir_label_transfer_valid_field(program, definition, first_slot, result, first);
+                break;
+            case IR_OPCODE_INDEX:
+                valid = ir_label_transfer_valid_index(program, function, definition, first_slot, result, first);
+                break;
+            case IR_OPCODE_DEREFERENCE:
+                valid = ir_label_transfer_valid_dereference(result, first);
+                break;
+            case IR_OPCODE_ARRAY:
+            case IR_OPCODE_AGGREGATE:
+                valid = ir_label_transfer_valid_aggregate(program, function, definition, result);
+                break;
+            case IR_OPCODE_LABEL_ADDRESS:
+                valid = ir_label_transfer_valid_label_address(program, definition, result);
+                break;
+            case IR_OPCODE_LOCAL:
+            case IR_OPCODE_GLOBAL:
+                valid = ir_label_transfer_valid_local(result);
+                break;
+            default:
+                valid = ir_label_transfer_valid_default(result);
+                break;
+                }
             }
         }
-        return !result->is_label_value;
     }
-    case IR_OPCODE_LABEL_ADDRESS:
-        return (!program || ir_canonical_void_pointer_type(program, definition->canonical_type)) && ir_label_provenance_valid(result) &&
-               definition->target_count == 1 && definition->targets && result->label_block_count == 1 &&
-               result->label_blocks[0].value == definition->targets[0].value;
-    case IR_OPCODE_LOCAL:
-    case IR_OPCODE_GLOBAL:
-        return !result->is_label_value;
-    default:
-        return !result->is_label_value && !result->has_label_provenance && !result->label_block_count && !result->label_blocks && !result->label_path_count &&
-               !result->label_paths;
-    }
+    return valid;
 }
 
 bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter)
