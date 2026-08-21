@@ -1738,120 +1738,118 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_unary(MachineX64Selector* selector, 
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
+    bool selected = false;
     u32 source_register;
-    if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+    if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
     {
-        return false;
-    }
-    bool wide = machine_x64_type_is_64_bit(program, function->values[instruction->operands[0].value].canonical_type);
-    if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT)
-    {
-        bool negate = instruction->unary_operation == IR_UNARY_INTEGER_NEGATE;
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                       .opcode = MACHINE_X64_MOV_RR,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        machine_x64_select_row(selector,
-                               (MachineInstruction){
-                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                   .opcode = (u16)(negate ? (wide ? MACHINE_X64_NEG64 : MACHINE_X64_NEG32) : (wide ? MACHINE_X64_NOT64 : MACHINE_X64_NOT32)),
-                               });
-        return true;
-    }
-    if (instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
-    {
-        if (!target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_POPCNT))
+        bool wide = machine_x64_type_is_64_bit(program, function->values[instruction->operands[0].value].canonical_type);
+        if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT)
         {
-            return false;
+            bool negate = instruction->unary_operation == IR_UNARY_INTEGER_NEGATE;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            machine_x64_select_row(selector,
+                                   (MachineInstruction){
+                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                       .opcode = (u16)(negate ? (wide ? MACHINE_X64_NEG64 : MACHINE_X64_NEG32) : (wide ? MACHINE_X64_NOT64 : MACHINE_X64_NOT32)),
+                                   });
+            selected = true;
         }
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                       .opcode = (u16)(wide ? MACHINE_X64_POPCNT64 : MACHINE_X64_POPCNT32),
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
-    {
-        // Canonical form: bsf for trailing zeros, bsr xor width-1 for
-        // leading — both undefined on zero input, exactly like the
-        // builtins they lower.
-        bool leading = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
-        u32 bit_scan_register = leading ? machine_x64_synthesize_register(selector) : result_register;
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                       .opcode = (u16)(leading ? (wide ? MACHINE_X64_BSR64 : MACHINE_X64_BSR32)
-                                                                               : (wide ? MACHINE_X64_BSF64 : MACHINE_X64_BSF32)),
-                                                   });
-        machine_x64_define(selector, bit_scan_register, row);
-        if (leading)
+        else if (instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
         {
-            u32 flip_immediate = selector->immediates.total_count;
-            u64* flip_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-            *flip_row = wide ? 63 : 31;
-            u32 flip_register = machine_x64_synthesize_register(selector);
+            selected = target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_POPCNT);
+            if (selected)
+            {
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                               .opcode = (u16)(wide ? MACHINE_X64_POPCNT64 : MACHINE_X64_POPCNT32),
+                                                           });
+                machine_x64_define(selector, result_register, row);
+            }
+        }
+        else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+        {
+            // Canonical form: bsf for trailing zeros, bsr xor width-1 for
+            // leading — both undefined on zero input, exactly like the
+            // builtins they lower.
+            bool leading = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+            u32 bit_scan_register = leading ? machine_x64_synthesize_register(selector) : result_register;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = (u16)(leading ? (wide ? MACHINE_X64_BSR64 : MACHINE_X64_BSR32)
+                                                                                   : (wide ? MACHINE_X64_BSF64 : MACHINE_X64_BSF32)),
+                                                       });
+            machine_x64_define(selector, bit_scan_register, row);
+            if (leading)
+            {
+                u32 flip_immediate = selector->immediates.total_count;
+                u64* flip_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                *flip_row = wide ? 63 : 31;
+                u32 flip_register = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register),
+                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, flip_immediate)},
+                                                     .opcode = MACHINE_X64_MOV_RI,
+                                                 });
+                u32 flip_row_index = machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register)},
+                                                                     .opcode = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
+                                                                 });
+                machine_x64_define(selector, result_register, flip_row_index);
+            }
+            selected = true;
+        }
+        else if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
+        {
+            IrType* float_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+            selected = float_type && float_type->kind == IR_TYPE_FLOAT && (float_type->bit_width == 32 || float_type->bit_width == 64);
+            if (selected)
+            {
+                // Sign-bit flip in the general-register domain is the exact
+                // IEEE negation for every input including NaN.
+                u32 mask_register = machine_x64_synthesize_register(selector);
+                u32 immediate_index = selector->immediates.total_count;
+                u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                *immediate_row = float_type->bit_width == 64 ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
+                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                     .opcode = MACHINE_X64_MOV_RI,
+                                                 });
+                u32 negate_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                     .opcode = (u16)(float_type->bit_width == 64 ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
+                                                 });
+                machine_x64_define(selector, result_register, negate_row);
+            }
+        }
+        else if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
+        {
             machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register),
-                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, flip_immediate)},
-                                                 .opcode = MACHINE_X64_MOV_RI,
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                 .opcode = MACHINE_X64_TEST_RR,
                                              });
-            u32 flip_row_index = machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register)},
-                                                                 .opcode = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
-                                                             });
-            machine_x64_define(selector, result_register, flip_row_index);
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .payload = MACHINE_X64_CONDITION_EQUAL,
+                                                           .opcode = MACHINE_X64_SETCC,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            selected = true;
         }
-        return true;
     }
-    if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
-    {
-        IrType* float_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-        if (!float_type || float_type->kind != IR_TYPE_FLOAT || (float_type->bit_width != 32 && float_type->bit_width != 64))
-        {
-            return false;
-        }
-        // Sign-bit flip in the general-register domain is the exact
-        // IEEE negation for every input including NaN.
-        u32 mask_register = machine_x64_synthesize_register(selector);
-        u32 immediate_index = selector->immediates.total_count;
-        u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-        *immediate_row = float_type->bit_width == 64 ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
-                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                             .opcode = MACHINE_X64_MOV_RI,
-                                         });
-        u32 negate_row = machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
-                                             .opcode = (u16)(float_type->bit_width == 64 ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
-                                         });
-        machine_x64_define(selector, result_register, negate_row);
-        return true;
-    }
-    if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
-    {
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                             .opcode = MACHINE_X64_TEST_RR,
-                                         });
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = MACHINE_X64_CONDITION_EQUAL,
-                                                       .opcode = MACHINE_X64_SETCC,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    return false;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
