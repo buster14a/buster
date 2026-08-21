@@ -1766,696 +1766,707 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                                                               ByteSlice data, u64 offset, u64 end)
 {
     ObjectAssemblyX86Prefix prefix;
+    u64 length;
     if (!object_assembly_x86_parse_prefix(data, offset, end, &prefix))
     {
-        return 0;
+        length = 0;
     }
-    u64 opcode_offset = offset + prefix.length;
-    if (opcode_offset >= end)
+    else
     {
-        return 0;
-    }
-    u8 opcode = data.pointer[opcode_offset];
-    u64 cursor = opcode_offset + 1;
-    u32 width = prefix.rex & 8 ? 64 : prefix.operand16 ? 16 : 32;
-    if (opcode == 0x90 && prefix.rep && !prefix.lock)
-    {
-        object_assembly_append_string(buffer, S8("\t pause\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0x90 && !prefix.lock && !prefix.rep && !prefix.repne)
-    {
-        object_assembly_append_string(buffer, S8("\tnop\n"));
-        return prefix.length + 1;
-    }
-    if ((opcode >= 0x50 && opcode <= 0x57) || (opcode >= 0x58 && opcode <= 0x5f))
-    {
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        object_assembly_append_string(buffer, opcode < 0x58 ? S8("push ") : S8("pop "));
-        object_assembly_append_x86_register(buffer, (opcode & 7) | ((prefix.rex & 1) ? 8 : 0), prefix.operand16 ? 16 : 64, prefix.rex != 0);
-        object_assembly_append_string(buffer, S8("\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0xc3 || opcode == 0xcb)
-    {
-        object_assembly_append_string(buffer, opcode == 0xc3 ? S8("\tret\n") : S8("\tretf\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0xc2 || opcode == 0xca)
-    {
-        u16 immediate = 0;
-        if (cursor + 2 > end)
+        u64 opcode_offset = offset + prefix.length;
+        if (opcode_offset >= end)
         {
-            return 0;
-        }
-        memcpy(&immediate, data.pointer + cursor, sizeof(immediate));
-        object_assembly_append_string(buffer, opcode == 0xc2 ? S8("\tret ") : S8("\tretf "));
-        object_assembly_append_u64_decimal(buffer, immediate);
-        object_assembly_append_string(buffer, S8("\n"));
-        return prefix.length + 3;
-    }
-    if (opcode == 0xc9)
-    {
-        object_assembly_append_string(buffer, S8("\tleave\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0x98)
-    {
-        object_assembly_append_string(buffer, width == 64 ? S8("\tcdqe\n") : width == 16 ? S8("\tcbw\n") : S8("\tcwde\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0x99)
-    {
-        object_assembly_append_string(buffer, width == 64 ? S8("\tcqo\n") : width == 16 ? S8("\tcwd\n") : S8("\tcdq\n"));
-        return prefix.length + 1;
-    }
-    if (opcode == 0x0f && cursor < end && data.pointer[cursor] == 0x77 && prefix.length == 0)
-    {
-        object_assembly_append_string(buffer, S8("\tvzeroupper\n"));
-        return 2;
-    }
-    if (opcode == 0xe8 || opcode == 0xe9 || opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f))
-    {
-        u32 displacement_size = opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f) ? 1 : 4;
-        u64 instruction_length = prefix.length + 1 + displacement_size;
-        if (offset + instruction_length > end)
-        {
-            return 0;
-        }
-        ObjectRelocation* relocation = object_assembly_relocation_at(object, section, offset + prefix.length + 1);
-        bool has_symbol = object_assembly_x86_is_pc_relocation(relocation) && displacement_size == 4;
-        s64 displacement = displacement_size == 1 ? (s8)data.pointer[offset + prefix.length + 1] : 0;
-        if (!has_symbol)
-        {
-            u32 encoded = 0;
-            if (displacement_size == 4 && !object_assembly_x86_read_u32(data, offset + prefix.length + 1, &encoded))
-            {
-                return 0;
-            }
-            if (displacement_size == 4)
-            {
-                displacement = (s32)encoded;
-            }
-            u64 target_offset = object_assembly_x86_relative_target(offset, instruction_length, displacement);
-            bool fixed_length_branch = opcode == 0xe8 || opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f);
-            bool has_target_label = fixed_length_branch && object_assembly_has_internal_label(buffer, section, target_offset);
-            if (!has_target_label && fixed_length_branch && target_offset > offset && object_assembly_x86_branch_target(data, target_offset))
-            {
-                object_assembly_mark_internal_label(buffer, section, target_offset);
-                has_target_label = true;
-            }
-            if (!fixed_length_branch || !object_assembly_x86_branch_target(data, target_offset) || !has_target_label)
-            {
-                return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-            }
-        }
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        if (opcode == 0xe8)
-        {
-            object_assembly_append_string(buffer, S8("call "));
-        }
-        else if (opcode == 0xe9 || opcode == 0xeb)
-        {
-            object_assembly_append_string(buffer, S8("jmp "));
+            length = 0;
         }
         else
         {
-            object_assembly_append_string(buffer, S8("j"));
-            object_assembly_append_string(buffer, object_assembly_x86_condition(opcode));
-            object_assembly_append_string(buffer, S8(" "));
-        }
-        if (has_symbol)
-        {
-            object_assembly_append_x86_relocation_expression(buffer, object, target, relocation, true);
-        }
-        else
-        {
-            object_assembly_append_x86_branch_target(buffer, section, object_assembly_x86_relative_target(offset, instruction_length, displacement));
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0x68 || opcode == 0x6a)
-    {
-        if (opcode == 0x68)
-        {
-            return 0;
-        }
-        u64 immediate_offset = cursor;
-        u32 immediate_size = opcode == 0x6a ? 1 : 4;
-        u32 immediate = 0;
-        if (immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        if (immediate_size == 1)
-        {
-            immediate = data.pointer[immediate_offset];
-        }
-        else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
-        {
-            return 0;
-        }
-        object_assembly_append_string(buffer, S8("\tpush "));
-        object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
-        object_assembly_append_string(buffer, S8("\n"));
-        return prefix.length + 1 + immediate_size;
-    }
-    if (opcode >= 0xb8 && opcode <= 0xbf)
-    {
-        u32 immediate_size = prefix.rex & 8 ? 8 : prefix.operand16 ? 2 : 4;
-        u64 immediate = 0;
-        if (cursor + immediate_size > end)
-        {
-            return 0;
-        }
-        if (immediate_size == 2)
-        {
-            u16 value = 0;
-            memcpy(&value, data.pointer + cursor, sizeof(value));
-            immediate = value;
-        }
-        else if (immediate_size == 4)
-        {
-            u32 value = 0;
-            if (!object_assembly_x86_read_u32(data, cursor, &value))
+            u8 opcode = data.pointer[opcode_offset];
+            u64 cursor = opcode_offset + 1;
+            u32 width = prefix.rex & 8 ? 64 : prefix.operand16 ? 16 : 32;
+            if (opcode == 0x90 && prefix.rep && !prefix.lock)
             {
-                return 0;
+                object_assembly_append_string(buffer, S8("\t pause\n"));
+                length = prefix.length + 1;
             }
-            immediate = value;
-        }
-        else if (!object_assembly_x86_read_u64(data, cursor, &immediate))
-        {
-            return 0;
-        }
-        object_assembly_append_string(buffer, S8("\t"));
-        if (immediate_size == 8)
-        {
-            object_assembly_append_string(buffer, S8("movabs "));
-        }
-        else
-        {
-            object_assembly_append_string(buffer, S8("mov "));
-        }
-        object_assembly_append_x86_register(buffer, (opcode & 7) | ((prefix.rex & 1) ? 8 : 0), immediate_size == 8 ? 64 : immediate_size * 8,
-                                             prefix.rex != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, false);
-        object_assembly_append_string(buffer, S8("\n"));
-        return prefix.length + 1 + immediate_size;
-    }
-    if (opcode == 0x05 || opcode == 0x0d || opcode == 0x15 || opcode == 0x1d || opcode == 0x25 || opcode == 0x2d || opcode == 0x35 ||
-        opcode == 0x3d)
-    {
-        if ((u64)prefix.length + 5 <= end - offset)
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, prefix.length + 5);
-        }
-        return 0;
-    }
-    if (opcode == 0x0f)
-    {
-        if (cursor >= end)
-        {
-            return 0;
-        }
-        u8 extended = data.pointer[cursor++];
-        if (extended == 0x05)
-        {
-            object_assembly_append_string(buffer, S8("\tsyscall\n"));
-            return prefix.length + 2;
-        }
-        if (extended == 0x34)
-        {
-            object_assembly_append_string(buffer, S8("\tsysenter\n"));
-            return prefix.length + 2;
-        }
-        if (extended == 0x31)
-        {
-            object_assembly_append_string(buffer, S8("\trdtsc\n"));
-            return prefix.length + 2;
-        }
-        if (extended == 0x77 && prefix.length == 0)
-        {
-            object_assembly_append_string(buffer, S8("\tvzeroupper\n"));
-            return 2;
-        }
-        if (extended >= 0x80 && extended <= 0x8f)
-        {
-            if (cursor + 4 > end)
+            else if (opcode == 0x90 && !prefix.lock && !prefix.rep && !prefix.repne)
             {
-                return 0;
+                object_assembly_append_string(buffer, S8("\tnop\n"));
+                length = prefix.length + 1;
             }
-            u32 encoded = 0;
-            object_assembly_x86_read_u32(data, cursor, &encoded);
-            s64 displacement = (s32)encoded;
-            u64 instruction_length = prefix.length + 6;
-            u64 target_offset = object_assembly_x86_relative_target(offset, instruction_length, displacement);
-            BUSTER_UNUSED(target_offset);
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        if (extended >= 0x90 && extended <= 0x9f)
-        {
-            ObjectAssemblyX86Modrm modrm;
-            if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+            else if ((opcode >= 0x50 && opcode <= 0x57) || (opcode >= 0x58 && opcode <= 0x5f))
             {
-                return 0;
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                object_assembly_append_string(buffer, opcode < 0x58 ? S8("push ") : S8("pop "));
+                object_assembly_append_x86_register(buffer, (opcode & 7) | ((prefix.rex & 1) ? 8 : 0), prefix.operand16 ? 16 : 64, prefix.rex != 0);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = prefix.length + 1;
             }
-            u64 instruction_length = prefix.length + 2 + modrm.length;
-            if (offset + instruction_length > end)
+            else if (opcode == 0xc3 || opcode == 0xcb)
             {
-                return 0;
+                object_assembly_append_string(buffer, opcode == 0xc3 ? S8("\tret\n") : S8("\tretf\n"));
+                length = prefix.length + 1;
             }
-            if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+            else if (opcode == 0xc2 || opcode == 0xca)
             {
-                return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                u16 immediate = 0;
+                if (cursor + 2 > end)
+                {
+                    return 0;
+                }
+                memcpy(&immediate, data.pointer + cursor, sizeof(immediate));
+                object_assembly_append_string(buffer, opcode == 0xc2 ? S8("\tret ") : S8("\tretf "));
+                object_assembly_append_u64_decimal(buffer, immediate);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = prefix.length + 3;
             }
-            object_assembly_x86_emit_prefix(buffer, prefix);
-            object_assembly_append_string(buffer, S8("set"));
-            object_assembly_append_string(buffer, object_assembly_x86_condition(extended));
-            object_assembly_append_string(buffer, S8(" "));
-            object_assembly_append_x86_rm(buffer, modrm, prefix, 8, true, object, target,
-                                          object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-            object_assembly_append_string(buffer, S8("\n"));
-            return instruction_length;
-        }
-        if (extended == 0xaf || extended == 0xbe || extended == 0xbf || extended == 0xb6 || extended == 0xb7 || extended == 0xb1 || extended == 0xc1)
-        {
-            ObjectAssemblyX86Modrm modrm;
-            if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+            else if (opcode == 0xc9)
             {
-                return 0;
+                object_assembly_append_string(buffer, S8("\tleave\n"));
+                length = prefix.length + 1;
             }
-            u32 source_width = extended == 0xbe || extended == 0xb6 ? 8 : extended == 0xbf || extended == 0xb7 ? 16 : width;
-            u64 instruction_length = prefix.length + 2 + modrm.length;
-            if (offset + instruction_length > end)
+            else if (opcode == 0x98)
             {
-                return 0;
+                object_assembly_append_string(buffer, width == 64 ? S8("\tcdqe\n") : width == 16 ? S8("\tcbw\n") : S8("\tcwde\n"));
+                length = prefix.length + 1;
             }
-            if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+            else if (opcode == 0x99)
             {
-                return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                object_assembly_append_string(buffer, width == 64 ? S8("\tcqo\n") : width == 16 ? S8("\tcwd\n") : S8("\tcdq\n"));
+                length = prefix.length + 1;
             }
-            object_assembly_x86_emit_prefix(buffer, prefix);
-            object_assembly_append_string(buffer, extended == 0xaf ? S8("imul ") : extended == 0xb1 ? S8("cmpxchg ")
-                                                                                                   : extended == 0xc1 ? S8("xadd ")
-                                                                                                                      : extended == 0xbe || extended == 0xbf ? S8("movsx ")
-                                                                                                                                                           : S8("movzx "));
-            if (extended == 0xaf || extended == 0xbe || extended == 0xbf || extended == 0xb6 || extended == 0xb7)
+            else if (opcode == 0x0f && cursor < end && data.pointer[cursor] == 0x77 && prefix.length == 0)
             {
+                object_assembly_append_string(buffer, S8("\tvzeroupper\n"));
+                length = 2;
+            }
+            else if (opcode == 0xe8 || opcode == 0xe9 || opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f))
+            {
+                u32 displacement_size = opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f) ? 1 : 4;
+                u64 instruction_length = prefix.length + 1 + displacement_size;
+                if (offset + instruction_length > end)
+                {
+                    return 0;
+                }
+                ObjectRelocation* relocation = object_assembly_relocation_at(object, section, offset + prefix.length + 1);
+                bool has_symbol = object_assembly_x86_is_pc_relocation(relocation) && displacement_size == 4;
+                s64 displacement = displacement_size == 1 ? (s8)data.pointer[offset + prefix.length + 1] : 0;
+                if (!has_symbol)
+                {
+                    u32 encoded = 0;
+                    if (displacement_size == 4 && !object_assembly_x86_read_u32(data, offset + prefix.length + 1, &encoded))
+                    {
+                        return 0;
+                    }
+                    if (displacement_size == 4)
+                    {
+                        displacement = (s32)encoded;
+                    }
+                    u64 target_offset = object_assembly_x86_relative_target(offset, instruction_length, displacement);
+                    bool fixed_length_branch = opcode == 0xe8 || opcode == 0xeb || (opcode >= 0x70 && opcode <= 0x7f);
+                    bool has_target_label = fixed_length_branch && object_assembly_has_internal_label(buffer, section, target_offset);
+                    if (!has_target_label && fixed_length_branch && target_offset > offset && object_assembly_x86_branch_target(data, target_offset))
+                    {
+                        object_assembly_mark_internal_label(buffer, section, target_offset);
+                        has_target_label = true;
+                    }
+                    if (!fixed_length_branch || !object_assembly_x86_branch_target(data, target_offset) || !has_target_label)
+                    {
+                        return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                    }
+                }
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                if (opcode == 0xe8)
+                {
+                    object_assembly_append_string(buffer, S8("call "));
+                }
+                else if (opcode == 0xe9 || opcode == 0xeb)
+                {
+                    object_assembly_append_string(buffer, S8("jmp "));
+                }
+                else
+                {
+                    object_assembly_append_string(buffer, S8("j"));
+                    object_assembly_append_string(buffer, object_assembly_x86_condition(opcode));
+                    object_assembly_append_string(buffer, S8(" "));
+                }
+                if (has_symbol)
+                {
+                    object_assembly_append_x86_relocation_expression(buffer, object, target, relocation, true);
+                }
+                else
+                {
+                    object_assembly_append_x86_branch_target(buffer, section, object_assembly_x86_relative_target(offset, instruction_length, displacement));
+                }
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
+            }
+            else if (opcode == 0x68 || opcode == 0x6a)
+            {
+                if (opcode == 0x68)
+                {
+                    return 0;
+                }
+                u64 immediate_offset = cursor;
+                u32 immediate_size = opcode == 0x6a ? 1 : 4;
+                u32 immediate = 0;
+                if (immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                if (immediate_size == 1)
+                {
+                    immediate = data.pointer[immediate_offset];
+                }
+                else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
+                {
+                    return 0;
+                }
+                object_assembly_append_string(buffer, S8("\tpush "));
+                object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = prefix.length + 1 + immediate_size;
+            }
+            else if (opcode >= 0xb8 && opcode <= 0xbf)
+            {
+                u32 immediate_size = prefix.rex & 8 ? 8 : prefix.operand16 ? 2 : 4;
+                u64 immediate = 0;
+                if (cursor + immediate_size > end)
+                {
+                    return 0;
+                }
+                if (immediate_size == 2)
+                {
+                    u16 value = 0;
+                    memcpy(&value, data.pointer + cursor, sizeof(value));
+                    immediate = value;
+                }
+                else if (immediate_size == 4)
+                {
+                    u32 value = 0;
+                    if (!object_assembly_x86_read_u32(data, cursor, &value))
+                    {
+                        return 0;
+                    }
+                    immediate = value;
+                }
+                else if (!object_assembly_x86_read_u64(data, cursor, &immediate))
+                {
+                    return 0;
+                }
+                object_assembly_append_string(buffer, S8("\t"));
+                if (immediate_size == 8)
+                {
+                    object_assembly_append_string(buffer, S8("movabs "));
+                }
+                else
+                {
+                    object_assembly_append_string(buffer, S8("mov "));
+                }
+                object_assembly_append_x86_register(buffer, (opcode & 7) | ((prefix.rex & 1) ? 8 : 0), immediate_size == 8 ? 64 : immediate_size * 8,
+                                                     prefix.rex != 0);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, false);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = prefix.length + 1 + immediate_size;
+            }
+            else if (opcode == 0x05 || opcode == 0x0d || opcode == 0x15 || opcode == 0x1d || opcode == 0x25 || opcode == 0x2d || opcode == 0x35 ||
+                opcode == 0x3d)
+            {
+                if ((u64)prefix.length + 5 <= end - offset)
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, prefix.length + 5);
+                }
+                length = 0;
+            }
+            else if (opcode == 0x0f)
+            {
+                if (cursor >= end)
+                {
+                    return 0;
+                }
+                u8 extended = data.pointer[cursor++];
+                if (extended == 0x05)
+                {
+                    object_assembly_append_string(buffer, S8("\tsyscall\n"));
+                    return prefix.length + 2;
+                }
+                if (extended == 0x34)
+                {
+                    object_assembly_append_string(buffer, S8("\tsysenter\n"));
+                    return prefix.length + 2;
+                }
+                if (extended == 0x31)
+                {
+                    object_assembly_append_string(buffer, S8("\trdtsc\n"));
+                    return prefix.length + 2;
+                }
+                if (extended == 0x77 && prefix.length == 0)
+                {
+                    object_assembly_append_string(buffer, S8("\tvzeroupper\n"));
+                    return 2;
+                }
+                if (extended >= 0x80 && extended <= 0x8f)
+                {
+                    if (cursor + 4 > end)
+                    {
+                        return 0;
+                    }
+                    u32 encoded = 0;
+                    object_assembly_x86_read_u32(data, cursor, &encoded);
+                    s64 displacement = (s32)encoded;
+                    u64 instruction_length = prefix.length + 6;
+                    u64 target_offset = object_assembly_x86_relative_target(offset, instruction_length, displacement);
+                    BUSTER_UNUSED(target_offset);
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                if (extended >= 0x90 && extended <= 0x9f)
+                {
+                    ObjectAssemblyX86Modrm modrm;
+                    if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                    {
+                        return 0;
+                    }
+                    u64 instruction_length = prefix.length + 2 + modrm.length;
+                    if (offset + instruction_length > end)
+                    {
+                        return 0;
+                    }
+                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    {
+                        return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                    }
+                    object_assembly_x86_emit_prefix(buffer, prefix);
+                    object_assembly_append_string(buffer, S8("set"));
+                    object_assembly_append_string(buffer, object_assembly_x86_condition(extended));
+                    object_assembly_append_string(buffer, S8(" "));
+                    object_assembly_append_x86_rm(buffer, modrm, prefix, 8, true, object, target,
+                                                  object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                    object_assembly_append_string(buffer, S8("\n"));
+                    return instruction_length;
+                }
+                if (extended == 0xaf || extended == 0xbe || extended == 0xbf || extended == 0xb6 || extended == 0xb7 || extended == 0xb1 || extended == 0xc1)
+                {
+                    ObjectAssemblyX86Modrm modrm;
+                    if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                    {
+                        return 0;
+                    }
+                    u32 source_width = extended == 0xbe || extended == 0xb6 ? 8 : extended == 0xbf || extended == 0xb7 ? 16 : width;
+                    u64 instruction_length = prefix.length + 2 + modrm.length;
+                    if (offset + instruction_length > end)
+                    {
+                        return 0;
+                    }
+                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    {
+                        return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                    }
+                    object_assembly_x86_emit_prefix(buffer, prefix);
+                    object_assembly_append_string(buffer, extended == 0xaf ? S8("imul ") : extended == 0xb1 ? S8("cmpxchg ")
+                                                                                                           : extended == 0xc1 ? S8("xadd ")
+                                                                                                                              : extended == 0xbe || extended == 0xbf ? S8("movsx ")
+                                                                                                                                                                   : S8("movzx "));
+                    if (extended == 0xaf || extended == 0xbe || extended == 0xbf || extended == 0xb6 || extended == 0xb7)
+                    {
+                        object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
+                        object_assembly_append_string(buffer, S8(", "));
+                        object_assembly_append_x86_rm(buffer, modrm, prefix, source_width, true, object, target,
+                                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                    }
+                    else
+                    {
+                        object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
+                                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                        object_assembly_append_string(buffer, S8(", "));
+                        object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
+                    }
+                    object_assembly_append_string(buffer, S8("\n"));
+                    return instruction_length;
+                }
+                if (extended == 0x1f)
+                {
+                    ObjectAssemblyX86Modrm modrm;
+                    if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                    {
+                        return 0;
+                    }
+                    u64 instruction_length = prefix.length + 2 + modrm.length;
+                    if (offset + instruction_length > end)
+                    {
+                        return 0;
+                    }
+                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    {
+                        return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                    }
+                    object_assembly_append_string(buffer, S8("\tnop "));
+                    object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
+                                                  object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                    object_assembly_append_string(buffer, S8("\n"));
+                    return instruction_length;
+                }
+                if (extended == 0x6f || extended == 0x7f || extended == 0x10 || extended == 0x11 || extended == 0x58 || extended == 0x59 || extended == 0x5c ||
+                    extended == 0x2e || extended == 0xef || extended == 0xfc || extended == 0xfe)
+                {
+                    ObjectAssemblyX86Modrm modrm;
+                    if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                    {
+                        return 0;
+                    }
+                    bool mmx = !prefix.operand16 && !prefix.rep && !prefix.repne &&
+                               (extended == 0x6f || extended == 0x7f || extended == 0xef || extended == 0xfc || extended == 0xfe);
+                    u32 vector_width = mmx ? 8 : 16;
+                    String8 name = (String8){0};
+                    if (extended == 0x6f || extended == 0x7f)
+                    {
+                        name = prefix.rep ? S8("movdqu") : prefix.operand16 ? S8("movdqa") : S8("movq");
+                    }
+                    else if (extended == 0x10 || extended == 0x11)
+                    {
+                        name = prefix.rep ? S8("movss") : prefix.repne ? S8("movsd") : prefix.operand16 ? S8("movupd") : S8("movups");
+                        vector_width = prefix.rep || prefix.repne ? 4 : 16;
+                    }
+                    else if (extended == 0x58 || extended == 0x59 || extended == 0x5c)
+                    {
+                        name = extended == 0x58 ? prefix.rep ? S8("addss") : prefix.repne ? S8("addsd") : prefix.operand16 ? S8("addpd") : S8("addps")
+                                               : extended == 0x59 ? prefix.rep ? S8("mulss") : prefix.repne ? S8("mulsd") : prefix.operand16 ? S8("mulpd")
+                                                                                                                       : S8("mulps")
+                                                                  : prefix.rep ? S8("subss") : prefix.repne ? S8("subsd") : prefix.operand16 ? S8("subpd")
+                                                                                                                       : S8("subps");
+                        vector_width = prefix.rep || prefix.repne ? 4 : 16;
+                    }
+                    else if (extended == 0x2e)
+                    {
+                        name = prefix.repne ? S8("ucomisd") : S8("ucomiss");
+                        vector_width = prefix.repne ? 8 : 4;
+                    }
+                    else if (extended == 0xef)
+                    {
+                        name = S8("pxor");
+                    }
+                    else
+                    {
+                        name = extended == 0xfc ? S8("paddb") : S8("paddd");
+                    }
+                    u64 instruction_length = prefix.length + 2 + modrm.length;
+                    if (offset + instruction_length > end)
+                    {
+                        return 0;
+                    }
+                    if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                    {
+                        return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                    }
+                    ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                    object_assembly_append_string(buffer, S8("\t"));
+                    object_assembly_append_string(buffer, name);
+                    object_assembly_append_string(buffer, S8(" "));
+                    if (extended == 0x7f || extended == 0x11)
+                    {
+                        object_assembly_append_x86_vector_rm(buffer, modrm, vector_width, true, prefix, object, target, relocation);
+                        object_assembly_append_string(buffer, S8(", "));
+                        object_assembly_append_x86_vector_register(buffer, modrm.reg, vector_width);
+                    }
+                    else
+                    {
+                        object_assembly_append_x86_vector_register(buffer, modrm.reg, vector_width);
+                        object_assembly_append_string(buffer, S8(", "));
+                        object_assembly_append_x86_vector_rm(buffer, modrm, vector_width, true, prefix, object, target, relocation);
+                    }
+                    object_assembly_append_string(buffer, S8("\n"));
+                    return instruction_length;
+                }
+                length = 0;
+            }
+            else if (opcode == 0x80 || opcode == 0x81 || opcode == 0x83)
+            {
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                {
+                    return 0;
+                }
+                u32 immediate_size = opcode == 0x80 || opcode == 0x83 ? 1 : 4;
+                u64 immediate_offset = cursor + modrm.length;
+                if (immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                u32 immediate = 0;
+                if (immediate_size == 1)
+                {
+                    immediate = data.pointer[immediate_offset];
+                }
+                else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
+                {
+                    return 0;
+                }
+                String8 name = object_assembly_x86_group_name(modrm.reg & 7);
+                if (!name.length)
+                {
+                    return 0;
+                }
+                u32 operand_width = opcode == 0x80 ? 8 : width;
+                u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
+                if (opcode == 0x81 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                    (modrm.mod != 3 && (prefix.rex & 8)))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                object_assembly_append_string(buffer, name);
+                object_assembly_append_string(buffer, S8(" "));
+                object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, opcode != 0x81 || operand_width != 32);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
+            }
+            else if (opcode == 0xc6 || opcode == 0xc7)
+            {
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm) || modrm.reg != 0)
+                {
+                    return 0;
+                }
+                u32 immediate_size = opcode == 0xc6 ? 1 : 4;
+                u64 immediate_offset = cursor + modrm.length;
+                u32 immediate = 0;
+                if (immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                if (immediate_size == 1)
+                {
+                    immediate = data.pointer[immediate_offset];
+                }
+                else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
+                {
+                    return 0;
+                }
+                u32 operand_width = opcode == 0xc6 ? 1 : width;
+                u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
+                if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                    (modrm.mod != 3 && (prefix.rex & 8)))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                object_assembly_append_string(buffer, S8("\tmov "));
+                object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target,
+                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, opcode == 0xc7 && operand_width == 64);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
+            }
+            else if (opcode == 0x69 || opcode == 0x6b)
+            {
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                {
+                    return 0;
+                }
+                u32 immediate_size = opcode == 0x6b ? 1 : 4;
+                u64 immediate_offset = cursor + modrm.length;
+                u32 immediate = 0;
+                if (immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                if (immediate_size == 1)
+                {
+                    immediate = data.pointer[immediate_offset];
+                }
+                else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
+                {
+                    return 0;
+                }
+                u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
+                if (opcode == 0x69 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                object_assembly_append_string(buffer, S8("\timul "));
                 object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_x86_rm(buffer, modrm, prefix, source_width, true, object, target,
-                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-            }
-            else
-            {
                 object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
                                               object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
                 object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
+                object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
             }
-            object_assembly_append_string(buffer, S8("\n"));
-            return instruction_length;
-        }
-        if (extended == 0x1f)
-        {
-            ObjectAssemblyX86Modrm modrm;
-            if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+            else if (opcode == 0x88 || opcode == 0x89 || opcode == 0x8a || opcode == 0x8b || opcode == 0x8d || opcode == 0x01 || opcode == 0x03 || opcode == 0x09 ||
+                opcode == 0x0b || opcode == 0x21 || opcode == 0x23 || opcode == 0x29 || opcode == 0x2b || opcode == 0x31 || opcode == 0x33 || opcode == 0x39 ||
+                opcode == 0x3b || opcode == 0x85 || opcode == 0x87 || opcode == 0x86 || opcode == 0x63)
             {
-                return 0;
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                {
+                    return 0;
+                }
+                u32 operand_width = opcode == 0x86 || opcode == 0x88 || opcode == 0x8a ? 8 : opcode == 0x63 ? 32 : width;
+                u64 instruction_length = prefix.length + 1 + modrm.length;
+                if (offset + instruction_length > end)
+                {
+                    return 0;
+                }
+                if ((opcode == 0x8d && modrm.mod == 3) || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
+                String8 name = opcode == 0x88 || opcode == 0x89 || opcode == 0x8a || opcode == 0x8b ? S8("mov")
+                               : opcode == 0x8d                                    ? S8("lea")
+                               : opcode == 0x87 || opcode == 0x86                 ? S8("xchg")
+                               : opcode == 0x63                                    ? S8("movsxd")
+                                                                                    : object_assembly_x86_binary_name(opcode);
+                if (!name.length && opcode != 0x85)
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                if (opcode == 0x85)
+                {
+                    name = S8("test");
+                }
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                object_assembly_append_string(buffer, name);
+                object_assembly_append_string(buffer, S8(" "));
+                bool reverse = opcode == 0x8a || opcode == 0x8b || opcode == 0x8d || opcode == 0x03 || opcode == 0x0b || opcode == 0x23 || opcode == 0x2b ||
+                               opcode == 0x33 || opcode == 0x3b || opcode == 0x63;
+                if (opcode == 0x85)
+                {
+                    object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_append_x86_register(buffer, modrm.reg, operand_width, prefix.rex != 0);
+                }
+                else if (reverse)
+                {
+                    object_assembly_append_x86_register(buffer, modrm.reg, opcode == 0x63 ? 64 : operand_width, prefix.rex != 0);
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, opcode != 0x8d, object, target, relocation);
+                }
+                else
+                {
+                    object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_append_x86_register(buffer, modrm.reg, operand_width, prefix.rex != 0);
+                }
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
             }
-            u64 instruction_length = prefix.length + 2 + modrm.length;
-            if (offset + instruction_length > end)
+            else if (opcode == 0xf6 || opcode == 0xf7 || opcode == 0xfe || opcode == 0xff)
             {
-                return 0;
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                {
+                    return 0;
+                }
+                u32 operand_width = opcode == 0xf6 || opcode == 0xfe ? 8 : width;
+                u32 group = modrm.reg & 7;
+                if (opcode == 0xff && (group == 2 || group == 4 || group == 6))
+                {
+                    operand_width = prefix.operand16 ? 16 : 64;
+                }
+                u32 immediate_size = opcode == 0xf6 && group == 0 ? 1 : opcode == 0xf7 && group == 0 ? 4 : 0;
+                u64 immediate_offset = cursor + modrm.length;
+                u32 immediate = 0;
+                if (immediate_size && immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                else if (immediate_size == 1)
+                {
+                    immediate = data.pointer[immediate_offset];
+                }
+                else if (immediate_size == 4 && !object_assembly_x86_read_u32(data, immediate_offset, &immediate))
+                {
+                    return 0;
+                }
+                u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
+                String8 name = group == 2 ? S8("not") : group == 3 ? S8("neg") : group == 4 ? S8("mul") : group == 5 ? S8("imul") : group == 6 ? S8("div")
+                                                                                                                                : group == 7 ? S8("idiv")
+                                                                                                                                             : group == 0 ? S8("test")
+                                                                                                                                                          : group == 1 ? S8("test")
+                                                                                                                                                                       : (String8){0};
+                if (opcode == 0xff)
+                {
+                    name = group == 0 ? S8("inc") : group == 1 ? S8("dec") : group == 2 ? S8("call") : group == 4 ? S8("jmp") : group == 6 ? S8("push") : (String8){0};
+                }
+                else if (opcode == 0xfe)
+                {
+                    name = group == 0 ? S8("inc") : group == 1 ? S8("dec") : (String8){0};
+                }
+                if (!name.length || ((opcode == 0xf6 || opcode == 0xf7) && group > 7))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
+                    (modrm.mod != 3 && (prefix.rex & 8)))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                object_assembly_append_string(buffer, name);
+                object_assembly_append_string(buffer, S8(" "));
+                object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object,
+                                              target, object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                if (immediate_size)
+                {
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
+                }
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
             }
-            if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+            else if (opcode == 0xd0 || opcode == 0xd1 || opcode == 0xd2 || opcode == 0xd3 || opcode == 0xc0 || opcode == 0xc1)
             {
-                return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-            }
-            object_assembly_append_string(buffer, S8("\tnop "));
-            object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
-                                          object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-            object_assembly_append_string(buffer, S8("\n"));
-            return instruction_length;
-        }
-        if (extended == 0x6f || extended == 0x7f || extended == 0x10 || extended == 0x11 || extended == 0x58 || extended == 0x59 || extended == 0x5c ||
-            extended == 0x2e || extended == 0xef || extended == 0xfc || extended == 0xfe)
-        {
-            ObjectAssemblyX86Modrm modrm;
-            if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-            {
-                return 0;
-            }
-            bool mmx = !prefix.operand16 && !prefix.rep && !prefix.repne &&
-                       (extended == 0x6f || extended == 0x7f || extended == 0xef || extended == 0xfc || extended == 0xfe);
-            u32 vector_width = mmx ? 8 : 16;
-            String8 name = (String8){0};
-            if (extended == 0x6f || extended == 0x7f)
-            {
-                name = prefix.rep ? S8("movdqu") : prefix.operand16 ? S8("movdqa") : S8("movq");
-            }
-            else if (extended == 0x10 || extended == 0x11)
-            {
-                name = prefix.rep ? S8("movss") : prefix.repne ? S8("movsd") : prefix.operand16 ? S8("movupd") : S8("movups");
-                vector_width = prefix.rep || prefix.repne ? 4 : 16;
-            }
-            else if (extended == 0x58 || extended == 0x59 || extended == 0x5c)
-            {
-                name = extended == 0x58 ? prefix.rep ? S8("addss") : prefix.repne ? S8("addsd") : prefix.operand16 ? S8("addpd") : S8("addps")
-                                       : extended == 0x59 ? prefix.rep ? S8("mulss") : prefix.repne ? S8("mulsd") : prefix.operand16 ? S8("mulpd")
-                                                                                                               : S8("mulps")
-                                                          : prefix.rep ? S8("subss") : prefix.repne ? S8("subsd") : prefix.operand16 ? S8("subpd")
-                                                                                                               : S8("subps");
-                vector_width = prefix.rep || prefix.repne ? 4 : 16;
-            }
-            else if (extended == 0x2e)
-            {
-                name = prefix.repne ? S8("ucomisd") : S8("ucomiss");
-                vector_width = prefix.repne ? 8 : 4;
-            }
-            else if (extended == 0xef)
-            {
-                name = S8("pxor");
+                ObjectAssemblyX86Modrm modrm;
+                if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
+                {
+                    return 0;
+                }
+                u32 group = modrm.reg & 7;
+                String8 name = group == 4 ? S8("shl") : group == 5 ? S8("shr") : group == 7 ? S8("sar") : (String8){0};
+                if (!name.length)
+                {
+                    return 0;
+                }
+                u32 immediate_size = opcode == 0xc0 || opcode == 0xc1 ? 1 : 0;
+                u64 immediate_offset = cursor + modrm.length;
+                if (immediate_offset + immediate_size > end)
+                {
+                    return 0;
+                }
+                u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
+                if (opcode == 0xc0 || opcode == 0xc1 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
+                {
+                    return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
+                }
+                object_assembly_x86_emit_prefix(buffer, prefix);
+                object_assembly_append_string(buffer, name);
+                object_assembly_append_string(buffer, S8(" "));
+                object_assembly_append_x86_rm(buffer, modrm, prefix, opcode == 0xc0 || opcode == 0xd0 || opcode == 0xd2 ? 8 : width, true, object, target,
+                                              object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
+                if (opcode == 0xc0 || opcode == 0xc1)
+                {
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_x86_emit_immediate(buffer, data.pointer[immediate_offset], 8, false);
+                }
+                else if (opcode == 0xd2 || opcode == 0xd3)
+                {
+                    object_assembly_append_string(buffer, S8(", cl"));
+                }
+                object_assembly_append_string(buffer, S8("\n"));
+                length = instruction_length;
             }
             else
             {
-                name = extended == 0xfc ? S8("paddb") : S8("paddd");
+                length = 0;
             }
-            u64 instruction_length = prefix.length + 2 + modrm.length;
-            if (offset + instruction_length > end)
-            {
-                return 0;
-            }
-            if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
-            {
-                return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-            }
-            ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
-            object_assembly_append_string(buffer, S8("\t"));
-            object_assembly_append_string(buffer, name);
-            object_assembly_append_string(buffer, S8(" "));
-            if (extended == 0x7f || extended == 0x11)
-            {
-                object_assembly_append_x86_vector_rm(buffer, modrm, vector_width, true, prefix, object, target, relocation);
-                object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_x86_vector_register(buffer, modrm.reg, vector_width);
-            }
-            else
-            {
-                object_assembly_append_x86_vector_register(buffer, modrm.reg, vector_width);
-                object_assembly_append_string(buffer, S8(", "));
-                object_assembly_append_x86_vector_rm(buffer, modrm, vector_width, true, prefix, object, target, relocation);
-            }
-            object_assembly_append_string(buffer, S8("\n"));
-            return instruction_length;
         }
-        return 0;
     }
-    if (opcode == 0x80 || opcode == 0x81 || opcode == 0x83)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-        {
-            return 0;
-        }
-        u32 immediate_size = opcode == 0x80 || opcode == 0x83 ? 1 : 4;
-        u64 immediate_offset = cursor + modrm.length;
-        if (immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        u32 immediate = 0;
-        if (immediate_size == 1)
-        {
-            immediate = data.pointer[immediate_offset];
-        }
-        else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
-        {
-            return 0;
-        }
-        String8 name = object_assembly_x86_group_name(modrm.reg & 7);
-        if (!name.length)
-        {
-            return 0;
-        }
-        u32 operand_width = opcode == 0x80 ? 8 : width;
-        u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-        if (opcode == 0x81 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
-            (modrm.mod != 3 && (prefix.rex & 8)))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_string(buffer, S8(" "));
-        object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, opcode != 0x81 || operand_width != 32);
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0xc6 || opcode == 0xc7)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm) || modrm.reg != 0)
-        {
-            return 0;
-        }
-        u32 immediate_size = opcode == 0xc6 ? 1 : 4;
-        u64 immediate_offset = cursor + modrm.length;
-        u32 immediate = 0;
-        if (immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        if (immediate_size == 1)
-        {
-            immediate = data.pointer[immediate_offset];
-        }
-        else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
-        {
-            return 0;
-        }
-        u32 operand_width = opcode == 0xc6 ? 1 : width;
-        u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-        if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
-            (modrm.mod != 3 && (prefix.rex & 8)))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        object_assembly_append_string(buffer, S8("\tmov "));
-        object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target,
-                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, opcode == 0xc7 && operand_width == 64);
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0x69 || opcode == 0x6b)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-        {
-            return 0;
-        }
-        u32 immediate_size = opcode == 0x6b ? 1 : 4;
-        u64 immediate_offset = cursor + modrm.length;
-        u32 immediate = 0;
-        if (immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        if (immediate_size == 1)
-        {
-            immediate = data.pointer[immediate_offset];
-        }
-        else if (!object_assembly_x86_read_u32(data, immediate_offset, &immediate))
-        {
-            return 0;
-        }
-        u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-        if (opcode == 0x69 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        object_assembly_append_string(buffer, S8("\timul "));
-        object_assembly_append_x86_register(buffer, modrm.reg, width, prefix.rex != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_x86_rm(buffer, modrm, prefix, width, true, object, target,
-                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0x88 || opcode == 0x89 || opcode == 0x8a || opcode == 0x8b || opcode == 0x8d || opcode == 0x01 || opcode == 0x03 || opcode == 0x09 ||
-        opcode == 0x0b || opcode == 0x21 || opcode == 0x23 || opcode == 0x29 || opcode == 0x2b || opcode == 0x31 || opcode == 0x33 || opcode == 0x39 ||
-        opcode == 0x3b || opcode == 0x85 || opcode == 0x87 || opcode == 0x86 || opcode == 0x63)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-        {
-            return 0;
-        }
-        u32 operand_width = opcode == 0x86 || opcode == 0x88 || opcode == 0x8a ? 8 : opcode == 0x63 ? 32 : width;
-        u64 instruction_length = prefix.length + 1 + modrm.length;
-        if (offset + instruction_length > end)
-        {
-            return 0;
-        }
-        if ((opcode == 0x8d && modrm.mod == 3) || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        ObjectRelocation* relocation = object_assembly_relocation_in_range(object, section, offset, offset + instruction_length);
-        String8 name = opcode == 0x88 || opcode == 0x89 || opcode == 0x8a || opcode == 0x8b ? S8("mov")
-                       : opcode == 0x8d                                    ? S8("lea")
-                       : opcode == 0x87 || opcode == 0x86                 ? S8("xchg")
-                       : opcode == 0x63                                    ? S8("movsxd")
-                                                                            : object_assembly_x86_binary_name(opcode);
-        if (!name.length && opcode != 0x85)
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        if (opcode == 0x85)
-        {
-            name = S8("test");
-        }
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_string(buffer, S8(" "));
-        bool reverse = opcode == 0x8a || opcode == 0x8b || opcode == 0x8d || opcode == 0x03 || opcode == 0x0b || opcode == 0x23 || opcode == 0x2b ||
-                       opcode == 0x33 || opcode == 0x3b || opcode == 0x63;
-        if (opcode == 0x85)
-        {
-            object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_x86_register(buffer, modrm.reg, operand_width, prefix.rex != 0);
-        }
-        else if (reverse)
-        {
-            object_assembly_append_x86_register(buffer, modrm.reg, opcode == 0x63 ? 64 : operand_width, prefix.rex != 0);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, opcode != 0x8d, object, target, relocation);
-        }
-        else
-        {
-            object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object, target, relocation);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_x86_register(buffer, modrm.reg, operand_width, prefix.rex != 0);
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0xf6 || opcode == 0xf7 || opcode == 0xfe || opcode == 0xff)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-        {
-            return 0;
-        }
-        u32 operand_width = opcode == 0xf6 || opcode == 0xfe ? 8 : width;
-        u32 group = modrm.reg & 7;
-        if (opcode == 0xff && (group == 2 || group == 4 || group == 6))
-        {
-            operand_width = prefix.operand16 ? 16 : 64;
-        }
-        u32 immediate_size = opcode == 0xf6 && group == 0 ? 1 : opcode == 0xf7 && group == 0 ? 4 : 0;
-        u64 immediate_offset = cursor + modrm.length;
-        u32 immediate = 0;
-        if (immediate_size && immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        else if (immediate_size == 1)
-        {
-            immediate = data.pointer[immediate_offset];
-        }
-        else if (immediate_size == 4 && !object_assembly_x86_read_u32(data, immediate_offset, &immediate))
-        {
-            return 0;
-        }
-        u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-        String8 name = group == 2 ? S8("not") : group == 3 ? S8("neg") : group == 4 ? S8("mul") : group == 5 ? S8("imul") : group == 6 ? S8("div")
-                                                                                                                        : group == 7 ? S8("idiv")
-                                                                                                                                     : group == 0 ? S8("test")
-                                                                                                                                                  : group == 1 ? S8("test")
-                                                                                                                                                               : (String8){0};
-        if (opcode == 0xff)
-        {
-            name = group == 0 ? S8("inc") : group == 1 ? S8("dec") : group == 2 ? S8("call") : group == 4 ? S8("jmp") : group == 6 ? S8("push") : (String8){0};
-        }
-        else if (opcode == 0xfe)
-        {
-            name = group == 0 ? S8("inc") : group == 1 ? S8("dec") : (String8){0};
-        }
-        if (!name.length || ((opcode == 0xf6 || opcode == 0xf7) && group > 7))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        if (!object_assembly_x86_modrm_has_stable_displacement(object, section, modrm) ||
-            (modrm.mod != 3 && (prefix.rex & 8)))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_string(buffer, S8(" "));
-        object_assembly_append_x86_rm(buffer, modrm, prefix, operand_width, true, object,
-                                      target, object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-        if (immediate_size)
-        {
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_x86_emit_immediate(buffer, immediate, immediate_size * 8, true);
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    if (opcode == 0xd0 || opcode == 0xd1 || opcode == 0xd2 || opcode == 0xd3 || opcode == 0xc0 || opcode == 0xc1)
-    {
-        ObjectAssemblyX86Modrm modrm;
-        if (!object_assembly_x86_parse_modrm(data, cursor, end, prefix, &modrm))
-        {
-            return 0;
-        }
-        u32 group = modrm.reg & 7;
-        String8 name = group == 4 ? S8("shl") : group == 5 ? S8("shr") : group == 7 ? S8("sar") : (String8){0};
-        if (!name.length)
-        {
-            return 0;
-        }
-        u32 immediate_size = opcode == 0xc0 || opcode == 0xc1 ? 1 : 0;
-        u64 immediate_offset = cursor + modrm.length;
-        if (immediate_offset + immediate_size > end)
-        {
-            return 0;
-        }
-        u64 instruction_length = prefix.length + 1 + modrm.length + immediate_size;
-        if (opcode == 0xc0 || opcode == 0xc1 || !object_assembly_x86_modrm_has_stable_displacement(object, section, modrm))
-        {
-            return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
-        }
-        object_assembly_x86_emit_prefix(buffer, prefix);
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_string(buffer, S8(" "));
-        object_assembly_append_x86_rm(buffer, modrm, prefix, opcode == 0xc0 || opcode == 0xd0 || opcode == 0xd2 ? 8 : width, true, object, target,
-                                      object_assembly_relocation_in_range(object, section, offset, offset + instruction_length));
-        if (opcode == 0xc0 || opcode == 0xc1)
-        {
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_x86_emit_immediate(buffer, data.pointer[immediate_offset], 8, false);
-        }
-        else if (opcode == 0xd2 || opcode == 0xd3)
-        {
-            object_assembly_append_string(buffer, S8(", cl"));
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return instruction_length;
-    }
-    return 0;
+    return length;
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_apple_x86_relocation(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target,
