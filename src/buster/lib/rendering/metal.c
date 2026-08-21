@@ -878,140 +878,140 @@ BUSTER_GLOBAL_LOCAL bool metal_record_background_blur(RenderingHandle* rendering
 {
     RenderingBlurPlan plan = rendering_blur_plan_make((RenderingWindowSize){.width = window->width, .height = window->height}, command.blur_rect,
                                                        command.blur_radius);
-    if (!plan.valid || !plan.radius)
+    if (plan.valid && plan.radius)
     {
-        return true;
-    }
-    if (!encoder || !*encoder || !command_buffer || !drawable_texture || command.target != RENDERING_TARGET_BACKBUFFER ||
-        !metal_blur_resources_ensure(rendering, window, frame) || !frame->blur_source || !frame->blur_horizontal)
-    {
-        return false;
+        if (!encoder || !*encoder || !command_buffer || !drawable_texture || command.target != RENDERING_TARGET_BACKBUFFER ||
+            !metal_blur_resources_ensure(rendering, window, frame) || !frame->blur_source || !frame->blur_horizontal)
+        {
+            return false;
+        }
+
+        metal_msg_void(*encoder, "endEncoding");
+        *encoder = 0;
+        id downsample_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+        id downsample_attachments = metal_msg_id(downsample_pass, "colorAttachments");
+        if (!downsample_pass || !downsample_attachments)
+        {
+            return false;
+        }
+        id downsample_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(downsample_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+        if (!downsample_attachment)
+        {
+            return false;
+        }
+        metal_msg_void_id(downsample_attachment, "setTexture:", frame->blur_source);
+        metal_msg_void_ulong(downsample_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
+        metal_msg_void_ulong(downsample_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+        BusterMTLClearColor downsample_clear_color = {0.0, 0.0, 0.0, 0.0};
+        ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(downsample_attachment, metal_sel("setClearColor:"), downsample_clear_color);
+        id downsample_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), downsample_pass);
+        if (!downsample_encoder)
+        {
+            return false;
+        }
+        BusterMTLViewport downsample_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
+        BusterMTLScissorRect downsample_scissor = {0, 0, plan.half_width, plan.half_height};
+        ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(downsample_encoder, metal_sel("setViewport:"), downsample_viewport);
+        ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(downsample_encoder, metal_sel("setScissorRect:"), downsample_scissor);
+        metal_msg_void_id(downsample_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentTexture:atIndex:"), drawable_texture, 0);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+        BlurConstants downsample_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.source_width, 1.0f / (f32)plan.source_height),
+            .radius = 0,
+            .vertical = 0,
+        };
+        ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                             &downsample_constants, sizeof(downsample_constants), 0);
+        ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                                  BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
+        metal_msg_void(downsample_encoder, "endEncoding");
+
+        id horizontal_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+        id horizontal_attachments = metal_msg_id(horizontal_pass, "colorAttachments");
+        if (!horizontal_pass || !horizontal_attachments)
+        {
+            return false;
+        }
+        id horizontal_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(horizontal_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+        if (!horizontal_attachment)
+        {
+            return false;
+        }
+        metal_msg_void_id(horizontal_attachment, "setTexture:", frame->blur_horizontal);
+        metal_msg_void_ulong(horizontal_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
+        metal_msg_void_ulong(horizontal_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+        BusterMTLClearColor clear_color = {0.0, 0.0, 0.0, 0.0};
+        ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(horizontal_attachment, metal_sel("setClearColor:"), clear_color);
+        id horizontal_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), horizontal_pass);
+        if (!horizontal_encoder)
+        {
+            return false;
+        }
+        BusterMTLViewport horizontal_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
+        BusterMTLScissorRect horizontal_scissor = {0, 0, plan.half_width, plan.half_height};
+        ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(horizontal_encoder, metal_sel("setViewport:"), horizontal_viewport);
+        ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(horizontal_encoder, metal_sel("setScissorRect:"), horizontal_scissor);
+        metal_msg_void_id(horizontal_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_source, 0);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+        BlurConstants horizontal_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+            .radius = plan.radius,
+            .vertical = 0,
+        };
+        ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                             &horizontal_constants, sizeof(horizontal_constants), 0);
+        ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                                  BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
+        metal_msg_void(horizontal_encoder, "endEncoding");
+
+        id target_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+        id target_attachments = metal_msg_id(target_pass, "colorAttachments");
+        if (!target_pass || !target_attachments)
+        {
+            return false;
+        }
+        id target_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(target_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
+        if (!target_attachment)
+        {
+            return false;
+        }
+        metal_msg_void_id(target_attachment, "setTexture:", drawable_texture);
+        metal_msg_void_ulong(target_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_LOAD);
+        metal_msg_void_ulong(target_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
+        *encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), target_pass);
+        if (!*encoder)
+        {
+            return false;
+        }
+        BusterMTLViewport target_viewport = {0, 0, (double)window->width, (double)window->height, 0, 1};
+        BusterMTLScissorRect blur_scissor = {
+            .x = (BusterNSUInteger)command.blur_rect.x0,
+            .y = (BusterNSUInteger)command.blur_rect.y0,
+            .width = (BusterNSUInteger)(command.blur_rect.x1 - command.blur_rect.x0),
+            .height = (BusterNSUInteger)(command.blur_rect.y1 - command.blur_rect.y0),
+        };
+        ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(*encoder, metal_sel("setViewport:"), target_viewport);
+        ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(*encoder, metal_sel("setScissorRect:"), blur_scissor);
+        metal_msg_void_id(*encoder, "setRenderPipelineState:", rendering->blur_pipeline);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_horizontal, 0);
+        ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
+        BlurConstants vertical_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+            .radius = plan.radius,
+            .vertical = 1,
+            .target_size = float2_make((f32)window->width, (f32)window->height),
+            .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
+            .corner_radii = command.blur_corner_radii,
+            .composite = 1,
+        };
+        ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentBytes:length:atIndex:"),
+                                                                                             &vertical_constants, sizeof(vertical_constants), 0);
+        ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
+                                                                                                  BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
     }
 
-    metal_msg_void(*encoder, "endEncoding");
-    *encoder = 0;
-    id downsample_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
-    id downsample_attachments = metal_msg_id(downsample_pass, "colorAttachments");
-    if (!downsample_pass || !downsample_attachments)
-    {
-        return false;
-    }
-    id downsample_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(downsample_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
-    if (!downsample_attachment)
-    {
-        return false;
-    }
-    metal_msg_void_id(downsample_attachment, "setTexture:", frame->blur_source);
-    metal_msg_void_ulong(downsample_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
-    metal_msg_void_ulong(downsample_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
-    BusterMTLClearColor downsample_clear_color = {0.0, 0.0, 0.0, 0.0};
-    ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(downsample_attachment, metal_sel("setClearColor:"), downsample_clear_color);
-    id downsample_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), downsample_pass);
-    if (!downsample_encoder)
-    {
-        return false;
-    }
-    BusterMTLViewport downsample_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
-    BusterMTLScissorRect downsample_scissor = {0, 0, plan.half_width, plan.half_height};
-    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(downsample_encoder, metal_sel("setViewport:"), downsample_viewport);
-    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(downsample_encoder, metal_sel("setScissorRect:"), downsample_scissor);
-    metal_msg_void_id(downsample_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentTexture:atIndex:"), drawable_texture, 0);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
-    BlurConstants downsample_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.source_width, 1.0f / (f32)plan.source_height),
-        .radius = 0,
-        .vertical = 0,
-    };
-    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
-                                                                                         &downsample_constants, sizeof(downsample_constants), 0);
-    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(downsample_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
-                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
-    metal_msg_void(downsample_encoder, "endEncoding");
-
-    id horizontal_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
-    id horizontal_attachments = metal_msg_id(horizontal_pass, "colorAttachments");
-    if (!horizontal_pass || !horizontal_attachments)
-    {
-        return false;
-    }
-    id horizontal_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(horizontal_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
-    if (!horizontal_attachment)
-    {
-        return false;
-    }
-    metal_msg_void_id(horizontal_attachment, "setTexture:", frame->blur_horizontal);
-    metal_msg_void_ulong(horizontal_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_CLEAR);
-    metal_msg_void_ulong(horizontal_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
-    BusterMTLClearColor clear_color = {0.0, 0.0, 0.0, 0.0};
-    ((void (*)(id, SEL, BusterMTLClearColor))objc_msgSend)(horizontal_attachment, metal_sel("setClearColor:"), clear_color);
-    id horizontal_encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), horizontal_pass);
-    if (!horizontal_encoder)
-    {
-        return false;
-    }
-    BusterMTLViewport horizontal_viewport = {0, 0, (double)plan.half_width, (double)plan.half_height, 0, 1};
-    BusterMTLScissorRect horizontal_scissor = {0, 0, plan.half_width, plan.half_height};
-    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(horizontal_encoder, metal_sel("setViewport:"), horizontal_viewport);
-    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(horizontal_encoder, metal_sel("setScissorRect:"), horizontal_scissor);
-    metal_msg_void_id(horizontal_encoder, "setRenderPipelineState:", rendering->blur_pipeline);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_source, 0);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
-    BlurConstants horizontal_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
-        .radius = plan.radius,
-        .vertical = 0,
-    };
-    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("setFragmentBytes:length:atIndex:"),
-                                                                                         &horizontal_constants, sizeof(horizontal_constants), 0);
-    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(horizontal_encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
-                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
-    metal_msg_void(horizontal_encoder, "endEncoding");
-
-    id target_pass = metal_msg_id((id)objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
-    id target_attachments = metal_msg_id(target_pass, "colorAttachments");
-    if (!target_pass || !target_attachments)
-    {
-        return false;
-    }
-    id target_attachment = ((id (*)(id, SEL, BusterNSUInteger))objc_msgSend)(target_attachments, metal_sel("objectAtIndexedSubscript:"), 0);
-    if (!target_attachment)
-    {
-        return false;
-    }
-    metal_msg_void_id(target_attachment, "setTexture:", drawable_texture);
-    metal_msg_void_ulong(target_attachment, "setLoadAction:", BUSTER_MTL_LOAD_ACTION_LOAD);
-    metal_msg_void_ulong(target_attachment, "setStoreAction:", BUSTER_MTL_STORE_ACTION_STORE);
-    *encoder = ((id (*)(id, SEL, id))objc_msgSend)(command_buffer, metal_sel("renderCommandEncoderWithDescriptor:"), target_pass);
-    if (!*encoder)
-    {
-        return false;
-    }
-    BusterMTLViewport target_viewport = {0, 0, (double)window->width, (double)window->height, 0, 1};
-    BusterMTLScissorRect blur_scissor = {
-        .x = (BusterNSUInteger)command.blur_rect.x0,
-        .y = (BusterNSUInteger)command.blur_rect.y0,
-        .width = (BusterNSUInteger)(command.blur_rect.x1 - command.blur_rect.x0),
-        .height = (BusterNSUInteger)(command.blur_rect.y1 - command.blur_rect.y0),
-    };
-    ((void (*)(id, SEL, BusterMTLViewport))objc_msgSend)(*encoder, metal_sel("setViewport:"), target_viewport);
-    ((void (*)(id, SEL, BusterMTLScissorRect))objc_msgSend)(*encoder, metal_sel("setScissorRect:"), blur_scissor);
-    metal_msg_void_id(*encoder, "setRenderPipelineState:", rendering->blur_pipeline);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentTexture:atIndex:"), frame->blur_horizontal, 0);
-    ((void (*)(id, SEL, id, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentSamplerState:atIndex:"), rendering->blur_sampler_state, 0);
-    BlurConstants vertical_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
-        .radius = plan.radius,
-        .vertical = 1,
-        .target_size = float2_make((f32)window->width, (f32)window->height),
-        .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
-        .corner_radii = command.blur_corner_radii,
-        .composite = 1,
-    };
-    ((void (*)(id, SEL, const void*, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("setFragmentBytes:length:atIndex:"),
-                                                                                         &vertical_constants, sizeof(vertical_constants), 0);
-    ((void (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger))objc_msgSend)(*encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"),
-                                                                                              BUSTER_MTL_PRIMITIVE_TYPE_TRIANGLE, 0, 3);
     return true;
 }
 

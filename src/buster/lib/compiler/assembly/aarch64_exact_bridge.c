@@ -8,12 +8,13 @@ BUSTER_GLOBAL_LOCAL bool a64_exact_string_equal(String8 left, String8 right)
 
 BUSTER_GLOBAL_LOCAL bool a64_exact_crosswalk_row(u32 index, BusterAarch64ExactCrosswalkRow const** result)
 {
-    if (!result || index >= BUSTER_AARCH64_EXACT_CROSSWALK_COUNT)
+    bool valid = result && index < BUSTER_AARCH64_EXACT_CROSSWALK_COUNT;
+    if (valid)
     {
-        return false;
+        *result = &buster_aarch64_exact_crosswalk_rows[index];
     }
-    *result = &buster_aarch64_exact_crosswalk_rows[index];
-    return true;
+
+    return valid;
 }
 
 u32 a64_exact_crosswalk_count(void)
@@ -24,19 +25,20 @@ u32 a64_exact_crosswalk_count(void)
 bool a64_exact_crosswalk(u32 index, A64ExactCrosswalkEntry* result)
 {
     BusterAarch64ExactCrosswalkRow const* row = 0;
-    if (!result || !a64_exact_crosswalk_row(index, &row))
+    bool valid = result && a64_exact_crosswalk_row(index, &row);
+    if (valid)
     {
-        return false;
+        *result = (A64ExactCrosswalkEntry){
+            .llvm_name = row->llvm_name,
+            .llvm_form_id = row->llvm_form_id,
+            .llvm_source_hash = row->llvm_source_hash,
+            .canonical = {.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest},
+            .llvm_field_count = row->llvm_field_count,
+            .canonical_field_count = row->canonical_field_count,
+        };
     }
-    *result = (A64ExactCrosswalkEntry){
-        .llvm_name = row->llvm_name,
-        .llvm_form_id = row->llvm_form_id,
-        .llvm_source_hash = row->llvm_source_hash,
-        .canonical = {.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest},
-        .llvm_field_count = row->llvm_field_count,
-        .canonical_field_count = row->canonical_field_count,
-    };
-    return true;
+
+    return valid;
 }
 
 bool a64_exact_lookup(String8 llvm_name, A64ExactFormKey* result)
@@ -60,12 +62,13 @@ bool a64_exact_lookup(String8 llvm_name, A64ExactFormKey* result)
 bool a64_exact_key(u32 index, A64ExactFormKey* result)
 {
     BusterAarch64ExactCrosswalkRow const* row = 0;
-    if (!result || !a64_exact_crosswalk_row(index, &row))
+    bool valid = result && a64_exact_crosswalk_row(index, &row);
+    if (valid)
     {
-        return false;
+        *result = (A64ExactFormKey){.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest};
     }
-    *result = (A64ExactFormKey){.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest};
-    return true;
+
+    return valid;
 }
 
 bool a64_exact_key_valid(A64ExactFormKey key)

@@ -59,32 +59,35 @@ BUSTER_GLOBAL_LOCAL u64 jit_section_size(ObjectSection const* section)
 
 BUSTER_GLOBAL_LOCAL bool jit_align_forward(u64 value, u64 alignment, u64* result)
 {
-    if (!alignment || (alignment & (alignment - 1)) || value > UINT64_MAX - (alignment - 1))
+    bool valid = alignment && !(alignment & (alignment - 1)) && value <= UINT64_MAX - (alignment - 1);
+    if (valid)
     {
-        return false;
+        *result = (value + alignment - 1) & ~(alignment - 1);
     }
-    *result = (value + alignment - 1) & ~(alignment - 1);
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_add_u64(u64 left, u64 right, u64* result)
 {
-    if (right > UINT64_MAX - left)
+    bool valid = right <= UINT64_MAX - left;
+    if (valid)
     {
-        return false;
+        *result = left + right;
     }
-    *result = left + right;
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_add_s64(s64 left, s64 right, s64* result)
 {
-    if ((right > 0 && left > INT64_MAX - right) || (right < 0 && left < INT64_MIN - right))
+    bool valid = (right <= 0 || left <= INT64_MAX - right) && (right >= 0 || left >= INT64_MIN - right);
+    if (valid)
     {
-        return false;
+        *result = left + right;
     }
-    *result = left + right;
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_address_difference(u64 target, u64 place, s64 addend, s64* result)

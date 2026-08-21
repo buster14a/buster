@@ -181,31 +181,37 @@ BUSTER_GLOBAL_LOCAL u32 codeview_model_type_index(DebugModel* model, DebugTypeId
 
 BUSTER_GLOBAL_LOCAL u32 codeview_model_simple_type(DebugType* type)
 {
+    u32 result;
     if (!type)
     {
-        return 0x0003;
+        result = 0x0003;
     }
-    if (type->kind == DEBUG_TYPE_VOID)
+    else if (type->kind == DEBUG_TYPE_VOID)
     {
-        return 0x0003;
+        result = 0x0003;
     }
-    if (type->kind == DEBUG_TYPE_BASE && type->name.length && (type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F'))
+    else if (type->kind == DEBUG_TYPE_BASE && type->name.length && (type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F'))
     {
-        return type->size > 4 ? 0x0041 : 0x0040;
+        result = type->size > 4 ? 0x0041 : 0x0040;
     }
-    if (type->size <= 1)
+    else if (type->size <= 1)
     {
-        return type->is_signed ? 0x0010 : 0x0020;
+        result = type->is_signed ? 0x0010 : 0x0020;
     }
-    if (type->size <= 2)
+    else if (type->size <= 2)
     {
-        return type->is_signed ? 0x0011 : 0x0021;
+        result = type->is_signed ? 0x0011 : 0x0021;
     }
-    if (type->size <= 4)
+    else if (type->size <= 4)
     {
-        return type->is_signed ? 0x0074 : 0x0075;
+        result = type->is_signed ? 0x0074 : 0x0075;
     }
-    return type->is_signed ? 0x0076 : 0x0077;
+    else
+    {
+        result = type->is_signed ? 0x0076 : 0x0077;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u64 codeview_type_record_begin(CodeviewBuffer* buffer, u16 leaf)

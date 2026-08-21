@@ -2606,11 +2606,29 @@ static bool arm_a64_append_scalar_header(Arena* output, ArmA64ScalarProjectionRo
 
 static String8 arm_a64_gpr_feature_name(String8 expression)
 {
-    if (!expression.length) return S8("TARGET_CPU_FEATURE_NONE");
-    if (string_equal(expression, S8("FEAT_CRC32"))) return S8("TARGET_CPU_FEATURE_AARCH64_CRC");
-    if (string_equal(expression, S8("FEAT_FlagM"))) return S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
-    if (string_equal(expression, S8("FEAT_PAuth"))) return S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
-    return (String8){0};
+    String8 result;
+    if (!expression.length)
+    {
+        result = S8("TARGET_CPU_FEATURE_NONE");
+    }
+    else if (string_equal(expression, S8("FEAT_CRC32")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_CRC");
+    }
+    else if (string_equal(expression, S8("FEAT_FlagM")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
+    }
+    else if (string_equal(expression, S8("FEAT_PAuth")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
+    }
+    else
+    {
+        result = (String8){0};
+    }
+
+    return result;
 }
 
 static bool arm_a64_append_gpr_header(Arena* output, ArmA64GprProjectionRow* rows, u32 count)
@@ -3436,14 +3454,41 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
 
 static String8 arm_a64_fixed_target_feature_name(String8 expression)
 {
-    if (!expression.length) return S8("TARGET_CPU_FEATURE_NONE");
-    if (string_equal(expression, S8("FEAT_FlagM"))) return S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
-    if (string_equal(expression, S8("FEAT_FlagM2"))) return S8("TARGET_CPU_FEATURE_AARCH64_ALTNZCV");
-    if (string_equal(expression, S8("FEAT_PAuth"))) return S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
-    if (string_equal(expression, S8("FEAT_RAS"))) return S8("TARGET_CPU_FEATURE_AARCH64_RAS");
-    if (string_equal(expression, S8("FEAT_SB"))) return S8("TARGET_CPU_FEATURE_AARCH64_SB");
-    if (string_equal(expression, S8("FEAT_TRF"))) return S8("TARGET_CPU_FEATURE_AARCH64_TRACEV8_4");
-    return (String8){0};
+    String8 result;
+    if (!expression.length)
+    {
+        result = S8("TARGET_CPU_FEATURE_NONE");
+    }
+    else if (string_equal(expression, S8("FEAT_FlagM")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
+    }
+    else if (string_equal(expression, S8("FEAT_FlagM2")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_ALTNZCV");
+    }
+    else if (string_equal(expression, S8("FEAT_PAuth")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
+    }
+    else if (string_equal(expression, S8("FEAT_RAS")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_RAS");
+    }
+    else if (string_equal(expression, S8("FEAT_SB")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_SB");
+    }
+    else if (string_equal(expression, S8("FEAT_TRF")))
+    {
+        result = S8("TARGET_CPU_FEATURE_AARCH64_TRACEV8_4");
+    }
+    else
+    {
+        result = (String8){0};
+    }
+
+    return result;
 }
 
 static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)

@@ -104,20 +104,56 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_register(Arena* arena, BusterX
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_immediate(Arena* arena, BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.has_unsigned_value) return string_format(arena, S8("0x{u64:x,no_prefix}"), operand.unsigned_value);
-    if (!operand.has_value) return (String8){0};
-    if (operand.value >= 0) return string_format(arena, S8("0x{u64:x,no_prefix}"), (u64)operand.value);
-    if (operand.value == INT64_MIN) return S8("-0x8000000000000000");
-    return string_format(arena, S8("-0x{u64:x,no_prefix}"), (u64)-operand.value);
+    String8 result;
+    if (operand.has_unsigned_value)
+    {
+        result = string_format(arena, S8("0x{u64:x,no_prefix}"), operand.unsigned_value);
+    }
+    else if (!operand.has_value)
+    {
+        result = (String8){0};
+    }
+    else if (operand.value >= 0)
+    {
+        result = string_format(arena, S8("0x{u64:x,no_prefix}"), (u64)operand.value);
+    }
+    else if (operand.value == INT64_MIN)
+    {
+        result = S8("-0x8000000000000000");
+    }
+    else
+    {
+        result = string_format(arena, S8("-0x{u64:x,no_prefix}"), (u64)-operand.value);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_symbol(Arena* arena, String8 symbol, s64 addend)
 {
-    if (!symbol.length) return (String8){0};
-    if (!addend) return symbol;
-    if (addend == INT64_MIN) return (String8){0};
-    if (addend > 0) return string_format(arena, S8("{S8} + {s64}"), symbol, addend);
-    return string_format(arena, S8("{S8} - {s64}"), symbol, -addend);
+    String8 result;
+    if (!symbol.length)
+    {
+        result = (String8){0};
+    }
+    else if (!addend)
+    {
+        result = symbol;
+    }
+    else if (addend == INT64_MIN)
+    {
+        result = (String8){0};
+    }
+    else if (addend > 0)
+    {
+        result = string_format(arena, S8("{S8} + {s64}"), symbol, addend);
+    }
+    else
+    {
+        result = string_format(arena, S8("{S8} - {s64}"), symbol, -addend);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_string_contains(String8 value, String8 needle)
@@ -180,11 +216,29 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_is_mask_register(BusterX86Metadat
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_typed_decorator(BusterX86MetadataPhysicalAttributes attributes)
 {
-    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST) return S8("rn-sae");
-    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_DOWN) return S8("rd-sae");
-    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_UP) return S8("ru-sae");
-    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_ZERO) return S8("rz-sae");
-    return S8("sae");
+    String8 result;
+    if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST)
+    {
+        result = S8("rn-sae");
+    }
+    else if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_DOWN)
+    {
+        result = S8("rd-sae");
+    }
+    else if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_UP)
+    {
+        result = S8("ru-sae");
+    }
+    else if (attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_ZERO)
+    {
+        result = S8("rz-sae");
+    }
+    else
+    {
+        result = S8("sae");
+    }
+
+    return result;
 }
 
 // The public decorator bridge is intentionally narrower than the metadata

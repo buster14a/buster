@@ -1306,89 +1306,178 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
         IrValueLabelMetadata source = ir_value_label_metadata(function, definition->operands[operand_index]);
         source_has_label |= ir_label_metadata_has_label(&source);
     }
-    if (!result_has_label && !source_has_label)
+    if (result_has_label || source_has_label)
     {
-        return true;
-    }
-    IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
-    if (!aggregate || (definition->opcode == IR_OPCODE_ARRAY && aggregate->kind != IR_TYPE_ARRAY && aggregate->kind != IR_TYPE_VECTOR) ||
-        (definition->opcode == IR_OPCODE_AGGREGATE && aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
-    {
-        return false;
-    }
-    bool source_non_label = false;
-    bool source_label = false;
-    for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
-    {
-        if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
+        IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
+        if (!aggregate || (definition->opcode == IR_OPCODE_ARRAY && aggregate->kind != IR_TYPE_ARRAY && aggregate->kind != IR_TYPE_VECTOR) ||
+            (definition->opcode == IR_OPCODE_AGGREGATE && aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
         {
             return false;
         }
-        IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
-        IrValueLabelMetadata* source = &source_metadata;
-        IrType* source_type = ir_type_from_id(&program->types, function->values[definition->operands[operand_index].value].canonical_type);
-        u64 base_offset = 0;
-        u64 source_size = 0;
-        if (definition->opcode == IR_OPCODE_ARRAY)
+        bool source_non_label = false;
+        bool source_label = false;
+        for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
         {
-            IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
-            if (!element || !element->layout.resolved || operand_index >= aggregate->element_count ||
-                operand_index > UINT64_MAX / element->layout.size)
+            if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
             {
                 return false;
             }
-            base_offset = operand_index * element->layout.size;
-            source_size = element->layout.size;
-        }
-        else
-        {
-            u64 field_index = definition->immediate_count == definition->operand_count && definition->immediates ? definition->immediates[operand_index] : UINT64_MAX;
-            if (field_index >= aggregate->field_count)
+            IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+            IrValueLabelMetadata* source = &source_metadata;
+            IrType* source_type = ir_type_from_id(&program->types, function->values[definition->operands[operand_index].value].canonical_type);
+            u64 base_offset = 0;
+            u64 source_size = 0;
+            if (definition->opcode == IR_OPCODE_ARRAY)
             {
-                return false;
-            }
-            IrField* field = aggregate->fields + field_index;
-            IrType* field_type = ir_type_from_id(&program->types, field->type);
-            if (!field_type || !field_type->layout.resolved)
-            {
-                return false;
-            }
-            base_offset = field->offset;
-            source_size = field_type->layout.size;
-        }
-        if (!source_type || !source_type->layout.resolved || base_offset > aggregate->layout.size || source_size > aggregate->layout.size - base_offset)
-        {
-            return false;
-        }
-        source_non_label |= ir_value_has_non_label_path(source);
-        source_label |= ir_label_metadata_has_label(source);
-        for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
-        {
-            IrLabelProvenancePath* source_path = source->label_paths + path_index;
-            if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > source_size ||
-                base_offset > UINT64_MAX - source_path->offset)
-            {
-                return false;
-            }
-            u64 expected_offset = base_offset + source_path->offset;
-            bool found = false;
-            for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-            {
-                IrLabelProvenancePath* result_path = result->label_paths + result_index;
-                if (result_path->offset != expected_offset || result_path->size != source_path->size)
+                IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
+                if (!element || !element->layout.resolved || operand_index >= aggregate->element_count ||
+                    operand_index > UINT64_MAX / element->layout.size)
                 {
-                    continue;
+                    return false;
                 }
-                if (source_path->is_non_label)
+                base_offset = operand_index * element->layout.size;
+                source_size = element->layout.size;
+            }
+            else
+            {
+                u64 field_index = definition->immediate_count == definition->operand_count && definition->immediates ? definition->immediates[operand_index] : UINT64_MAX;
+                if (field_index >= aggregate->field_count)
                 {
-                    found |= result_path->is_non_label || result->has_non_label_provenance;
+                    return false;
+                }
+                IrField* field = aggregate->fields + field_index;
+                IrType* field_type = ir_type_from_id(&program->types, field->type);
+                if (!field_type || !field_type->layout.resolved)
+                {
+                    return false;
+                }
+                base_offset = field->offset;
+                source_size = field_type->layout.size;
+            }
+            if (!source_type || !source_type->layout.resolved || base_offset > aggregate->layout.size || source_size > aggregate->layout.size - base_offset)
+            {
+                return false;
+            }
+            source_non_label |= ir_value_has_non_label_path(source);
+            source_label |= ir_label_metadata_has_label(source);
+            for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+            {
+                IrLabelProvenancePath* source_path = source->label_paths + path_index;
+                if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > source_size ||
+                    base_offset > UINT64_MAX - source_path->offset)
+                {
+                    return false;
+                }
+                u64 expected_offset = base_offset + source_path->offset;
+                bool found = false;
+                for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
+                {
+                    IrLabelProvenancePath* result_path = result->label_paths + result_index;
+                    if (result_path->offset != expected_offset || result_path->size != source_path->size)
+                    {
+                        continue;
+                    }
+                    if (source_path->is_non_label)
+                    {
+                        found |= result_path->is_non_label || result->has_non_label_provenance;
+                    }
+                    else
+                    {
+                        bool blocks_match = !result_path->is_non_label;
+                        for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
+                        {
+                            blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
+                        }
+                        found |= blocks_match;
+                    }
+                }
+                if (!found)
+                {
+                    return false;
+                }
+            }
+            if (source->is_label_value)
+            {
+                bool found = false;
+                for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
+                {
+                    IrLabelProvenancePath* result_path = result->label_paths + result_index;
+                    if (result_path->offset != base_offset || result_path->size != source_size || result_path->is_non_label)
+                    {
+                        continue;
+                    }
+                    bool blocks_match = source->label_block_count <= result_path->label_block_count;
+                    for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
+                    {
+                        blocks_match = ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
+                    }
+                    found |= blocks_match;
+                }
+                if (!found)
+                {
+                    return false;
+                }
+            }
+        }
+        if (source_non_label && !result->has_non_label_provenance)
+        {
+            return false;
+        }
+        if (source_label && !ir_label_metadata_has_label(result))
+        {
+            return false;
+        }
+        for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
+        {
+            IrLabelProvenancePath* result_path = result->label_paths + result_index;
+            bool found = false;
+            for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
+            {
+                IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+                IrValueLabelMetadata* source = &source_metadata;
+                u64 base_offset = 0;
+                u64 source_size = 0;
+                if (definition->opcode == IR_OPCODE_ARRAY)
+                {
+                    IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
+                    base_offset = operand_index * element->layout.size;
+                    source_size = element->layout.size;
                 }
                 else
                 {
-                    bool blocks_match = !result_path->is_non_label;
-                    for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
+                    IrField* field = aggregate->fields + definition->immediates[operand_index];
+                    IrType* field_type = ir_type_from_id(&program->types, field->type);
+                    base_offset = field->offset;
+                    source_size = field_type->layout.size;
+                }
+                for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+                {
+                    IrLabelProvenancePath* source_path = source->label_paths + path_index;
+                    if (source_path->offset <= UINT64_MAX - source_path->size && source_path->offset + source_path->size <= source_size &&
+                        base_offset <= UINT64_MAX - source_path->offset && result_path->offset == base_offset + source_path->offset &&
+                        result_path->size == source_path->size)
                     {
-                        blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
+                        if (source_path->is_non_label)
+                        {
+                            found |= result_path->is_non_label || result->has_non_label_provenance;
+                        }
+                        else
+                        {
+                            bool blocks_match = !result_path->is_non_label;
+                            for (u32 block_index = 0; blocks_match && block_index < result_path->label_block_count; block_index += 1)
+                            {
+                                blocks_match = ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
+                            }
+                            found |= blocks_match;
+                        }
+                    }
+                }
+                if (source->is_label_value && result_path->offset == base_offset && result_path->size == source_size && !result_path->is_non_label)
+                {
+                    bool blocks_match = source->label_block_count <= result_path->label_block_count;
+                    for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
+                    {
+                        blocks_match &= ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
                     }
                     found |= blocks_match;
                 }
@@ -1398,97 +1487,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
                 return false;
             }
         }
-        if (source->is_label_value)
-        {
-            bool found = false;
-            for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-            {
-                IrLabelProvenancePath* result_path = result->label_paths + result_index;
-                if (result_path->offset != base_offset || result_path->size != source_size || result_path->is_non_label)
-                {
-                    continue;
-                }
-                bool blocks_match = source->label_block_count <= result_path->label_block_count;
-                for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
-                {
-                    blocks_match = ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
-                }
-                found |= blocks_match;
-            }
-            if (!found)
-            {
-                return false;
-            }
-        }
     }
-    if (source_non_label && !result->has_non_label_provenance)
-    {
-        return false;
-    }
-    if (source_label && !ir_label_metadata_has_label(result))
-    {
-        return false;
-    }
-    for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-    {
-        IrLabelProvenancePath* result_path = result->label_paths + result_index;
-        bool found = false;
-        for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
-        {
-            IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
-            IrValueLabelMetadata* source = &source_metadata;
-            u64 base_offset = 0;
-            u64 source_size = 0;
-            if (definition->opcode == IR_OPCODE_ARRAY)
-            {
-                IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
-                base_offset = operand_index * element->layout.size;
-                source_size = element->layout.size;
-            }
-            else
-            {
-                IrField* field = aggregate->fields + definition->immediates[operand_index];
-                IrType* field_type = ir_type_from_id(&program->types, field->type);
-                base_offset = field->offset;
-                source_size = field_type->layout.size;
-            }
-            for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
-            {
-                IrLabelProvenancePath* source_path = source->label_paths + path_index;
-                if (source_path->offset <= UINT64_MAX - source_path->size && source_path->offset + source_path->size <= source_size &&
-                    base_offset <= UINT64_MAX - source_path->offset && result_path->offset == base_offset + source_path->offset &&
-                    result_path->size == source_path->size)
-                {
-                    if (source_path->is_non_label)
-                    {
-                        found |= result_path->is_non_label || result->has_non_label_provenance;
-                    }
-                    else
-                    {
-                        bool blocks_match = !result_path->is_non_label;
-                        for (u32 block_index = 0; blocks_match && block_index < result_path->label_block_count; block_index += 1)
-                        {
-                            blocks_match = ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
-                        }
-                        found |= blocks_match;
-                    }
-                }
-            }
-            if (source->is_label_value && result_path->offset == base_offset && result_path->size == source_size && !result_path->is_non_label)
-            {
-                bool blocks_match = source->label_block_count <= result_path->label_block_count;
-                for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
-                {
-                    blocks_match &= ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
-                }
-                found |= blocks_match;
-            }
-        }
-        if (!found)
-        {
-            return false;
-        }
-    }
+
     return true;
 }
 

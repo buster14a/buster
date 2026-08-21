@@ -361,10 +361,14 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_find_token_form(String8 iclass, St
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string8(BusterX86MetadataString value, char8* buffer, u32 capacity, String8* result)
 {
-    if (!buffer || !result || value.length >= capacity) return false;
-    for (u32 index = 0; index < value.length; index += 1) buffer[index] = (char8)buster_x86_metadata_string_byte(value, index);
-    *result = (String8){.pointer = buffer, .length = value.length};
-    return true;
+    bool valid = buffer && result && value.length < capacity;
+    if (valid)
+    {
+        for (u32 index = 0; index < value.length; index += 1) buffer[index] = (char8)buster_x86_metadata_string_byte(value, index);
+        *result = (String8){.pointer = buffer, .length = value.length};
+    }
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_candidate(BusterX86MetadataCandidateRange range, u32 position, u32* form_id)

@@ -1490,15 +1490,21 @@ bool target_cpu_features_are_valid(Target target)
 
 TargetCpuFeatures target_cpu_features_effective(Target target)
 {
+    TargetCpuFeatures result;
     if (target.cpu_features_explicit)
     {
-        return target.cpu_features;
+        result = target.cpu_features;
     }
-    if (target.cpu_model == CPU_MODEL_NATIVE && target.cpu_arch == target_native.cpu_arch && target_native.cpu_features_explicit)
+    else if (target.cpu_model == CPU_MODEL_NATIVE && target.cpu_arch == target_native.cpu_arch && target_native.cpu_features_explicit)
     {
-        return target_native.cpu_features;
+        result = target_native.cpu_features;
     }
-    return target_cpu_features_default(target.cpu_arch, target.cpu_model);
+    else
+    {
+        result = target_cpu_features_default(target.cpu_arch, target.cpu_model);
+    }
+
+    return result;
 }
 
 bool target_cpu_feature_has(Target target, TargetCpuFeature feature)

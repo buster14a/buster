@@ -1253,15 +1253,21 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
 
 BUSTER_GLOBAL_LOCAL u8 dwarf_model_base_encoding(DebugType* type)
 {
+    u8 result;
     if (type->bit_width == 1 || string_equal(type->name, S8("bool")) || string_equal(type->name, S8("boolean")))
     {
-        return 0x02;
+        result = 0x02;
     }
-    if (dwarf_model_base_is_float(type))
+    else if (dwarf_model_base_is_float(type))
     {
-        return 0x04;
+        result = 0x04;
     }
-    return type->is_signed ? 0x05 : 0x07;
+    else
+    {
+        result = type->is_signed ? 0x05 : 0x07;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_declaration(DwarfModelWriter* writer, DebugSourceLocation declaration)

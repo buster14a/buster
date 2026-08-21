@@ -371,31 +371,31 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_unw
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has_frame_lea(ObjectFile* object)
 {
-    if (!object)
+    if (object)
     {
-        return false;
-    }
-    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        ObjectSymbol* symbol = object->symbols + symbol_index;
-        if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || symbol->value > text.length || symbol->size > text.length - symbol->value)
+        ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
         {
-            continue;
-        }
-        u64 function_end = symbol->value + symbol->size;
-        for (u64 offset = symbol->value; offset + 6 <= function_end; offset += 1)
-        {
-            bool short_lea = text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d && text.pointer[offset + 2] == 0x65 &&
-                             text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
-            bool long_lea = offset + 9 <= function_end && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
-                            text.pointer[offset + 2] == 0xa5 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
-            if (short_lea || long_lea)
+            ObjectSymbol* symbol = object->symbols + symbol_index;
+            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || symbol->value > text.length || symbol->size > text.length - symbol->value)
             {
-                return true;
+                continue;
+            }
+            u64 function_end = symbol->value + symbol->size;
+            for (u64 offset = symbol->value; offset + 6 <= function_end; offset += 1)
+            {
+                bool short_lea = text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d && text.pointer[offset + 2] == 0x65 &&
+                                 text.pointer[offset + 4] == 0x5d && text.pointer[offset + 5] == 0xc3;
+                bool long_lea = offset + 9 <= function_end && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8d &&
+                                text.pointer[offset + 2] == 0xa5 && text.pointer[offset + 7] == 0x5d && text.pointer[offset + 8] == 0xc3;
+                if (short_lea || long_lea)
+                {
+                    return true;
+                }
             }
         }
     }
+
     return false;
 }
 

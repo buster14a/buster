@@ -1121,11 +1121,29 @@ BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_immediate_class(BusterX86M
 
 BUSTER_GLOBAL_LOCAL u8 codegen_canonical_x64_metadata_displacement_class(BusterX86MetadataPhysicalMemory memory)
 {
-    if (!memory.has_displacement) return 0;
-    if (memory.displacement == 0) return 1;
-    if (memory.displacement >= INT8_MIN && memory.displacement <= INT8_MAX) return 2;
-    if (memory.displacement >= INT32_MIN && memory.displacement <= INT32_MAX) return 3;
-    return 4;
+    u8 result;
+    if (!memory.has_displacement)
+    {
+        result = 0;
+    }
+    else if (memory.displacement == 0)
+    {
+        result = 1;
+    }
+    else if (memory.displacement >= INT8_MIN && memory.displacement <= INT8_MAX)
+    {
+        result = 2;
+    }
+    else if (memory.displacement >= INT32_MIN && memory.displacement <= INT32_MAX)
+    {
+        result = 3;
+    }
+    else
+    {
+        result = 4;
+    }
+
+    return result;
 }
 
 // Build the packed key.  Returns the word count, or 0 when the query does not
@@ -4711,267 +4729,267 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
 {
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    if (!codegen_canonical_x64_simd_supported(target, operation) || instruction->operand_count != shape.operand_count ||
-        instruction->immediate_count != shape.immediate_count)
+    if (codegen_canonical_x64_simd_supported(target, operation) && instruction->operand_count == shape.operand_count &&
+        instruction->immediate_count == shape.immediate_count)
     {
-        return false;
-    }
-    s32 slots[4] = {0};
-    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-    {
-        slots[operand_index] =
-            codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->operands[operand_index].value], frame_base_offset);
-    }
-    s32 result_slot = shape.has_result
-                          ? codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->result.value], frame_base_offset)
-                          : 0;
-    u8 immediate = instruction->immediate_count ? (u8)instruction->immediates[0] : 0;
-    X64Evex const move_load = {.map = 1, .prefix = 3, .opcode = 0x6f};
-    X64Evex const move_store = {.map = 1, .prefix = 3, .opcode = 0x7f};
-    switch (operation)
-    {
-    case IR_SIMD_LOAD:
-    case IR_SIMD_LOAD_MASKED:
-    {
-        bool masked = operation == IR_SIMD_LOAD_MASKED;
-        if (masked)
+        s32 slots[4] = {0};
+        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
         {
-            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+            slots[operand_index] =
+                codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->operands[operand_index].value], frame_base_offset);
+        }
+        s32 result_slot = shape.has_result
+                              ? codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->result.value], frame_base_offset)
+                              : 0;
+        u8 immediate = instruction->immediate_count ? (u8)instruction->immediates[0] : 0;
+        X64Evex const move_load = {.map = 1, .prefix = 3, .opcode = 0x6f};
+        X64Evex const move_store = {.map = 1, .prefix = 3, .opcode = 0x7f};
+        switch (operation)
+        {
+        case IR_SIMD_LOAD:
+        case IR_SIMD_LOAD_MASKED:
+        {
+            bool masked = operation == IR_SIMD_LOAD_MASKED;
+            if (masked)
+            {
+                if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+                {
+                    return false;
+                }
+            }
+            BusterX86MetadataPhysicalOperand pointer_load[2] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
+            };
+            BusterX86MetadataPhysicalAttributes attributes = masked
+                                                                  ? (BusterX86MetadataPhysicalAttributes){
+                                                                        .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK | BUSTER_X86_METADATA_DECORATOR_ZEROING,
+                                                                        .mask_register = X64_SIMD_MASK,
+                                                                        .has_mask_register = true,
+                                                                        .zeroing = true,
+                                                                    }
+                                                                  : (BusterX86MetadataPhysicalAttributes){0};
+            if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
+                !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, false, 8,
+                                                            attributes) ||
+                !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
+                                                            (BusterX86MetadataPhysicalAttributes){0}))
             {
                 return false;
             }
+            return buffer->error == CODEGEN_ERROR_NONE;
         }
-        BusterX86MetadataPhysicalOperand pointer_load[2] = {
-            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
-        };
-        BusterX86MetadataPhysicalAttributes attributes = masked
-                                                              ? (BusterX86MetadataPhysicalAttributes){
-                                                                    .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK | BUSTER_X86_METADATA_DECORATOR_ZEROING,
-                                                                    .mask_register = X64_SIMD_MASK,
-                                                                    .has_mask_register = true,
-                                                                    .zeroing = true,
-                                                                }
-                                                              : (BusterX86MetadataPhysicalAttributes){0};
-        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
-            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, false, 8,
-                                                        attributes) ||
-            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
-                                                        (BusterX86MetadataPhysicalAttributes){0}))
+        case IR_SIMD_STORE:
+        case IR_SIMD_STORE_MASKED:
+        case IR_SIMD_COMPRESS_STORE_BYTE:
         {
-            return false;
-        }
-        return buffer->error == CODEGEN_ERROR_NONE;
-    }
-    case IR_SIMD_STORE:
-    case IR_SIMD_STORE_MASKED:
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-    {
-        bool masked = operation != IR_SIMD_STORE;
-        u32 vector_operand = masked ? 2 : 1;
-        if (masked)
-        {
-            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+            bool masked = operation != IR_SIMD_STORE;
+            u32 vector_operand = masked ? 2 : 1;
+            if (masked)
+            {
+                if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]))
+                {
+                    return false;
+                }
+            }
+            BusterX86MetadataPhysicalOperand pointer_load[2] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
+            };
+            BusterX86MetadataPhysicalAttributes attributes = masked
+                                                                  ? (BusterX86MetadataPhysicalAttributes){
+                                                                        .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+                                                                        .mask_register = X64_SIMD_MASK,
+                                                                        .has_mask_register = true,
+                                                                    }
+                                                                  : (BusterX86MetadataPhysicalAttributes){0};
+            // vpcompressb writes its destination through the rm operand, so the
+            // compressing store and the plain store share this shape exactly.
+            String8 store_mnemonic = operation == IR_SIMD_COMPRESS_STORE_BYTE ? S8("VPCOMPRESSB") : S8("VMOVDQU8");
+            u16 store_memory_width = 8;
+            if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
+                !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP,
+                                                            slots[vector_operand], false, 8, (BusterX86MetadataPhysicalAttributes){0}) ||
+                !codegen_canonical_x64_simd_emit_zmm_memory(buffer, store_mnemonic, X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, true, store_memory_width,
+                                                            attributes))
             {
                 return false;
             }
+            return buffer->error == CODEGEN_ERROR_NONE;
         }
-        BusterX86MetadataPhysicalOperand pointer_load[2] = {
-            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, slots[0]),
-        };
-        BusterX86MetadataPhysicalAttributes attributes = masked
-                                                              ? (BusterX86MetadataPhysicalAttributes){
-                                                                    .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
-                                                                    .mask_register = X64_SIMD_MASK,
-                                                                    .has_mask_register = true,
-                                                                }
-                                                              : (BusterX86MetadataPhysicalAttributes){0};
-        // vpcompressb writes its destination through the rm operand, so the
-        // compressing store and the plain store share this shape exactly.
-        String8 store_mnemonic = operation == IR_SIMD_COMPRESS_STORE_BYTE ? S8("VPCOMPRESSB") : S8("VMOVDQU8");
-        u16 store_memory_width = 8;
-        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), pointer_load, BUSTER_ARRAY_LENGTH(pointer_load)) ||
-            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP,
-                                                        slots[vector_operand], false, 8, (BusterX86MetadataPhysicalAttributes){0}) ||
-            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, store_mnemonic, X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX, 0, true, store_memory_width,
-                                                        attributes))
+        case IR_SIMD_SPLAT_BYTE:
         {
-            return false;
+            BusterX86MetadataPhysicalOperand load_operands[2] = {
+                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 8, slots[0]),
+            };
+            if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOVZX"), load_operands, BUSTER_ARRAY_LENGTH(load_operands)) ||
+                !codegen_canonical_x64_simd_emit_zmm_gpr(buffer, S8("VPBROADCASTB"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX,
+                                                         (BusterX86MetadataPhysicalAttributes){0}) ||
+                !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
+                                                            (BusterX86MetadataPhysicalAttributes){0}))
+            {
+                return false;
+            }
+            return buffer->error == CODEGEN_ERROR_NONE;
         }
-        return buffer->error == CODEGEN_ERROR_NONE;
+        case IR_SIMD_COMPARE_EQUAL_BYTE:
+        case IR_SIMD_COMPARE_LESS_BYTE:
+        case IR_SIMD_TEST_MASK_BYTE:
+        case IR_SIMD_COMPARE_EQUAL_WORD:
+        {
+            String8 mnemonic = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? S8("VPCMPEQB")
+                                : operation == IR_SIMD_COMPARE_LESS_BYTE ? S8("VPCMPUB")
+                                : operation == IR_SIMD_COMPARE_EQUAL_WORD ? S8("VPCMPEQD")
+                                                                          : S8("VPTESTMB");
+            // The dword compare writes 16 mask bits and zeroes the rest of the k
+            // register, so the shared 64-bit KMOVQ spill stays exact for it.
+            u16 element_width = operation == IR_SIMD_COMPARE_EQUAL_WORD ? 32 : 8;
+            if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
+                                                            (BusterX86MetadataPhysicalAttributes){0}) ||
+                !codegen_canonical_x64_simd_emit_mask_zmm_memory(buffer, mnemonic, X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST,
+                                                                 X64_REGISTER_RBP, slots[1], element_width, operation == IR_SIMD_COMPARE_LESS_BYTE ? 1 : 0,
+                                                                 operation == IR_SIMD_COMPARE_LESS_BYTE) ||
+                !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
+            {
+                return false;
+            }
+            return buffer->error == CODEGEN_ERROR_NONE;
+        }
+        case IR_SIMD_SIGN_MASK_BYTE:
+        {
+            if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
+                                                            (BusterX86MetadataPhysicalAttributes){0}) ||
+                !codegen_canonical_x64_simd_emit_mask_zmm_register(buffer, S8("VPMOVB2M"), X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST) ||
+                !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
+            {
+                return false;
+            }
+            return buffer->error == CODEGEN_ERROR_NONE;
+        }
+        case IR_SIMD_PERMUTE2_BYTE:
+        {
+            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
+            {
+                return false;
+            }
+            X64Evex load = move_load;
+            load.reg = X64_SIMD_VECTOR_FIRST;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+            {
+                return false;
+            }
+            load.reg = X64_SIMD_VECTOR_SECOND;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]))
+            {
+                return false;
+            }
+            // vpermt2b reads the low table from its destination and the high table
+            // from rm, so the destination is loaded with the low table first and
+            // the masked write lands on top of it.
+            X64Evex permute = {
+                .map = 2,
+                .prefix = 1,
+                .opcode = 0x7d,
+                .reg = X64_SIMD_VECTOR_FIRST,
+                .vvvv = X64_SIMD_VECTOR_SECOND,
+                .mask = X64_SIMD_MASK,
+                .zeroing = true,
+            };
+            if (!codegen_canonical_x64_evex_frame(buffer, permute, slots[3]))
+            {
+                return false;
+            }
+            X64Evex spill = move_store;
+            spill.reg = X64_SIMD_VECTOR_FIRST;
+            return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        }
+        case IR_SIMD_COMPRESS_BYTE:
+        {
+            if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
+            {
+                return false;
+            }
+            X64Evex load = move_load;
+            load.reg = X64_SIMD_VECTOR_SECOND;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+            {
+                return false;
+            }
+            // Register form: rm is the destination and reg is the source, so the
+            // source is the one that gets loaded and the result lands in the
+            // first register like every other operation's does.
+            X64Evex compress = {
+                .map = 2,
+                .prefix = 1,
+                .opcode = 0x63,
+                .reg = X64_SIMD_VECTOR_SECOND,
+                .mask = X64_SIMD_MASK,
+                .zeroing = true,
+            };
+            if (!codegen_canonical_x64_evex_register(buffer, compress, X64_SIMD_VECTOR_FIRST))
+            {
+                return false;
+            }
+            X64Evex spill = move_store;
+            spill.reg = X64_SIMD_VECTOR_FIRST;
+            return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        }
+        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        {
+            // The source already lives in memory, so the quarter selection is an
+            // address offset and vpmovzxbd reads its 16 bytes straight from there
+            // — no vextracti32x4 in front of it.
+            X64Evex widen = {.map = 2, .prefix = 1, .opcode = 0x31, .reg = X64_SIMD_VECTOR_FIRST};
+            if (!codegen_canonical_x64_evex_frame(buffer, widen, slots[0] + (s32)immediate * 16))
+            {
+                return false;
+            }
+            X64Evex spill = move_store;
+            spill.reg = X64_SIMD_VECTOR_FIRST;
+            return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        }
+        case IR_SIMD_SHIFT_LEFT_WORD:
+        {
+            if (!codegen_canonical_x64_evex_frame(buffer, move_load, slots[0]) ||
+                !codegen_canonical_x64_simd_emit_zmm_register_immediate(buffer, S8("VPSLLD"), X64_SIMD_VECTOR_FIRST,
+                                                                          X64_SIMD_VECTOR_FIRST, immediate))
+            {
+                return false;
+            }
+            X64Evex spill = move_store;
+            spill.reg = X64_SIMD_VECTOR_FIRST;
+            return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        }
+        case IR_SIMD_TERNARY_WORD:
+        {
+            X64Evex load = move_load;
+            load.reg = X64_SIMD_VECTOR_FIRST;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[0]))
+            {
+                return false;
+            }
+            load.reg = X64_SIMD_VECTOR_SECOND;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
+            {
+                return false;
+            }
+            load.reg = X64_SIMD_VECTOR_THIRD;
+            if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]) ||
+                !codegen_canonical_x64_simd_emit_zmm_ternary_immediate(buffer, S8("VPTERNLOGD"), X64_SIMD_VECTOR_FIRST,
+                                                                         X64_SIMD_VECTOR_SECOND, X64_SIMD_VECTOR_THIRD, immediate))
+            {
+                return false;
+            }
+            X64Evex spill = move_store;
+            spill.reg = X64_SIMD_VECTOR_FIRST;
+            return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        }
+        case IR_SIMD_COUNT:
+            break;
+        }
     }
-    case IR_SIMD_SPLAT_BYTE:
-    {
-        BusterX86MetadataPhysicalOperand load_operands[2] = {
-            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
-            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 8, slots[0]),
-        };
-        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOVZX"), load_operands, BUSTER_ARRAY_LENGTH(load_operands)) ||
-            !codegen_canonical_x64_simd_emit_zmm_gpr(buffer, S8("VPBROADCASTB"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RAX,
-                                                     (BusterX86MetadataPhysicalAttributes){0}) ||
-            !codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, result_slot, true, 8,
-                                                        (BusterX86MetadataPhysicalAttributes){0}))
-        {
-            return false;
-        }
-        return buffer->error == CODEGEN_ERROR_NONE;
-    }
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-    case IR_SIMD_COMPARE_LESS_BYTE:
-    case IR_SIMD_TEST_MASK_BYTE:
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-    {
-        String8 mnemonic = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? S8("VPCMPEQB")
-                            : operation == IR_SIMD_COMPARE_LESS_BYTE ? S8("VPCMPUB")
-                            : operation == IR_SIMD_COMPARE_EQUAL_WORD ? S8("VPCMPEQD")
-                                                                      : S8("VPTESTMB");
-        // The dword compare writes 16 mask bits and zeroes the rest of the k
-        // register, so the shared 64-bit KMOVQ spill stays exact for it.
-        u16 element_width = operation == IR_SIMD_COMPARE_EQUAL_WORD ? 32 : 8;
-        if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
-                                                        (BusterX86MetadataPhysicalAttributes){0}) ||
-            !codegen_canonical_x64_simd_emit_mask_zmm_memory(buffer, mnemonic, X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST,
-                                                             X64_REGISTER_RBP, slots[1], element_width, operation == IR_SIMD_COMPARE_LESS_BYTE ? 1 : 0,
-                                                             operation == IR_SIMD_COMPARE_LESS_BYTE) ||
-            !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
-        {
-            return false;
-        }
-        return buffer->error == CODEGEN_ERROR_NONE;
-    }
-    case IR_SIMD_SIGN_MASK_BYTE:
-    {
-        if (!codegen_canonical_x64_simd_emit_zmm_memory(buffer, S8("VMOVDQU8"), X64_SIMD_VECTOR_FIRST, X64_REGISTER_RBP, slots[0], false, 8,
-                                                        (BusterX86MetadataPhysicalAttributes){0}) ||
-            !codegen_canonical_x64_simd_emit_mask_zmm_register(buffer, S8("VPMOVB2M"), X64_SIMD_MASK, X64_SIMD_VECTOR_FIRST) ||
-            !codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot))
-        {
-            return false;
-        }
-        return buffer->error == CODEGEN_ERROR_NONE;
-    }
-    case IR_SIMD_PERMUTE2_BYTE:
-    {
-        if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
-        {
-            return false;
-        }
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
-        {
-            return false;
-        }
-        load.reg = X64_SIMD_VECTOR_SECOND;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]))
-        {
-            return false;
-        }
-        // vpermt2b reads the low table from its destination and the high table
-        // from rm, so the destination is loaded with the low table first and
-        // the masked write lands on top of it.
-        X64Evex permute = {
-            .map = 2,
-            .prefix = 1,
-            .opcode = 0x7d,
-            .reg = X64_SIMD_VECTOR_FIRST,
-            .vvvv = X64_SIMD_VECTOR_SECOND,
-            .mask = X64_SIMD_MASK,
-            .zeroing = true,
-        };
-        if (!codegen_canonical_x64_evex_frame(buffer, permute, slots[3]))
-        {
-            return false;
-        }
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-    }
-    case IR_SIMD_COMPRESS_BYTE:
-    {
-        if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
-        {
-            return false;
-        }
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_SECOND;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
-        {
-            return false;
-        }
-        // Register form: rm is the destination and reg is the source, so the
-        // source is the one that gets loaded and the result lands in the
-        // first register like every other operation's does.
-        X64Evex compress = {
-            .map = 2,
-            .prefix = 1,
-            .opcode = 0x63,
-            .reg = X64_SIMD_VECTOR_SECOND,
-            .mask = X64_SIMD_MASK,
-            .zeroing = true,
-        };
-        if (!codegen_canonical_x64_evex_register(buffer, compress, X64_SIMD_VECTOR_FIRST))
-        {
-            return false;
-        }
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-    }
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-    {
-        // The source already lives in memory, so the quarter selection is an
-        // address offset and vpmovzxbd reads its 16 bytes straight from there
-        // — no vextracti32x4 in front of it.
-        X64Evex widen = {.map = 2, .prefix = 1, .opcode = 0x31, .reg = X64_SIMD_VECTOR_FIRST};
-        if (!codegen_canonical_x64_evex_frame(buffer, widen, slots[0] + (s32)immediate * 16))
-        {
-            return false;
-        }
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-    }
-    case IR_SIMD_SHIFT_LEFT_WORD:
-    {
-        if (!codegen_canonical_x64_evex_frame(buffer, move_load, slots[0]) ||
-            !codegen_canonical_x64_simd_emit_zmm_register_immediate(buffer, S8("VPSLLD"), X64_SIMD_VECTOR_FIRST,
-                                                                      X64_SIMD_VECTOR_FIRST, immediate))
-        {
-            return false;
-        }
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-    }
-    case IR_SIMD_TERNARY_WORD:
-    {
-        X64Evex load = move_load;
-        load.reg = X64_SIMD_VECTOR_FIRST;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[0]))
-        {
-            return false;
-        }
-        load.reg = X64_SIMD_VECTOR_SECOND;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[1]))
-        {
-            return false;
-        }
-        load.reg = X64_SIMD_VECTOR_THIRD;
-        if (!codegen_canonical_x64_evex_frame(buffer, load, slots[2]) ||
-            !codegen_canonical_x64_simd_emit_zmm_ternary_immediate(buffer, S8("VPTERNLOGD"), X64_SIMD_VECTOR_FIRST,
-                                                                     X64_SIMD_VECTOR_SECOND, X64_SIMD_VECTOR_THIRD, immediate))
-        {
-            return false;
-        }
-        X64Evex spill = move_store;
-        spill.reg = X64_SIMD_VECTOR_FIRST;
-        return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
-    }
-    case IR_SIMD_COUNT:
-        break;
-    }
+
     return false;
 }
 
@@ -5683,19 +5701,25 @@ u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bo
 
 BUSTER_GLOBAL_LOCAL u32 codegen_canonical_copy_chunk(u64 remaining, u64 source_offset, u64 destination_offset)
 {
+    u32 result;
     if (remaining >= 8 && source_offset % 8 == 0 && destination_offset % 8 == 0)
     {
-        return 8;
+        result = 8;
     }
-    if (remaining >= 4 && source_offset % 4 == 0 && destination_offset % 4 == 0)
+    else if (remaining >= 4 && source_offset % 4 == 0 && destination_offset % 4 == 0)
     {
-        return 4;
+        result = 4;
     }
-    if (remaining >= 2 && source_offset % 2 == 0 && destination_offset % 2 == 0)
+    else if (remaining >= 2 && source_offset % 2 == 0 && destination_offset % 2 == 0)
     {
-        return 2;
+        result = 2;
     }
-    return 1;
+    else
+    {
+        result = 1;
+    }
+
+    return result;
 }
 
 // The address of an outgoing-argument slot. The stack pointer is only sixteen

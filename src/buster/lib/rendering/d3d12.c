@@ -951,168 +951,168 @@ BUSTER_GLOBAL_LOCAL bool d3d12_record_background_blur(RenderingHandle* rendering
 {
     RenderingBlurPlan plan = rendering_blur_plan_make((RenderingWindowSize){.width = window->width, .height = window->height}, command.blur_rect,
                                                        command.blur_radius);
-    if (!plan.valid || !plan.radius)
+    if (plan.valid && plan.radius)
     {
-        return true;
-    }
-    if (command.target != RENDERING_TARGET_BACKBUFFER || !window->blur_shader_input_supported || !d3d12_blur_resources_ensure(rendering, window, frame))
-    {
-        return false;
-    }
-    if (!frame->blur_capture || !frame->blur_horizontal)
-    {
-        return false;
-    }
-    RenderingBlurDescriptorBindings descriptor_bindings = rendering_blur_descriptor_bindings(frame->blur_descriptor_count);
-    if (!descriptor_bindings.valid)
-    {
-        return false;
-    }
-    frame->blur_descriptor_count += 1;
+        if (command.target != RENDERING_TARGET_BACKBUFFER || !window->blur_shader_input_supported || !d3d12_blur_resources_ensure(rendering, window, frame))
+        {
+            return false;
+        }
+        if (!frame->blur_capture || !frame->blur_horizontal)
+        {
+            return false;
+        }
+        RenderingBlurDescriptorBindings descriptor_bindings = rendering_blur_descriptor_bindings(frame->blur_descriptor_count);
+        if (!descriptor_bindings.valid)
+        {
+            return false;
+        }
+        frame->blur_descriptor_count += 1;
 
-    u32 descriptor_base = frame->descriptor_base + RENDERING_MAX_BATCH_COUNT * RECT_TEXTURE_SLOT_COUNT;
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-        .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
-        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1, .PlaneSlice = 0, .ResourceMinLODClamp = 0},
-    };
-    D3D12_RESOURCE_BARRIER target_to_shader = {
-        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Transition = {.pResource = render_target,
-                       .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                       .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
-                       .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
-    };
-    ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &target_to_shader);
-    if (frame->blur_capture_ready)
-    {
-        D3D12_RESOURCE_BARRIER capture_to_target = {
-            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            .Transition = {.pResource = frame->blur_capture,
-                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                           .StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                           .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET},
+        u32 descriptor_base = frame->descriptor_base + RENDERING_MAX_BATCH_COUNT * RECT_TEXTURE_SLOT_COUNT;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
+            .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+            .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+            .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1, .PlaneSlice = 0, .ResourceMinLODClamp = 0},
         };
-        ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &capture_to_target);
-    }
-    D3D12_CPU_DESCRIPTOR_HANDLE capture_rtv =
-        d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_capture_rtv_descriptor);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &capture_rtv, FALSE, 0);
-    D3D12_VIEWPORT capture_viewport = {
-        .TopLeftX = 0,
-        .TopLeftY = 0,
-        .Width = (FLOAT)plan.half_width,
-        .Height = (FLOAT)plan.half_height,
-        .MinDepth = 0,
-        .MaxDepth = 1,
-    };
-    D3D12_RECT capture_scissor = {.left = 0, .top = 0, .right = (LONG)plan.half_width, .bottom = (LONG)plan.half_height};
-    ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &capture_viewport);
-    ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &capture_scissor);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, rendering->blur_root_signature);
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, rendering->blur_pipeline);
-    ID3D12GraphicsCommandList_IASetPrimitiveTopology(command_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    D3D12_CPU_DESCRIPTOR_HANDLE downsample_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                         descriptor_base + descriptor_bindings.downsample);
-    ID3D12Device_CreateShaderResourceView(rendering->device, render_target, &srv_desc, downsample_srv);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
-                                                              d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                                   descriptor_base + descriptor_bindings.downsample));
-    BlurConstants downsample_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.source_width, 1.0f / (f32)plan.source_height),
-        .radius = 0,
-        .vertical = 0,
-    };
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(downsample_constants) / sizeof(u32)), &downsample_constants, 0);
-    ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
-    D3D12_RESOURCE_BARRIER restore_target_barriers[2] = {
-        {
-            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            .Transition = {.pResource = frame->blur_capture,
-                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                           .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
-                           .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
-        },
-        {
+        D3D12_RESOURCE_BARRIER target_to_shader = {
             .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
             .Transition = {.pResource = render_target,
                            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                           .StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                           .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                           .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
+        };
+        ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &target_to_shader);
+        if (frame->blur_capture_ready)
+        {
+            D3D12_RESOURCE_BARRIER capture_to_target = {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Transition = {.pResource = frame->blur_capture,
+                               .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               .StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                               .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET},
+            };
+            ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &capture_to_target);
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE capture_rtv =
+            d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_capture_rtv_descriptor);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &capture_rtv, FALSE, 0);
+        D3D12_VIEWPORT capture_viewport = {
+            .TopLeftX = 0,
+            .TopLeftY = 0,
+            .Width = (FLOAT)plan.half_width,
+            .Height = (FLOAT)plan.half_height,
+            .MinDepth = 0,
+            .MaxDepth = 1,
+        };
+        D3D12_RECT capture_scissor = {.left = 0, .top = 0, .right = (LONG)plan.half_width, .bottom = (LONG)plan.half_height};
+        ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &capture_viewport);
+        ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &capture_scissor);
+        ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, rendering->blur_root_signature);
+        ID3D12GraphicsCommandList_SetPipelineState(command_list, rendering->blur_pipeline);
+        ID3D12GraphicsCommandList_IASetPrimitiveTopology(command_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D12_CPU_DESCRIPTOR_HANDLE downsample_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                             descriptor_base + descriptor_bindings.downsample);
+        ID3D12Device_CreateShaderResourceView(rendering->device, render_target, &srv_desc, downsample_srv);
+        ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
+                                                                  d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                                       descriptor_base + descriptor_bindings.downsample));
+        BlurConstants downsample_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.source_width, 1.0f / (f32)plan.source_height),
+            .radius = 0,
+            .vertical = 0,
+        };
+        ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(downsample_constants) / sizeof(u32)), &downsample_constants, 0);
+        ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
+        D3D12_RESOURCE_BARRIER restore_target_barriers[2] = {
+            {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Transition = {.pResource = frame->blur_capture,
+                               .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                               .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
+            },
+            {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Transition = {.pResource = render_target,
+                               .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               .StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                               .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET},
+            },
+        };
+        ID3D12GraphicsCommandList_ResourceBarrier(command_list, BUSTER_ARRAY_LENGTH(restore_target_barriers), restore_target_barriers);
+        frame->blur_capture_ready = true;
+
+        D3D12_RESOURCE_BARRIER horizontal_begin = {
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Transition = {.pResource = frame->blur_horizontal,
+                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                           .StateBefore = frame->blur_horizontal_ready ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COMMON,
                            .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET},
-        },
-    };
-    ID3D12GraphicsCommandList_ResourceBarrier(command_list, BUSTER_ARRAY_LENGTH(restore_target_barriers), restore_target_barriers);
-    frame->blur_capture_ready = true;
+        };
+        ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &horizontal_begin);
 
-    D3D12_RESOURCE_BARRIER horizontal_begin = {
-        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Transition = {.pResource = frame->blur_horizontal,
-                       .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                       .StateBefore = frame->blur_horizontal_ready ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COMMON,
-                       .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET},
-    };
-    ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &horizontal_begin);
+        D3D12_CPU_DESCRIPTOR_HANDLE horizontal_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_rtv_descriptor);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &horizontal_rtv, FALSE, 0);
+        D3D12_VIEWPORT horizontal_viewport = {.TopLeftX = 0, .TopLeftY = 0, .Width = (FLOAT)plan.half_width, .Height = (FLOAT)plan.half_height, .MinDepth = 0, .MaxDepth = 1};
+        D3D12_RECT horizontal_scissor = {.left = 0, .top = 0, .right = (LONG)plan.half_width, .bottom = (LONG)plan.half_height};
+        ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &horizontal_viewport);
+        ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &horizontal_scissor);
+        ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, rendering->blur_root_signature);
+        ID3D12GraphicsCommandList_SetPipelineState(command_list, rendering->blur_pipeline);
+        ID3D12GraphicsCommandList_IASetPrimitiveTopology(command_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D12_CPU_DESCRIPTOR_HANDLE capture_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                          descriptor_base + descriptor_bindings.horizontal);
+        D3D12_CPU_DESCRIPTOR_HANDLE horizontal_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                            descriptor_base + descriptor_bindings.vertical);
+        ID3D12Device_CreateShaderResourceView(rendering->device, frame->blur_capture, &srv_desc, capture_srv);
+        ID3D12Device_CreateShaderResourceView(rendering->device, frame->blur_horizontal, &srv_desc, horizontal_srv);
+        ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
+                                                                  d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                                       descriptor_base + descriptor_bindings.horizontal));
+        BlurConstants horizontal_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+            .radius = plan.radius,
+            .vertical = 0,
+        };
+        ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(horizontal_constants) / sizeof(u32)), &horizontal_constants, 0);
+        ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE horizontal_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_rtv_descriptor);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &horizontal_rtv, FALSE, 0);
-    D3D12_VIEWPORT horizontal_viewport = {.TopLeftX = 0, .TopLeftY = 0, .Width = (FLOAT)plan.half_width, .Height = (FLOAT)plan.half_height, .MinDepth = 0, .MaxDepth = 1};
-    D3D12_RECT horizontal_scissor = {.left = 0, .top = 0, .right = (LONG)plan.half_width, .bottom = (LONG)plan.half_height};
-    ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &horizontal_viewport);
-    ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &horizontal_scissor);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, rendering->blur_root_signature);
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, rendering->blur_pipeline);
-    ID3D12GraphicsCommandList_IASetPrimitiveTopology(command_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    D3D12_CPU_DESCRIPTOR_HANDLE capture_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                      descriptor_base + descriptor_bindings.horizontal);
-    D3D12_CPU_DESCRIPTOR_HANDLE horizontal_srv = d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                        descriptor_base + descriptor_bindings.vertical);
-    ID3D12Device_CreateShaderResourceView(rendering->device, frame->blur_capture, &srv_desc, capture_srv);
-    ID3D12Device_CreateShaderResourceView(rendering->device, frame->blur_horizontal, &srv_desc, horizontal_srv);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
-                                                              d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                                   descriptor_base + descriptor_bindings.horizontal));
-    BlurConstants horizontal_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
-        .radius = plan.radius,
-        .vertical = 0,
-    };
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(horizontal_constants) / sizeof(u32)), &horizontal_constants, 0);
-    ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
+        D3D12_RESOURCE_BARRIER horizontal_end = {
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Transition = {.pResource = frame->blur_horizontal,
+                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                           .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                           .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
+        };
+        ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &horizontal_end);
+        frame->blur_horizontal_ready = true;
 
-    D3D12_RESOURCE_BARRIER horizontal_end = {
-        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Transition = {.pResource = frame->blur_horizontal,
-                       .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                       .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
-                       .StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
-    };
-    ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &horizontal_end);
-    frame->blur_horizontal_ready = true;
+        D3D12_CPU_DESCRIPTOR_HANDLE target_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, window->frame_index);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &target_rtv, FALSE, 0);
+        D3D12_VIEWPORT target_viewport = {.TopLeftX = 0, .TopLeftY = 0, .Width = (FLOAT)window->width, .Height = (FLOAT)window->height, .MinDepth = 0, .MaxDepth = 1};
+        D3D12_RECT blur_scissor = {.left = (LONG)command.blur_rect.x0,
+                                   .top = (LONG)command.blur_rect.y0,
+                                   .right = (LONG)command.blur_rect.x1,
+                                   .bottom = (LONG)command.blur_rect.y1};
+        ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &target_viewport);
+        ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &blur_scissor);
+        ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
+                                                                  d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
+                                                                                       descriptor_base + descriptor_bindings.vertical));
+        BlurConstants vertical_constants = {
+            .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
+            .radius = plan.radius,
+            .vertical = 1,
+            .target_size = float2_make((f32)window->width, (f32)window->height),
+            .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
+            .corner_radii = command.blur_corner_radii,
+            .composite = 1,
+        };
+        ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(vertical_constants) / sizeof(u32)), &vertical_constants, 0);
+        ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
+    }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE target_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, window->frame_index);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &target_rtv, FALSE, 0);
-    D3D12_VIEWPORT target_viewport = {.TopLeftX = 0, .TopLeftY = 0, .Width = (FLOAT)window->width, .Height = (FLOAT)window->height, .MinDepth = 0, .MaxDepth = 1};
-    D3D12_RECT blur_scissor = {.left = (LONG)command.blur_rect.x0,
-                               .top = (LONG)command.blur_rect.y0,
-                               .right = (LONG)command.blur_rect.x1,
-                               .bottom = (LONG)command.blur_rect.y1};
-    ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &target_viewport);
-    ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &blur_scissor);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 0,
-                                                              d3d12_gpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size,
-                                                                                   descriptor_base + descriptor_bindings.vertical));
-    BlurConstants vertical_constants = {
-        .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
-        .radius = plan.radius,
-        .vertical = 1,
-        .target_size = float2_make((f32)window->width, (f32)window->height),
-        .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
-        .corner_radii = command.blur_corner_radii,
-        .composite = 1,
-    };
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(vertical_constants) / sizeof(u32)), &vertical_constants, 0);
-    ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
     return true;
 }
 

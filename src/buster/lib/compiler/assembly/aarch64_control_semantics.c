@@ -20,9 +20,13 @@ BUSTER_GLOBAL_LOCAL bool a64_control_string_valid(BusterAarch64ControlString str
 
 bool buster_aarch64_control_semantic_string(BusterAarch64ControlString string, String8* result)
 {
-    if (!result || !a64_control_string_valid(string)) return false;
-    *result = (String8){.pointer = (char8*)buster_aarch64_control_semantic_string_pool + string.offset, .length = string.length};
-    return true;
+    bool valid = result && a64_control_string_valid(string);
+    if (valid)
+    {
+        *result = (String8){.pointer = (char8*)buster_aarch64_control_semantic_string_pool + string.offset, .length = string.length};
+    }
+
+    return valid;
 }
 
 u8 buster_aarch64_control_semantic_string_byte(BusterAarch64ControlString string, u32 index)
@@ -285,9 +289,13 @@ u32 buster_aarch64_control_semantic_count(void)
 bool buster_aarch64_control_semantic_row(u32 row, BusterAarch64ControlSemanticRecord* result)
 {
     BusterAarch64ControlSemanticRecord const* source = a64_control_row(row);
-    if (!source || !result) return false;
-    *result = *source;
-    return true;
+    bool valid = source && result;
+    if (valid)
+    {
+        *result = *source;
+    }
+
+    return valid;
 }
 
 bool buster_aarch64_control_semantic_lookup(String8 id, u32* row)
@@ -538,9 +546,21 @@ BUSTER_GLOBAL_LOCAL bool a64_control_fixup_is_darwin(Target target)
 
 BUSTER_GLOBAL_LOCAL u8 a64_control_relocation_kind(BusterAarch64ControlFixupKind kind)
 {
-    if (kind == BUSTER_AARCH64_CONTROL_FIXUP_BRANCH26) return BUSTER_AARCH64_CONTROL_RELOCATION_KIND_BRANCH26;
-    if (kind == BUSTER_AARCH64_CONTROL_FIXUP_CALL26) return BUSTER_AARCH64_CONTROL_RELOCATION_KIND_CALL26;
-    return BUSTER_AARCH64_CONTROL_RELOCATION_KIND_NONE;
+    u8 result;
+    if (kind == BUSTER_AARCH64_CONTROL_FIXUP_BRANCH26)
+    {
+        result = BUSTER_AARCH64_CONTROL_RELOCATION_KIND_BRANCH26;
+    }
+    else if (kind == BUSTER_AARCH64_CONTROL_FIXUP_CALL26)
+    {
+        result = BUSTER_AARCH64_CONTROL_RELOCATION_KIND_CALL26;
+    }
+    else
+    {
+        result = BUSTER_AARCH64_CONTROL_RELOCATION_KIND_NONE;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_control_add_signed_u64(u64 base, s64 addend, u64* result)

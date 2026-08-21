@@ -27,9 +27,13 @@ BUSTER_GLOBAL_LOCAL bool a64_system_string_valid(BusterAarch64SystemString strin
 
 bool buster_aarch64_system_semantic_string(BusterAarch64SystemString string, String8* result)
 {
-    if (!result || !a64_system_string_valid(string)) return false;
-    *result = (String8){.pointer = (char8*)buster_aarch64_system_generated_string_pool + string.offset, .length = string.length};
-    return true;
+    bool valid = result && a64_system_string_valid(string);
+    if (valid)
+    {
+        *result = (String8){.pointer = (char8*)buster_aarch64_system_generated_string_pool + string.offset, .length = string.length};
+    }
+
+    return valid;
 }
 
 u8 buster_aarch64_system_semantic_string_byte(BusterAarch64SystemString string, u32 index)

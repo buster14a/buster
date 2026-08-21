@@ -132,12 +132,33 @@ BUSTER_GLOBAL_LOCAL String8 buster_aarch64_syntax_pool_string(u32 offset, u32 le
 
 BUSTER_GLOBAL_LOCAL u8 buster_aarch64_syntax_base64_value(char8 character)
 {
-    if (character >= 'A' && character <= 'Z') return (u8)(character - 'A');
-    if (character >= 'a' && character <= 'z') return (u8)(character - 'a' + 26);
-    if (character >= '0' && character <= '9') return (u8)(character - '0' + 52);
-    if (character == '+') return 62;
-    if (character == '/') return 63;
-    return 0xff;
+    u8 result;
+    if (character >= 'A' && character <= 'Z')
+    {
+        result = (u8)(character - 'A');
+    }
+    else if (character >= 'a' && character <= 'z')
+    {
+        result = (u8)(character - 'a' + 26);
+    }
+    else if (character >= '0' && character <= '9')
+    {
+        result = (u8)(character - '0' + 52);
+    }
+    else if (character == '+')
+    {
+        result = 62;
+    }
+    else if (character == '/')
+    {
+        result = 63;
+    }
+    else
+    {
+        result = 0xff;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_packed_byte(char8 const* blob, u32 blob_length, u32 byte_index, u8* result)
@@ -330,9 +351,13 @@ u32 buster_aarch64_syntax_schema_version(void)
 
 bool buster_aarch64_syntax_string(u32 offset, u32 length, String8* result)
 {
-    if (!result || !buster_aarch64_syntax_pool_range_valid(offset, length)) return false;
-    *result = buster_aarch64_syntax_pool_string(offset, length);
-    return true;
+    bool valid = result && buster_aarch64_syntax_pool_range_valid(offset, length);
+    if (valid)
+    {
+        *result = buster_aarch64_syntax_pool_string(offset, length);
+    }
+
+    return valid;
 }
 
 bool buster_aarch64_syntax_node(u32 index, BusterAarch64SyntaxNode* result)

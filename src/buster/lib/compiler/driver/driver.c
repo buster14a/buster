@@ -221,19 +221,25 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_metal_sdk_is_valid(String8 sdk)
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_dxc_shader_model_is_valid(GpuTarget target)
 {
+    bool result;
     if (target.shader_model_major != 6 || target.shader_model_minor > 10)
     {
-        return false;
+        result = false;
     }
-    if ((target.stage == GPU_SHADER_STAGE_MESH || target.stage == GPU_SHADER_STAGE_AMPLIFICATION) && target.shader_model_minor < 5)
+    else if ((target.stage == GPU_SHADER_STAGE_MESH || target.stage == GPU_SHADER_STAGE_AMPLIFICATION) && target.shader_model_minor < 5)
     {
-        return false;
+        result = false;
     }
-    if (target.stage >= GPU_SHADER_STAGE_LIBRARY && target.shader_model_minor == 0)
+    else if (target.stage >= GPU_SHADER_STAGE_LIBRARY && target.shader_model_minor == 0)
     {
-        return false;
+        result = false;
     }
-    return true;
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 typedef struct CompilerDriverFeatureOverride CompilerDriverFeatureOverride;
@@ -1275,15 +1281,21 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invocation, String8 path)
 {
+    bool result;
     if (invocation.language == COMPILER_DRIVER_LANGUAGE_C)
     {
-        return true;
+        result = true;
     }
-    if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
+    else if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
     {
-        return false;
+        result = false;
     }
-    return path.pointer[path.length - 2] == '.' && (path.pointer[path.length - 1] == 'c' || path.pointer[path.length - 1] == 'i');
+    else
+    {
+        result = path.pointer[path.length - 2] == '.' && (path.pointer[path.length - 1] == 'c' || path.pointer[path.length - 1] == 'i');
+    }
+
+    return result;
 }
 
 

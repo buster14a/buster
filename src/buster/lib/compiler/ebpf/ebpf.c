@@ -483,23 +483,29 @@ static bool ebpf_type_is_scalar(IrType* type)
 
 static u32 ebpf_type_bits(IrType* type)
 {
+    u32 result;
     if (!type)
     {
-        return 0;
+        result = 0;
     }
-    if (type->kind == IR_TYPE_BOOLEAN)
+    else if (type->kind == IR_TYPE_BOOLEAN)
     {
-        return 1;
+        result = 1;
     }
-    if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
+    else if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
     {
-        return 64;
+        result = 64;
     }
-    if (type->kind == IR_TYPE_ENUM && !type->bit_width)
+    else if (type->kind == IR_TYPE_ENUM && !type->bit_width)
     {
-        return (u32)(type->layout.size * 8);
+        result = (u32)(type->layout.size * 8);
     }
-    return type->bit_width ? type->bit_width : (u32)(type->layout.size * 8);
+    else
+    {
+        result = type->bit_width ? type->bit_width : (u32)(type->layout.size * 8);
+    }
+
+    return result;
 }
 
 static u32 ebpf_type_size(IrType* type)
@@ -1976,15 +1982,21 @@ static bool ebpf_global_has_storage_bytes(IrGlobal* global)
 
 static String8 ebpf_global_section_name(IrGlobal* global, IrSymbol* symbol)
 {
+    String8 result;
     if (symbol->section_name.length)
     {
-        return symbol->section_name;
+        result = symbol->section_name;
     }
-    if (!ebpf_global_has_storage_bytes(global) && !global->relocation_count)
+    else if (!ebpf_global_has_storage_bytes(global) && !global->relocation_count)
     {
-        return S8(".bss");
+        result = S8(".bss");
     }
-    return global->is_read_only ? S8(".rodata") : S8(".data");
+    else
+    {
+        result = global->is_read_only ? S8(".rodata") : S8(".data");
+    }
+
+    return result;
 }
 
 static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)

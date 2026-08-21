@@ -234,15 +234,16 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_field(u32 field_id, BusterAarch6
 BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_segment(u32 segment_id, BusterAarch64GeneratedBitSegment* result)
 {
     A64_METADATA_PACKED_ACCESS();
-    if (!result || segment_id >= BUSTER_AARCH64_GENERATED_SEGMENT_COUNT)
+    bool valid = result && segment_id < BUSTER_AARCH64_GENERATED_SEGMENT_COUNT;
+    if (valid)
     {
-        return false;
+        // The generated accessor is bounded; structural value checks are done by
+        // the raw-layout validator so descriptor inspection can still expose a
+        // malformed segment to an audit caller.
+        *result = buster_aarch64_generated_segment_at(segment_id);
     }
-    // The generated accessor is bounded; structural value checks are done by
-    // the raw-layout validator so descriptor inspection can still expose a
-    // malformed segment to an audit caller.
-    *result = buster_aarch64_generated_segment_at(segment_id);
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_raw_layout_complete(u32 form_id, BusterAarch64GeneratedForm* form_result)
@@ -790,19 +791,25 @@ BUSTER_GLOBAL_LOCAL bool a64_gpr_generated_form_valid(BusterAarch64ArmM1GprGener
 
 BUSTER_GLOBAL_LOCAL bool a64_gpr_operand_valid(BusterAarch64ArmM1GprGeneratedOperand expected, A64GprOperand actual)
 {
+    bool result;
     if ((actual.width != 32 && actual.width != 64) || actual.index > 31 || actual.reserved || (actual.index != 31 && actual.stack_pointer))
     {
-        return false;
+        result = false;
     }
-    if (actual.width != expected.width)
+    else if (actual.width != expected.width)
     {
-        return false;
+        result = false;
     }
-    if (actual.index == 31 && (actual.stack_pointer ? A64_GPR_REGISTER31_SP : A64_GPR_REGISTER31_ZR) != expected.register31_role)
+    else if (actual.index == 31 && (actual.stack_pointer ? A64_GPR_REGISTER31_SP : A64_GPR_REGISTER31_ZR) != expected.register31_role)
     {
-        return false;
+        result = false;
     }
-    return true;
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_gpr_target_valid(Target target)

@@ -1574,30 +1574,30 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
 
 BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame right)
 {
-    if (left.kind != right.kind)
+    if (left.kind == right.kind)
     {
-        return false;
+        switch (left.kind)
+        {
+        case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag;
+        case C_IR_QUERY_FRAME_ARRAY_BOUND:
+            return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
+                   left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
+                   left.bound.has_inferred_count == right.bound.has_inferred_count;
+        case C_IR_QUERY_FRAME_CONSTANT:
+        case C_IR_QUERY_FRAME_SIZEOF:
+        case C_IR_QUERY_FRAME_TYPE_PREDICTION:
+        case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end;
+        case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT: return left.start == right.start && left.end == right.end;
+        case C_IR_QUERY_FRAME_COMPOUND_TYPE:
+            return left.start == right.start && left.end == right.end && left.third == right.third && left.fourth == right.fourth;
+        case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
+            return left.first_type.value == right.first_type.value && left.second_type.value == right.second_type.value && left.start == right.start &&
+                   left.end == right.end && left.third == right.third && left.fourth == right.fourth;
+        case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
+            return left.first_type.value == right.first_type.value && left.start == right.start && left.end == right.end;
+        }
     }
-    switch (left.kind)
-    {
-    case C_IR_QUERY_FRAME_TYPE_NAME: return left.start == right.start && left.end == right.end && left.flag == right.flag;
-    case C_IR_QUERY_FRAME_ARRAY_BOUND:
-        return left.bound.inferred_count == right.bound.inferred_count && left.bound.token_start == right.bound.token_start &&
-               left.bound.token_count == right.bound.token_count && left.bound.is_static == right.bound.is_static && left.bound.is_star == right.bound.is_star &&
-               left.bound.has_inferred_count == right.bound.has_inferred_count;
-    case C_IR_QUERY_FRAME_CONSTANT:
-    case C_IR_QUERY_FRAME_SIZEOF:
-    case C_IR_QUERY_FRAME_TYPE_PREDICTION:
-    case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end;
-    case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT: return left.start == right.start && left.end == right.end;
-    case C_IR_QUERY_FRAME_COMPOUND_TYPE:
-        return left.start == right.start && left.end == right.end && left.third == right.third && left.fourth == right.fourth;
-    case C_IR_QUERY_FRAME_CONDITIONAL_TYPE:
-        return left.first_type.value == right.first_type.value && left.second_type.value == right.second_type.value && left.start == right.start &&
-               left.end == right.end && left.third == right.third && left.fourth == right.fourth;
-    case C_IR_QUERY_FRAME_NULL_POINTER_CONSTANT:
-        return left.first_type.value == right.first_type.value && left.start == right.start && left.end == right.end;
-    }
+
     return false;
 }
 

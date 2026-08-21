@@ -210,14 +210,41 @@ bool gpu_shader_model_parse(String8 value, u16* major, u16* minor)
 
 BUSTER_GLOBAL_LOCAL String8 gpu_metal_sdk_from_os(String8 os)
 {
-    if (string_equal(os, S8("macos")) || string_equal(os, S8("macosx"))) return S8("macosx");
-    if (string_equal(os, S8("ios")) || string_equal(os, S8("iphoneos"))) return S8("iphoneos");
-    if (string_equal(os, S8("iossimulator")) || string_equal(os, S8("iphonesimulator"))) return S8("iphonesimulator");
-    if (string_equal(os, S8("tvos")) || string_equal(os, S8("appletvos"))) return S8("appletvos");
-    if (string_equal(os, S8("tvossimulator")) || string_equal(os, S8("appletvsimulator"))) return S8("appletvsimulator");
-    if (string_equal(os, S8("visionos")) || string_equal(os, S8("xros"))) return S8("xros");
-    if (string_equal(os, S8("visionossimulator")) || string_equal(os, S8("xrsimulator"))) return S8("xrsimulator");
-    return (String8){0};
+    String8 result;
+    if (string_equal(os, S8("macos")) || string_equal(os, S8("macosx")))
+    {
+        result = S8("macosx");
+    }
+    else if (string_equal(os, S8("ios")) || string_equal(os, S8("iphoneos")))
+    {
+        result = S8("iphoneos");
+    }
+    else if (string_equal(os, S8("iossimulator")) || string_equal(os, S8("iphonesimulator")))
+    {
+        result = S8("iphonesimulator");
+    }
+    else if (string_equal(os, S8("tvos")) || string_equal(os, S8("appletvos")))
+    {
+        result = S8("appletvos");
+    }
+    else if (string_equal(os, S8("tvossimulator")) || string_equal(os, S8("appletvsimulator")))
+    {
+        result = S8("appletvsimulator");
+    }
+    else if (string_equal(os, S8("visionos")) || string_equal(os, S8("xros")))
+    {
+        result = S8("xros");
+    }
+    else if (string_equal(os, S8("visionossimulator")) || string_equal(os, S8("xrsimulator")))
+    {
+        result = S8("xrsimulator");
+    }
+    else
+    {
+        result = (String8){0};
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool gpu_metal_sdk_is_valid(String8 sdk)
@@ -566,15 +593,45 @@ String8 gpu_target_to_string(Arena* arena, GpuTarget target)
 
 GpuSourceLanguage gpu_source_language_from_path(String8 path)
 {
-    if (string_ends_with_sequence(path, S8(".cl")) || string_ends_with_sequence(path, S8(".ocl"))) return GPU_SOURCE_LANGUAGE_OPENCL;
-    if (string_ends_with_sequence(path, S8(".cu"))) return GPU_SOURCE_LANGUAGE_CUDA;
-    if (string_ends_with_sequence(path, S8(".hip"))) return GPU_SOURCE_LANGUAGE_HIP;
-    if (string_ends_with_sequence(path, S8(".metal"))) return GPU_SOURCE_LANGUAGE_METAL;
-    if (string_ends_with_sequence(path, S8(".hlsl")) || string_ends_with_sequence(path, S8(".fx"))) return GPU_SOURCE_LANGUAGE_HLSL;
-    if (string_ends_with_sequence(path, S8(".ll")) || string_ends_with_sequence(path, S8(".bc"))) return GPU_SOURCE_LANGUAGE_LLVM_IR;
-    if (string_ends_with_sequence(path, S8(".spv"))) return GPU_SOURCE_LANGUAGE_SPIRV_BINARY;
-    if (string_ends_with_sequence(path, S8(".air"))) return GPU_SOURCE_LANGUAGE_METAL_AIR;
-    return GPU_SOURCE_LANGUAGE_AUTOMATIC;
+    GpuSourceLanguage result;
+    if (string_ends_with_sequence(path, S8(".cl")) || string_ends_with_sequence(path, S8(".ocl")))
+    {
+        result = GPU_SOURCE_LANGUAGE_OPENCL;
+    }
+    else if (string_ends_with_sequence(path, S8(".cu")))
+    {
+        result = GPU_SOURCE_LANGUAGE_CUDA;
+    }
+    else if (string_ends_with_sequence(path, S8(".hip")))
+    {
+        result = GPU_SOURCE_LANGUAGE_HIP;
+    }
+    else if (string_ends_with_sequence(path, S8(".metal")))
+    {
+        result = GPU_SOURCE_LANGUAGE_METAL;
+    }
+    else if (string_ends_with_sequence(path, S8(".hlsl")) || string_ends_with_sequence(path, S8(".fx")))
+    {
+        result = GPU_SOURCE_LANGUAGE_HLSL;
+    }
+    else if (string_ends_with_sequence(path, S8(".ll")) || string_ends_with_sequence(path, S8(".bc")))
+    {
+        result = GPU_SOURCE_LANGUAGE_LLVM_IR;
+    }
+    else if (string_ends_with_sequence(path, S8(".spv")))
+    {
+        result = GPU_SOURCE_LANGUAGE_SPIRV_BINARY;
+    }
+    else if (string_ends_with_sequence(path, S8(".air")))
+    {
+        result = GPU_SOURCE_LANGUAGE_METAL_AIR;
+    }
+    else
+    {
+        result = GPU_SOURCE_LANGUAGE_AUTOMATIC;
+    }
+
+    return result;
 }
 
 String8 gpu_source_language_to_string(GpuSourceLanguage language)

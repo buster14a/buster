@@ -4488,47 +4488,53 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         index += 1;
     }
     *declarator_start = index;
+    CTypeKind result;
     if (!seen_type || (seen_signed && seen_unsigned))
     {
-        return C_TYPE_INVALID;
+        result = C_TYPE_INVALID;
     }
-    if (seen_void)
+    else if (seen_void)
     {
-        return C_TYPE_VOID;
+        result = C_TYPE_VOID;
     }
-    if (seen_bool)
+    else if (seen_bool)
     {
-        return C_TYPE_BOOL;
+        result = C_TYPE_BOOL;
     }
-    if (seen_char)
+    else if (seen_char)
     {
-        return seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+        result = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
     }
-    if (seen_float)
+    else if (seen_float)
     {
-        return C_TYPE_FLOAT;
+        result = C_TYPE_FLOAT;
     }
-    if (seen_double)
+    else if (seen_double)
     {
-        return long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        result = long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
     }
-    if (seen_short)
+    else if (seen_short)
     {
-        return seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+        result = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
     }
-    if (seen_int128)
+    else if (seen_int128)
     {
-        return seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
+        result = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
     }
-    if (long_count >= 2)
+    else if (long_count >= 2)
     {
-        return seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+        result = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
     }
-    if (long_count == 1)
+    else if (long_count == 1)
     {
-        return seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+        result = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
     }
-    return seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+    else
+    {
+        result = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_parse_attribute_unsigned(String8 spelling, u32* value_out)

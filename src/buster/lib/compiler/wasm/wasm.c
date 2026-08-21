@@ -413,19 +413,25 @@ static bool wasm64_type_is_pointer(IrType* type)
 
 static u32 wasm64_integer_bits(IrType* type)
 {
+    u32 result;
     if (!type)
     {
-        return 0;
+        result = 0;
     }
-    if (type->kind == IR_TYPE_BOOLEAN)
+    else if (type->kind == IR_TYPE_BOOLEAN)
     {
-        return 1;
+        result = 1;
     }
-    if (type->kind == IR_TYPE_ENUM)
+    else if (type->kind == IR_TYPE_ENUM)
     {
-        return type->layout.size <= 4 ? 32 : 64;
+        result = type->layout.size <= 4 ? 32 : 64;
     }
-    return type->bit_width;
+    else
+    {
+        result = type->bit_width;
+    }
+
+    return result;
 }
 
 static bool wasm64_valtype_for_type(IrType* type, bool place, Wasm64ValType* result)

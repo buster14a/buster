@@ -251,19 +251,25 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_vector_register(IrType* type)
 // byte lanes and mask compares, VBMI vpermt2b, VBMI2 the compress family.
 BUSTER_GLOBAL_LOCAL bool machine_x64_simd_supported(Target target, IrSimdOperation operation)
 {
+    bool result;
     if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW))
     {
-        return false;
+        result = false;
     }
-    if (operation == IR_SIMD_PERMUTE2_BYTE)
+    else if (operation == IR_SIMD_PERMUTE2_BYTE)
     {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
+        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
     }
-    if (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE)
+    else if (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE)
     {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
+        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
     }
-    return true;
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId type_id, IrAbiUse use, Target target, MachineX64ValueShape* shape)
@@ -7172,19 +7178,52 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_zmm_opera
 
 BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_immediate_class(BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.has_unsigned_value) return 5;
-    if (!operand.has_value) return 0;
-    if (operand.value >= INT8_MIN && operand.value <= INT8_MAX) return operand.value < 0 ? 2 : 1;
-    if (operand.value >= INT32_MIN && operand.value <= INT32_MAX) return operand.value < 0 ? 4 : 3;
-    return operand.value < 0 ? 6 : 7;
+    u8 result;
+    if (operand.has_unsigned_value)
+    {
+        result = 5;
+    }
+    else if (!operand.has_value)
+    {
+        result = 0;
+    }
+    else if (operand.value >= INT8_MIN && operand.value <= INT8_MAX)
+    {
+        result = operand.value < 0 ? 2 : 1;
+    }
+    else if (operand.value >= INT32_MIN && operand.value <= INT32_MAX)
+    {
+        result = operand.value < 0 ? 4 : 3;
+    }
+    else
+    {
+        result = operand.value < 0 ? 6 : 7;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_displacement_class(BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !operand.memory.has_displacement) return 0;
-    if (operand.memory.displacement >= INT8_MIN && operand.memory.displacement <= INT8_MAX) return 1;
-    if (operand.memory.displacement >= INT32_MIN && operand.memory.displacement <= INT32_MAX) return 2;
-    return 3;
+    u8 result;
+    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !operand.memory.has_displacement)
+    {
+        result = 0;
+    }
+    else if (operand.memory.displacement >= INT8_MIN && operand.memory.displacement <= INT8_MAX)
+    {
+        result = 1;
+    }
+    else if (operand.memory.displacement >= INT32_MIN && operand.memory.displacement <= INT32_MAX)
+    {
+        result = 2;
+    }
+    else
+    {
+        result = 3;
+    }
+
+    return result;
 }
 
 // The mnemonics the shape signature distinguishes, and the small dense id each
@@ -7251,14 +7290,41 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_mnemonic_id(String8 mnemonic)
 
 BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_feature_id(BusterX86MetadataFeatureInput features)
 {
-    if (!features.count) return 0;
-    if (features.names == machine_x64_sse_features) return 1;
-    if (features.names == machine_x64_sse2_features) return 2;
-    if (features.names == machine_x64_avx_features) return 3;
-    if (features.names == machine_x64_avx512_features) return 4;
-    if (features.names == machine_x64_cx16_features) return 5;
-    if (features.names == machine_x64_avx512f_features) return 6;
-    return (u8)(0x80u | BUSTER_MIN(features.count, 0x7fu));
+    u8 result;
+    if (!features.count)
+    {
+        result = 0;
+    }
+    else if (features.names == machine_x64_sse_features)
+    {
+        result = 1;
+    }
+    else if (features.names == machine_x64_sse2_features)
+    {
+        result = 2;
+    }
+    else if (features.names == machine_x64_avx_features)
+    {
+        result = 3;
+    }
+    else if (features.names == machine_x64_avx512_features)
+    {
+        result = 4;
+    }
+    else if (features.names == machine_x64_cx16_features)
+    {
+        result = 5;
+    }
+    else if (features.names == machine_x64_avx512f_features)
+    {
+        result = 6;
+    }
+    else
+    {
+        result = (u8)(0x80u | BUSTER_MIN(features.count, 0x7fu));
+    }
+
+    return result;
 }
 
 typedef struct MachineX64MetadataShapeHashes MachineX64MetadataShapeHashes;

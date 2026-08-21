@@ -423,15 +423,21 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
 
 BUSTER_GLOBAL_LOCAL DebugSourceLocation debug_function_declaration(Arena* arena, DebugModelInput* input, DebugFunctionSeed* seed)
 {
+    DebugSourceLocation result;
     if (seed->declaration.line)
     {
-        return seed->declaration;
+        result = seed->declaration;
     }
-    if (input->program && seed->symbol.value < input->program->symbols.count)
+    else if (input->program && seed->symbol.value < input->program->symbols.count)
     {
-        return debug_source_from_ir(arena, input->program, input->program->symbols.symbols[seed->symbol.value].source);
+        result = debug_source_from_ir(arena, input->program, input->program->symbols.symbols[seed->symbol.value].source);
     }
-    return (DebugSourceLocation){0};
+    else
+    {
+        result = (DebugSourceLocation){0};
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void debug_model_fill_sources(Arena* arena, DebugModel* model, DebugModelInput* input)

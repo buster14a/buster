@@ -1290,19 +1290,25 @@ static u32 llvm_bc_value_type_id(LlvmBcContext* context, IrFunction* function, I
 
 static u32 llvm_bc_integer_width(IrType* type)
 {
+    u32 result;
     if (!type)
     {
-        return 0;
+        result = 0;
     }
-    if (type->kind == IR_TYPE_BOOLEAN)
+    else if (type->kind == IR_TYPE_BOOLEAN)
     {
-        return 1;
+        result = 1;
     }
-    if (type->kind == IR_TYPE_ENUM && !type->bit_width)
+    else if (type->kind == IR_TYPE_ENUM && !type->bit_width)
     {
-        return type->layout.size && type->layout.size <= 8 ? (u32)(type->layout.size * 8) : 32;
+        result = type->layout.size && type->layout.size <= 8 ? (u32)(type->layout.size * 8) : 32;
     }
-    return type->bit_width;
+    else
+    {
+        result = type->bit_width;
+    }
+
+    return result;
 }
 
 static u32 llvm_bc_scalar_integer_constant(LlvmBcContext* context, IrType* type, u64 magnitude, bool negative)

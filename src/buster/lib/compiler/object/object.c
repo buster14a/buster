@@ -1144,22 +1144,24 @@ struct ObjectAssemblyX86Modrm
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_x86_read_u32(ByteSlice data, u64 offset, u32* result)
 {
-    if (offset > data.length || sizeof(*result) > data.length - offset)
+    bool valid = offset <= data.length && sizeof(*result) <= data.length - offset;
+    if (valid)
     {
-        return false;
+        memcpy(result, data.pointer + offset, sizeof(*result));
     }
-    memcpy(result, data.pointer + offset, sizeof(*result));
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_assembly_x86_read_u64(ByteSlice data, u64 offset, u64* result)
 {
-    if (offset > data.length || sizeof(*result) > data.length - offset)
+    bool valid = offset <= data.length && sizeof(*result) <= data.length - offset;
+    if (valid)
     {
-        return false;
+        memcpy(result, data.pointer + offset, sizeof(*result));
     }
-    memcpy(result, data.pointer + offset, sizeof(*result));
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_register(ObjectAssemblyBuffer* buffer, u32 index, u32 width, bool rex)
@@ -3430,15 +3432,21 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
 
 u32 object_section_default_alignment(ObjectSectionKind kind)
 {
+    u32 result;
     if (object_section_kind_is_debug(kind))
     {
-        return 1;
+        result = 1;
     }
-    if (kind == OBJECT_SECTION_UNWIND)
+    else if (kind == OBJECT_SECTION_UNWIND)
     {
-        return 8;
+        result = 8;
     }
-    return kind == OBJECT_SECTION_WINDOWS_PDATA || kind == OBJECT_SECTION_WINDOWS_XDATA ? 4 : 16;
+    else
+    {
+        result = kind == OBJECT_SECTION_WINDOWS_PDATA || kind == OBJECT_SECTION_WINDOWS_XDATA ? 4 : 16;
+    }
+
+    return result;
 }
 
 bool object_section_kind_is_zero_fill(ObjectSectionKind kind)
@@ -3448,39 +3456,45 @@ bool object_section_kind_is_zero_fill(ObjectSectionKind kind)
 
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String8 name)
 {
+    ObjectSectionKind result;
     if (string_equal(name, S8(".debug_info")) || string_equal(name, S8("__debug_info")))
     {
-        return OBJECT_SECTION_DEBUG_INFO;
+        result = OBJECT_SECTION_DEBUG_INFO;
     }
-    if (string_equal(name, S8(".debug_abbrev")) || string_equal(name, S8("__debug_abbrev")))
+    else if (string_equal(name, S8(".debug_abbrev")) || string_equal(name, S8("__debug_abbrev")))
     {
-        return OBJECT_SECTION_DEBUG_ABBREV;
+        result = OBJECT_SECTION_DEBUG_ABBREV;
     }
-    if (string_equal(name, S8(".debug_line")) || string_equal(name, S8("__debug_line")))
+    else if (string_equal(name, S8(".debug_line")) || string_equal(name, S8("__debug_line")))
     {
-        return OBJECT_SECTION_DEBUG_LINE;
+        result = OBJECT_SECTION_DEBUG_LINE;
     }
-    if (string_equal(name, S8(".debug_str")) || string_equal(name, S8("__debug_str")))
+    else if (string_equal(name, S8(".debug_str")) || string_equal(name, S8("__debug_str")))
     {
-        return OBJECT_SECTION_DEBUG_STR;
+        result = OBJECT_SECTION_DEBUG_STR;
     }
-    if (string_equal(name, S8(".debug_loc")) || string_equal(name, S8("__debug_loc")))
+    else if (string_equal(name, S8(".debug_loc")) || string_equal(name, S8("__debug_loc")))
     {
-        return OBJECT_SECTION_DEBUG_LOC;
+        result = OBJECT_SECTION_DEBUG_LOC;
     }
-    if (string_equal(name, S8(".debug_ranges")) || string_equal(name, S8("__debug_ranges")))
+    else if (string_equal(name, S8(".debug_ranges")) || string_equal(name, S8("__debug_ranges")))
     {
-        return OBJECT_SECTION_DEBUG_RANGES;
+        result = OBJECT_SECTION_DEBUG_RANGES;
     }
-    if (string_equal(name, S8(".debug$S")))
+    else if (string_equal(name, S8(".debug$S")))
     {
-        return OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS;
+        result = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS;
     }
-    if (string_equal(name, S8(".debug$T")))
+    else if (string_equal(name, S8(".debug$T")))
     {
-        return OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+        result = OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
     }
-    return OBJECT_SECTION_COUNT;
+    else
+    {
+        result = OBJECT_SECTION_COUNT;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, Target target)

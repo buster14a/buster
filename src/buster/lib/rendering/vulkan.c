@@ -1350,23 +1350,29 @@ BUSTER_GLOBAL_LOCAL bool vulkan_surface_format_is_compatible(VkSurfaceFormatKHR*
 
 BUSTER_GLOBAL_LOCAL VkCompositeAlphaFlagBitsKHR vulkan_choose_composite_alpha(VkCompositeAlphaFlagsKHR supported)
 {
+    VkCompositeAlphaFlagBitsKHR result;
     if (supported & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
     {
-        return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        result = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     }
-    if (supported & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
+    else if (supported & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
     {
-        return VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+        result = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
     }
-    if (supported & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR)
+    else if (supported & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR)
     {
-        return VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+        result = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
     }
-    if (supported & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
+    else if (supported & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
     {
-        return VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        result = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     }
-    return (VkCompositeAlphaFlagBitsKHR)0;
+    else
+    {
+        result = (VkCompositeAlphaFlagBitsKHR)0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool vulkan_collect_device_candidate(Arena* arena, VkSurfaceKHR surface, VkPhysicalDevice physical_device, u32 enumeration_index,

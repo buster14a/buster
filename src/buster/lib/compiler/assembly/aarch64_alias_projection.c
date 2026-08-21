@@ -126,15 +126,21 @@ static bool alias_find_field(BusterA64SemanticForm form, String8 name, u32* loca
 
 static u32 alias_width_mask(u32 width)
 {
+    u32 result;
     if (width >= 32)
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    if (width == 0)
+    else if (width == 0)
     {
-        return 0;
+        result = 0;
     }
-    return (UINT32_C(1) << width) - 1;
+    else
+    {
+        result = (UINT32_C(1) << width) - 1;
+    }
+
+    return result;
 }
 
 static bool alias_field_value_from_word(BusterA64SemanticForm form, u32 local, u32 word, u32* value)
@@ -524,58 +530,58 @@ static bool alias_program_syntax_supported(u32 form_id, bool preference)
     BusterA64SemanticAlias alias = {0};
     BusterA64AliasRowInfo info = {0};
     BusterA64SemanticForm target_form = {0};
-    if (!alias_form(form_id, &alias_semantic_form) || !buster_a64_semantic_alias_descriptor(form_id, &alias) || !buster_a64_alias_row_by_form(form_id, &info) ||
-        !buster_a64_semantic_form(info.target_form_id, &target_form))
+    if (alias_form(form_id, &alias_semantic_form) && buster_a64_semantic_alias_descriptor(form_id, &alias) && buster_a64_alias_row_by_form(form_id, &info) &&
+        buster_a64_semantic_form(info.target_form_id, &target_form))
     {
-        return false;
-    }
-    u32 token_count = preference ? alias.preference_condition_count : alias.condition_count;
-    if (token_count == 0)
-    {
-        return true;
-    }
-    char8 token_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-    String8 token = {0};
-    if (token_count == 1)
-    {
-        return alias_program_token(form_id, preference, 0, token_storage, sizeof(token_storage), &token) &&
-               (alias_string_equal(token, S8("Unconditionally")) || alias_string_equal(token, S8("Never")));
-    }
-    u32 index = 0;
-    while (index < token_count)
-    {
-        char8 lhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 operator_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 rhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 brace_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 close_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        String8 lhs = {0}, operator = {0}, rhs = {0};
-        u32 atom_length = 0;
-        if (!alias_program_atom_tokens(form_id, preference, index, token_count, lhs_storage, operator_storage, rhs_storage, brace_storage, close_storage,
-                                       &lhs, &operator, &rhs, &atom_length))
-        {
-            return false;
-        }
-        u32 value = 0, mask = 0, local = 0;
-        bool lhs_supported = alias_pattern(lhs, &value, &mask) || alias_find_field(alias_semantic_form, lhs, &local) || alias_find_field(target_form, lhs, &local) ||
-                             alias_string_equal(lhs, S8("A"));
-        bool rhs_supported = alias_pattern(rhs, &value, &mask) || alias_find_field(alias_semantic_form, rhs, &local) || alias_find_field(target_form, rhs, &local) ||
-                             alias_string_equal(rhs, S8("A"));
-        if (!lhs_supported || !rhs_supported)
-        {
-            return false;
-        }
-        index += atom_length;
-        if (index == token_count)
+        u32 token_count = preference ? alias.preference_condition_count : alias.condition_count;
+        if (token_count == 0)
         {
             return true;
         }
-        if (!alias_program_token(form_id, preference, index, token_storage, sizeof(token_storage), &token) || !alias_string_equal(token, S8("&&")))
+        char8 token_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+        String8 token = {0};
+        if (token_count == 1)
         {
-            return false;
+            return alias_program_token(form_id, preference, 0, token_storage, sizeof(token_storage), &token) &&
+                   (alias_string_equal(token, S8("Unconditionally")) || alias_string_equal(token, S8("Never")));
         }
-        index += 1;
+        u32 index = 0;
+        while (index < token_count)
+        {
+            char8 lhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 operator_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 rhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 brace_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 close_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            String8 lhs = {0}, operator = {0}, rhs = {0};
+            u32 atom_length = 0;
+            if (!alias_program_atom_tokens(form_id, preference, index, token_count, lhs_storage, operator_storage, rhs_storage, brace_storage, close_storage,
+                                           &lhs, &operator, &rhs, &atom_length))
+            {
+                return false;
+            }
+            u32 value = 0, mask = 0, local = 0;
+            bool lhs_supported = alias_pattern(lhs, &value, &mask) || alias_find_field(alias_semantic_form, lhs, &local) || alias_find_field(target_form, lhs, &local) ||
+                                 alias_string_equal(lhs, S8("A"));
+            bool rhs_supported = alias_pattern(rhs, &value, &mask) || alias_find_field(alias_semantic_form, rhs, &local) || alias_find_field(target_form, rhs, &local) ||
+                                 alias_string_equal(rhs, S8("A"));
+            if (!lhs_supported || !rhs_supported)
+            {
+                return false;
+            }
+            index += atom_length;
+            if (index == token_count)
+            {
+                return true;
+            }
+            if (!alias_program_token(form_id, preference, index, token_storage, sizeof(token_storage), &token) || !alias_string_equal(token, S8("&&")))
+            {
+                return false;
+            }
+            index += 1;
+        }
     }
+
     return false;
 }
 

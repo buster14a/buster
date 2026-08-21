@@ -1027,9 +1027,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_lock_alias_allowed(BusterX86Me
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_reg_matches(BusterX86MetadataPatternSemantics pattern, u8 value)
 {
-    if (pattern.reg_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY) return value == pattern.reg_fixed;
-    if (pattern.has_reg_range) return value >= pattern.reg_min && value <= pattern.reg_max;
-    return true;
+    bool result;
+    if (pattern.reg_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY)
+    {
+        result = value == pattern.reg_fixed;
+    }
+    else if (pattern.has_reg_range)
+    {
+        result = value >= pattern.reg_min && value <= pattern.reg_max;
+    }
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_reg_is_unconstrained(BusterX86MetadataPatternSemantics pattern)
@@ -1350,9 +1362,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_seed_equal(BusterX86Metadat
 // paths use it; callers outside that window keep using the copying accessor.
 BUSTER_GLOBAL_LOCAL BusterX86MetadataForm const* buster_x86_metadata_normalized_form_borrow(u32 form_id)
 {
-    if (!buster_x86_metadata_prewarmed || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return 0;
-    if (!buster_x86_metadata_normalized_forms_cached[form_id]) return 0;
-    return &buster_x86_metadata_normalized_forms[form_id];
+    BusterX86MetadataForm const* result;
+    if (!buster_x86_metadata_prewarmed || form_id >= BUSTER_X86_GENERATED_FORM_COUNT)
+    {
+        result = 0;
+    }
+    else if (!buster_x86_metadata_normalized_forms_cached[form_id])
+    {
+        result = 0;
+    }
+    else
+    {
+        result = &buster_x86_metadata_normalized_forms[form_id];
+    }
+
+    return result;
 }
 
 // Borrow a form's parsed pattern instead of copying it out.  This is the same
@@ -2862,11 +2886,29 @@ static u8 const buster_x86_metadata_required_physical_kind[16] = {
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_operand_class_extended(BusterX86MetadataPhysicalOperandKind kind, u8 register_physical_class)
 {
-    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) return BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY;
-    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_IMMEDIATE;
-    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_RELATIVE;
-    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE) return BUSTER_X86_METADATA_PHYSICAL_CLASS_ABSOLUTE;
-    return register_physical_class;
+    u8 result;
+    if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+    {
+        result = BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY;
+    }
+    else if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        result = BUSTER_X86_METADATA_PHYSICAL_CLASS_IMMEDIATE;
+    }
+    else if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE)
+    {
+        result = BUSTER_X86_METADATA_PHYSICAL_CLASS_RELATIVE;
+    }
+    else if (kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
+    {
+        result = BUSTER_X86_METADATA_PHYSICAL_CLASS_ABSOLUTE;
+    }
+    else
+    {
+        result = register_physical_class;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_operand_class(BusterX86MetadataPhysicalOperand operand)
@@ -2876,9 +2918,21 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_operand_class(BusterX86MetadataP
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_operand_width(BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.width) return operand.width;
-    if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) return operand.reg.width;
-    return 0;
+    u16 result;
+    if (operand.width)
+    {
+        result = operand.width;
+    }
+    else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+    {
+        result = operand.reg.width;
+    }
+    else
+    {
+        result = 0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86MetadataPhysicalBinding* bindings, u32 binding_count)
@@ -5121,32 +5175,78 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pc_relocation_kind(u8 width)
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_signed_fits(s64 value, u8 width)
 {
-    if (width == 1) return value >= -128 && value <= 127;
-    if (width == 2) return value >= -32768 && value <= 32767;
-    if (width == 4) return value >= INT32_MIN && value <= INT32_MAX;
-    return true;
+    bool result;
+    if (width == 1)
+    {
+        result = value >= -128 && value <= 127;
+    }
+    else if (width == 2)
+    {
+        result = value >= -32768 && value <= 32767;
+    }
+    else if (width == 4)
+    {
+        result = value >= INT32_MIN && value <= INT32_MAX;
+    }
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_fits(u64 value, u8 width)
 {
-    if (width == 1) return value <= 255;
-    if (width == 2) return value <= 65535;
-    if (width == 4) return value <= UINT32_MAX;
-    return true;
+    bool result;
+    if (width == 1)
+    {
+        result = value <= 255;
+    }
+    else if (width == 2)
+    {
+        result = value <= 65535;
+    }
+    else if (width == 4)
+    {
+        result = value <= UINT32_MAX;
+    }
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_unsigned_operand_fits(BusterX86MetadataPhysicalOperand operand, u8 width)
 {
-    if (operand.has_unsigned_value) return buster_x86_metadata_emit_unsigned_fits(operand.unsigned_value, width);
-    if (!operand.has_value || operand.value < 0) return false;
-    return buster_x86_metadata_emit_unsigned_fits((u64)operand.value, width);
+    bool result;
+    if (operand.has_unsigned_value)
+    {
+        result = buster_x86_metadata_emit_unsigned_fits(operand.unsigned_value, width);
+    }
+    else if (!operand.has_value || operand.value < 0)
+    {
+        result = false;
+    }
+    else
+    {
+        result = buster_x86_metadata_emit_unsigned_fits((u64)operand.value, width);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_checked_add_s64(s64 left, s64 right, s64* result)
 {
-    if ((right > 0 && left > INT64_MAX - right) || (right < 0 && left < INT64_MIN - right)) return false;
-    if (result) *result = left + right;
-    return true;
+    bool valid = (right <= 0 || left <= INT64_MAX - right) && (right >= 0 || left >= INT64_MIN - right);
+    if (valid)
+    {
+        if (result) *result = left + right;
+    }
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_diagnostic_u64(s64* diagnostic_value, u64 value)
@@ -8722,31 +8822,100 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_form_blocker(BusterX86MetadataForm form)
 {
-    if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS) return BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS;
-    if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64) return BUSTER_X86_METADATA_BLOCKER_NOT64;
-    if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED) return BUSTER_X86_METADATA_BLOCKER_PRIVILEGED;
-    return buster_x86_metadata_coverage_structural_blocker(form);
+    u8 result;
+    if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS)
+    {
+        result = BUSTER_X86_METADATA_BLOCKER_DECODE_ALIAS;
+    }
+    else if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64)
+    {
+        result = BUSTER_X86_METADATA_BLOCKER_NOT64;
+    }
+    else if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED)
+    {
+        result = BUSTER_X86_METADATA_BLOCKER_PRIVILEGED;
+    }
+    else
+    {
+        result = buster_x86_metadata_coverage_structural_blocker(form);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_coverage_width(u16 flags, u8 physical_class, BusterX86MetadataPatternSemantics pattern)
 {
-    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM) return 128;
-    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM) return 256;
-    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) return 512;
-    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM) return 1024;
-    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK) return 64;
-    if (pattern.mandatory_prefix == 0x66 && (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16)) return 16;
-    if (pattern.has_w && !pattern.w && (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32)) return 32;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_64) return 64;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32) return 32;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16) return 16;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_8) return 8;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_80) return 80;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_128) return 128;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_256) return 256;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_512) return 512;
-    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024) return 1024;
-    return physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ? 64 : 0;
+    u16 result;
+    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM)
+    {
+        result = 128;
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM)
+    {
+        result = 256;
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM)
+    {
+        result = 512;
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM)
+    {
+        result = 1024;
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+    {
+        result = 64;
+    }
+    else if (pattern.mandatory_prefix == 0x66 && (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16))
+    {
+        result = 16;
+    }
+    else if (pattern.has_w && !pattern.w && (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32))
+    {
+        result = 32;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_64)
+    {
+        result = 64;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32)
+    {
+        result = 32;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16)
+    {
+        result = 16;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_8)
+    {
+        result = 8;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_80)
+    {
+        result = 80;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_128)
+    {
+        result = 128;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_256)
+    {
+        result = 256;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_512)
+    {
+        result = 512;
+    }
+    else if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024)
+    {
+        result = 1024;
+    }
+    else
+    {
+        result = physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ? 64 : 0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_register(BusterX86MetadataOperand metadata,
@@ -10068,9 +10237,13 @@ bool buster_x86_metadata_validate(BusterX86MetadataValidationResult* result)
 
 bool buster_x86_metadata_string(u32 offset, BusterX86MetadataString* result)
 {
-    if (!result || !buster_x86_metadata_string_offset_terminated(offset, &result->length)) return false;
-    result->offset = offset;
-    return true;
+    bool valid = result && buster_x86_metadata_string_offset_terminated(offset, &result->length);
+    if (valid)
+    {
+        result->offset = offset;
+    }
+
+    return valid;
 }
 
 u8 buster_x86_metadata_string_byte(BusterX86MetadataString string, u32 index)
@@ -10089,9 +10262,13 @@ bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
 bool buster_x86_metadata_form_key(u32 form_id, BusterX86MetadataFormKey* result)
 {
     BusterX86MetadataForm form = {0};
-    if (!result || !buster_x86_metadata_form(form_id, &form)) return false;
-    *result = (BusterX86MetadataFormKey){.form_id = form_id, .stable_hash = form.stable_hash};
-    return true;
+    bool valid = result && buster_x86_metadata_form(form_id, &form);
+    if (valid)
+    {
+        *result = (BusterX86MetadataFormKey){.form_id = form_id, .stable_hash = form.stable_hash};
+    }
+
+    return valid;
 }
 
 bool buster_x86_metadata_form_key_from_id(u32 form_id, BusterX86MetadataFormKey* result)
@@ -10118,9 +10295,13 @@ bool buster_x86_metadata_form_key_from_stable_hash(u64 stable_hash, BusterX86Met
 bool buster_x86_metadata_lookup_form_key(BusterX86MetadataFormKey key, BusterX86MetadataForm* result)
 {
     BusterX86MetadataForm form = {0};
-    if (!result || !key.stable_hash || !buster_x86_metadata_form(key.form_id, &form) || form.stable_hash != key.stable_hash) return false;
-    *result = form;
-    return true;
+    bool valid = result && key.stable_hash && buster_x86_metadata_form(key.form_id, &form) && form.stable_hash == key.stable_hash;
+    if (valid)
+    {
+        *result = form;
+    }
+
+    return valid;
 }
 
 bool buster_x86_metadata_form_is_moffs(u32 form_id)
@@ -10568,11 +10749,29 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataCandidateRange buster_x86_metadata_lookup_t
 // shares one canonical form and byte sequence.
 BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_mnemonic_alias_target(String8 mnemonic)
 {
-    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTCW"))) return S8("FNSTCW");
-    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTENV"))) return S8("FNSTENV");
-    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSAVE"))) return S8("FNSAVE");
-    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTSW"))) return S8("FNSTSW");
-    return mnemonic;
+    String8 result;
+    if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTCW")))
+    {
+        result = S8("FNSTCW");
+    }
+    else if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTENV")))
+    {
+        result = S8("FNSTENV");
+    }
+    else if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSAVE")))
+    {
+        result = S8("FNSAVE");
+    }
+    else if (buster_x86_metadata_input_string_equal(mnemonic, S8("FSTSW")))
+    {
+        result = S8("FNSTSW");
+    }
+    else
+    {
+        result = mnemonic;
+    }
+
+    return result;
 }
 
 BusterX86MetadataCandidateRange buster_x86_metadata_lookup_mnemonic(String8 mnemonic)

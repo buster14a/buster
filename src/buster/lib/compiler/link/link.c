@@ -903,22 +903,24 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
 
 BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
 {
-    if (!result || right > UINT64_MAX - left)
+    bool valid = result && right <= UINT64_MAX - left;
+    if (valid)
     {
-        return false;
+        *result = left + right;
     }
-    *result = left + right;
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_u64_align_forward(u64 value, u64 alignment, u64* result)
 {
-    if (!result || !alignment || !BUSTER_IS_POWER_OF_TWO(alignment) || value > UINT64_MAX - (alignment - 1))
+    bool valid = result && alignment && BUSTER_IS_POWER_OF_TWO(alignment) && value <= UINT64_MAX - (alignment - 1);
+    if (valid)
     {
-        return false;
+        *result = align_forward(value, alignment);
     }
-    *result = align_forward(value, alignment);
-    return true;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
