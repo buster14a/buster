@@ -73,13 +73,14 @@ RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
 
 bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size)
 {
-    if (!window || !size.width || !size.height)
+    bool result = window && size.width && size.height;
+    if (result)
     {
-        return false;
+        window->width = size.width;
+        window->height = size.height;
     }
-    window->width = size.width;
-    window->height = size.height;
-    return true;
+
+    return result;
 }
 
 void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
@@ -90,12 +91,13 @@ void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
     BUSTER_UNUSED(texture_memory);
-    if (!rendering)
+    TextureIndex result = {.value = UINT32_MAX};
+    if (rendering)
     {
-        return (TextureIndex){.value = UINT32_MAX};
+        result = (TextureIndex){.value = rendering->texture_count};
+        rendering->texture_count += 1;
     }
-    TextureIndex result = {.value = rendering->texture_count};
-    rendering->texture_count += 1;
+
     return result;
 }
 

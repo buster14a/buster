@@ -100,21 +100,22 @@ BUSTER_GLOBAL_LOCAL Class buster_ios_view_layer_class(id self, SEL _cmd)
 
 BUSTER_GLOBAL_LOCAL Class buster_ios_register_view_class(void)
 {
-    Class existing = (Class)objc_getClass("BusterMetalView");
-    if (existing)
+    // Registration is once-only: a second call finds the pair the first one
+    // registered and must not build another.
+    Class result = (Class)objc_getClass("BusterMetalView");
+    if (!result)
     {
-        return existing;
+        result = objc_allocateClassPair((Class)objc_getClass("UIView"), "BusterMetalView", 0);
+        // +layerClass is a class method, so it lives on the metaclass.
+        class_addMethod(object_getClass((id)result), buster_sel("layerClass"), (IMP)buster_ios_view_layer_class, "#@:");
+        class_addMethod(result, buster_sel("touchesBegan:withEvent:"), (IMP)buster_ios_touches_began, "v@:@@");
+        class_addMethod(result, buster_sel("touchesMoved:withEvent:"), (IMP)buster_ios_touches_moved, "v@:@@");
+        class_addMethod(result, buster_sel("touchesEnded:withEvent:"), (IMP)buster_ios_touches_ended, "v@:@@");
+        class_addMethod(result, buster_sel("touchesCancelled:withEvent:"), (IMP)buster_ios_touches_ended, "v@:@@");
+        objc_registerClassPair(result);
     }
 
-    Class view_class = objc_allocateClassPair((Class)objc_getClass("UIView"), "BusterMetalView", 0);
-    // +layerClass is a class method, so it lives on the metaclass.
-    class_addMethod(object_getClass((id)view_class), buster_sel("layerClass"), (IMP)buster_ios_view_layer_class, "#@:");
-    class_addMethod(view_class, buster_sel("touchesBegan:withEvent:"), (IMP)buster_ios_touches_began, "v@:@@");
-    class_addMethod(view_class, buster_sel("touchesMoved:withEvent:"), (IMP)buster_ios_touches_moved, "v@:@@");
-    class_addMethod(view_class, buster_sel("touchesEnded:withEvent:"), (IMP)buster_ios_touches_ended, "v@:@@");
-    class_addMethod(view_class, buster_sel("touchesCancelled:withEvent:"), (IMP)buster_ios_touches_ended, "v@:@@");
-    objc_registerClassPair(view_class);
-    return view_class;
+    return result;
 }
 
 // pthread entry for the compiler/test runner (buster_ios_worker_entry calls exit()).
@@ -213,17 +214,16 @@ BUSTER_GLOBAL_LOCAL bool buster_ios_did_finish_launching(id self, SEL _cmd, id a
 
 BUSTER_GLOBAL_LOCAL Class buster_ios_register_delegate_class(void)
 {
-    Class existing = (Class)objc_getClass("BusterAppDelegate");
-    if (existing)
+    Class result = (Class)objc_getClass("BusterAppDelegate");
+    if (!result)
     {
-        return existing;
+        result = objc_allocateClassPair((Class)objc_getClass("UIResponder"), "BusterAppDelegate", 0);
+        class_addProtocol(result, objc_getProtocol("UIApplicationDelegate"));
+        class_addMethod(result, buster_sel("application:didFinishLaunchingWithOptions:"), (IMP)buster_ios_did_finish_launching, "B@:@@");
+        objc_registerClassPair(result);
     }
 
-    Class delegate_class = objc_allocateClassPair((Class)objc_getClass("UIResponder"), "BusterAppDelegate", 0);
-    class_addProtocol(delegate_class, objc_getProtocol("UIApplicationDelegate"));
-    class_addMethod(delegate_class, buster_sel("application:didFinishLaunchingWithOptions:"), (IMP)buster_ios_did_finish_launching, "B@:@@");
-    objc_registerClassPair(delegate_class);
-    return delegate_class;
+    return result;
 }
 
 extern int UIApplicationMain(int argc, char* argv[], id principal_class_name, id delegate_class_name);

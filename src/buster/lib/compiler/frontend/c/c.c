@@ -17,55 +17,52 @@ CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult pr
     {
         result.diagnostics = analysis.diagnostics;
         result.diagnostic_count = analysis.diagnostic_count;
-        return result;
     }
-    return c_lower_to_ir(arena, source_path, preprocess, analysis, target);
+    else
+    {
+        result = c_lower_to_ir(arena, source_path, preprocess, analysis, target);
+    }
+
+    return result;
 }
 
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-    {
-        return S8("invalid");
-    }
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-    {
-        return S8("end of file");
-    }
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-    {
-        return S8("identifier");
-    }
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-    {
-        return S8("preprocessing number");
-    }
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-    {
-        return S8("character literal");
-    }
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-    {
-        return S8("string literal");
-    }
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-    {
-        return S8("punctuator");
-    }
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-    {
-        return S8("newline");
-    }
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-    {
-        return S8("pragma");
-    }
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-    {
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    }
-    return S8("invalid token kind");
+
+    return result;
 }

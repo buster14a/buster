@@ -29,34 +29,35 @@ BUSTER_GLOBAL_LOCAL void restore_default_signal_handlers(void);
 #endif
 ProcessResult buster_fuzz_run(SliceString8 fuzz_arguments)
 {
-    if (fuzz_arguments.length > (u64)INT32_MAX - 1)
+    ProcessResult process_result = PROCESS_RESULT_FAILED;
+    if (fuzz_arguments.length <= (u64)INT32_MAX - 1)
     {
-        return PROCESS_RESULT_FAILED;
-    }
-
 #if !BUSTER_SANITIZE
     // libFuzzer's SetSigaction() refuses to replace an already-installed
     // handler, so our crash reporter would otherwise silently disable
     // libFuzzer's own crash reporting: no crash-<sha1> artifact, no reproducer
     // command, no minimization. A fuzz session with no saved input is not
     // actionable, so hand the fatal signals back before entering the driver.
-    restore_default_signal_handlers();
+        restore_default_signal_handlers();
 #endif
 
-    u64 argument_count = fuzz_arguments.length + 1;
-    char** arguments = arena_allocate(program_state->arena, char*, argument_count + 1);
-    String8 executable = string_duplicate_arena(program_state->arena, program_state->input.arguments.pointer[0], true);
-    arguments[0] = (char*)executable.pointer;
-    for (u64 i = 0; i < fuzz_arguments.length; i += 1)
-    {
-        String8 argument = string_duplicate_arena(program_state->arena, fuzz_arguments.pointer[i], true);
-        arguments[i + 1] = (char*)argument.pointer;
-    }
-    arguments[argument_count] = 0;
+        u64 argument_count = fuzz_arguments.length + 1;
+        char** arguments = arena_allocate(program_state->arena, char*, argument_count + 1);
+        String8 executable = string_duplicate_arena(program_state->arena, program_state->input.arguments.pointer[0], true);
+        arguments[0] = (char*)executable.pointer;
+        for (u64 i = 0; i < fuzz_arguments.length; i += 1)
+        {
+            String8 argument = string_duplicate_arena(program_state->arena, fuzz_arguments.pointer[i], true);
+            arguments[i + 1] = (char*)argument.pointer;
+        }
+        arguments[argument_count] = 0;
 
-    int argc = (int)argument_count;
-    int result = LLVMFuzzerRunDriver(&argc, &arguments, &buster_fuzz_test_input);
-    return result == 0 ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        int argc = (int)argument_count;
+        int driver_result = LLVMFuzzerRunDriver(&argc, &arguments, &buster_fuzz_test_input);
+        process_result = driver_result == 0 ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+
+    return process_result;
 }
 #endif
 
@@ -724,31 +725,33 @@ BUSTER_EXPORT double frexp(double x, int* e)
     memcpy(&bits, &x, sizeof(bits));
     u64 exponent_bits = (bits >> 52) & 0x7ff;
 
+    double result = x;
     if (exponent_bits == 0x7ff || x == 0.0)
     {
-        // Inf/NaN: return x with *e unspecified (0 here). Zero: (0, 0).
+        // Inf/NaN: yield x with *e unspecified (0 here). Zero: (0, 0).
         *e = 0;
-        return x;
-    }
-
-    if (exponent_bits == 0)
-    {
-        // Subnormal: scale into the normal range first, then adjust the
-        // exponent by the scale factor.
-        double scaled = x * 18446744073709551616.0; // 2^64
-        memcpy(&bits, &scaled, sizeof(bits));
-        exponent_bits = (bits >> 52) & 0x7ff;
-        *e = (int)exponent_bits - 1022 - 64;
     }
     else
     {
-        *e = (int)exponent_bits - 1022;
+        if (exponent_bits == 0)
+        {
+            // Subnormal: scale into the normal range first, then adjust the
+            // exponent by the scale factor.
+            double scaled = x * 18446744073709551616.0; // 2^64
+            memcpy(&bits, &scaled, sizeof(bits));
+            exponent_bits = (bits >> 52) & 0x7ff;
+            *e = (int)exponent_bits - 1022 - 64;
+        }
+        else
+        {
+            *e = (int)exponent_bits - 1022;
+        }
+
+        // Force the exponent field to 1022 so the mantissa lands in [0.5, 1).
+        bits = (bits & ~((u64)0x7ff << 52)) | ((u64)0x3fe << 52);
+        memcpy(&result, &bits, sizeof(result));
     }
 
-    // Force the exponent field to 1022 so the mantissa lands in [0.5, 1).
-    bits = (bits & ~((u64)0x7ff << 52)) | ((u64)0x3fe << 52);
-    double result;
-    memcpy(&result, &bits, sizeof(result));
     return result;
 }
 
