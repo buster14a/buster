@@ -19996,8 +19996,10 @@ BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CTok
 BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
 {
     if (body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
-        index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER || string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[index]), S8("case")) ||
-        string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[index]), S8("default")) || !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON))
+        index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
+        c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
+        c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
+        !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON))
     {
         return false;
     }
@@ -20037,17 +20039,19 @@ BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u3
         }
         if (open != UINT32_MAX && open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
         {
-            String8 control = c_token_spelling(preprocess->spelling_base, preprocess->tokens[open - 1]);
-            return string_equal(control, S8("if")) || string_equal(control, S8("for")) || string_equal(control, S8("while")) ||
-                   string_equal(control, S8("switch"));
+            CToken control = preprocess->tokens[open - 1];
+            return c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_IF) ||
+                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_FOR) ||
+                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_WHILE) ||
+                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_SWITCH);
         }
         return false;
     }
     return c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) ||
            c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON) ||
            (c_token_is_punctuator(&previous, C_PUNCTUATOR_COLON) && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
-           (previous.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess->spelling_base, previous), S8("do")) ||
-                                                    string_equal(c_token_spelling(preprocess->spelling_base, previous), S8("else"))));
+           (previous.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
+                                                    c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE)));
 }
 
 BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name)
@@ -22436,6 +22440,19 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
     return c_ir_activate_cleanup(builder, state->vla_entity, source);
 }
 
+// The keyword groups the statement walker classifies its first token
+// against, as C_SYMBOL_WELL_KNOWN_BIT sets: one shift-and-mask each, in
+// place of the spelling ladders they replaced.
+#define C_IR_ASM_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
+#define C_IR_THREAD_LOCAL_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU))
+#define C_IR_TAG_KEYWORD_SET (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
+#define C_IR_DECLARATION_INTRODUCER_SET (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_IR_TAG_KEYWORD_SET)
+#define C_IR_STATEMENT_KEYWORD_SET                                                                                                         \
+    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
+     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
+     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
+     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     if (!state->initialized && !c_ir_lower_body_initialize(builder, state))
@@ -22872,7 +22889,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index += 2;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("_Static_assert")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
             {
                 u32 assertion_end = index + 1;
                 u32 assertion_depth = 0;
@@ -22913,7 +22930,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index = assertion_end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("switch")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
             {
                 if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -22953,8 +22970,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         brace_depth -= 1;
                         continue;
                     }
-                    bool is_case = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("case"));
-                    bool is_default = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("default"));
+                    bool is_case = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
+                    bool is_default = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DEFAULT);
                     if (!is_case && !is_default)
                     {
                         continue;
@@ -23092,7 +23109,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 state->task_count = task_count;
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("if")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_IF))
             {
                 if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -23113,7 +23130,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     return false;
                 }
                 bool has_else = after < task.end && builder->preprocess.tokens[after].kind == C_TOKEN_IDENTIFIER &&
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[after]), S8("else"));
+                                c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[after], C_SYMBOL_WELL_KNOWN_ELSE);
                 u32 else_open = UINT32_MAX;
                 u32 else_close = UINT32_MAX;
                 if (has_else)
@@ -23180,14 +23197,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                });
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("do")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_DO))
             {
                 u32 body_start = 0;
                 u32 controlled_body_end = 0;
                 u32 after_body = 0;
                 if (!c_ir_builder_controlled_body_range(builder, index + 1, task.end, &body_start, &controlled_body_end, &after_body) ||
                     after_body + 2 >= task.end || builder->preprocess.tokens[after_body].kind != C_TOKEN_IDENTIFIER ||
-                    !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[after_body]), S8("while")) ||
+                    !c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[after_body], C_SYMBOL_WELL_KNOWN_WHILE) ||
                     !c_token_is_punctuator(&builder->preprocess.tokens[after_body + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
                     return false;
@@ -23241,7 +23258,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 split = true;
                 break;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("for")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_FOR))
             {
                 if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -23365,7 +23382,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 split = true;
                 break;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("while")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_WHILE))
             {
                 if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -23534,20 +23551,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             if (statement_expression_mode && task.allow_trailing_expression && (end == task.end || end + 1 == task.end))
             {
                 bool control = first.kind == C_TOKEN_IDENTIFIER &&
-                               (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("break")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("case")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("continue")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("default")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("do")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("for")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("goto")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("if")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("return")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("switch")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("while")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("_Static_assert")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("asm")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__asm")) ||
-                                string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__asm__")));
-                bool trailing_declaration = first_is_typedef_name || first_is_unbound_typedef_name ||
-                                            (first.kind == C_TOKEN_IDENTIFIER &&
-                                             (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typedef")) ||
-                                              c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect) ||
-                                              string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) ||
-                                              string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("enum"))));
+                               c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_KEYWORD_SET);
+                bool trailing_declaration =
+                    first_is_typedef_name || first_is_unbound_typedef_name ||
+                    (first.kind == C_TOKEN_IDENTIFIER &&
+                     (c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_DECLARATION_INTRODUCER_SET) ||
+                      c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect)));
                 if (!control && !trailing_declaration)
                 {
                     c_ir_lower_body_yield(builder, state, task, task.end, C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION,
@@ -23563,8 +23572,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     return false;
                 }
             }
-            if (first.kind == C_TOKEN_IDENTIFIER &&
-                (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("asm")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__asm")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__asm__"))))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_ASM_KEYWORD_SET))
             {
                 CIrLowerInlineAssemblyState* inline_state = arena_allocate(builder->scratch_arena, CIrLowerInlineAssemblyState, 1);
                 *inline_state = (CIrLowerInlineAssemblyState){
@@ -23580,7 +23588,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 state->task_count = task_count;
                 return false;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("return")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_RETURN))
             {
                 bool has_value = index + 1 < end;
                 if (has_value == builder->returns_void)
@@ -23613,7 +23621,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("goto")))
+            if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_GOTO))
             {
                 if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
                 {
@@ -23662,9 +23670,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("break")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("continue"))))
+            if (first.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_BREAK) || c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_CONTINUE)))
             {
-                bool is_break = string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("break"));
+                bool is_break = c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_BREAK);
                 IrBlockId target = is_break ? task.break_block : task.continue_block;
                 bool has_checkpoint = is_break ? task.has_break_checkpoint : task.has_continue_checkpoint;
                 IrValueId checkpoint = is_break ? task.break_checkpoint : task.continue_checkpoint;
@@ -23684,11 +23692,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index = end == task.end ? task.end : end + 1;
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typedef")) ||
+            if (first.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
                                                      c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect) ||
                                                       first_is_typedef_name || first_is_unbound_typedef_name))
             {
-                if (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typedef")))
+                if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF))
                 {
                     index = end == task.end ? task.end : end + 1;
                     continue;
@@ -23771,7 +23779,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     bool type_only_aggregate =
                         first.kind == C_TOKEN_IDENTIFIER &&
-                        (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("enum")));
+                        c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_TAG_KEYWORD_SET);
                     if (!type_only_aggregate)
                     {
                         builder->failure_message = S8("could not resolve the declared local identifier");
@@ -23906,17 +23914,16 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         break;
                     }
-                    static_storage |= token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("static"));
+                    static_storage |= token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_STATIC);
                 }
                 for (u32 specifier = index; specifier < name_index; specifier += 1)
                 {
                     local_extern |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                    string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier]), S8("extern"));
+                                    c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_SYMBOL_WELL_KNOWN_EXTERN);
                     static_storage |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                      string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier]), S8("static"));
+                                      c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_SYMBOL_WELL_KNOWN_STATIC);
                     local_thread_local |= builder->preprocess.tokens[specifier].kind == C_TOKEN_IDENTIFIER &&
-                                          (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier]), S8("_Thread_local")) ||
-                                           string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier]), S8("__thread")));
+                                          c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[specifier], C_IR_THREAD_LOCAL_KEYWORD_SET);
                 }
                 if (variable_length_array && static_storage)
                 {

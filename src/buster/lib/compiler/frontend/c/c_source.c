@@ -2170,12 +2170,14 @@ BUSTER_C_INTERNAL void c_macro_hash_rebuild(Arena* arena, CMacro* first, u32 cap
 }
 
 // Identifier interning: the preprocessor assigns every identifier token a
-// u32 symbol id (stored in token.location.symbol) so downstream consumers
-// compare integers instead of re-hashing and re-comparing spellings. The
-// names below are interned first, in array order, so their ids are the
-// compile-time-known range [1, C_SYMBOL_PREDEFINED_COUNT] and one dense
-// byte table classifies them. Tokens that never pass through the intern
-// pass (pasted, synthesized, or test-built tokens) keep symbol 0 and every
+// u32 symbol id (stored in token.symbol) so downstream consumers compare
+// integers instead of re-hashing and re-comparing spellings. The well-known
+// names take the ids below C_SYMBOL_WELL_KNOWN_COUNT, and the names in the
+// table below are interned next, in array order, so their ids are the
+// compile-time-known range [C_SYMBOL_WELL_KNOWN_COUNT,
+// C_SYMBOL_WELL_KNOWN_COUNT + C_SYMBOL_PREDEFINED_COUNT) and one dense byte
+// table classifies them. Tokens that never pass through the intern pass
+// (pasted, synthesized, or test-built tokens) keep symbol 0 and every
 // consumer falls back to the spelling ladder, so a missed path costs speed,
 // never correctness.
 typedef struct CSymbolPredefined CSymbolPredefined;
@@ -2268,9 +2270,10 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
 
-// Dense kind classification for interned symbols; index 0 stays
-// C_SYMBOL_BUILTIN_NONE so `kinds[symbol]` is valid for every id in
-// [0, C_SYMBOL_PREDEFINED_COUNT].
+// Dense kind classification for interned symbols; every id at or below
+// predefined_limit indexes it, and the ids that are not builtins — 0, the
+// well-known names, the keywords and the classified extras — stay
+// C_SYMBOL_BUILTIN_NONE.
 // The cold path for symbol-less identifier tokens: the same classification
 // by spelling, scanning the single source-of-truth table above.
 BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
@@ -2468,6 +2471,41 @@ BUSTER_C_INTERNAL String8 const c_symbol_classified_extras[] = {
     S8_INITIALIZER("__vector_size__"),
 };
 
+// The spellings behind CSymbolWellKnown: entry N is interned N-th and
+// therefore receives id N, which is what lets a call site write the
+// enumerator where the id belongs. Designated by enumerator so the pairing
+// survives any reordering of the enum, and c_symbol_table_create asserts
+// both halves of the contract — every entry present, every id as promised.
+// C_SYMBOL_WELL_KNOWN_NONE keeps the empty spelling and is never interned.
+BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT] = {
+    [C_SYMBOL_WELL_KNOWN_NONE] = S8_INITIALIZER(""),
+    [C_SYMBOL_WELL_KNOWN_CASE] = S8_INITIALIZER("case"),
+    [C_SYMBOL_WELL_KNOWN_DEFAULT] = S8_INITIALIZER("default"),
+    [C_SYMBOL_WELL_KNOWN_IF] = S8_INITIALIZER("if"),
+    [C_SYMBOL_WELL_KNOWN_FOR] = S8_INITIALIZER("for"),
+    [C_SYMBOL_WELL_KNOWN_WHILE] = S8_INITIALIZER("while"),
+    [C_SYMBOL_WELL_KNOWN_SWITCH] = S8_INITIALIZER("switch"),
+    [C_SYMBOL_WELL_KNOWN_DO] = S8_INITIALIZER("do"),
+    [C_SYMBOL_WELL_KNOWN_ELSE] = S8_INITIALIZER("else"),
+    [C_SYMBOL_WELL_KNOWN_OVERLOADABLE] = S8_INITIALIZER("__overloadable__"),
+    [C_SYMBOL_WELL_KNOWN_STATIC_ASSERT] = S8_INITIALIZER("_Static_assert"),
+    [C_SYMBOL_WELL_KNOWN_BREAK] = S8_INITIALIZER("break"),
+    [C_SYMBOL_WELL_KNOWN_CONTINUE] = S8_INITIALIZER("continue"),
+    [C_SYMBOL_WELL_KNOWN_GOTO] = S8_INITIALIZER("goto"),
+    [C_SYMBOL_WELL_KNOWN_RETURN] = S8_INITIALIZER("return"),
+    [C_SYMBOL_WELL_KNOWN_TYPEDEF] = S8_INITIALIZER("typedef"),
+    [C_SYMBOL_WELL_KNOWN_STRUCT] = S8_INITIALIZER("struct"),
+    [C_SYMBOL_WELL_KNOWN_UNION] = S8_INITIALIZER("union"),
+    [C_SYMBOL_WELL_KNOWN_ENUM] = S8_INITIALIZER("enum"),
+    [C_SYMBOL_WELL_KNOWN_STATIC] = S8_INITIALIZER("static"),
+    [C_SYMBOL_WELL_KNOWN_EXTERN] = S8_INITIALIZER("extern"),
+    [C_SYMBOL_WELL_KNOWN_THREAD_LOCAL] = S8_INITIALIZER("_Thread_local"),
+    [C_SYMBOL_WELL_KNOWN_THREAD_GNU] = S8_INITIALIZER("__thread"),
+    [C_SYMBOL_WELL_KNOWN_ASM] = S8_INITIALIZER("asm"),
+    [C_SYMBOL_WELL_KNOWN_ASM_GNU] = S8_INITIALIZER("__asm"),
+    [C_SYMBOL_WELL_KNOWN_ASM_GNU_ALT] = S8_INITIALIZER("__asm__"),
+};
+
 enum
 {
     C_SYMBOL_PREDEFINED_LIMIT_CAPACITY = 256,
@@ -2489,10 +2527,22 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
     table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     memset(table.builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     memset(table.class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    // The well-known names go in first and in enumerator order, because the
+    // passes that compare against them spell the id as the enumerator itself
+    // rather than reading it back out of the table.
+    for (u32 well_known = 1; well_known < C_SYMBOL_WELL_KNOWN_COUNT; well_known += 1)
+    {
+        // An enumerator with no spelling would intern the empty name and
+        // match nothing, so the gap is caught here rather than as a pass
+        // that silently stops recognizing its keyword.
+        BUSTER_CHECK(c_symbol_well_known_spellings[well_known].length);
+        u32 id = c_symbol_intern(&table, c_symbol_well_known_spellings[well_known]);
+        BUSTER_CHECK(id == well_known);
+    }
     for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
     {
         u32 id = c_symbol_intern(&table, c_symbol_predefined[index].name);
-        BUSTER_CHECK(id == index + 1);
+        BUSTER_CHECK(id == C_SYMBOL_WELL_KNOWN_COUNT + index);
         // Routed through the spelling scan instead of reading
         // c_symbol_predefined[index].builtin directly, so the two
         // classification paths cannot drift.

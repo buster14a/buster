@@ -10558,7 +10558,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             identifier_count += 1;
-            for_count += string_equal(c_token_spelling(preprocess.spelling_base, token), S8("for"));
+            for_count += c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR);
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
         {
@@ -10852,8 +10852,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         bool overloadable = false;
         for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
         {
-            overloadable |=
-                preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__overloadable__"));
+            overloadable |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+                            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
         // The name chain lists same-named entities newest first; the

@@ -13,6 +13,7 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/integer.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 
@@ -188,6 +189,91 @@ struct CSymbolTable
     u32 name_capacity;
     u32 count;
 };
+
+// The names a pass compares an identifier token against by hand, and their
+// interned ids. c_symbol_table_create interns this list first and in order,
+// so an enumerator *is* the id its spelling was assigned: a comparison is
+// `token.symbol == C_SYMBOL_WELL_KNOWN_FOR`, one immediate compare against a
+// field the token already carries, in place of materializing the spelling
+// through c_token_length's oversized guard and running string_equal.
+// C_SYMBOL_WELL_KNOWN_NONE is 0 so it coincides with the uninterned marker,
+// and the create-time BUSTER_CHECK holds the enum and the table together.
+typedef enum CSymbolWellKnown
+{
+    C_SYMBOL_WELL_KNOWN_NONE,
+    C_SYMBOL_WELL_KNOWN_CASE,
+    C_SYMBOL_WELL_KNOWN_DEFAULT,
+    C_SYMBOL_WELL_KNOWN_IF,
+    C_SYMBOL_WELL_KNOWN_FOR,
+    C_SYMBOL_WELL_KNOWN_WHILE,
+    C_SYMBOL_WELL_KNOWN_SWITCH,
+    C_SYMBOL_WELL_KNOWN_DO,
+    C_SYMBOL_WELL_KNOWN_ELSE,
+    C_SYMBOL_WELL_KNOWN_OVERLOADABLE,
+    C_SYMBOL_WELL_KNOWN_STATIC_ASSERT,
+    C_SYMBOL_WELL_KNOWN_BREAK,
+    C_SYMBOL_WELL_KNOWN_CONTINUE,
+    C_SYMBOL_WELL_KNOWN_GOTO,
+    C_SYMBOL_WELL_KNOWN_RETURN,
+    C_SYMBOL_WELL_KNOWN_TYPEDEF,
+    C_SYMBOL_WELL_KNOWN_STRUCT,
+    C_SYMBOL_WELL_KNOWN_UNION,
+    C_SYMBOL_WELL_KNOWN_ENUM,
+    C_SYMBOL_WELL_KNOWN_STATIC,
+    C_SYMBOL_WELL_KNOWN_EXTERN,
+    C_SYMBOL_WELL_KNOWN_THREAD_LOCAL,
+    C_SYMBOL_WELL_KNOWN_THREAD_GNU,
+    C_SYMBOL_WELL_KNOWN_ASM,
+    C_SYMBOL_WELL_KNOWN_ASM_GNU,
+    C_SYMBOL_WELL_KNOWN_ASM_GNU_ALT,
+    C_SYMBOL_WELL_KNOWN_COUNT,
+} CSymbolWellKnown;
+
+// One well-known name as a set bit. The ids stay below 64 so any group of
+// them is a u64 the membership test shifts by the token's own symbol,
+// turning a ladder of spelling compares into one shift, one mask and one
+// branch.
+#define C_SYMBOL_WELL_KNOWN_BIT(name) (1ull << (u64)(C_SYMBOL_WELL_KNOWN_##name))
+BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
+
+// Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
+BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];
+
+// Is this identifier token spelled `well_known`?  Interned tokens — every
+// token the preprocessor produced — settle on the integer compare. Symbol 0
+// marks a token that never passed the intern pass (pasted, synthesized, or
+// test-built) and falls back to the spelling, so a missed path costs speed
+// and never correctness. Both sides read the one spelling table, so the id
+// and the fallback spelling cannot drift apart.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_well_known(char8 const* spelling_base, CToken token, CSymbolWellKnown well_known)
+{
+    return token.symbol ? token.symbol == (u32)well_known
+                        : string_equal(c_token_spelling(spelling_base, token), c_symbol_well_known_spellings[well_known]);
+}
+
+// Is this identifier token spelled as any member of `set`, a union of
+// C_SYMBOL_WELL_KNOWN_BIT values?  The interned answer is a shift and a mask
+// whatever the set's size; the uninterned fallback walks the set bits and
+// compares spellings, which is the same ladder the call sites used to write
+// out by hand and runs only for tokens the intern pass never saw.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(char8 const* spelling_base, CToken token, u64 set)
+{
+    bool result;
+    if (token.symbol)
+    {
+        result = token.symbol < 64 && ((set >> token.symbol) & 1);
+    }
+    else
+    {
+        String8 spelling = c_token_spelling(spelling_base, token);
+        result = false;
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
+        {
+            result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
+        }
+    }
+    return result;
+}
 
 typedef enum CConditionalOperator
 {
