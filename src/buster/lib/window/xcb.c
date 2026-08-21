@@ -1198,9 +1198,13 @@ SliceString8 wm_x11_parse_uri_list(Arena* arena, String8 uri_list)
     SliceString8 result = {0};
     if (budget_valid && candidate_count != 0)
     {
+        // The count has to survive both the saturation guard and the array-size
+        // check before the second pass may write anything, so both refusals set
+        // `countable` rather than leaving with the empty slice.
         u64 accepted_count = 0;
+        bool countable = true;
         line_start = 0;
-        for (u64 index = 0; index <= uri_list.length; index += 1)
+        for (u64 index = 0; index <= uri_list.length && countable; index += 1)
         {
             bool at_end = index == uri_list.length;
             if (at_end || uri_list.pointer[index] == '\n')
@@ -1217,54 +1221,54 @@ SliceString8 wm_x11_parse_uri_list(Arena* arena, String8 uri_list)
                     wm_x11_file_uri_decoded_length(uri, 0, &uri_valid);
                     if (uri_valid)
                     {
-                        if (accepted_count == UINT64_MAX)
+                        countable = accepted_count != UINT64_MAX;
+                        if (countable)
                         {
-                            return result;
+                            accepted_count += 1;
                         }
-                        accepted_count += 1;
                     }
                 }
                 line_start = index + 1;
             }
         }
 
-        if (!wm_native_file_drop_array_size_allowed(accepted_count, sizeof(String8)))
+        if (countable && wm_native_file_drop_array_size_allowed(accepted_count, sizeof(String8)))
         {
-            return result;
-        }
-        if (accepted_count != 0)
-        {
-            result.pointer = arena_allocate(arena, String8, accepted_count);
-            result.length = accepted_count;
-        }
-        u64 output_index = 0;
-        line_start = 0;
-        for (u64 index = 0; index <= uri_list.length; index += 1)
-        {
-            bool at_end = index == uri_list.length;
-            if (at_end || uri_list.pointer[index] == '\n')
+            if (accepted_count != 0)
             {
-                u64 line_end = index;
-                if (line_end > line_start && uri_list.pointer[line_end - 1] == '\r')
-                {
-                    line_end -= 1;
-                }
-                if (line_end > line_start && uri_list.pointer[line_start] != '#')
-                {
-                    bool valid = false;
-                    String8 uri = string_from_pointer_length(uri_list.pointer + line_start, line_end - line_start);
-                    String8 path = wm_x11_decode_file_uri(arena, uri, &valid);
-                    if (valid)
-                    {
-                        result.pointer[output_index] = path;
-                        output_index += 1;
-                    }
-                }
-                line_start = index + 1;
+                result.pointer = arena_allocate(arena, String8, accepted_count);
+                result.length = accepted_count;
             }
+            u64 output_index = 0;
+            line_start = 0;
+            for (u64 index = 0; index <= uri_list.length; index += 1)
+            {
+                bool at_end = index == uri_list.length;
+                if (at_end || uri_list.pointer[index] == '\n')
+                {
+                    u64 line_end = index;
+                    if (line_end > line_start && uri_list.pointer[line_end - 1] == '\r')
+                    {
+                        line_end -= 1;
+                    }
+                    if (line_end > line_start && uri_list.pointer[line_start] != '#')
+                    {
+                        bool valid = false;
+                        String8 uri = string_from_pointer_length(uri_list.pointer + line_start, line_end - line_start);
+                        String8 path = wm_x11_decode_file_uri(arena, uri, &valid);
+                        if (valid)
+                        {
+                            result.pointer[output_index] = path;
+                            output_index += 1;
+                        }
+                    }
+                    line_start = index + 1;
+                }
+            }
+            result.length = output_index;
         }
-        result.length = output_index;
     }
+
     return result;
 }
 

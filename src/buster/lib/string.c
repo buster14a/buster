@@ -466,39 +466,43 @@ BUSTER_GLOBAL_LOCAL u64 string_format_u128_parts_divide(StringFormatU128Parts* v
 {
     BUSTER_CHECK(divisor >= 2 && divisor <= 16);
 
+    u64 remainder;
     if (!value->high)
     {
-        u64 remainder = value->low % divisor;
+        // A value that fits in the low half divides without the bit loop.
+        remainder = value->low % divisor;
         value->low /= divisor;
-        return remainder;
     }
-
-    StringFormatU128Parts quotient = {0};
-    u64 remainder = 0;
-
-    // Long division from the most significant bit keeps the implementation
-    // independent of a compiler-provided 128-bit integer type.
-    for (u64 bit_index = 128; bit_index != 0; bit_index -= 1)
+    else
     {
-        u64 shift = bit_index - 1;
-        u64 bit = shift >= 64 ? (value->high >> (shift - 64)) & 1u : (value->low >> shift) & 1u;
-        remainder = remainder * 2 + bit;
+        StringFormatU128Parts quotient = {0};
+        remainder = 0;
 
-        if (remainder >= divisor)
+        // Long division from the most significant bit keeps the implementation
+        // independent of a compiler-provided 128-bit integer type.
+        for (u64 bit_index = 128; bit_index != 0; bit_index -= 1)
         {
-            remainder -= divisor;
-            if (shift >= 64)
+            u64 shift = bit_index - 1;
+            u64 bit = shift >= 64 ? (value->high >> (shift - 64)) & 1u : (value->low >> shift) & 1u;
+            remainder = remainder * 2 + bit;
+
+            if (remainder >= divisor)
             {
-                quotient.high |= (u64)1 << (shift - 64);
-            }
-            else
-            {
-                quotient.low |= (u64)1 << shift;
+                remainder -= divisor;
+                if (shift >= 64)
+                {
+                    quotient.high |= (u64)1 << (shift - 64);
+                }
+                else
+                {
+                    quotient.low |= (u64)1 << shift;
+                }
             }
         }
+
+        *value = quotient;
     }
 
-    *value = quotient;
     return remainder;
 }
 
@@ -581,39 +585,48 @@ BUSTER_GLOBAL_LOCAL String8 string_format_u128_parts_radix(String8 buffer, Strin
 
 BUSTER_GLOBAL_LOCAL u64 string_format_integer_max_width(u64 bit_width, StringFormatIntegerKind kind)
 {
+    u64 result;
     switch (kind)
     {
-        break;
     case STRING_FORMAT_INTEGER_KIND_DECIMAL:
+        // Decimal is the only radix whose width is not a function of bit_width.
         switch (bit_width)
         {
-            break;
         case 8:
-            return 3;
+            result = 3;
+            break;
         case 16:
-            return 5;
+            result = 5;
+            break;
         case 32:
-            return 10;
+            result = 10;
+            break;
         case 64:
-            return 20;
+            result = 20;
+            break;
         case 128:
-            return 39;
+            result = 39;
+            break;
         default:
-            BUSTER_UNREACHABLE();
+            BUSTER_TODO();
         }
         break;
     case STRING_FORMAT_INTEGER_KIND_BINARY:
-        return bit_width;
+        result = bit_width;
+        break;
     case STRING_FORMAT_INTEGER_KIND_OCTAL:
-        return (bit_width + 2) / 3;
+        result = (bit_width + 2) / 3;
+        break;
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
-        return (bit_width + 3) / 4;
+        result = (bit_width + 3) / 4;
+        break;
     case STRING_FORMAT_INTEGER_KIND_COUNT:
-        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_TODO();
     }
 
-    BUSTER_UNREACHABLE();
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u64 string_format_integer_radix(StringFormatIntegerKind kind)
@@ -868,16 +881,21 @@ BUSTER_GLOBAL_LOCAL Utf8DecodeResult utf8_decode(String8 string, u64 index)
 
 BUSTER_GLOBAL_LOCAL u64 utf16_write_code_point(char16* destination, u32 code_point)
 {
+    u64 result;
     if (code_point <= 0xFFFFu)
     {
         destination[0] = (char16)code_point;
-        return 1;
+        result = 1;
+    }
+    else
+    {
+        code_point -= 0x10000u;
+        destination[0] = (char16)(0xD800u + (code_point >> 10));
+        destination[1] = (char16)(0xDC00u + (code_point & 0x3FFu));
+        result = 2;
     }
 
-    code_point -= 0x10000u;
-    destination[0] = (char16)(0xD800u + (code_point >> 10));
-    destination[1] = (char16)(0xDC00u + (code_point & 0x3FFu));
-    return 2;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
@@ -1413,29 +1431,27 @@ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate
 SliceString8 string16_environment_block_to_slice_string(Arena* arena, const char16* environment_block)
 {
     SliceString8 result = {0};
-    u64 string_count = 0;
-
-    if (!environment_block)
+    if (environment_block)
     {
-        return result;
+        // Windows environment blocks are NUL-separated strings terminated by an extra NUL.
+        u64 string_count = 0;
+        for (const char16* it = environment_block; *it; it += string16_length(it) + 1)
+        {
+            string_count += 1;
+        }
+
+        String8* slices = arena_allocate(arena, String8, string_count);
+        const char16* it = environment_block;
+        for (u64 i = 0; i < string_count; i += 1)
+        {
+            u64 length = string16_length(it);
+            slices[i] = string8_from_string16(arena, string16_from_pointer_length(it, length), true);
+            it += length + 1;
+        }
+
+        result = (SliceString8){.pointer = slices, .length = string_count};
     }
 
-    // Windows environment blocks are NUL-separated strings terminated by an extra NUL.
-    for (const char16* it = environment_block; *it; it += string16_length(it) + 1)
-    {
-        string_count += 1;
-    }
-
-    String8* slices = arena_allocate(arena, String8, string_count);
-    const char16* it = environment_block;
-    for (u64 i = 0; i < string_count; i += 1)
-    {
-        u64 length = string16_length(it);
-        slices[i] = string8_from_string16(arena, string16_from_pointer_length(it, length), true);
-        it += length + 1;
-    }
-
-    result = (SliceString8){.pointer = slices, .length = string_count};
     return result;
 }
 

@@ -79,17 +79,21 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpcodeInfo const* info)
 {
-    if (!info)
+    // An opcode with no info is treated as a barrier: nothing may be reordered
+    // across something the scheduler cannot describe.
+    bool result = true;
+    if (info)
     {
-        return true;
+        MachineScheduleClass schedule_class = machine_opcode_schedule_class(info);
+        MachineMemoryEffect memory_effect = machine_opcode_memory_effect(info);
+        result = schedule_class == MACHINE_SCHEDULE_CLASS_BARRIER || schedule_class == MACHINE_SCHEDULE_CLASS_CALL ||
+                 schedule_class == MACHINE_SCHEDULE_CLASS_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_VOLATILE ||
+                 memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_BARRIER ||
+                 (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0 ||
+                 machine_schedule_opcode_is_barrier(opcode);
     }
-    MachineScheduleClass schedule_class = machine_opcode_schedule_class(info);
-    MachineMemoryEffect memory_effect = machine_opcode_memory_effect(info);
-    return schedule_class == MACHINE_SCHEDULE_CLASS_BARRIER || schedule_class == MACHINE_SCHEDULE_CLASS_CALL ||
-           schedule_class == MACHINE_SCHEDULE_CLASS_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_VOLATILE ||
-           memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_BARRIER ||
-           (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0 ||
-           machine_schedule_opcode_is_barrier(opcode);
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
@@ -178,12 +182,17 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
 }
 BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
 {
-    if (virtual_register >= function->virtual_register_count)
+    MachineRegisterClass result = MACHINE_REGISTER_CLASS_GENERAL;
+    if (virtual_register < function->virtual_register_count)
     {
-        return MACHINE_REGISTER_CLASS_GENERAL;
+        MachineRegisterClass register_class = (MachineRegisterClass)function->virtual_registers[virtual_register].register_class;
+        if (register_class < MACHINE_REGISTER_CLASS_COUNT && register_class != MACHINE_REGISTER_CLASS_NONE)
+        {
+            result = register_class;
+        }
     }
-    MachineRegisterClass register_class = (MachineRegisterClass)function->virtual_registers[virtual_register].register_class;
-    return register_class < MACHINE_REGISTER_CLASS_COUNT && register_class != MACHINE_REGISTER_CLASS_NONE ? register_class : MACHINE_REGISTER_CLASS_GENERAL;
+
+    return result;
 }
 
 #define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
@@ -347,593 +356,593 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // smaller cannot have excess, and a function of only such blocks is
         // done before anything is allocated. This is the gate almost every
         // function leaves through.
-        if (maximum_block_rows <= allocatable_count)
+        if (maximum_block_rows > allocatable_count)
         {
-            return result;
-        }
-        TemporalArena scratch = scratch_begin(&arena, 1);
-        u32* touch_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        u32* last_touches = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            touch_epochs[register_index] = 0;
-        }
-        s32* window_deltas = arena_allocate(scratch.arena, s32, (u64)(maximum_block_rows + 1u) * MACHINE_REGISTER_CLASS_COUNT);
-        u32* order_scratch = arena_allocate(scratch.arena, u32, maximum_block_rows ? maximum_block_rows : 1);
-        u8* register_classes = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            register_classes[register_index] = (u8)machine_schedule_register_class(function, register_index);
-        }
-        // First gate, before any scheduling structure exists: the per-block
-        // excess in source order. Blocks the file already covers are excluded
-        // from scheduling outright, and a function with no excess anywhere is
-        // done — no order can improve it under this model.
-        u32* block_excesses = arena_allocate(scratch.arena, u32, function->block_count);
-        u32 base_excess = 0;
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            MachineBlock* block = function->blocks + block_index;
-            if (block->instruction_count <= allocatable_count)
+            TemporalArena scratch = scratch_begin(&arena, 1);
+            u32* touch_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+            u32* last_touches = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+            for (u32 register_index = 0; register_index < register_count; register_index += 1)
             {
-                block_excesses[block_index] = 0;
-                continue;
+                touch_epochs[register_index] = 0;
             }
-            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+            s32* window_deltas = arena_allocate(scratch.arena, s32, (u64)(maximum_block_rows + 1u) * MACHINE_REGISTER_CLASS_COUNT);
+            u32* order_scratch = arena_allocate(scratch.arena, u32, maximum_block_rows ? maximum_block_rows : 1);
+            u8* register_classes = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
+            for (u32 register_index = 0; register_index < register_count; register_index += 1)
             {
-                order_scratch[offset] = block->first_instruction + offset;
+                register_classes[register_index] = (u8)machine_schedule_register_class(function, register_index);
             }
-            block_excesses[block_index] = machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
-                                                                        block_index + 1, touch_epochs, last_touches, window_deltas);
-            base_excess += block_excesses[block_index];
-        }
-        if (!base_excess)
-        {
-            scratch_end(scratch);
-            return result;
-        }
-        u32* definition_totals = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            definition_totals[register_index] = 0;
-        }
-        for (u32 row = 0; row < row_count; row += 1)
-        {
-            MachineInstruction* instruction = function->instructions + row;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            if (!info)
+            // First gate, before any scheduling structure exists: the per-block
+            // excess in source order. Blocks the file already covers are excluded
+            // from scheduling outright, and a function with no excess anywhere is
+            // done — no order can improve it under this model.
+            u32* block_excesses = arena_allocate(scratch.arena, u32, function->block_count);
+            u32 base_excess = 0;
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
             {
-                scratch_end(scratch);
-                return result;
-            }
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                MachineBlock* block = function->blocks + block_index;
+                if (block->instruction_count <= allocatable_count)
                 {
+                    block_excesses[block_index] = 0;
                     continue;
                 }
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                definition_totals[machine_ref_payload(instruction->operands[slot])] +=
-                    role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+                {
+                    order_scratch[offset] = block->first_instruction + offset;
+                }
+                block_excesses[block_index] = machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
+                                                                            block_index + 1, touch_epochs, last_touches, window_deltas);
+                base_excess += block_excesses[block_index];
             }
-        }
-        // Per-block scheduling scratch, sized once at the widest block. Every
-        // array is indexed by block-local unit index; edge capacity is a hard
-        // bound — each row contributes at most four operand edges, and each unit
-        // at most a barrier-in edge, one appearance in a barrier's flush list,
-        // and one link in each of the memory and vector chains.
-        u32 edge_capacity = 8 * maximum_block_rows + 8;
-        u32* unit_first_rows = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u32* unit_row_counts = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u8* unit_flags = arena_allocate(scratch.arena, u8, maximum_block_rows);
-        u32* edge_sources = arena_allocate(scratch.arena, u32, edge_capacity);
-        u32* edge_destinations = arena_allocate(scratch.arena, u32, edge_capacity);
-        u32* successor_remaining = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u32* predecessor_offsets = arena_allocate(scratch.arena, u32, maximum_block_rows + 1);
-        u32* predecessor_lists = arena_allocate(scratch.arena, u32, edge_capacity);
-        u32* flush_list = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u32* newly_ready = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u32* demand_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            demand_epochs[register_index] = 0;
-        }
-        // The ready queue. Growth values are small integers, so the queue is a
-        // bucket per growth with LIFO entries; entries go stale by sequence
-        // number instead of being unlinked, and a demand transition re-pushes
-        // every ready unit it touches with a fresh growth. Pushes are one per
-        // unit becoming ready plus one per (transition, toucher) pair; a
-        // single-definition value transitions at most twice, a multi-definition
-        // one up to once per touch, which the per-value toucher cap below
-        // bounds, and a block that overflows the capacity anyway falls back to
-        // source order rather than scheduling on a partial queue.
-        u32 entry_capacity = 10 * maximum_block_rows + 16;
-        u32* entry_units = arena_allocate(scratch.arena, u32, entry_capacity);
-        u32* entry_seqs = arena_allocate(scratch.arena, u32, entry_capacity);
-        u32* entry_next = arena_allocate(scratch.arena, u32, entry_capacity);
-        u32* unit_seqs = arena_allocate(scratch.arena, u32, maximum_block_rows);
-        u8* unit_states = arena_allocate(scratch.arena, u8, maximum_block_rows);
-        // Touch lists: for every value a block touches, the units touching it,
-        // for the eager growth updates above. Slots compact the touched values.
-        u32* vreg_slots = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        u32* vreg_slot_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            vreg_slot_epochs[register_index] = 0;
-        }
-        u32 touch_capacity = 4 * maximum_block_rows + 4;
-        u32* slot_touch_offsets = arena_allocate(scratch.arena, u32, touch_capacity + 1);
-        u32* touch_units = arena_allocate(scratch.arena, u32, touch_capacity);
-        // Per-virtual-register block-local dependence tracking, epoch-stamped:
-        // the last defining unit for single-definition values, the last touching
-        // unit for multi-definition ones.
-        u32* register_units = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        u32* register_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            register_epochs[register_index] = 0;
-        }
-        u32* new_rows = arena_allocate(scratch.arena, u32, row_count);
-        for (u32 row = 0; row < row_count; row += 1)
-        {
-            new_rows[row] = row;
-        }
-        bool moved = false;
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            MachineBlock* block = function->blocks + block_index;
-            u32 block_rows = block->instruction_count;
-            if (!block_excesses[block_index])
+            if (base_excess)
             {
-                continue;
-            }
-            u32 epoch = block_index + 1;
-            // Unit construction: one unit per row, except that a FLAGS_USE row
-            // joins the unit ending immediately above it when that unit's last
-            // row defines flags. Anything else consuming flags means the
-            // producer is not adjacent; the block keeps its source order.
-            u32 unit_count = 0;
-            bool block_supported = true;
-            for (u32 offset = 0; offset < block_rows && block_supported; offset += 1)
-            {
-                MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
-                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                u8 flags = 0;
-                flags |= machine_schedule_info_is_barrier(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
-                flags |= machine_schedule_info_is_memory(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
-                flags |= machine_opcode_schedule_class(info) == MACHINE_SCHEDULE_CLASS_VECTOR || machine_schedule_opcode_is_vector(instruction->opcode)
-                             ? MACHINE_SCHEDULE_UNIT_VECTOR
-                             : 0;
-                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                u32* definition_totals = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
-                    flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
+                    definition_totals[register_index] = 0;
                 }
-                if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE)
+                // An opcode the table cannot describe leaves the function unscheduled;
+                // `described` both ends this pass and skips everything built on it.
+                bool described = true;
+                for (u32 row = 0; row < row_count && described; row += 1)
                 {
-                    MachineOpcodeInfo const* above = offset ? machine_opcode_info(function->instructions[block->first_instruction + offset - 1].opcode) : 0;
-                    if (!above || !(above->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE))
-                    {
-                        block_supported = false;
-                        break;
-                    }
-                    unit_row_counts[unit_count - 1] += 1;
-                    unit_flags[unit_count - 1] |= flags;
-                    continue;
-                }
-                unit_first_rows[unit_count] = offset;
-                unit_row_counts[unit_count] = 1;
-                unit_flags[unit_count] = flags;
-                unit_count += 1;
-            }
-            if (!block_supported || unit_count <= 2)
-            {
-                continue;
-            }
-            // Edge construction, one forward walk. An edge (source, destination)
-            // means the source unit stays above the destination.
-            u32 edge_count = 0;
-            u32 last_barrier = UINT32_MAX;
-            u32 last_memory = UINT32_MAX;
-            u32 last_vector = UINT32_MAX;
-            u32 flush_count = 0;
-            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-            {
-                u8 flags = unit_flags[unit_index];
-                if (last_barrier != UINT32_MAX)
-                {
-                    edge_sources[edge_count] = last_barrier;
-                    edge_destinations[edge_count] = unit_index;
-                    edge_count += 1;
-                }
-                if (flags & MACHINE_SCHEDULE_UNIT_BARRIER)
-                {
-                    for (u32 flush_index = 0; flush_index < flush_count; flush_index += 1)
-                    {
-                        edge_sources[edge_count] = flush_list[flush_index];
-                        edge_destinations[edge_count] = unit_index;
-                        edge_count += 1;
-                    }
-                    flush_count = 0;
-                    last_barrier = unit_index;
-                    // The chains restart here: ordering across the barrier is
-                    // already transitive through the flush and barrier-in edges.
-                    last_memory = UINT32_MAX;
-                    last_vector = UINT32_MAX;
-                }
-                else
-                {
-                    flush_list[flush_count] = unit_index;
-                    flush_count += 1;
-                    if (flags & MACHINE_SCHEDULE_UNIT_MEMORY)
-                    {
-                        if (last_memory != UINT32_MAX)
-                        {
-                            edge_sources[edge_count] = last_memory;
-                            edge_destinations[edge_count] = unit_index;
-                            edge_count += 1;
-                        }
-                        last_memory = unit_index;
-                    }
-                    if (flags & MACHINE_SCHEDULE_UNIT_VECTOR)
-                    {
-                        if (last_vector != UINT32_MAX)
-                        {
-                            edge_sources[edge_count] = last_vector;
-                            edge_destinations[edge_count] = unit_index;
-                            edge_count += 1;
-                        }
-                        last_vector = unit_index;
-                    }
-                }
-                u32 first_row = unit_first_rows[unit_index];
-                for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
-                {
-                    MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
+                    MachineInstruction* instruction = function->instructions + row;
                     MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                    if (!info)
+                    {
+                        described = false;
+                        continue;
+                    }
                     for (u32 slot = 0; slot < info->operand_count; slot += 1)
                     {
                         if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
                         {
                             continue;
                         }
-                        u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
                         u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                        bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-                        bool tracked = register_epochs[virtual_register] == epoch;
-                        u32 tracked_unit = tracked ? register_units[virtual_register] : UINT32_MAX;
-                        if (definition_totals[virtual_register] > 1)
+                        definition_totals[machine_ref_payload(instruction->operands[slot])] +=
+                            role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                    }
+                }
+                // Per-block scheduling scratch, sized once at the widest block. Every
+                // array is indexed by block-local unit index; edge capacity is a hard
+                // bound — each row contributes at most four operand edges, and each unit
+                // at most a barrier-in edge, one appearance in a barrier's flush list,
+                // and one link in each of the memory and vector chains.
+                u32 edge_capacity = 8 * maximum_block_rows + 8;
+                u32* unit_first_rows = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u32* unit_row_counts = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u8* unit_flags = arena_allocate(scratch.arena, u8, maximum_block_rows);
+                u32* edge_sources = arena_allocate(scratch.arena, u32, edge_capacity);
+                u32* edge_destinations = arena_allocate(scratch.arena, u32, edge_capacity);
+                u32* successor_remaining = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u32* predecessor_offsets = arena_allocate(scratch.arena, u32, maximum_block_rows + 1);
+                u32* predecessor_lists = arena_allocate(scratch.arena, u32, edge_capacity);
+                u32* flush_list = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u32* newly_ready = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u32* demand_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                for (u32 register_index = 0; register_index < register_count; register_index += 1)
+                {
+                    demand_epochs[register_index] = 0;
+                }
+                // The ready queue. Growth values are small integers, so the queue is a
+                // bucket per growth with LIFO entries; entries go stale by sequence
+                // number instead of being unlinked, and a demand transition re-pushes
+                // every ready unit it touches with a fresh growth. Pushes are one per
+                // unit becoming ready plus one per (transition, toucher) pair; a
+                // single-definition value transitions at most twice, a multi-definition
+                // one up to once per touch, which the per-value toucher cap below
+                // bounds, and a block that overflows the capacity anyway falls back to
+                // source order rather than scheduling on a partial queue.
+                u32 entry_capacity = 10 * maximum_block_rows + 16;
+                u32* entry_units = arena_allocate(scratch.arena, u32, entry_capacity);
+                u32* entry_seqs = arena_allocate(scratch.arena, u32, entry_capacity);
+                u32* entry_next = arena_allocate(scratch.arena, u32, entry_capacity);
+                u32* unit_seqs = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                u8* unit_states = arena_allocate(scratch.arena, u8, maximum_block_rows);
+                // Touch lists: for every value a block touches, the units touching it,
+                // for the eager growth updates above. Slots compact the touched values.
+                u32* vreg_slots = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                u32* vreg_slot_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                for (u32 register_index = 0; register_index < register_count; register_index += 1)
+                {
+                    vreg_slot_epochs[register_index] = 0;
+                }
+                u32 touch_capacity = 4 * maximum_block_rows + 4;
+                u32* slot_touch_offsets = arena_allocate(scratch.arena, u32, touch_capacity + 1);
+                u32* touch_units = arena_allocate(scratch.arena, u32, touch_capacity);
+                // Per-virtual-register block-local dependence tracking, epoch-stamped:
+                // the last defining unit for single-definition values, the last touching
+                // unit for multi-definition ones.
+                u32* register_units = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                u32* register_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+                for (u32 register_index = 0; register_index < register_count; register_index += 1)
+                {
+                    register_epochs[register_index] = 0;
+                }
+                u32* new_rows = arena_allocate(scratch.arena, u32, row_count);
+                for (u32 row = 0; row < row_count; row += 1)
+                {
+                    new_rows[row] = row;
+                }
+                bool moved = false;
+                for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+                {
+                    MachineBlock* block = function->blocks + block_index;
+                    u32 block_rows = block->instruction_count;
+                    if (!block_excesses[block_index])
+                    {
+                        continue;
+                    }
+                    u32 epoch = block_index + 1;
+                    // Unit construction: one unit per row, except that a FLAGS_USE row
+                    // joins the unit ending immediately above it when that unit's last
+                    // row defines flags. Anything else consuming flags means the
+                    // producer is not adjacent; the block keeps its source order.
+                    u32 unit_count = 0;
+                    bool block_supported = true;
+                    for (u32 offset = 0; offset < block_rows && block_supported; offset += 1)
+                    {
+                        MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
+                        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                        u8 flags = 0;
+                        flags |= machine_schedule_info_is_barrier(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
+                        flags |= machine_schedule_info_is_memory(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
+                        flags |= machine_opcode_schedule_class(info) == MACHINE_SCHEDULE_CLASS_VECTOR || machine_schedule_opcode_is_vector(instruction->opcode)
+                                     ? MACHINE_SCHEDULE_UNIT_VECTOR
+                                     : 0;
+                        for (u32 slot = 0; slot < info->operand_count; slot += 1)
                         {
-                            // Multi-definition value: every touch stays in
-                            // source order.
-                            if (tracked && tracked_unit != unit_index)
+                            flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
+                        }
+                        if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE)
+                        {
+                            MachineOpcodeInfo const* above = offset ? machine_opcode_info(function->instructions[block->first_instruction + offset - 1].opcode) : 0;
+                            if (!above || !(above->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE))
                             {
-                                edge_sources[edge_count] = tracked_unit;
+                                block_supported = false;
+                                break;
+                            }
+                            unit_row_counts[unit_count - 1] += 1;
+                            unit_flags[unit_count - 1] |= flags;
+                            continue;
+                        }
+                        unit_first_rows[unit_count] = offset;
+                        unit_row_counts[unit_count] = 1;
+                        unit_flags[unit_count] = flags;
+                        unit_count += 1;
+                    }
+                    if (!block_supported || unit_count <= 2)
+                    {
+                        continue;
+                    }
+                    // Edge construction, one forward walk. An edge (source, destination)
+                    // means the source unit stays above the destination.
+                    u32 edge_count = 0;
+                    u32 last_barrier = UINT32_MAX;
+                    u32 last_memory = UINT32_MAX;
+                    u32 last_vector = UINT32_MAX;
+                    u32 flush_count = 0;
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                    {
+                        u8 flags = unit_flags[unit_index];
+                        if (last_barrier != UINT32_MAX)
+                        {
+                            edge_sources[edge_count] = last_barrier;
+                            edge_destinations[edge_count] = unit_index;
+                            edge_count += 1;
+                        }
+                        if (flags & MACHINE_SCHEDULE_UNIT_BARRIER)
+                        {
+                            for (u32 flush_index = 0; flush_index < flush_count; flush_index += 1)
+                            {
+                                edge_sources[edge_count] = flush_list[flush_index];
                                 edge_destinations[edge_count] = unit_index;
                                 edge_count += 1;
                             }
-                            register_units[virtual_register] = unit_index;
-                            register_epochs[virtual_register] = epoch;
+                            flush_count = 0;
+                            last_barrier = unit_index;
+                            // The chains restart here: ordering across the barrier is
+                            // already transitive through the flush and barrier-in edges.
+                            last_memory = UINT32_MAX;
+                            last_vector = UINT32_MAX;
                         }
                         else
                         {
-                            // Single definition: uses order only against it. A
-                            // use with no in-block definition reads a live-in
-                            // value and needs no edge.
-                            if (!defines && tracked && tracked_unit != unit_index)
+                            flush_list[flush_count] = unit_index;
+                            flush_count += 1;
+                            if (flags & MACHINE_SCHEDULE_UNIT_MEMORY)
                             {
-                                edge_sources[edge_count] = tracked_unit;
-                                edge_destinations[edge_count] = unit_index;
-                                edge_count += 1;
-                            }
-                            if (defines)
-                            {
-                                register_units[virtual_register] = unit_index;
-                                register_epochs[virtual_register] = epoch;
-                            }
-                        }
-                    }
-                }
-            }
-            // Backward list scheduling. The terminator is the only successor-free
-            // unit — every other unit reaches it through the barrier chain — so
-            // the walk starts there and fills the block bottom-up. Selection is
-            // pressure-greedy: among ready units, take the one whose placement
-            // grows the live set least — a unit's definitions demanded below it
-            // leave the set, its operands not yet demanded enter it — so chains
-            // continue before new computations open, and a producer with several
-            // consumers is not dragged above all of them early. Ties go to the
-            // most recently pushed entry in the winning bucket, which is
-            // depth-first chain-following on tree shapes and recency of demand
-            // everywhere else.
-            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-            {
-                successor_remaining[unit_index] = 0;
-                predecessor_offsets[unit_index] = 0;
-            }
-            predecessor_offsets[unit_count] = 0;
-            for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
-            {
-                successor_remaining[edge_sources[edge_index]] += 1;
-                predecessor_offsets[edge_destinations[edge_index] + 1] += 1;
-            }
-            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-            {
-                predecessor_offsets[unit_index + 1] += predecessor_offsets[unit_index];
-            }
-            for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
-            {
-                predecessor_lists[predecessor_offsets[edge_destinations[edge_index]]] = edge_sources[edge_index];
-                predecessor_offsets[edge_destinations[edge_index]] += 1;
-            }
-            for (u32 unit_index = unit_count; unit_index > 0; unit_index -= 1)
-            {
-                predecessor_offsets[unit_index] = predecessor_offsets[unit_index - 1];
-            }
-            predecessor_offsets[0] = 0;
-            // Touch lists for the eager growth updates: for every value the
-            // block touches, the units touching it, in compact slots.
-            u32 slot_count = 0;
-            slot_touch_offsets[0] = 0;
-            for (u32 pass = 0; pass < 2; pass += 1)
-            {
-                for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-                {
-                    u32 first_row = unit_first_rows[unit_index];
-                    for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
-                    {
-                        MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
-                        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        for (u32 slot = 0; slot < info->operand_count; slot += 1)
-                        {
-                            if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
-                            {
-                                continue;
-                            }
-                            u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
-                            if (vreg_slot_epochs[virtual_register] != 2 * epoch + pass)
-                            {
-                                vreg_slot_epochs[virtual_register] = 2 * epoch + pass;
-                                vreg_slots[virtual_register] = pass ? vreg_slots[virtual_register] : slot_count;
-                                slot_count += pass ? 0 : 1;
-                                if (!pass)
+                                if (last_memory != UINT32_MAX)
                                 {
-                                    slot_touch_offsets[slot_count] = 0;
+                                    edge_sources[edge_count] = last_memory;
+                                    edge_destinations[edge_count] = unit_index;
+                                    edge_count += 1;
                                 }
+                                last_memory = unit_index;
                             }
-                            u32 value_slot = vreg_slots[virtual_register];
-                            if (pass)
+                            if (flags & MACHINE_SCHEDULE_UNIT_VECTOR)
                             {
-                                touch_units[slot_touch_offsets[value_slot]] = unit_index;
-                                slot_touch_offsets[value_slot] += 1;
-                            }
-                            else
-                            {
-                                slot_touch_offsets[value_slot + 1] += 1;
+                                if (last_vector != UINT32_MAX)
+                                {
+                                    edge_sources[edge_count] = last_vector;
+                                    edge_destinations[edge_count] = unit_index;
+                                    edge_count += 1;
+                                }
+                                last_vector = unit_index;
                             }
                         }
-                    }
-                }
-                if (!pass)
-                {
-                    for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
-                    {
-                        slot_touch_offsets[slot_index + 1] += slot_touch_offsets[slot_index];
-                    }
-                }
-            }
-            for (u32 slot_index = slot_count; slot_index > 0; slot_index -= 1)
-            {
-                slot_touch_offsets[slot_index] = slot_touch_offsets[slot_index - 1];
-            }
-            slot_touch_offsets[0] = 0;
-            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-            {
-                unit_seqs[unit_index] = 0;
-                unit_states[unit_index] = 0;
-            }
-            u32 demand_epoch = function->block_count * 2 + block_index + 1;
-            MachineScheduleQueue queue = {
-                .function = function,
-                .block_first_instruction = block->first_instruction,
-                .unit_first_rows = unit_first_rows,
-                .unit_row_counts = unit_row_counts,
-                .demand_epochs = demand_epochs,
-                .demand_epoch = demand_epoch,
-                .unit_seqs = unit_seqs,
-                .entry_units = entry_units,
-                .entry_seqs = entry_seqs,
-                .entry_next = entry_next,
-                .entry_capacity = entry_capacity,
-                .minimum_bucket = 33,
-            };
-            for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-            {
-                if (!successor_remaining[unit_index])
-                {
-                    unit_states[unit_index] = 1;
-                    machine_schedule_queue_push(&queue, unit_index);
-                }
-            }
-            u32 out_row = block_rows;
-            u32 emitted_units = 0;
-            while (queue.minimum_bucket < 33 && !queue.overflow)
-            {
-                u32 entry_slot = queue.bucket_heads[queue.minimum_bucket];
-                if (!entry_slot)
-                {
-                    queue.minimum_bucket += 1;
-                    continue;
-                }
-                queue.bucket_heads[queue.minimum_bucket] = entry_next[entry_slot - 1];
-                u32 unit_index = entry_units[entry_slot - 1];
-                if (unit_states[unit_index] != 1 || entry_seqs[entry_slot - 1] != unit_seqs[unit_index])
-                {
-                    continue;
-                }
-                unit_states[unit_index] = 2;
-                u32 unit_rows = unit_row_counts[unit_index];
-                out_row -= unit_rows;
-                for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
-                {
-                    new_rows[block->first_instruction + unit_first_rows[unit_index] + unit_row] = block->first_instruction + out_row + unit_row;
-                }
-                // Update demand: placed definitions are satisfied, operands are
-                // now needed by everything below; a value both defined and used
-                // here stays demanded for its producer above. Every transition
-                // re-pushes the ready units touching the value, so their queue
-                // positions stay exact.
-                u32 emitted_first = unit_first_rows[unit_index];
-                for (u32 direction = 0; direction < 2; direction += 1)
-                {
-                    for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
-                    {
-                        MachineInstruction* instruction = function->instructions + block->first_instruction + emitted_first + unit_row;
-                        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                        u32 first_row = unit_first_rows[unit_index];
+                        for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
                         {
-                            if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                            MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
+                            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                            for (u32 slot = 0; slot < info->operand_count; slot += 1)
                             {
-                                continue;
-                            }
-                            u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
-                            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                            bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-                            bool uses = role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-                            bool transition = direction ? uses && demand_epochs[virtual_register] != demand_epoch
-                                                        : defines && demand_epochs[virtual_register] == demand_epoch;
-                            if (!transition)
-                            {
-                                continue;
-                            }
-                            demand_epochs[virtual_register] = direction ? demand_epoch : 0;
-                            // A widely-touched value — a hot promoted local —
-                            // transitions once per touch, and refreshing all its
-                            // touchers each time is quadratic; past the cap its
-                            // touchers keep their last pushed growth, a
-                            // heuristic staleness the excess gate still checks.
-                            u32 value_slot = vreg_slots[virtual_register];
-                            if (slot_touch_offsets[value_slot + 1] - slot_touch_offsets[value_slot] > 16)
-                            {
-                                continue;
-                            }
-                            for (u32 touch_index = slot_touch_offsets[value_slot]; touch_index < slot_touch_offsets[value_slot + 1]; touch_index += 1)
-                            {
-                                if (unit_states[touch_units[touch_index]] == 1)
+                                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
                                 {
-                                    machine_schedule_queue_push(&queue, touch_units[touch_index]);
+                                    continue;
+                                }
+                                u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                                bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                                bool tracked = register_epochs[virtual_register] == epoch;
+                                u32 tracked_unit = tracked ? register_units[virtual_register] : UINT32_MAX;
+                                if (definition_totals[virtual_register] > 1)
+                                {
+                                    // Multi-definition value: every touch stays in
+                                    // source order.
+                                    if (tracked && tracked_unit != unit_index)
+                                    {
+                                        edge_sources[edge_count] = tracked_unit;
+                                        edge_destinations[edge_count] = unit_index;
+                                        edge_count += 1;
+                                    }
+                                    register_units[virtual_register] = unit_index;
+                                    register_epochs[virtual_register] = epoch;
+                                }
+                                else
+                                {
+                                    // Single definition: uses order only against it. A
+                                    // use with no in-block definition reads a live-in
+                                    // value and needs no edge.
+                                    if (!defines && tracked && tracked_unit != unit_index)
+                                    {
+                                        edge_sources[edge_count] = tracked_unit;
+                                        edge_destinations[edge_count] = unit_index;
+                                        edge_count += 1;
+                                    }
+                                    if (defines)
+                                    {
+                                        register_units[virtual_register] = unit_index;
+                                        register_epochs[virtual_register] = epoch;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                emitted_units += 1;
-                u32 newly_ready_count = 0;
-                for (u32 list_index = predecessor_offsets[unit_index]; list_index < predecessor_offsets[unit_index + 1]; list_index += 1)
-                {
-                    u32 predecessor = predecessor_lists[list_index];
-                    successor_remaining[predecessor] -= 1;
-                    if (!successor_remaining[predecessor])
+                    // Backward list scheduling. The terminator is the only successor-free
+                    // unit — every other unit reaches it through the barrier chain — so
+                    // the walk starts there and fills the block bottom-up. Selection is
+                    // pressure-greedy: among ready units, take the one whose placement
+                    // grows the live set least — a unit's definitions demanded below it
+                    // leave the set, its operands not yet demanded enter it — so chains
+                    // continue before new computations open, and a producer with several
+                    // consumers is not dragged above all of them early. Ties go to the
+                    // most recently pushed entry in the winning bucket, which is
+                    // depth-first chain-following on tree shapes and recency of demand
+                    // everywhere else.
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
                     {
-                        newly_ready[newly_ready_count] = predecessor;
-                        newly_ready_count += 1;
+                        successor_remaining[unit_index] = 0;
+                        predecessor_offsets[unit_index] = 0;
+                    }
+                    predecessor_offsets[unit_count] = 0;
+                    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+                    {
+                        successor_remaining[edge_sources[edge_index]] += 1;
+                        predecessor_offsets[edge_destinations[edge_index] + 1] += 1;
+                    }
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                    {
+                        predecessor_offsets[unit_index + 1] += predecessor_offsets[unit_index];
+                    }
+                    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+                    {
+                        predecessor_lists[predecessor_offsets[edge_destinations[edge_index]]] = edge_sources[edge_index];
+                        predecessor_offsets[edge_destinations[edge_index]] += 1;
+                    }
+                    for (u32 unit_index = unit_count; unit_index > 0; unit_index -= 1)
+                    {
+                        predecessor_offsets[unit_index] = predecessor_offsets[unit_index - 1];
+                    }
+                    predecessor_offsets[0] = 0;
+                    // Touch lists for the eager growth updates: for every value the
+                    // block touches, the units touching it, in compact slots.
+                    u32 slot_count = 0;
+                    slot_touch_offsets[0] = 0;
+                    for (u32 pass = 0; pass < 2; pass += 1)
+                    {
+                        for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                        {
+                            u32 first_row = unit_first_rows[unit_index];
+                            for (u32 unit_row = 0; unit_row < unit_row_counts[unit_index]; unit_row += 1)
+                            {
+                                MachineInstruction* instruction = function->instructions + block->first_instruction + first_row + unit_row;
+                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                {
+                                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                                    {
+                                        continue;
+                                    }
+                                    u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                    if (vreg_slot_epochs[virtual_register] != 2 * epoch + pass)
+                                    {
+                                        vreg_slot_epochs[virtual_register] = 2 * epoch + pass;
+                                        vreg_slots[virtual_register] = pass ? vreg_slots[virtual_register] : slot_count;
+                                        slot_count += pass ? 0 : 1;
+                                        if (!pass)
+                                        {
+                                            slot_touch_offsets[slot_count] = 0;
+                                        }
+                                    }
+                                    u32 value_slot = vreg_slots[virtual_register];
+                                    if (pass)
+                                    {
+                                        touch_units[slot_touch_offsets[value_slot]] = unit_index;
+                                        slot_touch_offsets[value_slot] += 1;
+                                    }
+                                    else
+                                    {
+                                        slot_touch_offsets[value_slot + 1] += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if (!pass)
+                        {
+                            for (u32 slot_index = 0; slot_index < slot_count; slot_index += 1)
+                            {
+                                slot_touch_offsets[slot_index + 1] += slot_touch_offsets[slot_index];
+                            }
+                        }
+                    }
+                    for (u32 slot_index = slot_count; slot_index > 0; slot_index -= 1)
+                    {
+                        slot_touch_offsets[slot_index] = slot_touch_offsets[slot_index - 1];
+                    }
+                    slot_touch_offsets[0] = 0;
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                    {
+                        unit_seqs[unit_index] = 0;
+                        unit_states[unit_index] = 0;
+                    }
+                    u32 demand_epoch = function->block_count * 2 + block_index + 1;
+                    MachineScheduleQueue queue = {
+                        .function = function,
+                        .block_first_instruction = block->first_instruction,
+                        .unit_first_rows = unit_first_rows,
+                        .unit_row_counts = unit_row_counts,
+                        .demand_epochs = demand_epochs,
+                        .demand_epoch = demand_epoch,
+                        .unit_seqs = unit_seqs,
+                        .entry_units = entry_units,
+                        .entry_seqs = entry_seqs,
+                        .entry_next = entry_next,
+                        .entry_capacity = entry_capacity,
+                        .minimum_bucket = 33,
+                    };
+                    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+                    {
+                        if (!successor_remaining[unit_index])
+                        {
+                            unit_states[unit_index] = 1;
+                            machine_schedule_queue_push(&queue, unit_index);
+                        }
+                    }
+                    u32 out_row = block_rows;
+                    u32 emitted_units = 0;
+                    while (queue.minimum_bucket < 33 && !queue.overflow)
+                    {
+                        u32 entry_slot = queue.bucket_heads[queue.minimum_bucket];
+                        if (!entry_slot)
+                        {
+                            queue.minimum_bucket += 1;
+                            continue;
+                        }
+                        queue.bucket_heads[queue.minimum_bucket] = entry_next[entry_slot - 1];
+                        u32 unit_index = entry_units[entry_slot - 1];
+                        if (unit_states[unit_index] != 1 || entry_seqs[entry_slot - 1] != unit_seqs[unit_index])
+                        {
+                            continue;
+                        }
+                        unit_states[unit_index] = 2;
+                        u32 unit_rows = unit_row_counts[unit_index];
+                        out_row -= unit_rows;
+                        for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
+                        {
+                            new_rows[block->first_instruction + unit_first_rows[unit_index] + unit_row] = block->first_instruction + out_row + unit_row;
+                        }
+                        // Update demand: placed definitions are satisfied, operands are
+                        // now needed by everything below; a value both defined and used
+                        // here stays demanded for its producer above. Every transition
+                        // re-pushes the ready units touching the value, so their queue
+                        // positions stay exact.
+                        u32 emitted_first = unit_first_rows[unit_index];
+                        for (u32 direction = 0; direction < 2; direction += 1)
+                        {
+                            for (u32 unit_row = 0; unit_row < unit_rows; unit_row += 1)
+                            {
+                                MachineInstruction* instruction = function->instructions + block->first_instruction + emitted_first + unit_row;
+                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                                {
+                                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                                    {
+                                        continue;
+                                    }
+                                    u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                                    bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                                    bool uses = role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                                    bool transition = direction ? uses && demand_epochs[virtual_register] != demand_epoch
+                                                                : defines && demand_epochs[virtual_register] == demand_epoch;
+                                    if (!transition)
+                                    {
+                                        continue;
+                                    }
+                                    demand_epochs[virtual_register] = direction ? demand_epoch : 0;
+                                    // A widely-touched value — a hot promoted local —
+                                    // transitions once per touch, and refreshing all its
+                                    // touchers each time is quadratic; past the cap its
+                                    // touchers keep their last pushed growth, a
+                                    // heuristic staleness the excess gate still checks.
+                                    u32 value_slot = vreg_slots[virtual_register];
+                                    if (slot_touch_offsets[value_slot + 1] - slot_touch_offsets[value_slot] > 16)
+                                    {
+                                        continue;
+                                    }
+                                    for (u32 touch_index = slot_touch_offsets[value_slot]; touch_index < slot_touch_offsets[value_slot + 1]; touch_index += 1)
+                                    {
+                                        if (unit_states[touch_units[touch_index]] == 1)
+                                        {
+                                            machine_schedule_queue_push(&queue, touch_units[touch_index]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        emitted_units += 1;
+                        u32 newly_ready_count = 0;
+                        for (u32 list_index = predecessor_offsets[unit_index]; list_index < predecessor_offsets[unit_index + 1]; list_index += 1)
+                        {
+                            u32 predecessor = predecessor_lists[list_index];
+                            successor_remaining[predecessor] -= 1;
+                            if (!successor_remaining[predecessor])
+                            {
+                                newly_ready[newly_ready_count] = predecessor;
+                                newly_ready_count += 1;
+                            }
+                        }
+                        for (u32 push_index = 0; push_index < newly_ready_count; push_index += 1)
+                        {
+                            unit_states[newly_ready[push_index]] = 1;
+                            machine_schedule_queue_push(&queue, newly_ready[push_index]);
+                        }
+                    }
+                    // A cycle would leave units unemitted; the dependence relation is
+                    // acyclic by construction, but an unexpected shape falls back to
+                    // source order rather than corrupting the block.
+                    if (emitted_units != unit_count || out_row != 0)
+                    {
+                        for (u32 offset = 0; offset < block_rows; offset += 1)
+                        {
+                            new_rows[block->first_instruction + offset] = block->first_instruction + offset;
+                        }
+                        continue;
+                    }
+                    for (u32 offset = 0; offset < block_rows; offset += 1)
+                    {
+                        moved |= new_rows[block->first_instruction + offset] != block->first_instruction + offset;
                     }
                 }
-                for (u32 push_index = 0; push_index < newly_ready_count; push_index += 1)
+                if (moved)
                 {
-                    unit_states[newly_ready[push_index]] = 1;
-                    machine_schedule_queue_push(&queue, newly_ready[push_index]);
+                    // Second gate: the scheduled order must lower the total excess, or the
+                    // caller's second placement run is not worth paying for. Only scheduled
+                    // blocks can differ from their already-computed source-order excess.
+                    u32 scheduled_excess = 0;
+                    u32 compared_excess = 0;
+                    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+                    {
+                        MachineBlock* block = function->blocks + block_index;
+                        if (!block_excesses[block_index])
+                        {
+                            continue;
+                        }
+                        compared_excess += block_excesses[block_index];
+                        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+                        {
+                            order_scratch[new_rows[block->first_instruction + offset] - block->first_instruction] = block->first_instruction + offset;
+                        }
+                        scheduled_excess += machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
+                                                                          function->block_count + block_index + 1, touch_epochs, last_touches, window_deltas);
+                    }
+                    if (scheduled_excess < compared_excess)
+                    {
+                        MachineInstruction* scheduled_instructions = arena_allocate(arena, MachineInstruction, row_count);
+                        for (u32 row = 0; row < row_count; row += 1)
+                        {
+                            scheduled_instructions[new_rows[row]] = function->instructions[row];
+                        }
+                        MachineVirtualRegister* scheduled_registers = arena_allocate(arena, MachineVirtualRegister, register_count ? register_count : 1);
+                        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+                        {
+                            scheduled_registers[register_index] = function->virtual_registers[register_index];
+                            MachinePoint definition = scheduled_registers[register_index].definition_point;
+                            if (definition != MACHINE_POINT_INVALID && machine_point_instruction(definition) < row_count)
+                            {
+                                scheduled_registers[register_index].definition_point =
+                                    machine_point_make(new_rows[machine_point_instruction(definition)], machine_point_phase(definition));
+                            }
+                        }
+                        MachineLineMark* scheduled_marks = arena_allocate(arena, MachineLineMark, function->line_mark_count ? function->line_mark_count : 1);
+                        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
+                        {
+                            scheduled_marks[mark_index] = function->line_marks[mark_index];
+                            if (scheduled_marks[mark_index].row < row_count)
+                            {
+                                scheduled_marks[mark_index].row = new_rows[scheduled_marks[mark_index].row];
+                            }
+                        }
+                        // The line consumer walks marks in ascending row order; scheduling
+                        // shuffles them within each block, so restore the order. Insertion sort:
+                        // the sequence is block-locally shuffled but globally almost sorted.
+                        for (u32 mark_index = 1; mark_index < function->line_mark_count; mark_index += 1)
+                        {
+                            MachineLineMark mark = scheduled_marks[mark_index];
+                            u32 shift = mark_index;
+                            while (shift && scheduled_marks[shift - 1].row > mark.row)
+                            {
+                                scheduled_marks[shift] = scheduled_marks[shift - 1];
+                                shift -= 1;
+                            }
+                            scheduled_marks[shift] = mark;
+                        }
+                        result.function.instructions = scheduled_instructions;
+                        result.function.virtual_registers = scheduled_registers;
+                        result.function.line_marks = scheduled_marks;
+                        result.moved = true;
+                    }
                 }
             }
-            // A cycle would leave units unemitted; the dependence relation is
-            // acyclic by construction, but an unexpected shape falls back to
-            // source order rather than corrupting the block.
-            if (emitted_units != unit_count || out_row != 0)
-            {
-                for (u32 offset = 0; offset < block_rows; offset += 1)
-                {
-                    new_rows[block->first_instruction + offset] = block->first_instruction + offset;
-                }
-                continue;
-            }
-            for (u32 offset = 0; offset < block_rows; offset += 1)
-            {
-                moved |= new_rows[block->first_instruction + offset] != block->first_instruction + offset;
-            }
-        }
-        if (!moved)
-        {
+
+            // One release for every way out of the gates above; each of them
+            // used to carry its own scratch_end beside its own return, and the
+            // no-excess gate would now leak without this sitting outside it.
             scratch_end(scratch);
-            return result;
         }
-        // Second gate: the scheduled order must lower the total excess, or the
-        // caller's second placement run is not worth paying for. Only scheduled
-        // blocks can differ from their already-computed source-order excess.
-        u32 scheduled_excess = 0;
-        u32 compared_excess = 0;
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            MachineBlock* block = function->blocks + block_index;
-            if (!block_excesses[block_index])
-            {
-                continue;
-            }
-            compared_excess += block_excesses[block_index];
-            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-            {
-                order_scratch[new_rows[block->first_instruction + offset] - block->first_instruction] = block->first_instruction + offset;
-            }
-            scheduled_excess += machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
-                                                              function->block_count + block_index + 1, touch_epochs, last_touches, window_deltas);
-        }
-        if (scheduled_excess >= compared_excess)
-        {
-            scratch_end(scratch);
-            return result;
-        }
-        MachineInstruction* scheduled_instructions = arena_allocate(arena, MachineInstruction, row_count);
-        for (u32 row = 0; row < row_count; row += 1)
-        {
-            scheduled_instructions[new_rows[row]] = function->instructions[row];
-        }
-        MachineVirtualRegister* scheduled_registers = arena_allocate(arena, MachineVirtualRegister, register_count ? register_count : 1);
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            scheduled_registers[register_index] = function->virtual_registers[register_index];
-            MachinePoint definition = scheduled_registers[register_index].definition_point;
-            if (definition != MACHINE_POINT_INVALID && machine_point_instruction(definition) < row_count)
-            {
-                scheduled_registers[register_index].definition_point =
-                    machine_point_make(new_rows[machine_point_instruction(definition)], machine_point_phase(definition));
-            }
-        }
-        MachineLineMark* scheduled_marks = arena_allocate(arena, MachineLineMark, function->line_mark_count ? function->line_mark_count : 1);
-        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
-        {
-            scheduled_marks[mark_index] = function->line_marks[mark_index];
-            if (scheduled_marks[mark_index].row < row_count)
-            {
-                scheduled_marks[mark_index].row = new_rows[scheduled_marks[mark_index].row];
-            }
-        }
-        // The line consumer walks marks in ascending row order; scheduling
-        // shuffles them within each block, so restore the order. Insertion sort:
-        // the sequence is block-locally shuffled but globally almost sorted.
-        for (u32 mark_index = 1; mark_index < function->line_mark_count; mark_index += 1)
-        {
-            MachineLineMark mark = scheduled_marks[mark_index];
-            u32 shift = mark_index;
-            while (shift && scheduled_marks[shift - 1].row > mark.row)
-            {
-                scheduled_marks[shift] = scheduled_marks[shift - 1];
-                shift -= 1;
-            }
-            scheduled_marks[shift] = mark;
-        }
-        result.function.instructions = scheduled_instructions;
-        result.function.virtual_registers = scheduled_registers;
-        result.function.line_marks = scheduled_marks;
-        result.moved = true;
-        scratch_end(scratch);
     }
 
     return result;

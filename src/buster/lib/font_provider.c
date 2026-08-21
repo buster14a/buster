@@ -205,6 +205,7 @@ String8 font_file_get_path(FontIndex index)
             FcFini();
         }
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 1);
+        bool searched = true;
 #elif BUSTER_WINDOWS
         String8 windir = os_get_environment_variable(S8("WINDIR"));
         if (!windir.length)
@@ -246,11 +247,13 @@ String8 font_file_get_path(FontIndex index)
             }
         }
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        bool searched = true;
 #elif BUSTER_IOS
         // Bundled into the app's Resources by CMake; resolved via file_read's
         // bundle-path lookup when an application chooses to package this font.
         font_candidate_append(candidates, &candidate_count, S8("FiraCode-Regular.ttf"));
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        bool searched = true;
 #elif BUSTER_MACOS
         font_candidate_append_file(temp.arena, candidates, &candidate_count, S8("/Library/Fonts"), S8("FiraCode-Regular.ttf"));
 
@@ -266,16 +269,20 @@ String8 font_file_get_path(FontIndex index)
         font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Menlo.ttc"));
         font_candidate_append_file(temp.arena, candidates, &candidate_count, system_fonts, S8("Monaco.ttf"));
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        bool searched = true;
 #elif BUSTER_ANDROID
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/DroidSansMono.ttf"));
         font_candidate_append(candidates, &candidate_count, S8("/system/fonts/RobotoMono-Regular.ttf"));
         table[(u64)FONT_INDEX_MONO] = font_select_first_usable(candidates, candidate_count, 0);
+        bool searched = true;
 #else
-        scratch_end(temp);
-        return (String8){0};
+        // Nowhere to look on this configuration. The table stays empty and the
+        // caller reads a zero path, which is not the same as searching and
+        // finding nothing -- that still fails the process below.
+        bool searched = false;
 #endif
 
-        if (!table[(u64)FONT_INDEX_MONO].pointer)
+        if (searched && !table[(u64)FONT_INDEX_MONO].pointer)
         {
             font_print_attempted_paths(candidates, candidate_count);
             os_fail_message(S8("no usable monospace font was found"));

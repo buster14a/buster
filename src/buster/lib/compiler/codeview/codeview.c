@@ -307,28 +307,31 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(CodeviewBuffer* symbols, D
 BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(CodeviewBuffer* symbols, DebugModel* model, DebugVariable* variable, u32 function_offset,
                                                       u16 machine)
 {
-    if (!variable)
+    if (variable)
     {
-        return;
-    }
-    bool has_constant = variable->location_count && variable->locations[0].location.kind == DEBUG_LOCATION_CONSTANT;
-    if (has_constant)
-    {
-        u64 record = codeview_record_begin(symbols, S_CONSTANT);
-        codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
-        codeview_emit_numeric_u32(symbols, variable->locations[0].location.constant);
-        codeview_emit_name(symbols, variable->name);
-        codeview_record_end(symbols, record);
-        return;
-    }
-    u64 record = codeview_record_begin(symbols, S_LOCAL);
-    codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
-    codeview_emit_u16(symbols, variable->kind == DEBUG_VARIABLE_PARAMETER ? 1 : 0);
-    codeview_emit_name(symbols, variable->name);
-    codeview_record_end(symbols, record);
-    for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
-    {
-        codeview_emit_location_range(symbols, variable->locations + location_index, function_offset, machine);
+        // A constant is a whole record on its own; everything else emits a local
+        // followed by its location ranges.
+        bool has_constant = variable->location_count && variable->locations[0].location.kind == DEBUG_LOCATION_CONSTANT;
+        if (has_constant)
+        {
+            u64 record = codeview_record_begin(symbols, S_CONSTANT);
+            codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
+            codeview_emit_numeric_u32(symbols, variable->locations[0].location.constant);
+            codeview_emit_name(symbols, variable->name);
+            codeview_record_end(symbols, record);
+        }
+        else
+        {
+            u64 record = codeview_record_begin(symbols, S_LOCAL);
+            codeview_emit_u32(symbols, codeview_model_type_index(model, variable->type));
+            codeview_emit_u16(symbols, variable->kind == DEBUG_VARIABLE_PARAMETER ? 1 : 0);
+            codeview_emit_name(symbols, variable->name);
+            codeview_record_end(symbols, record);
+            for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
+            {
+                codeview_emit_location_range(symbols, variable->locations + location_index, function_offset, machine);
+            }
+        }
     }
 }
 

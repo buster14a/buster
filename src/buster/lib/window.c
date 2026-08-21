@@ -151,33 +151,28 @@ bool wm_native_file_drop_array_size_allowed(u64 count, u64 element_size)
 #if BUSTER_MACOS || BUSTER_INCLUDE_TESTS
 SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values)
 {
+    // Every budget refusal yields the empty slice, so one gate carries all three
+    // of them and the measuring pass stops as soon as one trips.
     u64 valid_count = 0;
     u64 output_bytes = 0;
-    if (!wm_native_file_drop_budget_allows(values.length, 0))
-    {
-        return (SliceString8){0};
-    }
-    for (u64 index = 0; index < values.length; index += 1)
+    bool within_budget = wm_native_file_drop_budget_allows(values.length, 0);
+    for (u64 index = 0; index < values.length && within_budget; index += 1)
     {
         WmAppleFileUrlPath value = values.pointer[index];
         if (value.is_file_url && wm_file_path_is_valid(value.path))
         {
-            if (value.path.length > BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - output_bytes)
+            within_budget = value.path.length <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - output_bytes;
+            if (within_budget)
             {
-                return (SliceString8){0};
+                output_bytes += value.path.length;
+                valid_count += 1;
             }
-            output_bytes += value.path.length;
-            valid_count += 1;
         }
     }
 
-    if (!wm_native_file_drop_budget_allows(valid_count, output_bytes) || !wm_native_file_drop_array_size_allowed(valid_count, sizeof(String8)))
-    {
-        return (SliceString8){0};
-    }
-
     SliceString8 result = {0};
-    if (valid_count != 0)
+    if (within_budget && wm_native_file_drop_budget_allows(valid_count, output_bytes) &&
+        wm_native_file_drop_array_size_allowed(valid_count, sizeof(String8)) && valid_count != 0)
     {
         result.pointer = arena_allocate(arena, String8, valid_count);
         result.length = valid_count;
@@ -192,6 +187,7 @@ SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPa
             }
         }
     }
+
     return result;
 }
 
