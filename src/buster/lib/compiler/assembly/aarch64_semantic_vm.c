@@ -974,189 +974,265 @@ buster_a64_semantic_vm_apply_program(u32 form_id, u32 transform_id, BusterA64Sem
     return buster_a64_semantic_vm_eval_typed_program(form_id, fields, false, transform_id, transform.program_count, output);
 }
 
-BusterA64SemanticVMStatus
-buster_a64_semantic_vm_apply(BusterA64SemanticVMInstruction instruction,
-                             BusterA64SemanticVMValue const* inputs, u32 input_count, u64 pc, u64 place,
-                             BusterA64SemanticVMValue* output)
+// Materializes `instruction.constant` at `instruction.width` (zero meaning the
+// full 64 bits). FIXED_LITERAL, ALIAS_INJECT, and DEFAULT's no-input case all
+// produce a value this way.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_constant(BusterA64SemanticVMInstruction instruction, BusterA64SemanticVMValue* output)
 {
-    if (!output || input_count > 8 || (input_count && !inputs) || instruction.op >= BUSTER_A64_SEMANTIC_VM_OP_COUNT)
-        return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    if (instruction.width > 64) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+    else
+    {
+        BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(instruction.constant, instruction.width ? instruction.width : 64);
+        if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+        else *output = candidate;
+    }
+    return status;
+}
+
+// Joins the inputs most significant first. A 64-bit input can only stand alone,
+// since anything already occupying bits leaves it nowhere to go.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_concat(BusterA64SemanticVMValue const* inputs, u32 input_count, BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    u64 joined = 0;
+    u8 width = 0;
+    for (u32 index = 0; index < input_count && status == BUSTER_A64_SEMANTIC_VM_STATUS_OK; index += 1)
+    {
+        u64 value = 0;
+        if (!buster_a64_semantic_vm_value_uint(inputs[index], &value) || inputs[index].width > 64 - width) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+        else if (inputs[index].width == 64)
+        {
+            if (width != 0) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+            else joined = value;
+        }
+        else joined = (joined << inputs[index].width) | value;
+        width = (u8)(width + inputs[index].width);
+    }
+    if (status == BUSTER_A64_SEMANTIC_VM_STATUS_OK)
+    {
+        BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(joined, width);
+        if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+        else *output = candidate;
+    }
+    return status;
+}
+
+// UINT_EXTEND and SIGNED_EXTEND differ only in the sign fill the source width
+// implies before the value is re-widened, so one body covers both.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_extend(BusterA64SemanticVMInstruction instruction, BusterA64SemanticVMValue first, BusterA64SemanticVMValue* output)
+{
+    bool is_signed = instruction.op == BUSTER_A64_SEMANTIC_VM_OP_SIGNED_EXTEND;
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    u64 unsigned_value = 0;
+    if (instruction.width == 0 || instruction.width > 64 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value) ||
+        (is_signed && (first.width == 0 || first.width > 64)))
+        status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    else
+    {
+        if (is_signed && first.width < 64 && (unsigned_value & (UINT64_C(1) << (first.width - 1)))) unsigned_value |= ~buster_a64_semantic_vm_width_mask(first.width);
+        BusterA64SemanticVMValue candidate = is_signed ? buster_a64_semantic_vm_value_signed((s64)unsigned_value, instruction.width)
+                                                       : buster_a64_semantic_vm_value_unsigned(unsigned_value, instruction.width);
+        if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+        else *output = candidate;
+    }
+    return status;
+}
+
+// A field that decoded to the architecture's RESERVED spelling — either as the
+// reserved value kind or as that literal enumeration text — fails the form.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_reserved_reject(BusterA64SemanticVMValue first, BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    bool is_reserved = first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_RESERVED;
+    if (!is_reserved && first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION && first.text.length == 8)
+    {
+        char8 reserved[8] = {'R', 'E', 'S', 'E', 'R', 'V', 'E', 'D'};
+        is_reserved = true;
+        for (u32 index = 0; index < 8; index += 1)
+        {
+            is_reserved = is_reserved && buster_a64_semantic_string_byte(first.text, index) == reserved[index];
+        }
+    }
+    if (is_reserved) status = BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED;
+    else *output = first;
+    return status;
+}
+
+// PC_RELATIVE resolves against the instruction's place, PAGE_RELATIVE against
+// the 4 KiB page holding it; either way the sum must not wrap past the base.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_relative(BusterA64SemanticVMInstruction instruction, BusterA64SemanticVMValue first, u64 pc, u64 place,
+                                      BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    bool is_page = instruction.op == BUSTER_A64_SEMANTIC_VM_OP_PAGE_RELATIVE;
+    s64 signed_value = 0;
+    if (!buster_a64_semantic_vm_value_sint(first, &signed_value)) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    else
+    {
+        u64 base = is_page ? place & ~UINT64_C(0xfff) : place;
+        u64 target = base + (u64)signed_value;
+        if ((signed_value > 0 && target < base) || (signed_value < 0 && target > base)) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+        else
+            *output = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_LABEL_FIXUP,
+                                                 .width = is_page ? 52 : 64,
+                                                 .flags = is_page ? BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_PAGE : 0,
+                                                 .payload = target,
+                                                 .aux = (u32)pc};
+    }
+    return status;
+}
+
+// Steps a register number within its bank, which the aliases that name a pair
+// or a consecutive list need. Only SP and ZR may carry a bank flag, only at
+// number 31, and stepping off 31 drops the flag with it.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_register_add_mod32(BusterA64SemanticVMInstruction instruction, BusterA64SemanticVMValue first,
+                                                BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+    u16 stack_or_zero = (u16)(BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR);
+    bool is_gpr = first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER;
+    if (first.payload > 31 ||
+        (!is_gpr && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_REGISTER && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR &&
+         first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
+         first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
+        status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    else if (is_gpr && ((first.width != 32 && first.width != 64) || (first.flags & stack_or_zero) == stack_or_zero || (first.flags & ~stack_or_zero) != 0 ||
+                        ((first.flags & stack_or_zero) && first.payload != 31)))
+        status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    else if (!is_gpr && (first.flags & stack_or_zero)) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    else
+    {
+        *output = first;
+        output->payload = (first.payload + instruction.constant) & 31;
+        if (is_gpr && instruction.constant != 0) output->flags &= (u16)~stack_or_zero;
+        if (output->kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER && (output->flags & stack_or_zero) && output->payload != 31)
+            status = BUSTER_A64_SEMANTIC_VM_STATUS_TARGET_MISMATCH;
+    }
+    return status;
+}
+
+// The operation itself, split from buster_a64_semantic_vm_apply's argument
+// check so `inputs` is known good here and the switch stays at one indent.
+static BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply_operation(BusterA64SemanticVMInstruction instruction, BusterA64SemanticVMValue const* inputs, u32 input_count, u64 pc,
+                                       u64 place, BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_OK;
     BusterA64SemanticVMValue first = input_count ? inputs[0] : buster_a64_semantic_vm_value_invalid();
     u64 unsigned_value = 0;
-    s64 signed_value = 0;
     switch (instruction.op)
     {
         case BUSTER_A64_SEMANTIC_VM_OP_FIELD:
         case BUSTER_A64_SEMANTIC_VM_OP_EXTRACT:
             if (input_count != 1 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value) || instruction.high < instruction.low || instruction.high >= 64)
-                return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = buster_a64_semantic_vm_value_bits((unsigned_value >> instruction.low) & buster_a64_semantic_vm_width_mask((u8)(instruction.high - instruction.low + 1)),
-                                                        buster_a64_semantic_vm_width_mask((u8)(instruction.high - instruction.low + 1)),
-                                                        (u8)(instruction.high - instruction.low + 1));
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+                status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else
+            {
+                u8 width = (u8)(instruction.high - instruction.low + 1);
+                *output = buster_a64_semantic_vm_value_bits((unsigned_value >> instruction.low) & buster_a64_semantic_vm_width_mask(width),
+                                                            buster_a64_semantic_vm_width_mask(width), width);
+            }
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_CONCAT:
-        {
-            if (input_count == 0 || input_count > 8) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            u64 result = 0;
-            u8 width = 0;
-            for (u32 index = 0; index < input_count; index += 1)
-            {
-                u64 value = 0;
-                if (!buster_a64_semantic_vm_value_uint(inputs[index], &value) || inputs[index].width > 64 - width) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                if (inputs[index].width == 64)
-                {
-                    if (width != 0) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                    result = value;
-                }
-                else result = (result << inputs[index].width) | value;
-                width = (u8)(width + inputs[index].width);
-            }
-            BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(result, width);
-            if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-            *output = candidate;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
-        }
+            if (input_count == 0) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_concat(inputs, input_count, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_UINT_EXTEND:
-            if (input_count != 1 || instruction.width == 0 || instruction.width > 64 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value)) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            {
-                BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(unsigned_value, instruction.width);
-                if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = candidate;
-            }
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
         case BUSTER_A64_SEMANTIC_VM_OP_SIGNED_EXTEND:
-            if (input_count != 1 || instruction.width == 0 || instruction.width > 64 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value) || first.width == 0 || first.width > 64)
-                return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (first.width < 64 && (unsigned_value & (UINT64_C(1) << (first.width - 1)))) unsigned_value |= ~buster_a64_semantic_vm_width_mask(first.width);
-            {
-                BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_signed((s64)unsigned_value, instruction.width);
-                if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = candidate;
-            }
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_extend(instruction, first, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_ADD_CONST:
         case BUSTER_A64_SEMANTIC_VM_OP_SUB_CONST:
         case BUSTER_A64_SEMANTIC_VM_OP_SUB_FROM_CONST:
         case BUSTER_A64_SEMANTIC_VM_OP_SCALE_MUL:
         case BUSTER_A64_SEMANTIC_VM_OP_SCALE_DIV:
-            if (input_count != 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (instruction.constant > UINT16_MAX) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-            return buster_a64_semantic_vm_apply_affine(instruction.op, (u16)instruction.constant, first, output);
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else if (instruction.constant > UINT16_MAX) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+            else status = buster_a64_semantic_vm_apply_affine(instruction.op, (u16)instruction.constant, first, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_FIXED_LITERAL:
-            if (input_count != 0) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (instruction.width > 64) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-            {
-                BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(instruction.constant, instruction.width ? instruction.width : 64);
-                if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = candidate;
-            }
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_INJECT:
+            if (input_count != 0) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_constant(instruction, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_DEFAULT:
-            if (input_count == 0 || first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
-            {
-                if (instruction.width > 64) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(instruction.constant, instruction.width ? instruction.width : 64);
-                if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = candidate;
-                return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
-            }
-            if (input_count != 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = first;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count == 0 || first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) status = buster_a64_semantic_vm_apply_constant(instruction, output);
+            else if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else *output = first;
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_OPTIONAL:
-            if (input_count > 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = first;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count > 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else *output = first;
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_RESERVED_REJECT:
-            if (input_count != 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_RESERVED) return BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED;
-            if (first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION && first.text.length == 8)
-            {
-                char8 reserved[8] = {'R', 'E', 'S', 'E', 'R', 'V', 'E', 'D'};
-                bool is_reserved = true;
-                for (u32 index = 0; index < 8; index += 1)
-                {
-                    is_reserved = is_reserved && buster_a64_semantic_string_byte(first.text, index) == reserved[index];
-                }
-                if (is_reserved) return BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED;
-            }
-            *output = first;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_reserved_reject(first, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_PC_RELATIVE:
         case BUSTER_A64_SEMANTIC_VM_OP_PAGE_RELATIVE:
-            if (input_count != 1 || !buster_a64_semantic_vm_value_sint(first, &signed_value)) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            {
-                u64 base = instruction.op == BUSTER_A64_SEMANTIC_VM_OP_PAGE_RELATIVE ? place & ~UINT64_C(0xfff) : place;
-                u64 target = base + (u64)signed_value;
-                if ((signed_value > 0 && target < base) || (signed_value < 0 && target > base)) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_LABEL_FIXUP,
-                                                    .width = instruction.op == BUSTER_A64_SEMANTIC_VM_OP_PAGE_RELATIVE ? 52 : 64,
-                                                    .flags = instruction.op == BUSTER_A64_SEMANTIC_VM_OP_PAGE_RELATIVE ? BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_PAGE : 0,
-                                                    .payload = target,
-                                                    .aux = (u32)pc};
-            }
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_relative(instruction, first, pc, place, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_CONDITION_INVERT:
-            if (input_count != 1 || first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_CONDITION || first.payload > 13) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-            *output = buster_a64_semantic_vm_value_condition((u32)first.payload ^ 1u);
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1 || first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_CONDITION || first.payload > 13) status = BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
+            else *output = buster_a64_semantic_vm_value_condition((u32)first.payload ^ 1u);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_REGISTER_ADD_MOD32:
-            if (input_count != 1 || first.payload > 31 ||
-                (first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_REGISTER &&
-                 first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR &&
-                 first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
-                return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER &&
-                ((first.width != 32 && first.width != 64) || (first.flags & (BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR)) ==
-                                                              (BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR) ||
-                 (first.flags & ~(BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR)) != 0 ||
-                 ((first.flags & (BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR)) && first.payload != 31)))
-                return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (first.kind != BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER && (first.flags & (BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR)))
-                return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = first;
-            output->payload = (first.payload + instruction.constant) & 31;
-            if (first.kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER && instruction.constant != 0)
-                output->flags &= (u16)~(BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR);
-            if (output->kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER &&
-                (output->flags & (BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP | BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_ZR)) && output->payload != 31)
-                return BUSTER_A64_SEMANTIC_VM_STATUS_TARGET_MISMATCH;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else status = buster_a64_semantic_vm_apply_register_add_mod32(instruction, first, output);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_BITWISE_NOT:
         case BUSTER_A64_SEMANTIC_VM_OP_MOVN:
-            if (input_count != 1 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value) || first.width == 0 || first.width > 64) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = buster_a64_semantic_vm_value_bits(~unsigned_value & buster_a64_semantic_vm_width_mask(first.width), buster_a64_semantic_vm_width_mask(first.width), first.width);
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
+            if (input_count != 1 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value) || first.width == 0 || first.width > 64)
+                status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else
+                *output = buster_a64_semantic_vm_value_bits(~unsigned_value & buster_a64_semantic_vm_width_mask(first.width),
+                                                            buster_a64_semantic_vm_width_mask(first.width), first.width);
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_LOGICAL_IMMEDIATE:
-            if (input_count != 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            instruction.width = instruction.width ? instruction.width : 64;
-            return buster_a64_semantic_vm_logical_immediate(instruction, first, output);
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else
+            {
+                instruction.width = instruction.width ? instruction.width : 64;
+                status = buster_a64_semantic_vm_logical_immediate(instruction, first, output);
+            }
+            break;
+        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_MAP:
+            if (input_count != 1) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else *output = first;
+            break;
+        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_CONDITION:
+            if (input_count != 1 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value)) status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+            else if (!unsigned_value) status = BUSTER_A64_SEMANTIC_VM_STATUS_TARGET_MISMATCH;
+            else *output = first;
+            break;
         case BUSTER_A64_SEMANTIC_VM_OP_FP_IMMEDIATE:
         case BUSTER_A64_SEMANTIC_VM_OP_ADVSIMD_IMMEDIATE:
-            return BUSTER_A64_SEMANTIC_VM_STATUS_UNSUPPORTED;
         case BUSTER_A64_SEMANTIC_VM_OP_SYSOP_LOOKUP:
-            return BUSTER_A64_SEMANTIC_VM_STATUS_UNSUPPORTED;
-        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_MAP:
-            if (input_count != 1) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            *output = first;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
-        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_INJECT:
-            if (input_count != 0) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (instruction.width > 64) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-            {
-                BusterA64SemanticVMValue candidate = buster_a64_semantic_vm_value_unsigned(instruction.constant, instruction.width ? instruction.width : 64);
-                if (candidate.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) return BUSTER_A64_SEMANTIC_VM_STATUS_RANGE;
-                *output = candidate;
-            }
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
-        case BUSTER_A64_SEMANTIC_VM_OP_ALIAS_CONDITION:
-            if (input_count != 1 || !buster_a64_semantic_vm_value_uint(first, &unsigned_value)) return BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
-            if (!unsigned_value) return BUSTER_A64_SEMANTIC_VM_STATUS_TARGET_MISMATCH;
-            *output = first;
-            return BUSTER_A64_SEMANTIC_VM_STATUS_OK;
         default:
-            return BUSTER_A64_SEMANTIC_VM_STATUS_UNSUPPORTED;
+            status = BUSTER_A64_SEMANTIC_VM_STATUS_UNSUPPORTED;
+            break;
     }
+    return status;
+}
+
+BusterA64SemanticVMStatus
+buster_a64_semantic_vm_apply(BusterA64SemanticVMInstruction instruction,
+                             BusterA64SemanticVMValue const* inputs, u32 input_count, u64 pc, u64 place,
+                             BusterA64SemanticVMValue* output)
+{
+    BusterA64SemanticVMStatus status = BUSTER_A64_SEMANTIC_VM_STATUS_INVALID_ARGUMENT;
+    if (output && input_count <= 8 && (!input_count || inputs) && instruction.op < BUSTER_A64_SEMANTIC_VM_OP_COUNT)
+        status = buster_a64_semantic_vm_apply_operation(instruction, inputs, input_count, pc, place, output);
+    return status;
 }
 
 BusterA64SemanticVMStatus
