@@ -727,16 +727,35 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
 // builds the comparand.  Wider vector files consume the same kernel in
 // sixteen-register chunks, while non-AVX-512 targets retain the bounded
 // scalar walk.
+//
+// The chunk count is the register-file limit and not `active_register_count`,
+// so the whole query is three straight-line compares with no loop and no
+// data-dependent branch at all.  Two facts license reading past the active
+// count.  `owner` is declared MACHINE_TARGET_REGISTER_LIMIT lanes wide, so
+// every chunk is a whole in-bounds vector.  And `candidates` never carries a
+// bit at or above `active_register_count`: that count is either the target's
+// full file, or — for a function with no vector virtual register — one past
+// the highest bit of `allocatable_mask | callee_saved_mask`, which is a
+// superset of the only class mask such a function can ask about.  The lanes
+// above it therefore contribute nothing whatever they hold, which matters
+// because the reduced-count case leaves them at the free sentinel.
+//
+// The loop was previously bounded by `active_register_count` with an
+// `if (!active) continue;` skipping empty chunks.  That saved a
+// memory-folded VPCMPEQD and bought two data-dependent branches; a stage-1
+// profile put the skip alone at ~1% of all branch misses.  Removing only the
+// skip is not the fix — the misses relocate onto the loop's exit branch,
+// unchanged in weight — so the loop goes too.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u64 candidates)
 {
 #if BUSTER_SIMD_512
+    BUSTER_CT_CHECK(MACHINE_TARGET_REGISTER_LIMIT % 16u == 0u);
+    Simd512 sentinel = simd512_splat(UINT8_MAX);
     u64 free = 0;
-    for (u32 base = 0; base < state->active_register_count; base += 16)
+    for (u32 base = 0; base < MACHINE_TARGET_REGISTER_LIMIT; base += 16)
     {
         u32 active = (u32)((candidates >> base) & UINT64_C(0xffff));
-        if (!active) continue;
-        Mask64 free_words = simd512_equal_word(
-            simd512_load(state->owner + base), simd512_splat(UINT8_MAX));
+        Mask64 free_words = simd512_equal_word(simd512_load(state->owner + base), sentinel);
         free |= (u64)((u32)free_words & active) << base;
     }
     return free;
