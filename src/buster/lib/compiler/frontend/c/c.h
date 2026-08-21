@@ -148,6 +148,27 @@ BUSTER_CT_CHECK(sizeof(CToken) == 12);
 BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(C_TOKEN_KIND_COUNT <= UINT8_MAX);
 
+// A set of punctuators as a 64-bit mask: bit `p` is a member test for
+// CPunctuator `p`.  Every id is a valid bit position because the whole enum
+// fits in 64 values, which the check below holds it to; adding a 65th
+// punctuator fails the build rather than silently truncating a set.
+// C_PUNCTUATOR_NONE is bit 0, so a set that leaves bit 0 clear answers "is
+// this token one of these punctuators" with no kind test — the same
+// invariant c_token_is_punctuator relies on.
+#define C_PUNCTUATOR_BIT(punctuator) ((u64)1 << (punctuator))
+BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= 64);
+
+// One shift and one mask answer what a chain of dependent compares answers.
+// Callers that ask several punctuator questions about the same token pay one
+// serial branch ladder per token otherwise; this is the classification they
+// gate on instead.  Inline for the same reason c_token_length is: an
+// out-of-line call in a per-token loop costs more than the body, and it
+// perturbs the caller's register allocation in every copy.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_punctuator_in_set(u8 punctuator, u64 set)
+{
+    return ((set >> punctuator) & 1) != 0;
+}
+
 typedef enum CDiagnosticKind
 {
     C_DIAGNOSTIC_INVALID_CHARACTER,

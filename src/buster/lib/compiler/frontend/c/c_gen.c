@@ -19998,7 +19998,7 @@ BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CTok
     return true;
 }
 
-BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
+BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
 {
     if (body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
         index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
@@ -20019,22 +20019,25 @@ BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u3
         u32 open = UINT32_MAX;
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-            CToken token = preprocess->tokens[scan];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            u8 punctuator = preprocess->tokens[scan].punctuator;
+            if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
             {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                if (!depth)
+                if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
                 {
-                    break;
+                    depth += 1;
                 }
-                depth -= 1;
-                if (!depth)
+                else
                 {
-                    open = scan;
-                    break;
+                    if (!depth)
+                    {
+                        break;
+                    }
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        open = scan;
+                        break;
+                    }
                 }
             }
             if (scan == body_start)
@@ -20052,9 +20055,8 @@ BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u3
         }
         return false;
     }
-    return c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) ||
-           c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON) ||
-           (c_token_is_punctuator(&previous, C_PUNCTUATOR_COLON) && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
+    return c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
+           (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
            (previous.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
                                                     c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE)));
 }
@@ -20073,23 +20075,32 @@ BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, S
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The pair is loop-invariant, so it becomes one set the scan tests each
+    // token against: the two chained compares per token were two dependent
+    // branches, and the delimiters themselves are a small minority of the
+    // range being scanned.
+    u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);
     u32 depth = 0;
     for (u32 index = open; index < end; index += 1)
     {
-        if (c_token_is_punctuator(&preprocess.tokens[index], opening))
+        u8 punctuator = preprocess.tokens[index].punctuator;
+        if (c_punctuator_in_set(punctuator, delimiters))
         {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&preprocess.tokens[index], closing))
-        {
-            if (!depth)
+            if (punctuator == opening)
             {
-                return UINT32_MAX;
+                depth += 1;
             }
-            depth -= 1;
-            if (!depth)
+            else
             {
-                return index;
+                if (!depth)
+                {
+                    return UINT32_MAX;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    return index;
+                }
             }
         }
     }
@@ -22143,6 +22154,13 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
     }
 }
 
+// The punctuators c_ir_unsupported_gnu_construct's bracket ladder reacts to:
+// the two nesting pairs it counts plus the ELLIPSIS that a GNU initializer
+// range is spelled with.
+#define C_IR_GNU_INITIALIZER_SCAN_PUNCTUATORS                                                                                                  \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |                                      \
+     C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ELLIPSIS))
+
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
 {
     u32 initializer_parentheses = 0;
@@ -22150,28 +22168,34 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        // One set test stands in front of the bracket ladder: most scanned
+        // tokens are none of these five, and the ones that are pay the same
+        // chain they always did.
+        if (c_punctuator_in_set(token.punctuator, C_IR_GNU_INITIALIZER_SCAN_PUNCTUATORS))
         {
-            initializer_parentheses += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            initializer_parentheses -= initializer_parentheses != 0;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            initializer_brackets += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-        {
-            initializer_brackets -= initializer_brackets != 0;
-        }
-        else if (!initializer_parentheses && initializer_brackets == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
-        {
-            *token_index_out = index;
-            return c_preprocess_dialect_is_gnu(preprocess.dialect)
-                       ? (String8){0}
-                       : S8("GNU initializer ranges are only available in GNU dialects");
+            if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+            {
+                initializer_parentheses += 1;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+            {
+                initializer_parentheses -= initializer_parentheses != 0;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+            {
+                initializer_brackets += 1;
+            }
+            else if (token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET)
+            {
+                initializer_brackets -= initializer_brackets != 0;
+            }
+            else if (!initializer_parentheses && initializer_brackets == 1)
+            {
+                *token_index_out = index;
+                return c_preprocess_dialect_is_gnu(preprocess.dialect)
+                           ? (String8){0}
+                           : S8("GNU initializer ranges are only available in GNU dialects");
+            }
         }
         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("goto")) && index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))

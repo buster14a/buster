@@ -67,7 +67,22 @@ BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
-BUSTER_C_EXTERN bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// The cold half of c_ir_named_label_at: the full proof, reached only for a
+// token that already looks like `<identifier> :`.
+BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
+// Whether a named label starts at `index`. Both loops that size and fill a
+// body's label table ask this of every body token, so the necessary condition
+// — an identifier followed by a colon — is inline and the proof stays out of
+// line: the answer is almost always no, and an out-of-line call per body
+// token to reach it is the expensive part. The three range tests come first
+// because they are what makes the two token reads in bounds.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index,
+                                                                             u32 body_end)
+{
+    return body_end <= preprocess->token_count && index < body_end && index + 1 < body_end &&
+           preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON &&
+           c_ir_named_label_proven_at(preprocess, body_start, index, body_end);
+}
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
@@ -127,7 +142,18 @@ BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessRe
                                                                      IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
                                                                  CScopeId scope, u32 expression_start, u32 index);
-BUSTER_C_EXTERN bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
+// The cold half of c_parse_label_address_prefix: the full proof, reached only
+// for a token that is actually the `&&` a label address is spelled with.
+BUSTER_C_EXTERN bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
+// Whether `index` is the `&&` of a GNU label address. c_ir_unsupported_gnu_construct
+// asks this of every token it scans, so the necessary condition is inline for
+// the same reason as c_ir_named_label_at above.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,
+                                                                                      u32 index)
+{
+    return index < preprocess->token_count && preprocess->tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND &&
+           c_parse_label_address_prefix_proven(preprocess, expression_start, index);
+}
 BUSTER_C_EXTERN bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect);
 typedef struct CSpellingSpace CSpellingSpace;
@@ -140,6 +166,24 @@ struct CSpellingSpace
 };
 BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
 BUSTER_C_EXTERN bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator);
+// Punctuator sets the frontend asks about repeatedly (see c_punctuator_in_set
+// in c.h). The parenthesis pair is what the two backward scans that look for
+// a control-statement head classify on; the statement-boundary set is the
+// punctuators that can precede a labelled statement without further proof.
+#define C_PUNCTUATOR_SET_PARENTHESES (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS))
+#define C_PUNCTUATOR_SET_STATEMENT_BOUNDARY                                                                                                    \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SEMICOLON))
+// The three nesting pairs a declarator scan tracks, split by side. Each side
+// is three ids that are not adjacent in the enum — the pairs interleave — so
+// a compare chain over one side does not fold into a range test the way the
+// unary-operator chains do; these are the sets worth spelling as sets.
+// Digraph spellings carry distinct ids and are absent here, exactly as the
+// chains these replaced were written.
+#define C_PUNCTUATOR_SET_DELIMITER_OPEN                                                                                                        \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE))
+#define C_PUNCTUATOR_SET_DELIMITER_CLOSE                                                                                                       \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) |                                         \
+     C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE))
 BUSTER_C_EXTERN u16 c_token_length_field(u64 length);
 BUSTER_C_EXTERN CToken c_space_token(CSpellingSpace* space, String8 text, CTokenKind kind, CPunctuator punctuator);
 BUSTER_C_EXTERN CToken c_space_retoken(CSpellingSpace* space, char8 const* from_base, CToken token);

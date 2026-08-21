@@ -49,7 +49,7 @@
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
 //                                                 functions
-//   c_parse_label_address_prefix,                 statement boundaries, asm
+//   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_bind_function_body                    binds body identifiers to
 //                                                 entities, indexes scopes
@@ -1499,23 +1499,30 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The pair is loop-invariant, so it becomes one set the scan tests each
+    // token against; see c_ir_matching_delimiter for the same shape.
+    u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);
     u32 depth = 0;
     for (u32 index = open; index < end; index += 1)
     {
-        if (c_token_is_punctuator(&preprocess.tokens[index], opening))
+        u8 punctuator = preprocess.tokens[index].punctuator;
+        if (c_punctuator_in_set(punctuator, delimiters))
         {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&preprocess.tokens[index], closing))
-        {
-            if (!depth)
+            if (punctuator == opening)
             {
-                return end;
+                depth += 1;
             }
-            depth -= 1;
-            if (!depth)
+            else
             {
-                return index;
+                if (!depth)
+                {
+                    return end;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    return index;
+                }
             }
         }
     }
@@ -2593,10 +2600,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     }
 }
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
 BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                                     u32 expression_start, u32 index);
-BUSTER_C_SHARED bool c_ir_named_label_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
 
 BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
 
@@ -8876,7 +8881,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 body_start, u32 index)
+BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
     if (body_start >= preprocess->token_count || index >= preprocess->token_count ||
         !c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
@@ -8906,22 +8911,25 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix(CPreprocessResult const* prepr
         u32 open = UINT32_MAX;
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-            CToken candidate = preprocess->tokens[scan];
-            if (c_token_is_punctuator(&candidate, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            u8 punctuator = preprocess->tokens[scan].punctuator;
+            if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
             {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(&candidate, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                if (!depth)
+                if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
                 {
-                    break;
+                    depth += 1;
                 }
-                depth -= 1;
-                if (!depth)
+                else
                 {
-                    open = scan;
-                    break;
+                    if (!depth)
+                    {
+                        break;
+                    }
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        open = scan;
+                        break;
+                    }
                 }
             }
             if (scan == body_start)
@@ -10273,17 +10281,15 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
         {
             delimiter_count += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        else if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
         {
             delimiter_count -= delimiter_count != 0;
         }
-        else if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        else if (!delimiter_count && token.punctuator == C_PUNCTUATOR_COMMA)
         {
             return index;
         }
@@ -10344,10 +10350,9 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             {
                 seen_equal = true;
             }
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
             {
-                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index > start &&
+                if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
                     preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                     !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), preprocess.dialect) && !seen_equal &&
                     function_name_token == C_ID_UNDERLYING_INVALID)
@@ -10363,7 +10368,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         name_token = function_name_token;
                     }
                 }
-                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
+                if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
                 {
                     body_start = index + 1;
                     u32 brace_depth = 1;
@@ -10398,12 +10403,11 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 index += 1;
                 continue;
             }
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
             {
-                CPunctuator expected = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                                       : c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)   ? C_PUNCTUATOR_LEFT_BRACKET
-                                                                                                     : C_PUNCTUATOR_LEFT_BRACE;
+                CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                                       : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                                                                                          : C_PUNCTUATOR_LEFT_BRACE;
                 if (!delimiter_count || !c_token_is_punctuator(&preprocess.tokens[delimiter_stack[delimiter_count - 1]], expected))
                 {
                     c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
