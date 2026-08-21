@@ -45,73 +45,80 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, built.types.length == 4);
     BUSTER_TEST(arguments, built.symbols.length > 16);
     BUSTER_TEST(arguments, built.relocation_count == 4 * BUSTER_ARRAY_LENGTH(functions));
-    if (!built.valid)
-    {
-        return result;
-    }
-    u32 signature;
-    memcpy(&signature, built.symbols.pointer, sizeof(signature));
-    BUSTER_TEST(arguments, signature == CODEVIEW_TEST_SIGNATURE_C13);
-    for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
-    {
-        CodeviewRelocation relocation = built.relocations[relocation_index];
-        u64 width = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? 4 : 2;
-        BUSTER_TEST(arguments, relocation.offset + width <= built.symbols.length);
-        BUSTER_TEST(arguments, relocation.function < BUSTER_ARRAY_LENGTH(functions));
-    }
-    // Walk the subsections and check the payload structure.
+    // A failed build leaves nothing walkable, and a subsection that overruns the
+    // buffer stops the walk; both cases skip the structural tallies below rather
+    // than leaving the function early.
+    bool walkable = built.valid;
     u32 symbol_subsections = 0;
     u32 line_subsections = 0;
     u32 checksum_subsections = 0;
     u32 string_subsections = 0;
     u32 checked_lines = 0;
-    u64 offset = 4;
-    while (offset + 8 <= built.symbols.length)
+    if (walkable)
     {
-        u32 kind;
-        u32 length;
-        memcpy(&kind, built.symbols.pointer + offset, sizeof(kind));
-        memcpy(&length, built.symbols.pointer + offset + 4, sizeof(length));
-        u64 payload = offset + 8;
-        BUSTER_TEST(arguments, payload + length <= built.symbols.length);
-        if (payload + length > built.symbols.length)
+        u32 signature;
+        memcpy(&signature, built.symbols.pointer, sizeof(signature));
+        BUSTER_TEST(arguments, signature == CODEVIEW_TEST_SIGNATURE_C13);
+        for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
         {
-            return result;
+            CodeviewRelocation relocation = built.relocations[relocation_index];
+            u64 width = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? 4 : 2;
+            BUSTER_TEST(arguments, relocation.offset + width <= built.symbols.length);
+            BUSTER_TEST(arguments, relocation.function < BUSTER_ARRAY_LENGTH(functions));
         }
-        symbol_subsections += kind == CODEVIEW_TEST_SYMBOLS;
-        checksum_subsections += kind == CODEVIEW_TEST_FILECHKSMS;
-        string_subsections += kind == CODEVIEW_TEST_STRINGTABLE;
-        if (kind == CODEVIEW_TEST_LINES && length >= 12 + 12 + 8)
+        // Walk the subsections and check the payload structure.
+        u64 offset = 4;
+        while (offset + 8 <= built.symbols.length && walkable)
         {
-            line_subsections += 1;
-            u32 contribution_size;
-            u32 file_id;
-            u32 line_count;
-            u32 first_line;
-            memcpy(&contribution_size, built.symbols.pointer + payload + 8, sizeof(contribution_size));
-            memcpy(&file_id, built.symbols.pointer + payload + 12, sizeof(file_id));
-            memcpy(&line_count, built.symbols.pointer + payload + 16, sizeof(line_count));
-            memcpy(&first_line, built.symbols.pointer + payload + 24 + 4, sizeof(first_line));
-            DwarfFunction* function = functions + (line_subsections - 1);
-            BUSTER_TEST(arguments, contribution_size == function->code_size);
-            BUSTER_TEST(arguments, file_id == function->file * 8);
-            BUSTER_TEST(arguments, line_count >= 1);
-            BUSTER_TEST(arguments, (first_line & CODEVIEW_TEST_LINE_NUMBER_MASK) == function->line);
-            BUSTER_TEST(arguments, first_line & CODEVIEW_TEST_LINE_STATEMENT);
-            checked_lines += 1;
+            u32 kind;
+            u32 length;
+            memcpy(&kind, built.symbols.pointer + offset, sizeof(kind));
+            memcpy(&length, built.symbols.pointer + offset + 4, sizeof(length));
+            u64 payload = offset + 8;
+            walkable = payload + length <= built.symbols.length;
+            BUSTER_TEST(arguments, walkable);
+            if (walkable)
+            {
+                symbol_subsections += kind == CODEVIEW_TEST_SYMBOLS;
+                checksum_subsections += kind == CODEVIEW_TEST_FILECHKSMS;
+                string_subsections += kind == CODEVIEW_TEST_STRINGTABLE;
+                if (kind == CODEVIEW_TEST_LINES && length >= 12 + 12 + 8)
+                {
+                    line_subsections += 1;
+                    u32 contribution_size;
+                    u32 file_id;
+                    u32 line_count;
+                    u32 first_line;
+                    memcpy(&contribution_size, built.symbols.pointer + payload + 8, sizeof(contribution_size));
+                    memcpy(&file_id, built.symbols.pointer + payload + 12, sizeof(file_id));
+                    memcpy(&line_count, built.symbols.pointer + payload + 16, sizeof(line_count));
+                    memcpy(&first_line, built.symbols.pointer + payload + 24 + 4, sizeof(first_line));
+                    DwarfFunction* function = functions + (line_subsections - 1);
+                    BUSTER_TEST(arguments, contribution_size == function->code_size);
+                    BUSTER_TEST(arguments, file_id == function->file * 8);
+                    BUSTER_TEST(arguments, line_count >= 1);
+                    BUSTER_TEST(arguments, (first_line & CODEVIEW_TEST_LINE_NUMBER_MASK) == function->line);
+                    BUSTER_TEST(arguments, first_line & CODEVIEW_TEST_LINE_STATEMENT);
+                    checked_lines += 1;
+                }
+                if (kind == CODEVIEW_TEST_STRINGTABLE)
+                {
+                    BUSTER_TEST(arguments, length >= 1 + files[0].length + 1 + files[1].length + 1);
+                    BUSTER_TEST(arguments, built.symbols.pointer[payload] == 0);
+                    BUSTER_TEST(arguments, memcmp(built.symbols.pointer + payload + 1, files[0].pointer, files[0].length) == 0);
+                }
+                offset = payload + ((length + 3) & ~3u);
+            }
         }
-        if (kind == CODEVIEW_TEST_STRINGTABLE)
-        {
-            BUSTER_TEST(arguments, length >= 1 + files[0].length + 1 + files[1].length + 1);
-            BUSTER_TEST(arguments, built.symbols.pointer[payload] == 0);
-            BUSTER_TEST(arguments, memcmp(built.symbols.pointer + payload + 1, files[0].pointer, files[0].length) == 0);
-        }
-        offset = payload + ((length + 3) & ~3u);
     }
-    BUSTER_TEST(arguments, symbol_subsections == 1 + BUSTER_ARRAY_LENGTH(functions));
-    BUSTER_TEST(arguments, line_subsections == BUSTER_ARRAY_LENGTH(functions));
-    BUSTER_TEST(arguments, checksum_subsections == 1 && string_subsections == 1);
-    BUSTER_TEST(arguments, checked_lines == BUSTER_ARRAY_LENGTH(functions));
+
+    if (walkable)
+    {
+        BUSTER_TEST(arguments, symbol_subsections == 1 + BUSTER_ARRAY_LENGTH(functions));
+        BUSTER_TEST(arguments, line_subsections == BUSTER_ARRAY_LENGTH(functions));
+        BUSTER_TEST(arguments, checksum_subsections == 1 && string_subsections == 1);
+        BUSTER_TEST(arguments, checked_lines == BUSTER_ARRAY_LENGTH(functions));
+    }
     // Invalid input: an out-of-range file index must be rejected.
     DwarfLineEntry invalid_line = {.code_offset = 0, .file = 9, .line = 1, .column = 1};
     CodeviewInput invalid = input;

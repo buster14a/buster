@@ -31,90 +31,96 @@ BUSTER_GLOBAL_LOCAL BusterAarch64ControlOperandValue a64_control_test_imm(u8 kin
 BUSTER_GLOBAL_LOCAL BusterAarch64ControlInstruction a64_control_test_fixture(u32 row_index)
 {
     BusterAarch64ControlSemanticRecord row_storage = {0};
-    if (!buster_aarch64_control_semantic_row(row_index, &row_storage)) return (BusterAarch64ControlInstruction){0};
-    BusterAarch64ControlSemanticRecord const* row = &row_storage;
-    BusterAarch64ControlInstruction instruction = {.row = (u16)row_index, .operand_count = row->operand_count};
-    switch ((BusterAarch64ControlForm)row->form)
+    // An unknown row yields the zeroed fixture; only a row the table knows
+    // reaches the per-form operand fill.
+    BusterAarch64ControlInstruction instruction = {0};
+    if (buster_aarch64_control_semantic_row(row_index, &row_storage))
     {
-    case BUSTER_AARCH64_CONTROL_FORM_ADRP:
-    case BUSTER_AARCH64_CONTROL_FORM_ADR:
-        instruction.operands[0] = a64_control_test_reg(64, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_B:
-    case BUSTER_AARCH64_CONTROL_FORM_BL:
-        instruction.operands[0] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_B_COND:
-        instruction.operands[0] = a64_control_test_pc(0);
-        instruction.operands[1] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_CBZ_W:
-    case BUSTER_AARCH64_CONTROL_FORM_CBNZ_W:
-    case BUSTER_AARCH64_CONTROL_FORM_CBZ_X:
-    case BUSTER_AARCH64_CONTROL_FORM_CBNZ_X:
-        instruction.operands[0] = a64_control_test_reg(row->form == BUSTER_AARCH64_CONTROL_FORM_CBZ_W ||
-                                                                row->form == BUSTER_AARCH64_CONTROL_FORM_CBNZ_W
-                                                            ? 32
-                                                            : 64,
-                                                        0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_TBZ:
-    case BUSTER_AARCH64_CONTROL_FORM_TBNZ:
-        instruction.operands[0] = a64_control_test_reg(32, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_IMMEDIATE, 6, 0);
-        instruction.operands[2] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_LDR_W:
-    case BUSTER_AARCH64_CONTROL_FORM_LDR_S:
-        instruction.operands[0] = a64_control_test_reg(32, 0,
-                                                        row->form == BUSTER_AARCH64_CONTROL_FORM_LDR_S
-                                                            ? BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD
-                                                            : BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_LDR_X:
-    case BUSTER_AARCH64_CONTROL_FORM_LDRSW_X:
-    case BUSTER_AARCH64_CONTROL_FORM_LDR_D:
-        instruction.operands[0] = a64_control_test_reg(64, 0,
-                                                        row->form == BUSTER_AARCH64_CONTROL_FORM_LDR_D
-                                                            ? BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD
-                                                            : BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_LDR_Q:
-        instruction.operands[0] = a64_control_test_reg(128, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_PRFM:
-        instruction.operands[0] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_IMMEDIATE, 5, 0);
-        instruction.operands[1] = a64_control_test_pc(0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_RET:
-        instruction.operand_count = 0;
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_CSEL_W:
-    case BUSTER_AARCH64_CONTROL_FORM_CSINC_W:
-    case BUSTER_AARCH64_CONTROL_FORM_CSINV_W:
-    case BUSTER_AARCH64_CONTROL_FORM_CSNEG_W:
-        instruction.operands[0] = a64_control_test_reg(32, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_reg(32, 1, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[2] = a64_control_test_reg(32, 2, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[3] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_CSEL_X:
-    case BUSTER_AARCH64_CONTROL_FORM_CSINC_X:
-    case BUSTER_AARCH64_CONTROL_FORM_CSINV_X:
-    case BUSTER_AARCH64_CONTROL_FORM_CSNEG_X:
-        instruction.operands[0] = a64_control_test_reg(64, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[1] = a64_control_test_reg(64, 1, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[2] = a64_control_test_reg(64, 2, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
-        instruction.operands[3] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
-        break;
-    case BUSTER_AARCH64_CONTROL_FORM_COUNT:
-        break;
+        BusterAarch64ControlSemanticRecord const* row = &row_storage;
+        instruction = (BusterAarch64ControlInstruction){.row = (u16)row_index, .operand_count = row->operand_count};
+        switch ((BusterAarch64ControlForm)row->form)
+        {
+        case BUSTER_AARCH64_CONTROL_FORM_ADRP:
+        case BUSTER_AARCH64_CONTROL_FORM_ADR:
+            instruction.operands[0] = a64_control_test_reg(64, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_B:
+        case BUSTER_AARCH64_CONTROL_FORM_BL:
+            instruction.operands[0] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_B_COND:
+            instruction.operands[0] = a64_control_test_pc(0);
+            instruction.operands[1] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_CBZ_W:
+        case BUSTER_AARCH64_CONTROL_FORM_CBNZ_W:
+        case BUSTER_AARCH64_CONTROL_FORM_CBZ_X:
+        case BUSTER_AARCH64_CONTROL_FORM_CBNZ_X:
+            instruction.operands[0] = a64_control_test_reg(row->form == BUSTER_AARCH64_CONTROL_FORM_CBZ_W ||
+                                                                    row->form == BUSTER_AARCH64_CONTROL_FORM_CBNZ_W
+                                                                ? 32
+                                                                : 64,
+                                                            0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_TBZ:
+        case BUSTER_AARCH64_CONTROL_FORM_TBNZ:
+            instruction.operands[0] = a64_control_test_reg(32, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_IMMEDIATE, 6, 0);
+            instruction.operands[2] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_LDR_W:
+        case BUSTER_AARCH64_CONTROL_FORM_LDR_S:
+            instruction.operands[0] = a64_control_test_reg(32, 0,
+                                                            row->form == BUSTER_AARCH64_CONTROL_FORM_LDR_S
+                                                                ? BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD
+                                                                : BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_LDR_X:
+        case BUSTER_AARCH64_CONTROL_FORM_LDRSW_X:
+        case BUSTER_AARCH64_CONTROL_FORM_LDR_D:
+            instruction.operands[0] = a64_control_test_reg(64, 0,
+                                                            row->form == BUSTER_AARCH64_CONTROL_FORM_LDR_D
+                                                                ? BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD
+                                                                : BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_LDR_Q:
+            instruction.operands[0] = a64_control_test_reg(128, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_FP_SIMD);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_PRFM:
+            instruction.operands[0] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_IMMEDIATE, 5, 0);
+            instruction.operands[1] = a64_control_test_pc(0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_RET:
+            instruction.operand_count = 0;
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_CSEL_W:
+        case BUSTER_AARCH64_CONTROL_FORM_CSINC_W:
+        case BUSTER_AARCH64_CONTROL_FORM_CSINV_W:
+        case BUSTER_AARCH64_CONTROL_FORM_CSNEG_W:
+            instruction.operands[0] = a64_control_test_reg(32, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_reg(32, 1, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[2] = a64_control_test_reg(32, 2, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[3] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_CSEL_X:
+        case BUSTER_AARCH64_CONTROL_FORM_CSINC_X:
+        case BUSTER_AARCH64_CONTROL_FORM_CSINV_X:
+        case BUSTER_AARCH64_CONTROL_FORM_CSNEG_X:
+            instruction.operands[0] = a64_control_test_reg(64, 0, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[1] = a64_control_test_reg(64, 1, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[2] = a64_control_test_reg(64, 2, BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR);
+            instruction.operands[3] = a64_control_test_imm(BUSTER_AARCH64_CONTROL_OPERAND_CONDITION, 4, 0);
+            break;
+        case BUSTER_AARCH64_CONTROL_FORM_COUNT:
+            break;
+        }
     }
+
     return instruction;
 }
 

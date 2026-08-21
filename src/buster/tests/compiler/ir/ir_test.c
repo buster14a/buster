@@ -136,11 +136,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* are
                                                                           .initializer_bits = 1,
                                                                           .initializer_kind = initializer_kind,
                                                                       });
-    if (!global || floating.value == IR_ID_UNDERLYING_INVALID || symbol.value == IR_ID_UNDERLYING_INVALID)
+    IrValidationResult result = {.error = IR_VALIDATION_INVALID_ID};
+    if (global && floating.value != IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID)
     {
-        return (IrValidationResult){.error = IR_VALIDATION_INVALID_ID};
+        result = ir_validate_canonical_module(&program, program.modules);
     }
-    return ir_validate_canonical_module(&program, program.modules);
+
+    return result;
 }
 
 UnitTestResult ir_tests(UnitTestArguments* arguments)

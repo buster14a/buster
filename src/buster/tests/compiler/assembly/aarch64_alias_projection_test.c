@@ -15,27 +15,22 @@ static Target a64_alias_projection_test_target(void)
 
 static bool a64_alias_projection_string_is(String8 actual, char8 const* expected)
 {
-    if (!expected)
+    bool result = expected != 0;
+    if (result)
     {
-        return false;
-    }
-    u32 length = 0;
-    while (expected[length])
-    {
-        length += 1;
-    }
-    if (actual.length != length)
-    {
-        return false;
-    }
-    for (u32 index = 0; index < length; index += 1)
-    {
-        if (actual.pointer[index] != expected[index])
+        u32 length = 0;
+        while (expected[length])
         {
-            return false;
+            length += 1;
+        }
+        result = actual.length == length;
+        for (u32 index = 0; index < length && result; index += 1)
+        {
+            result = actual.pointer[index] == expected[index];
         }
     }
-    return true;
+
+    return result;
 }
 
 UnitTestResult aarch64_alias_projection_tests(UnitTestArguments* arguments)

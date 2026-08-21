@@ -21,41 +21,44 @@ BUSTER_GLOBAL_LOCAL BusterAarch64SystemInstruction a64_system_test_fixture(u32 r
 {
     BusterAarch64SystemSemanticRecord metadata = {0};
     BusterAarch64SystemInstruction result = {.row = (u16)row};
-    if (!buster_aarch64_system_semantic_row(row, &metadata)) return result;
-    result.field_count = metadata.field_count;
-    for (u32 field = 0; field < metadata.field_count; field += 1)
+    if (buster_aarch64_system_semantic_row(row, &metadata))
     {
-        BusterAarch64SystemFieldSchema schema = {0};
-        buster_aarch64_system_semantic_field(row, field, &schema);
-        result.fields[field] = (BusterAarch64SystemOperandValue){.kind = schema.kind, .width = schema.width, .value = schema.minimum};
+        result.field_count = metadata.field_count;
+        for (u32 field = 0; field < metadata.field_count; field += 1)
+        {
+            BusterAarch64SystemFieldSchema schema = {0};
+            buster_aarch64_system_semantic_field(row, field, &schema);
+            result.fields[field] = (BusterAarch64SystemOperandValue){.kind = schema.kind, .width = schema.width, .value = schema.minimum};
+        }
+        if (row == BUSTER_AARCH64_SYSTEM_FORM_HINT)
+        {
+            result.fields[0].value = 0;
+            result.fields[1].value = 0;
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE)
+        {
+            result.fields[0].value = 5; // SPSel selector
+            result.fields[1].value = 0;
+            result.fields[2].value = 0;
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_SYS)
+        {
+            result.fields[0].value = 31;
+            result.defaulted_mask = 1;
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_CLREX || row == BUSTER_AARCH64_SYSTEM_FORM_ISB)
+        {
+            result.fields[0].value = 15;
+            result.defaulted_mask = 1;
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB || row == BUSTER_AARCH64_SYSTEM_FORM_DSB)
+        {
+            // CRm=15 (`sy`) is the independent LLVM representative for both
+            // barriers; DSB's #0/#4 aliases remain exercised below.
+            result.fields[0].value = 15;
+        }
     }
-    if (row == BUSTER_AARCH64_SYSTEM_FORM_HINT)
-    {
-        result.fields[0].value = 0;
-        result.fields[1].value = 0;
-    }
-    else if (row == BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE)
-    {
-        result.fields[0].value = 5; // SPSel selector
-        result.fields[1].value = 0;
-        result.fields[2].value = 0;
-    }
-    else if (row == BUSTER_AARCH64_SYSTEM_FORM_SYS)
-    {
-        result.fields[0].value = 31;
-        result.defaulted_mask = 1;
-    }
-    else if (row == BUSTER_AARCH64_SYSTEM_FORM_CLREX || row == BUSTER_AARCH64_SYSTEM_FORM_ISB)
-    {
-        result.fields[0].value = 15;
-        result.defaulted_mask = 1;
-    }
-    else if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB || row == BUSTER_AARCH64_SYSTEM_FORM_DSB)
-    {
-        // CRm=15 (`sy`) is the independent LLVM representative for both
-        // barriers; DSB's #0/#4 aliases remain exercised below.
-        result.fields[0].value = 15;
-    }
+
     return result;
 }
 

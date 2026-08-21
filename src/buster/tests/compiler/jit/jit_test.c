@@ -913,44 +913,45 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
         void* data_address = jit_program_symbol(&native_program, native_symbols[5].name);
         void* bss_address = jit_program_symbol(&native_program, native_symbols[6].name);
         BUSTER_TEST(arguments, read_only_address && data_address && bss_address);
-        if (!read_only_address || !data_address || !bss_address)
+        // The loaded addresses are what everything below reads through, so a
+        // missing one skips the payload checks; the release at the end of the
+        // block covers both paths.
+        if (read_only_address && data_address && bss_address)
         {
-            jit_program_release(&native_program);
-            return result;
-        }
-        u64 loaded_read_only_value = 0;
-        u64 data_value = 0;
-        u64 bss_value = 0;
-        u64 relocated_bss = 0;
-        u64 relocated_read_only = 0;
-        memcpy(&loaded_read_only_value, read_only_address, sizeof(loaded_read_only_value));
-        memcpy(&data_value, data_address, sizeof(data_value));
-        memcpy(&bss_value, bss_address, sizeof(bss_value));
-        memcpy(&relocated_bss, (u8*)data_address + 8, sizeof(relocated_bss));
-        memcpy(&relocated_read_only, (u8*)data_address + 16, sizeof(relocated_read_only));
-        BUSTER_TEST(arguments, loaded_read_only_value == 17);
-        BUSTER_TEST(arguments, data_value == 11);
-        BUSTER_TEST(arguments, bss_value == 0);
-        BUSTER_TEST(arguments, relocated_bss == (u64)(uintptr_t)bss_address);
-        BUSTER_TEST(arguments, relocated_read_only == (u64)(uintptr_t)read_only_address);
-        data_value = 29;
-        bss_value = 31;
-        memcpy(data_address, &data_value, sizeof(data_value));
-        memcpy(bss_address, &bss_value, sizeof(bss_value));
-        data_value = 0;
-        bss_value = 0;
-        memcpy(&data_value, data_address, sizeof(data_value));
-        memcpy(&bss_value, bss_address, sizeof(bss_value));
-        BUSTER_TEST(arguments, data_value == 29);
-        BUSTER_TEST(arguments, bss_value == 31);
+            u64 loaded_read_only_value = 0;
+            u64 data_value = 0;
+            u64 bss_value = 0;
+            u64 relocated_bss = 0;
+            u64 relocated_read_only = 0;
+            memcpy(&loaded_read_only_value, read_only_address, sizeof(loaded_read_only_value));
+            memcpy(&data_value, data_address, sizeof(data_value));
+            memcpy(&bss_value, bss_address, sizeof(bss_value));
+            memcpy(&relocated_bss, (u8*)data_address + 8, sizeof(relocated_bss));
+            memcpy(&relocated_read_only, (u8*)data_address + 16, sizeof(relocated_read_only));
+            BUSTER_TEST(arguments, loaded_read_only_value == 17);
+            BUSTER_TEST(arguments, data_value == 11);
+            BUSTER_TEST(arguments, bss_value == 0);
+            BUSTER_TEST(arguments, relocated_bss == (u64)(uintptr_t)bss_address);
+            BUSTER_TEST(arguments, relocated_read_only == (u64)(uintptr_t)read_only_address);
+            data_value = 29;
+            bss_value = 31;
+            memcpy(data_address, &data_value, sizeof(data_value));
+            memcpy(bss_address, &bss_value, sizeof(bss_value));
+            data_value = 0;
+            bss_value = 0;
+            memcpy(&data_value, data_address, sizeof(data_value));
+            memcpy(&bss_value, bss_address, sizeof(bss_value));
+            BUSTER_TEST(arguments, data_value == 29);
+            BUSTER_TEST(arguments, bss_value == 31);
 #if BUSTER_MACOS
-        BUSTER_TEST(arguments, !jit_program_symbol(&native_program, S8("missing_symbol")));
-        BUSTER_TEST(arguments, native_program.error == JIT_ERROR_SYMBOL_NOT_FOUND);
-        BUSTER_STRING_TEST(arguments, native_program.failing_symbol, S8("missing_symbol"));
-        BUSTER_TEST(arguments, !jit_program_symbol(&native_program, native_symbols[7].name));
-        BUSTER_TEST(arguments, native_program.error == JIT_ERROR_SYMBOL_BOUNDS);
-        BUSTER_STRING_TEST(arguments, native_program.failing_symbol, native_symbols[7].name);
+            BUSTER_TEST(arguments, !jit_program_symbol(&native_program, S8("missing_symbol")));
+            BUSTER_TEST(arguments, native_program.error == JIT_ERROR_SYMBOL_NOT_FOUND);
+            BUSTER_STRING_TEST(arguments, native_program.failing_symbol, S8("missing_symbol"));
+            BUSTER_TEST(arguments, !jit_program_symbol(&native_program, native_symbols[7].name));
+            BUSTER_TEST(arguments, native_program.error == JIT_ERROR_SYMBOL_BOUNDS);
+            BUSTER_STRING_TEST(arguments, native_program.failing_symbol, native_symbols[7].name);
 #endif
+        }
     }
     jit_program_release(&native_program);
     BUSTER_TEST(arguments, !native_program.allocation_base && !native_program.auxiliary_allocation_base && !native_program.object);
