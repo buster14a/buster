@@ -2576,130 +2576,49 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     {
         u64 size = type->layout.size;
         bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
-        if (type->kind != IR_TYPE_VOID)
+        if (type->kind == IR_TYPE_VOID)
         {
-            if (!aggregate && type->kind != IR_TYPE_VECTOR)
+            return value;
+        }
+        if (!aggregate && type->kind != IR_TYPE_VECTOR)
+        {
+            if (type->kind == IR_TYPE_FLOAT)
             {
-                if (type->kind == IR_TYPE_FLOAT)
+                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
                 {
-                    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
+                    if (is_result)
                     {
-                        if (is_result)
-                        {
-                            // A scalar long double returns directly in ST0.  Keep
-                            // both eightbyte classes in the neutral ABI model so a
-                            // consumer can validate the x87 result shape without
-                            // inventing a hidden result pointer.
-                            value.part_count = 2;
-                            value.parts[0] = (IrAbiPart){
-                                .abi_class = IR_ABI_CLASS_X87,
-                                .value_offset = 0,
-                                .size = 8,
-                            };
-                            value.parts[1] = (IrAbiPart){
-                                .abi_class = IR_ABI_CLASS_X87_UP,
-                                .value_offset = 8,
-                                .size = 8,
-                            };
-                        }
-                        else
-                        {
-                            // SysV arguments (including variadic arguments) carry
-                            // long double by value in a 16-byte-aligned memory slot;
-                            // this is not an indirect/sret pointer argument.
-                            value.part_count = 1;
-                            value.memory = true;
-                            value.parts[0] = (IrAbiPart){
-                                .abi_class = IR_ABI_CLASS_MEMORY,
-                                .size = (u32)size,
-                            };
-                        }
-                        return value;
-                    }
-                    if (type->bit_width > 64)
-                    {
-                        value.part_count = 1;
-                        value.indirect = is_result;
-                        value.memory = !is_result;
+                        // A scalar long double returns directly in ST0.  Keep
+                        // both eightbyte classes in the neutral ABI model so a
+                        // consumer can validate the x87 result shape without
+                        // inventing a hidden result pointer.
+                        value.part_count = 2;
                         value.parts[0] = (IrAbiPart){
-                            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                            .size = is_result ? 8 : (u32)size,
+                            .abi_class = IR_ABI_CLASS_X87,
+                            .value_offset = 0,
+                            .size = 8,
                         };
-                    }
-                    else
-                    {
-                        value.part_count = 1;
-                        value.parts[0] = (IrAbiPart){
-                            .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
-                            .size = (u32)size,
-                        };
-                    }
-                    return value;
-                }
-                if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
-                {
-                    value.part_count = 1;
-                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
-                    return value;
-                }
-                if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
-                {
-                    if (size <= 8)
-                    {
-                        value.part_count = 1;
-                        value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
-                        return value;
-                    }
-                    if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
-                    {
-                        value.part_count = (u32)((size + 7) / 8);
-                        for (u32 part = 0; part < value.part_count; part += 1)
-                        {
-                            value.parts[part] = (IrAbiPart){
-                                .abi_class = IR_ABI_CLASS_INTEGER,
-                                .value_offset = part * 8,
-                                .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                            };
-                        }
-                        return value;
-                    }
-                    value.part_count = 1;
-                    value.indirect = true;
-                    value.memory = !is_result;
-                    value.parts[0] = (IrAbiPart){
-                        .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                        .size = is_result ? 8 : (u32)size,
-                    };
-                    return value;
-                }
-                return value;
-            }
-            if (type->kind == IR_TYPE_VECTOR)
-            {
-                bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                               convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-                if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-                {
-                    if (!is_result || (size != 8 && size != 16))
-                    {
-                        value.part_count = 1;
-                        value.indirect = true;
-                        value.parts[0] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_POINTER,
+                        value.parts[1] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_X87_UP,
+                            .value_offset = 8,
                             .size = 8,
                         };
                     }
                     else
                     {
+                        // SysV arguments (including variadic arguments) carry
+                        // long double by value in a 16-byte-aligned memory slot;
+                        // this is not an indirect/sret pointer argument.
                         value.part_count = 1;
+                        value.memory = true;
                         value.parts[0] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_VECTOR,
+                            .abi_class = IR_ABI_CLASS_MEMORY,
                             .size = (u32)size,
                         };
                     }
                     return value;
                 }
-                if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
+                if (type->bit_width > 64)
                 {
                     value.part_count = 1;
                     value.indirect = is_result;
@@ -2708,69 +2627,32 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
                         .size = is_result ? 8 : (u32)size,
                     };
-                    return value;
                 }
-                if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
-                {
-                    value.part_count = (u32)((size + 7) / 8);
-                    for (u32 part = 0; part < value.part_count; part += 1)
-                    {
-                        value.parts[part] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_INTEGER,
-                            .value_offset = part * 8,
-                            .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                        };
-                    }
-                    return value;
-                }
-                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
+                else
                 {
                     value.part_count = 1;
-                    value.memory = true;
                     value.parts[0] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_MEMORY,
+                        .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
                         .size = (u32)size,
                     };
+                }
+                return value;
+            }
+            if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
+                return value;
+            }
+            if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
+            {
+                if (size <= 8)
+                {
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
                     return value;
                 }
-                value.part_count = 1;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
-                return value;
-            }
-            if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-            {
-                value.part_count = 1;
-                if (size == 1 || size == 2 || size == 4 || size == 8)
-                {
-                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
-                }
-                else
-                {
-                    value.indirect = true;
-                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
-                }
-                return value;
-            }
-            bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                           convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-            if (aarch64)
-            {
-                IrTypeId element = IR_TYPE_ID_INVALID;
-                u32 count = 0;
-                if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
-                {
-                    IrType* element_type = ir_type_from_id(&program->types, element);
-                    value.part_count = count;
-                    for (u32 part = 0; part < count; part += 1)
-                    {
-                        value.parts[part] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_FLOAT,
-                            .value_offset = part * (u32)element_type->layout.size,
-                            .size = (u32)element_type->layout.size,
-                        };
-                    }
-                }
-                else if (size <= 16)
+                if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
                 {
                     value.part_count = (u32)((size + 7) / 8);
                     for (u32 part = 0; part < value.part_count; part += 1)
@@ -2781,16 +2663,45 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                             .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
                         };
                     }
+                    return value;
+                }
+                value.part_count = 1;
+                value.indirect = true;
+                value.memory = !is_result;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
+                };
+                return value;
+            }
+            return value;
+        }
+        if (type->kind == IR_TYPE_VECTOR)
+        {
+            bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                           convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+            if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+            {
+                if (!is_result || (size != 8 && size != 16))
+                {
+                    value.part_count = 1;
+                    value.indirect = true;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_POINTER,
+                        .size = 8,
+                    };
                 }
                 else
                 {
                     value.part_count = 1;
-                    value.indirect = true;
-                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_VECTOR,
+                        .size = (u32)size,
+                    };
                 }
                 return value;
             }
-            if (size > 16)
+            if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
             {
                 value.part_count = 1;
                 value.indirect = is_result;
@@ -2801,64 +2712,154 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 };
                 return value;
             }
-            IrAbiClass classes[2] = {0};
-            if (!ir_system_v_abi_classes(program, type_id, classes))
+            if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
+            {
+                value.part_count = (u32)((size + 7) / 8);
+                for (u32 part = 0; part < value.part_count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_INTEGER,
+                        .value_offset = part * 8,
+                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
+                return value;
+            }
+            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
             {
                 value.part_count = 1;
-                value.indirect = is_result;
-                value.memory = !is_result;
+                value.memory = true;
                 value.parts[0] = (IrAbiPart){
-                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                    .size = is_result ? 8 : (u32)size,
+                    .abi_class = IR_ABI_CLASS_MEMORY,
+                    .size = (u32)size,
                 };
                 return value;
             }
-            bool has_x87 = false;
-            bool has_memory = false;
-            for (u32 part = 0; part < 2; part += 1)
+            value.part_count = 1;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
+            return value;
+        }
+        if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+        {
+            value.part_count = 1;
+            if (size == 1 || size == 2 || size == 4 || size == 8)
             {
-                has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
-                has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
             }
-            if (has_memory || (has_x87 && !is_result))
+            else
             {
-                // X87/X87_UP arguments are memory-class values in SysV, as are
-                // aggregates whose fields merged incompatibly with an x87 class.
-                // Keep `indirect` clear for arguments: only a result uses a hidden
-                // pointer when the aggregate cannot be returned directly.
+                value.indirect = true;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+            }
+            return value;
+        }
+        bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                       convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+        if (aarch64)
+        {
+            IrTypeId element = IR_TYPE_ID_INVALID;
+            u32 count = 0;
+            if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
+            {
+                IrType* element_type = ir_type_from_id(&program->types, element);
+                value.part_count = count;
+                for (u32 part = 0; part < count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_FLOAT,
+                        .value_offset = part * (u32)element_type->layout.size,
+                        .size = (u32)element_type->layout.size,
+                    };
+                }
+            }
+            else if (size <= 16)
+            {
+                value.part_count = (u32)((size + 7) / 8);
+                for (u32 part = 0; part < value.part_count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_INTEGER,
+                        .value_offset = part * 8,
+                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
+            }
+            else
+            {
                 value.part_count = 1;
-                value.indirect = is_result;
-                value.memory = !is_result;
-                value.parts[0] = (IrAbiPart){
-                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                    .size = is_result ? 8 : (u32)size,
-                };
-                return value;
+                value.indirect = true;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
             }
-            if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
-            {
-                // X87_UP is meaningful only as the second half of the canonical
-                // long-double pair.  A malformed/incompatible aggregate is therefore
-                // returned indirectly rather than exposing a register shape that no
-                // SysV caller can consume.
-                value.part_count = 1;
-                value.indirect = is_result;
-                value.memory = !is_result;
-                value.parts[0] = (IrAbiPart){
-                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                    .size = is_result ? 8 : (u32)size,
-                };
-                return value;
-            }
-            value.part_count = (u32)((size + 7) / 8);
-            for (u32 part = 0; part < value.part_count; part += 1)
-            {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
-                    .value_offset = part * 8,
-                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                };
-            }
+            return value;
+        }
+        if (size > 16)
+        {
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        IrAbiClass classes[2] = {0};
+        if (!ir_system_v_abi_classes(program, type_id, classes))
+        {
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        bool has_x87 = false;
+        bool has_memory = false;
+        for (u32 part = 0; part < 2; part += 1)
+        {
+            has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
+            has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
+        }
+        if (has_memory || (has_x87 && !is_result))
+        {
+            // X87/X87_UP arguments are memory-class values in SysV, as are
+            // aggregates whose fields merged incompatibly with an x87 class.
+            // Keep `indirect` clear for arguments: only a result uses a hidden
+            // pointer when the aggregate cannot be returned directly.
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
+        {
+            // X87_UP is meaningful only as the second half of the canonical
+            // long-double pair.  A malformed/incompatible aggregate is therefore
+            // returned indirectly rather than exposing a register shape that no
+            // SysV caller can consume.
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        value.part_count = (u32)((size + 7) / 8);
+        for (u32 part = 0; part < value.part_count; part += 1)
+        {
+            value.parts[part] = (IrAbiPart){
+                .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
+                .value_offset = part * 8,
+                .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+            };
         }
     }
 

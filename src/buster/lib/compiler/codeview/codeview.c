@@ -828,18 +828,19 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             u32* argument_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
             codeview_emit_model_types(&types, input.model, field_indices, argument_indices);
         }
-        if (!symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
+        if (symbols.overflow || types.overflow || symbols.count > UINT32_MAX)
         {
-            result.symbols = (ByteSlice){
-                .pointer = symbols.bytes,
-                .length = symbols.count,
-            };
-            result.types = (ByteSlice){
-                .pointer = types.bytes,
-                .length = types.count,
-            };
-            result.valid = true;
+            return result;
         }
+        result.symbols = (ByteSlice){
+            .pointer = symbols.bytes,
+            .length = symbols.count,
+        };
+        result.types = (ByteSlice){
+            .pointer = types.bytes,
+            .length = types.count,
+        };
+        result.valid = true;
     }
 
     return result;

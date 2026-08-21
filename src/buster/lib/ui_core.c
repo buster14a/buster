@@ -414,12 +414,14 @@ BUSTER_GLOBAL_LOCAL String8 ui_copy_string8_checked(Arena* arena, String8 source
     if (arena && ui_string8_source_is_valid(source) && source.length != 0)
     {
         u64 position = arena->position;
-        if (ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+        if (!ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
         {
-            result.pointer = arena_allocate(arena, char8, source.length);
-            result.length = source.length;
-            memcpy(result.pointer, source.pointer, source.length);
+            return result;
         }
+
+        result.pointer = arena_allocate(arena, char8, source.length);
+        result.length = source.length;
+        memcpy(result.pointer, source.pointer, source.length);
     }
 
     return result;
@@ -432,29 +434,31 @@ BUSTER_GLOBAL_LOCAL SliceString8 ui_copy_string8_slice_checked(Arena* arena, Sli
     {
         u64 position = arena->position;
         u64 descriptor_bytes = sources.length * sizeof(*sources.pointer);
-        if (ui_arena_try_advance(arena, &position, descriptor_bytes, BUSTER_ALIGN_OF(String8)))
+        if (!ui_arena_try_advance(arena, &position, descriptor_bytes, BUSTER_ALIGN_OF(String8)))
         {
-            u64 aggregate_length = 0;
-            for (u64 index = 0; index < sources.length; index += 1)
-            {
-                String8 source = sources.pointer[index];
-                if (!ui_string8_source_is_valid(source) || source.length > (u64)-1 - aggregate_length ||
-                    !ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
-                {
-                    return result;
-                }
-                aggregate_length += source.length;
-            }
+            return result;
+        }
 
-            result.pointer = arena_allocate(arena, String8, sources.length);
-            result.length = sources.length;
-            for (u64 index = 0; index < sources.length; index += 1)
+        u64 aggregate_length = 0;
+        for (u64 index = 0; index < sources.length; index += 1)
+        {
+            String8 source = sources.pointer[index];
+            if (!ui_string8_source_is_valid(source) || source.length > (u64)-1 - aggregate_length ||
+                !ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
             {
-                result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
-                if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
-                {
-                    BUSTER_CHECK(false);
-                }
+                return result;
+            }
+            aggregate_length += source.length;
+        }
+
+        result.pointer = arena_allocate(arena, String8, sources.length);
+        result.length = sources.length;
+        for (u64 index = 0; index < sources.length; index += 1)
+        {
+            result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
+            if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
+            {
+                BUSTER_CHECK(false);
             }
         }
     }
@@ -1732,77 +1736,81 @@ BUSTER_GLOBAL_LOCAL String8 ui_tooltip_make_text(Arena* arena, String8 source, u
         u64 full_columns = ui_utf8_codepoint_count(source);
         u64 column_capacity = max_lines * max_columns;
         bool truncated = full_columns > column_capacity;
-        if (!truncated || max_columns >= 3)
+        if (truncated && max_columns < 3)
         {
-            u64 source_columns = truncated ? column_capacity - 3 : full_columns;
-            u64 output_capacity = source.length;
-            if (output_capacity > (u64)-1 - source.length || output_capacity + source.length > (u64)-1 - max_lines ||
-                output_capacity + source.length + max_lines > (u64)-1 - 4)
-            {
-                return result;
-            }
-            output_capacity += source.length + max_lines + 4;
-
-            u64 position = arena->position;
-            if (ui_arena_try_advance(arena, &position, output_capacity, BUSTER_ALIGN_OF(char8)))
-            {
-                char8* output = arena_allocate(arena, char8, output_capacity);
-                u64 output_length = 0;
-                u64 source_position = 0;
-                u64 copied_columns = 0;
-                u64 line_count = 1;
-                u64 line_columns = 0;
-                u64 max_line_columns = 0;
-                while (source_position < source.length && copied_columns < source_columns)
-                {
-                    u64 sequence_length = ui_utf8_sequence_length(source, source_position);
-                    sequence_length = sequence_length ? sequence_length : 1;
-                    if (line_columns == max_columns)
-                    {
-                        output[output_length++] = '\n';
-                        line_count += 1;
-                        line_columns = 0;
-                    }
-
-                    u32 codepoint = ui_utf8_codepoint_at(source, source_position);
-                    if (codepoint == '\n')
-                    {
-                        output[output_length++] = ' ';
-                    }
-                    else
-                    {
-                        memcpy(output + output_length, source.pointer + source_position, sequence_length);
-                        output_length += sequence_length;
-                    }
-                    source_position += sequence_length;
-                    copied_columns += 1;
-                    line_columns += 1;
-                    max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
-                }
-
-                truncated = truncated || source_position < source.length;
-                if (truncated)
-                {
-                    if (line_columns + 3 > max_columns)
-                    {
-                        output[output_length++] = '\n';
-                        line_count += 1;
-                        line_columns = 0;
-                    }
-                    output[output_length++] = '.';
-                    output[output_length++] = '.';
-                    output[output_length++] = '.';
-                    line_columns += 3;
-                    max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
-                }
-
-                result.pointer = output;
-                result.length = output_length;
-                *line_count_out = line_count;
-                *max_line_columns_out = max_line_columns;
-                *truncated_out = truncated;
-            }
+            return result;
         }
+
+        u64 source_columns = truncated ? column_capacity - 3 : full_columns;
+        u64 output_capacity = source.length;
+        if (output_capacity > (u64)-1 - source.length || output_capacity + source.length > (u64)-1 - max_lines ||
+            output_capacity + source.length + max_lines > (u64)-1 - 4)
+        {
+            return result;
+        }
+        output_capacity += source.length + max_lines + 4;
+
+        u64 position = arena->position;
+        if (!ui_arena_try_advance(arena, &position, output_capacity, BUSTER_ALIGN_OF(char8)))
+        {
+            return result;
+        }
+
+        char8* output = arena_allocate(arena, char8, output_capacity);
+        u64 output_length = 0;
+        u64 source_position = 0;
+        u64 copied_columns = 0;
+        u64 line_count = 1;
+        u64 line_columns = 0;
+        u64 max_line_columns = 0;
+        while (source_position < source.length && copied_columns < source_columns)
+        {
+            u64 sequence_length = ui_utf8_sequence_length(source, source_position);
+            sequence_length = sequence_length ? sequence_length : 1;
+            if (line_columns == max_columns)
+            {
+                output[output_length++] = '\n';
+                line_count += 1;
+                line_columns = 0;
+            }
+
+            u32 codepoint = ui_utf8_codepoint_at(source, source_position);
+            if (codepoint == '\n')
+            {
+                output[output_length++] = ' ';
+            }
+            else
+            {
+                memcpy(output + output_length, source.pointer + source_position, sequence_length);
+                output_length += sequence_length;
+            }
+            source_position += sequence_length;
+            copied_columns += 1;
+            line_columns += 1;
+            max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+        }
+
+        truncated = truncated || source_position < source.length;
+        if (truncated)
+        {
+            if (line_columns + 3 > max_columns)
+            {
+                output[output_length++] = '\n';
+                line_count += 1;
+                line_columns = 0;
+            }
+            output[output_length++] = '.';
+            output[output_length++] = '.';
+            output[output_length++] = '.';
+            line_columns += 3;
+            max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+        }
+
+        result.pointer = output;
+        result.length = output_length;
+        *line_count_out = line_count;
+        *max_line_columns_out = max_line_columns;
+        *truncated_out = truncated;
     }
 
     return result;

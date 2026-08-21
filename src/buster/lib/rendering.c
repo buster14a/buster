@@ -1159,67 +1159,68 @@ RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStr
     if (rendering_command_stream_is_valid(stream) && events)
     {
         u32 event_count = rendering_command_stream_replay(stream, events, capacity);
-        if (event_count <= capacity)
+        if (event_count > capacity)
         {
-            result.valid = true;
-            result.event_count = event_count;
-            result.order_preserved = true;
-            result.resources_snapshot = true;
-            result.target_boundaries = true;
-            result.state_restored = true;
-            bool saw_blur = false;
-            bool blur_followed_by_draw = false;
-            u32 previous_command_index = 0;
-            for (u32 event_index = 0; event_index < event_count; event_index += 1)
-            {
-                RenderingReplayEvent event = events[event_index];
-                if (event_index && event.command_index <= previous_command_index)
-                {
-                    result.order_preserved = false;
-                }
-                previous_command_index = event.command_index;
-                switch (event.kind)
-                {
-                case RENDERING_REPLAY_DRAW:
-                    result.draw_count += 1;
-                    if (event.batch_index >= stream->batch_count ||
-                        memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
-                        event.target != stream->batches[event.batch_index].target)
-                    {
-                        result.resources_snapshot = false;
-                    }
-                    if (saw_blur)
-                    {
-                        blur_followed_by_draw = true;
-                        saw_blur = false;
-                    }
-                    break;
-                case RENDERING_REPLAY_BACKGROUND_BLUR:
-                    result.blur_pass_count += 3;
-                    saw_blur = true;
-                    break;
-                case RENDERING_REPLAY_TARGET:
-                    if (event.target != RENDERING_TARGET_BACKBUFFER)
-                    {
-                        result.target_boundaries = false;
-                    }
-                    break;
-                case RENDERING_REPLAY_CLIP_PUSH:
-                case RENDERING_REPLAY_CLIP_POP:
-                case RENDERING_REPLAY_FLUSH:
-                case RENDERING_REPLAY_RESOURCE:
-                    break;
-                case RENDERING_REPLAY_EVENT_KIND_COUNT:
-                    result.valid = false;
-                    break;
-                }
-            }
-            if (saw_blur)
-            {
-                blur_followed_by_draw = true;
-            }
-            result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
+            return result;
         }
+        result.valid = true;
+        result.event_count = event_count;
+        result.order_preserved = true;
+        result.resources_snapshot = true;
+        result.target_boundaries = true;
+        result.state_restored = true;
+        bool saw_blur = false;
+        bool blur_followed_by_draw = false;
+        u32 previous_command_index = 0;
+        for (u32 event_index = 0; event_index < event_count; event_index += 1)
+        {
+            RenderingReplayEvent event = events[event_index];
+            if (event_index && event.command_index <= previous_command_index)
+            {
+                result.order_preserved = false;
+            }
+            previous_command_index = event.command_index;
+            switch (event.kind)
+            {
+            case RENDERING_REPLAY_DRAW:
+                result.draw_count += 1;
+                if (event.batch_index >= stream->batch_count ||
+                    memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
+                    event.target != stream->batches[event.batch_index].target)
+                {
+                    result.resources_snapshot = false;
+                }
+                if (saw_blur)
+                {
+                    blur_followed_by_draw = true;
+                    saw_blur = false;
+                }
+                break;
+            case RENDERING_REPLAY_BACKGROUND_BLUR:
+                result.blur_pass_count += 3;
+                saw_blur = true;
+                break;
+            case RENDERING_REPLAY_TARGET:
+                if (event.target != RENDERING_TARGET_BACKBUFFER)
+                {
+                    result.target_boundaries = false;
+                }
+                break;
+            case RENDERING_REPLAY_CLIP_PUSH:
+            case RENDERING_REPLAY_CLIP_POP:
+            case RENDERING_REPLAY_FLUSH:
+            case RENDERING_REPLAY_RESOURCE:
+                break;
+            case RENDERING_REPLAY_EVENT_KIND_COUNT:
+                result.valid = false;
+                break;
+            }
+        }
+        if (saw_blur)
+        {
+            blur_followed_by_draw = true;
+        }
+        result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
     }
 
     return result;

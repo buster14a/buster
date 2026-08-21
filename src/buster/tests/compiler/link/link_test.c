@@ -73,38 +73,39 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 nam
         u64 string_header = table_offset + (u64)string_index * header_size;
         u64 string_offset = link_read_u64(image.pointer, string_header + 24);
         u64 string_size = link_read_u64(image.pointer, string_header + 32);
-        if (string_offset <= image.length && string_size <= image.length - string_offset)
+        if (string_offset > image.length || string_size > image.length - string_offset)
         {
-            for (u32 index = 1; index < section_count; index += 1)
+            return false;
+        }
+        for (u32 index = 1; index < section_count; index += 1)
+        {
+            u64 header = table_offset + (u64)index * header_size;
+            u32 name_offset = link_read_u32(image.pointer, header);
+            if (name_offset >= string_size)
             {
-                u64 header = table_offset + (u64)index * header_size;
-                u32 name_offset = link_read_u32(image.pointer, header);
-                if (name_offset >= string_size)
+                continue;
+            }
+            u64 length = 0;
+            while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+            {
+                length += 1;
+            }
+            if ((u64)name_offset + length < string_size && string_equal(
+                                                                  (String8){
+                                                                      .pointer = (char8*)image.pointer + string_offset + name_offset,
+                                                                      .length = length,
+                                                                  },
+                                                                  name))
+            {
+                if (section_index)
                 {
-                    continue;
+                    *section_index = index;
                 }
-                u64 length = 0;
-                while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+                if (section_header)
                 {
-                    length += 1;
+                    *section_header = header;
                 }
-                if ((u64)name_offset + length < string_size && string_equal(
-                                                                      (String8){
-                                                                          .pointer = (char8*)image.pointer + string_offset + name_offset,
-                                                                          .length = length,
-                                                                      },
-                                                                      name))
-                {
-                    if (section_index)
-                    {
-                        *section_index = index;
-                    }
-                    if (section_header)
-                    {
-                        *section_header = header;
-                    }
-                    return true;
-                }
+                return true;
             }
         }
     }
@@ -173,38 +174,40 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
     if (image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z')
     {
         u32 pe_offset = link_read_u32(image.pointer, 0x3c);
-        if (pe_offset <= image.length && image.length - pe_offset >= 24 && memcmp(image.pointer + pe_offset, "PE\0\0", 4) == 0)
+        if (pe_offset > image.length || image.length - pe_offset < 24 || memcmp(image.pointer + pe_offset, "PE\0\0", 4) != 0)
         {
-            u16 section_count = 0;
-            u16 optional_size = 0;
-            memcpy(&section_count, image.pointer + pe_offset + 6, sizeof(section_count));
-            memcpy(&optional_size, image.pointer + pe_offset + 20, sizeof(optional_size));
-            u64 section_table = (u64)pe_offset + 24 + optional_size;
-            if (section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
+            return false;
+        }
+        u16 section_count = 0;
+        u16 optional_size = 0;
+        memcpy(&section_count, image.pointer + pe_offset + 6, sizeof(section_count));
+        memcpy(&optional_size, image.pointer + pe_offset + 20, sizeof(optional_size));
+        u64 section_table = (u64)pe_offset + 24 + optional_size;
+        if (section_table > image.length || (u64)section_count > (image.length - section_table) / 40)
+        {
+            return false;
+        }
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 40;
+            String8 candidate = {.pointer = (char8*)image.pointer + section, .length = 0};
+            while (candidate.length < 8 && candidate.pointer[candidate.length])
             {
-                for (u16 section_index = 0; section_index < section_count; section_index += 1)
-                {
-                    u64 section = section_table + (u64)section_index * 40;
-                    String8 candidate = {.pointer = (char8*)image.pointer + section, .length = 0};
-                    while (candidate.length < 8 && candidate.pointer[candidate.length])
-                    {
-                        candidate.length += 1;
-                    }
-                    if (!string_equal(candidate, name))
-                    {
-                        continue;
-                    }
-                    if (virtual_address)
-                    {
-                        *virtual_address = link_read_u32(image.pointer, section + 12);
-                    }
-                    if (raw_offset)
-                    {
-                        *raw_offset = link_read_u32(image.pointer, section + 20);
-                    }
-                    return true;
-                }
+                candidate.length += 1;
             }
+            if (!string_equal(candidate, name))
+            {
+                continue;
+            }
+            if (virtual_address)
+            {
+                *virtual_address = link_read_u32(image.pointer, section + 12);
+            }
+            if (raw_offset)
+            {
+                *raw_offset = link_read_u32(image.pointer, section + 20);
+            }
+            return true;
         }
     }
 
@@ -218,150 +221,154 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, Strin
     if (executable.length >= 0x40 && executable.pointer[0] == 'M' && executable.pointer[1] == 'Z')
     {
         u32 pe_offset = link_read_u32(executable.pointer, 0x3c);
-        if (pe_offset <= executable.length && executable.length - pe_offset >= 24 && memcmp(executable.pointer + pe_offset, "PE\0\0", 4) == 0)
+        if (pe_offset > executable.length || executable.length - pe_offset < 24 || memcmp(executable.pointer + pe_offset, "PE\0\0", 4) != 0)
         {
-            u16 section_count = 0;
-            u16 optional_size = 0;
-            memcpy(&section_count, executable.pointer + pe_offset + 6, sizeof(section_count));
-            memcpy(&optional_size, executable.pointer + pe_offset + 20, sizeof(optional_size));
-            u64 optional = pe_offset + 24;
-            if (optional <= executable.length && optional_size <= executable.length - optional && optional_size >= 128)
+            return false;
+        }
+        u16 section_count = 0;
+        u16 optional_size = 0;
+        memcpy(&section_count, executable.pointer + pe_offset + 6, sizeof(section_count));
+        memcpy(&optional_size, executable.pointer + pe_offset + 20, sizeof(optional_size));
+        u64 optional = pe_offset + 24;
+        if (optional > executable.length || optional_size > executable.length - optional || optional_size < 128)
+        {
+            return false;
+        }
+        u32 import_rva = link_read_u32(executable.pointer, optional + 120);
+        u32 import_size = link_read_u32(executable.pointer, optional + 124);
+        if (!import_size || import_size % 20)
+        {
+            return false;
+        }
+        u64 section_table = optional + optional_size;
+        u64 import_offset = 0;
+        bool import_mapped = false;
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 40;
+            if (section > executable.length || 40 > executable.length - section)
             {
-                u32 import_rva = link_read_u32(executable.pointer, optional + 120);
-                u32 import_size = link_read_u32(executable.pointer, optional + 124);
-                if (import_size && !(import_size % 20))
+                return false;
+            }
+            u32 virtual_size = link_read_u32(executable.pointer, section + 8);
+            u32 virtual_address = link_read_u32(executable.pointer, section + 12);
+            u32 raw_size = link_read_u32(executable.pointer, section + 16);
+            u32 raw_offset = link_read_u32(executable.pointer, section + 20);
+            u64 span = BUSTER_MAX(virtual_size, raw_size);
+            if (import_rva >= virtual_address && (u64)import_rva - virtual_address < span)
+            {
+                import_offset = raw_offset + ((u64)import_rva - virtual_address);
+                import_mapped = import_offset < executable.length;
+                break;
+            }
+        }
+        if (!import_mapped)
+        {
+            return false;
+        }
+        for (u32 descriptor_index = 0; descriptor_index < import_size / 20; descriptor_index += 1)
+        {
+            u64 descriptor = import_offset + (u64)descriptor_index * 20;
+            if (descriptor > executable.length || 20 > executable.length - descriptor)
+            {
+                return false;
+            }
+            u32 lookup_rva = link_read_u32(executable.pointer, descriptor);
+            u32 name_rva = link_read_u32(executable.pointer, descriptor + 12);
+            if (!lookup_rva && !name_rva)
+            {
+                return false;
+            }
+            u64 name_offset = 0;
+            u64 lookup_offset = 0;
+            bool name_mapped = false;
+            bool lookup_mapped = false;
+            for (u16 section_index = 0; section_index < section_count; section_index += 1)
+            {
+                u64 section = section_table + (u64)section_index * 40;
+                u32 virtual_size = link_read_u32(executable.pointer, section + 8);
+                u32 virtual_address = link_read_u32(executable.pointer, section + 12);
+                u32 raw_size = link_read_u32(executable.pointer, section + 16);
+                u32 raw_offset = link_read_u32(executable.pointer, section + 20);
+                u64 span = BUSTER_MAX(virtual_size, raw_size);
+                if (name_rva >= virtual_address && (u64)name_rva - virtual_address < span)
                 {
-                    u64 section_table = optional + optional_size;
-                    u64 import_offset = 0;
-                    bool import_mapped = false;
-                    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+                    name_offset = raw_offset + ((u64)name_rva - virtual_address);
+                    name_mapped = name_offset < executable.length;
+                }
+                if (lookup_rva >= virtual_address && (u64)lookup_rva - virtual_address < span)
+                {
+                    lookup_offset = raw_offset + ((u64)lookup_rva - virtual_address);
+                    lookup_mapped = lookup_offset < executable.length;
+                }
+            }
+            if (!name_mapped || !lookup_mapped)
+            {
+                return false;
+            }
+            u64 name_length = 0;
+            while (name_offset + name_length < executable.length && executable.pointer[name_offset + name_length])
+            {
+                name_length += 1;
+            }
+            if (name_offset + name_length >= executable.length || !string_equal(
+                                                                      (String8){
+                                                                          .pointer = (char8*)executable.pointer + name_offset,
+                                                                          .length = name_length,
+                                                                      },
+                                                                      library))
+            {
+                continue;
+            }
+            for (u32 thunk_index = 0; lookup_offset + (u64)thunk_index * 8 + sizeof(u64) <= executable.length; thunk_index += 1)
+            {
+                u64 name_entry = link_read_u64(executable.pointer, lookup_offset + (u64)thunk_index * 8);
+                if (!name_entry)
+                {
+                    return false;
+                }
+                if (name_entry >> 63)
+                {
+                    continue;
+                }
+                u64 symbol_offset = 0;
+                bool symbol_mapped = false;
+                for (u16 section_index = 0; section_index < section_count; section_index += 1)
+                {
+                    u64 section = section_table + (u64)section_index * 40;
+                    u32 virtual_size = link_read_u32(executable.pointer, section + 8);
+                    u32 virtual_address = link_read_u32(executable.pointer, section + 12);
+                    u32 raw_size = link_read_u32(executable.pointer, section + 16);
+                    u32 raw_offset = link_read_u32(executable.pointer, section + 20);
+                    u64 span = BUSTER_MAX(virtual_size, raw_size);
+                    if (name_entry >= virtual_address && name_entry - virtual_address < span)
                     {
-                        u64 section = section_table + (u64)section_index * 40;
-                        if (section > executable.length || 40 > executable.length - section)
-                        {
-                            return false;
-                        }
-                        u32 virtual_size = link_read_u32(executable.pointer, section + 8);
-                        u32 virtual_address = link_read_u32(executable.pointer, section + 12);
-                        u32 raw_size = link_read_u32(executable.pointer, section + 16);
-                        u32 raw_offset = link_read_u32(executable.pointer, section + 20);
-                        u64 span = BUSTER_MAX(virtual_size, raw_size);
-                        if (import_rva >= virtual_address && (u64)import_rva - virtual_address < span)
-                        {
-                            import_offset = raw_offset + ((u64)import_rva - virtual_address);
-                            import_mapped = import_offset < executable.length;
-                            break;
-                        }
+                        symbol_offset = raw_offset + (name_entry - virtual_address) + 2;
+                        symbol_mapped = symbol_offset < executable.length;
+                        break;
                     }
-                    if (import_mapped)
-                    {
-                        for (u32 descriptor_index = 0; descriptor_index < import_size / 20; descriptor_index += 1)
-                        {
-                            u64 descriptor = import_offset + (u64)descriptor_index * 20;
-                            if (descriptor > executable.length || 20 > executable.length - descriptor)
-                            {
-                                return false;
-                            }
-                            u32 lookup_rva = link_read_u32(executable.pointer, descriptor);
-                            u32 name_rva = link_read_u32(executable.pointer, descriptor + 12);
-                            if (!lookup_rva && !name_rva)
-                            {
-                                return false;
-                            }
-                            u64 name_offset = 0;
-                            u64 lookup_offset = 0;
-                            bool name_mapped = false;
-                            bool lookup_mapped = false;
-                            for (u16 section_index = 0; section_index < section_count; section_index += 1)
-                            {
-                                u64 section = section_table + (u64)section_index * 40;
-                                u32 virtual_size = link_read_u32(executable.pointer, section + 8);
-                                u32 virtual_address = link_read_u32(executable.pointer, section + 12);
-                                u32 raw_size = link_read_u32(executable.pointer, section + 16);
-                                u32 raw_offset = link_read_u32(executable.pointer, section + 20);
-                                u64 span = BUSTER_MAX(virtual_size, raw_size);
-                                if (name_rva >= virtual_address && (u64)name_rva - virtual_address < span)
-                                {
-                                    name_offset = raw_offset + ((u64)name_rva - virtual_address);
-                                    name_mapped = name_offset < executable.length;
-                                }
-                                if (lookup_rva >= virtual_address && (u64)lookup_rva - virtual_address < span)
-                                {
-                                    lookup_offset = raw_offset + ((u64)lookup_rva - virtual_address);
-                                    lookup_mapped = lookup_offset < executable.length;
-                                }
-                            }
-                            if (!name_mapped || !lookup_mapped)
-                            {
-                                return false;
-                            }
-                            u64 name_length = 0;
-                            while (name_offset + name_length < executable.length && executable.pointer[name_offset + name_length])
-                            {
-                                name_length += 1;
-                            }
-                            if (name_offset + name_length >= executable.length || !string_equal(
-                                                                                      (String8){
-                                                                                          .pointer = (char8*)executable.pointer + name_offset,
-                                                                                          .length = name_length,
-                                                                                      },
-                                                                                      library))
-                            {
-                                continue;
-                            }
-                            for (u32 thunk_index = 0; lookup_offset + (u64)thunk_index * 8 + sizeof(u64) <= executable.length; thunk_index += 1)
-                            {
-                                u64 name_entry = link_read_u64(executable.pointer, lookup_offset + (u64)thunk_index * 8);
-                                if (!name_entry)
-                                {
-                                    return false;
-                                }
-                                if (name_entry >> 63)
-                                {
-                                    continue;
-                                }
-                                u64 symbol_offset = 0;
-                                bool symbol_mapped = false;
-                                for (u16 section_index = 0; section_index < section_count; section_index += 1)
-                                {
-                                    u64 section = section_table + (u64)section_index * 40;
-                                    u32 virtual_size = link_read_u32(executable.pointer, section + 8);
-                                    u32 virtual_address = link_read_u32(executable.pointer, section + 12);
-                                    u32 raw_size = link_read_u32(executable.pointer, section + 16);
-                                    u32 raw_offset = link_read_u32(executable.pointer, section + 20);
-                                    u64 span = BUSTER_MAX(virtual_size, raw_size);
-                                    if (name_entry >= virtual_address && name_entry - virtual_address < span)
-                                    {
-                                        symbol_offset = raw_offset + (name_entry - virtual_address) + 2;
-                                        symbol_mapped = symbol_offset < executable.length;
-                                        break;
-                                    }
-                                }
-                                if (!symbol_mapped)
-                                {
-                                    return false;
-                                }
-                                u64 symbol_length = 0;
-                                while (symbol_offset + symbol_length < executable.length && executable.pointer[symbol_offset + symbol_length])
-                                {
-                                    symbol_length += 1;
-                                }
-                                if (symbol_offset + symbol_length >= executable.length)
-                                {
-                                    return false;
-                                }
-                                if (string_equal(
-                                        (String8){
-                                            .pointer = (char8*)executable.pointer + symbol_offset,
-                                            .length = symbol_length,
-                                        },
-                                        symbol))
-                                {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+                }
+                if (!symbol_mapped)
+                {
+                    return false;
+                }
+                u64 symbol_length = 0;
+                while (symbol_offset + symbol_length < executable.length && executable.pointer[symbol_offset + symbol_length])
+                {
+                    symbol_length += 1;
+                }
+                if (symbol_offset + symbol_length >= executable.length)
+                {
+                    return false;
+                }
+                if (string_equal(
+                        (String8){
+                            .pointer = (char8*)executable.pointer + symbol_offset,
+                            .length = symbol_length,
+                        },
+                        symbol))
+                {
+                    return true;
                 }
             }
         }
@@ -965,69 +972,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
         BUSTER_TEST(arguments, normal_symbol_found && normal_size != 0);
         BUSTER_TEST(arguments, large_symbol_found && large_size != 0);
         BUSTER_TEST(arguments, main_symbol_found && main_size != 0);
-        if (normal_symbol_found && normal_size && large_symbol_found && large_size && main_symbol_found && main_size)
+        if (!normal_symbol_found || !normal_size || !large_symbol_found || !large_size || !main_symbol_found || !main_size)
         {
-            String8 run_arguments[] = {output_path};
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                        (ProcessSpawnOptions){
-                                                            .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
-                                                            .use_process_environment = true,
-                                                        });
-            BUSTER_TEST(arguments, spawn.handle != 0);
-            if (spawn.handle)
-            {
-                ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
-                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
-                ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
-                BUSTER_TEST(arguments, output.length == sizeof(LinkTestRuntimeReport));
-                if (wait.result != PROCESS_RESULT_SUCCESS || output.length != sizeof(LinkTestRuntimeReport))
-                {
-                    return result;
-                }
-                LinkTestRuntimeReport report = {0};
-                memcpy(&report, output.pointer, sizeof(report));
-                BUSTER_TEST(arguments, report.normal_entry != 0 && report.large_entry != 0 && report.main_entry != 0);
-                BUSTER_TEST(arguments, report.normal_count != 0 && report.normal_count <= BUSTER_ARRAY_LENGTH(report.normal_frames));
-                BUSTER_TEST(arguments, report.large_count != 0 && report.large_count <= BUSTER_ARRAY_LENGTH(report.large_frames));
-#if BUSTER_WINDOWS
-                BUSTER_TEST(arguments, report.semantic_status == UINT64_C(0x535441434b434f50));
-                BUSTER_TEST(arguments, report.body_status == 1 && report.large_body_status == 1);
-                BUSTER_TEST(arguments, report.epilog_status == 1 && report.epilog_unwind_pc != 0);
-                BUSTER_TEST(arguments, report.large_epilog_status == 1 && report.large_epilog_unwind_pc != 0);
-#endif
-                if (!report.normal_entry || !report.large_entry || !report.main_entry || !report.normal_count || !report.large_count ||
-                    report.normal_count > BUSTER_ARRAY_LENGTH(report.normal_frames) || report.large_count > BUSTER_ARRAY_LENGTH(report.large_frames))
-                {
-                    return result;
-                }
-
-                bool base_ranges_valid = report.normal_entry >= normal_value && report.large_entry >= large_value && report.main_entry >= main_value;
-                u64 normal_base = report.normal_entry - normal_value;
-                u64 large_base = report.large_entry - large_value;
-                u64 main_base = report.main_entry - main_value;
-                base_ranges_valid &= normal_base == large_base && normal_base == main_base;
-                BUSTER_TEST(arguments, base_ranges_valid);
-                if (!base_ranges_valid)
-                {
-                    return result;
-                }
-                u64 normal_begin = normal_base + normal_value;
-                u64 large_begin = normal_base + large_value;
-                u64 main_begin = normal_base + main_value;
-#if BUSTER_WINDOWS
-                bool epilog_unwind_reached_main = report.epilog_unwind_pc >= main_begin && report.epilog_unwind_pc < main_begin + main_size;
-                BUSTER_TEST(arguments, epilog_unwind_reached_main);
-                bool large_epilog_unwind_reached_main = report.large_epilog_unwind_pc >= main_begin && report.large_epilog_unwind_pc < main_begin + main_size;
-                BUSTER_TEST(arguments, large_epilog_unwind_reached_main);
-#endif
-                bool normal_contains_normal = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, normal_begin, normal_size);
-                bool normal_contains_main = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, main_begin, main_size);
-                bool large_contains_large = link_test_runtime_frame_contains(report.large_frames, report.large_count, large_begin, large_size);
-                bool large_contains_main = link_test_runtime_frame_contains(report.large_frames, report.large_count, main_begin, main_size);
-                BUSTER_TEST(arguments, normal_contains_normal && normal_contains_main);
-                BUSTER_TEST(arguments, large_contains_large && large_contains_main);
-            }
+            return result;
         }
+
+        String8 run_arguments[] = {output_path};
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                    (ProcessSpawnOptions){
+                                                        .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+                                                        .use_process_environment = true,
+                                                    });
+        BUSTER_TEST(arguments, spawn.handle != 0);
+        if (!spawn.handle)
+        {
+            return result;
+        }
+        ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
+        BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+        ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
+        BUSTER_TEST(arguments, output.length == sizeof(LinkTestRuntimeReport));
+        if (wait.result != PROCESS_RESULT_SUCCESS || output.length != sizeof(LinkTestRuntimeReport))
+        {
+            return result;
+        }
+        LinkTestRuntimeReport report = {0};
+        memcpy(&report, output.pointer, sizeof(report));
+        BUSTER_TEST(arguments, report.normal_entry != 0 && report.large_entry != 0 && report.main_entry != 0);
+        BUSTER_TEST(arguments, report.normal_count != 0 && report.normal_count <= BUSTER_ARRAY_LENGTH(report.normal_frames));
+        BUSTER_TEST(arguments, report.large_count != 0 && report.large_count <= BUSTER_ARRAY_LENGTH(report.large_frames));
+#if BUSTER_WINDOWS
+        BUSTER_TEST(arguments, report.semantic_status == UINT64_C(0x535441434b434f50));
+        BUSTER_TEST(arguments, report.body_status == 1 && report.large_body_status == 1);
+        BUSTER_TEST(arguments, report.epilog_status == 1 && report.epilog_unwind_pc != 0);
+        BUSTER_TEST(arguments, report.large_epilog_status == 1 && report.large_epilog_unwind_pc != 0);
+#endif
+        if (!report.normal_entry || !report.large_entry || !report.main_entry || !report.normal_count || !report.large_count ||
+            report.normal_count > BUSTER_ARRAY_LENGTH(report.normal_frames) || report.large_count > BUSTER_ARRAY_LENGTH(report.large_frames))
+        {
+            return result;
+        }
+
+        bool base_ranges_valid = report.normal_entry >= normal_value && report.large_entry >= large_value && report.main_entry >= main_value;
+        u64 normal_base = report.normal_entry - normal_value;
+        u64 large_base = report.large_entry - large_value;
+        u64 main_base = report.main_entry - main_value;
+        base_ranges_valid &= normal_base == large_base && normal_base == main_base;
+        BUSTER_TEST(arguments, base_ranges_valid);
+        if (!base_ranges_valid)
+        {
+            return result;
+        }
+        u64 normal_begin = normal_base + normal_value;
+        u64 large_begin = normal_base + large_value;
+        u64 main_begin = normal_base + main_value;
+#if BUSTER_WINDOWS
+        bool epilog_unwind_reached_main = report.epilog_unwind_pc >= main_begin && report.epilog_unwind_pc < main_begin + main_size;
+        BUSTER_TEST(arguments, epilog_unwind_reached_main);
+        bool large_epilog_unwind_reached_main = report.large_epilog_unwind_pc >= main_begin && report.large_epilog_unwind_pc < main_begin + main_size;
+        BUSTER_TEST(arguments, large_epilog_unwind_reached_main);
+#endif
+        bool normal_contains_normal = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, normal_begin, normal_size);
+        bool normal_contains_main = link_test_runtime_frame_contains(report.normal_frames, report.normal_count, main_begin, main_size);
+        bool large_contains_large = link_test_runtime_frame_contains(report.large_frames, report.large_count, large_begin, large_size);
+        bool large_contains_main = link_test_runtime_frame_contains(report.large_frames, report.large_count, main_begin, main_size);
+        BUSTER_TEST(arguments, normal_contains_normal && normal_contains_main);
+        BUSTER_TEST(arguments, large_contains_large && large_contains_main);
     }
 
     return result;
@@ -1104,33 +1114,35 @@ BUSTER_GLOBAL_LOCAL bool link_test_uefi_pe_section_find(ByteSlice image, String8
     if (result && image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z')
     {
         u32 pe_offset = link_read_u32(image.pointer, 0x3c);
-        if (pe_offset <= image.length && 24 <= image.length - pe_offset && memcmp(image.pointer + pe_offset, "PE\0\0", 4) == 0)
+        if (pe_offset > image.length || 24 > image.length - pe_offset || memcmp(image.pointer + pe_offset, "PE\0\0", 4) != 0)
         {
-            u16 section_count = link_test_uefi_read_u16(image, pe_offset + 6);
-            u16 optional_size = link_test_uefi_read_u16(image, pe_offset + 20);
-            u64 section_table = (u64)pe_offset + 24 + optional_size;
-            if (section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
+            return false;
+        }
+        u16 section_count = link_test_uefi_read_u16(image, pe_offset + 6);
+        u16 optional_size = link_test_uefi_read_u16(image, pe_offset + 20);
+        u64 section_table = (u64)pe_offset + 24 + optional_size;
+        if (section_table > image.length || (u64)section_count > (image.length - section_table) / 40)
+        {
+            return false;
+        }
+        for (u32 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 header = section_table + (u64)section_index * 40;
+            String8 candidate = {.pointer = (char8*)image.pointer + header};
+            while (candidate.length < 8 && candidate.pointer[candidate.length])
             {
-                for (u32 section_index = 0; section_index < section_count; section_index += 1)
-                {
-                    u64 header = section_table + (u64)section_index * 40;
-                    String8 candidate = {.pointer = (char8*)image.pointer + header};
-                    while (candidate.length < 8 && candidate.pointer[candidate.length])
-                    {
-                        candidate.length += 1;
-                    }
-                    if (string_equal(candidate, name))
-                    {
-                        *result = (LinkTestUefiPeSection){
-                            .virtual_size = link_read_u32(image.pointer, header + 8),
-                            .virtual_address = link_read_u32(image.pointer, header + 12),
-                            .raw_size = link_read_u32(image.pointer, header + 16),
-                            .raw_offset = link_read_u32(image.pointer, header + 20),
-                            .characteristics = link_read_u32(image.pointer, header + 36),
-                        };
-                        return result->raw_offset <= image.length && result->raw_size <= image.length - result->raw_offset;
-                    }
-                }
+                candidate.length += 1;
+            }
+            if (string_equal(candidate, name))
+            {
+                *result = (LinkTestUefiPeSection){
+                    .virtual_size = link_read_u32(image.pointer, header + 8),
+                    .virtual_address = link_read_u32(image.pointer, header + 12),
+                    .raw_size = link_read_u32(image.pointer, header + 16),
+                    .raw_offset = link_read_u32(image.pointer, header + 20),
+                    .characteristics = link_read_u32(image.pointer, header + 36),
+                };
+                return result->raw_offset <= image.length && result->raw_size <= image.length - result->raw_offset;
             }
         }
     }

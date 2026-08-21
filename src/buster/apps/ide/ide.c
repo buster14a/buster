@@ -375,34 +375,35 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         object_fuzz_test_input(pointer, size);
 
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
-        if (arena)
+        if (!arena)
         {
-            String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
-            CPreprocessResult preprocess = c_preprocess(arena, source,
-                                                        (CPreprocessOptions){
-                                                            .source_path = S8("fuzz.c"),
-                                                            .target = target_native,
-                                                            .data_layout = target_data_layout(target_native),
-                                                            .expansion_limit = BUSTER_KB(4),
-                                                            .include_depth_limit = 8,
-                                                            .disable_external_includes = true,
-                                                        });
-            CParserResult syntax = c_parse_ast(arena, preprocess);
-            CIRLowerResult lower = c_analyze(arena, S8("fuzz.c"), preprocess, syntax, target_native);
-            if (lower.program)
-            {
-                for (u32 module_index = 0; module_index < lower.program->module_count; module_index += 1)
-                {
-                    IrValidationResult validation = ir_validate_canonical_module(lower.program, &lower.program->modules[module_index]);
-                    BUSTER_CHECK(validation.error == IR_VALIDATION_NONE);
-                }
-            }
-            if (preprocess.recovery && preprocess.recovery->spelling_arena)
-            {
-                arena_destroy(preprocess.recovery->spelling_arena, 1);
-            }
-            arena_destroy(arena, 1);
+            return 0;
         }
+        String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
+        CPreprocessResult preprocess = c_preprocess(arena, source,
+                                                    (CPreprocessOptions){
+                                                        .source_path = S8("fuzz.c"),
+                                                        .target = target_native,
+                                                        .data_layout = target_data_layout(target_native),
+                                                        .expansion_limit = BUSTER_KB(4),
+                                                        .include_depth_limit = 8,
+                                                        .disable_external_includes = true,
+                                                    });
+        CParserResult syntax = c_parse_ast(arena, preprocess);
+        CIRLowerResult lower = c_analyze(arena, S8("fuzz.c"), preprocess, syntax, target_native);
+        if (lower.program)
+        {
+            for (u32 module_index = 0; module_index < lower.program->module_count; module_index += 1)
+            {
+                IrValidationResult validation = ir_validate_canonical_module(lower.program, &lower.program->modules[module_index]);
+                BUSTER_CHECK(validation.error == IR_VALIDATION_NONE);
+            }
+        }
+        if (preprocess.recovery && preprocess.recovery->spelling_arena)
+        {
+            arena_destroy(preprocess.recovery->spelling_arena, 1);
+        }
+        arena_destroy(arena, 1);
     }
 
     return 0;

@@ -1234,34 +1234,38 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
         result.y_offset = y0;
         result.width = width > 0 ? width : 0;
         result.height = height > 0 ? height : 0;
-        if (result.width != 0 && result.height != 0)
+        if (result.width == 0 || result.height == 0)
         {
-            u32 max_points = (u32)information->max_points + (u32)information->max_composite_points;
-            u32 max_contours = (u32)information->max_contours + (u32)information->max_composite_contours;
-            if (max_points < 256u)
-            {
-                max_points = 256u;
-            }
-            if (max_contours < 64u)
-            {
-                max_contours = 64u;
-            }
-            u32 raster_point_capacity = max_points * (TTF_CURVE_SEGMENTS + 1u) + max_contours * 2u + 64u;
-            TTF_RasterPath path = {
-                .points = arena_allocate(arena, TTF_RasterPoint, raster_point_capacity),
-                .contour_ends = arena_allocate(arena, u32, max_contours),
-                .point_capacity = raster_point_capacity,
-                .contour_capacity = max_contours,
-            };
-
-            TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
-            if (ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, x0, y0, 0, &path) && !path.overflowed)
-            {
-                u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
-                result.pixels = arena_allocate(arena, u8, pixel_count);
-                ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
-            }
+            return result;
         }
+
+        u32 max_points = (u32)information->max_points + (u32)information->max_composite_points;
+        u32 max_contours = (u32)information->max_contours + (u32)information->max_composite_contours;
+        if (max_points < 256u)
+        {
+            max_points = 256u;
+        }
+        if (max_contours < 64u)
+        {
+            max_contours = 64u;
+        }
+        u32 raster_point_capacity = max_points * (TTF_CURVE_SEGMENTS + 1u) + max_contours * 2u + 64u;
+        TTF_RasterPath path = {
+            .points = arena_allocate(arena, TTF_RasterPoint, raster_point_capacity),
+            .contour_ends = arena_allocate(arena, u32, max_contours),
+            .point_capacity = raster_point_capacity,
+            .contour_capacity = max_contours,
+        };
+
+        TTF_Transform identity = {.m00 = 1.0f, .m11 = 1.0f};
+        if (!ttf_append_glyph_path(arena, information, glyph, identity, scale_x, scale_y, x0, y0, 0, &path) || path.overflowed)
+        {
+            return result;
+        }
+
+        u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
+        result.pixels = arena_allocate(arena, u8, pixel_count);
+        ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
     }
 
     return result;

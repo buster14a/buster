@@ -7710,15 +7710,16 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
 
         // Preserve the original fallback for absent or malformed lookup metadata.
         // Ascending entity order is the language's oldest-typedef tie breaker.
-        if (result->entities)
+        if (!result->entities)
         {
-            for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+            return C_ENTITY_ID_INVALID;
+        }
+        for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+        {
+            CEntity* entity = &result->entities[entity_index];
+            if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
             {
-                CEntity* entity = &result->entities[entity_index];
-                if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
-                {
-                    return (CEntityId){.value = entity_index};
-                }
+                return (CEntityId){.value = entity_index};
             }
         }
     }
@@ -7900,55 +7901,56 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
     if (entity->is_constexpr && entity->type.value < result->type_count)
     {
         CType value_type = result->types[entity->type.value];
-        if (c_type_kind_is_integer(value_type.kind))
+        if (!c_type_kind_is_integer(value_type.kind))
         {
-            Arena* conflicts[] = {
-                arena,
-            };
-            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-            u64 value = 0;
-            bool evaluated =
-                c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
-            scratch_end(temporary);
-            if (!evaluated)
-            {
-                c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                                   S8("integer constexpr initializer must be an integer constant expression"));
-                return false;
-            }
-            bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
-            bool negative = value > INT64_MAX && !expression_unsigned;
-            u64 magnitude = negative ? 0 - value : value;
-            u64 size = 0;
-            u32 alignment = 0;
-            bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
-            BUSTER_UNUSED(alignment);
-            if (representable && size <= 8)
-            {
-                u32 bits = (u32)(size * 8);
-                bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
-                if (target_signed)
-                {
-                    u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
-                    u64 negative_max = positive_max + 1;
-                    representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
-                }
-                else
-                {
-                    u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
-                    representable = !negative && magnitude <= maximum;
-                }
-            }
-            if (!representable)
-            {
-                c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                                   S8("integer constexpr initializer is not exactly representable in the declared type"));
-                return false;
-            }
-            entity->has_constant_value = true;
-            entity->constant_is_negative = negative;
-            entity->constant_value = magnitude;
+            return true;
         }
+        Arena* conflicts[] = {
+            arena,
+        };
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        u64 value = 0;
+        bool evaluated =
+            c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+        scratch_end(temporary);
+        if (!evaluated)
+        {
+            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                               S8("integer constexpr initializer must be an integer constant expression"));
+            return false;
+        }
+        bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
+        bool negative = value > INT64_MAX && !expression_unsigned;
+        u64 magnitude = negative ? 0 - value : value;
+        u64 size = 0;
+        u32 alignment = 0;
+        bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
+        BUSTER_UNUSED(alignment);
+        if (representable && size <= 8)
+        {
+            u32 bits = (u32)(size * 8);
+            bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
+            if (target_signed)
+            {
+                u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
+                u64 negative_max = positive_max + 1;
+                representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+            }
+            else
+            {
+                u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
+                representable = !negative && magnitude <= maximum;
+            }
+        }
+        if (!representable)
+        {
+            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                               S8("integer constexpr initializer is not exactly representable in the declared type"));
+            return false;
+        }
+        entity->has_constant_value = true;
+        entity->constant_is_negative = negative;
+        entity->constant_value = magnitude;
     }
 
     return true;
@@ -9201,62 +9203,63 @@ BUSTER_C_INTERNAL bool c_parse_asm_operand_name_token(CPreprocessResult preproce
                 separators[separator_count++] = index;
             }
         }
-        if (separator_count)
+        if (!separator_count)
         {
-            u32 ranges[4] = {
-                separators[0] + 1,
-                separator_count >= 2 ? separators[1] : close,
-                separator_count >= 2 ? separators[1] + 1 : close,
-                separator_count >= 3 ? separators[2] : close,
-            };
-            for (u32 range_index = 0; range_index < 2; range_index += 1)
+            return false;
+        }
+        u32 ranges[4] = {
+            separators[0] + 1,
+            separator_count >= 2 ? separators[1] : close,
+            separator_count >= 2 ? separators[1] + 1 : close,
+            separator_count >= 3 ? separators[2] : close,
+        };
+        for (u32 range_index = 0; range_index < 2; range_index += 1)
+        {
+            u32 start = ranges[range_index * 2];
+            u32 end = ranges[range_index * 2 + 1];
+            if (token_index < start || token_index >= end)
             {
-                u32 start = ranges[range_index * 2];
-                u32 end = ranges[range_index * 2 + 1];
-                if (token_index < start || token_index >= end)
-                {
-                    continue;
-                }
-                u32 segment_start = start;
-                parentheses = 0;
-                brackets = 0;
-                braces = 0;
-                for (u32 index = start; index <= token_index && index < end; index += 1)
-                {
-                    u32 punctuator = preprocess.tokens[index].punctuator;
-                    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
-                    {
-                        parentheses += 1;
-                    }
-                    else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
-                    {
-                        parentheses -= 1;
-                    }
-                    else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
-                    {
-                        brackets += 1;
-                    }
-                    else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
-                    {
-                        brackets -= 1;
-                    }
-                    else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
-                    {
-                        braces += 1;
-                    }
-                    else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
-                    {
-                        braces -= 1;
-                    }
-                    else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
-                    {
-                        segment_start = index + 1;
-                    }
-                }
-                return token_index == segment_start + 1 && segment_start + 2 < end &&
-                       c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
-                       c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
+                continue;
             }
+            u32 segment_start = start;
+            parentheses = 0;
+            brackets = 0;
+            braces = 0;
+            for (u32 index = start; index <= token_index && index < end; index += 1)
+            {
+                u32 punctuator = preprocess.tokens[index].punctuator;
+                if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+                {
+                    parentheses += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
+                {
+                    parentheses -= 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+                {
+                    brackets += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
+                {
+                    brackets -= 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+                {
+                    braces += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
+                {
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
+                {
+                    segment_start = index + 1;
+                }
+            }
+            return token_index == segment_start + 1 && segment_start + 2 < end &&
+                   c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
+                   c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
         }
     }
 

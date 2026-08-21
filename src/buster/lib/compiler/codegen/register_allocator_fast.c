@@ -2135,13 +2135,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // save area that really lies below the frame pointer; see the same guard
         // in machine_stack_placement_build. An invalid placement falls back to the
         // canonical emitter, which is always sound.
-        if (running <= placement.frame_size + pool_base)
+        if (running > placement.frame_size + pool_base)
         {
-            // See machine_stack_placement_build: the saves the Win64 prologue pushes
-            // before the frame pointer lie between it and the incoming arguments.
-            placement.incoming_base = description->saves_precede_frame_pointer ? 8u * push_count : 0u;
-            placement.valid = true;
+            return placement;
         }
+        // See machine_stack_placement_build: the saves the Win64 prologue pushes
+        // before the frame pointer lie between it and the incoming arguments.
+        placement.incoming_base = description->saves_precede_frame_pointer ? 8u * push_count : 0u;
+        placement.valid = true;
     }
 
     return placement;

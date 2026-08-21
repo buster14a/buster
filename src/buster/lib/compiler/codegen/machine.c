@@ -1778,16 +1778,17 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         // deepest values live under the stack pointer where the next call's shadow
         // space and return address overwrite them. Refuse the placement instead:
         // the function falls back to the canonical emitter rather than miscompile.
-        if (running <= placement.frame_size + push_area)
+        if (running > placement.frame_size + push_area)
         {
-            // Pushes that precede the frame pointer sit between it and the caller's
-            // frame, so every incoming stack argument is that much further up.
-            placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
-            placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
-            placement.edit_count = edits.total_count;
-            machine_stream_flatten(&edits, placement.edits);
-            placement.valid = true;
+            return placement;
         }
+        // Pushes that precede the frame pointer sit between it and the caller's
+        // frame, so every incoming stack argument is that much further up.
+        placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
+        placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
+        placement.edit_count = edits.total_count;
+        machine_stream_flatten(&edits, placement.edits);
+        placement.valid = true;
     }
 
     return placement;
