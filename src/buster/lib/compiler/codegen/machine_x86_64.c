@@ -4089,6 +4089,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     return selected;
 }
 
+// The rows the alias sweeps and the branch-fusion pass act on.  Everything
+// else those passes visited only to fall through, so the prepass walk records
+// where these sit and the two passes read that list instead of the rows.
+#define MACHINE_X64_CANDIDATE_OPCODES                                                                                                  \
+    (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
+     IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool assume_validated)
 {
@@ -4267,13 +4274,36 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
     }
+    // The one walk over the linked rows.  Besides the value facts below it
+    // records how many rows each block owns and which of them carry an opcode
+    // the alias sweeps and the branch-fusion pass act on, so those three
+    // passes read counted arrays instead of chasing `next` again: the four
+    // candidate opcodes are under a third of the rows, and the sweeps used to
+    // walk all of them twice just to reach them.
+    MachineSelectionRowLayout row_layout = {
+        .block_row_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1),
+    };
+    u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
+    u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    u32 candidate_count = 0;
+    bool dense_rows = true;
     u32 walk_ordinal = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
+        u32 block_row_count = 0;
+        u32 block_candidate_count = 0;
         for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
         {
             IrInstruction* instruction = function->instructions + id.value;
+            dense_rows &= id.value == block->first_instruction.value + block_row_count;
+            if ((MACHINE_X64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
+            {
+                candidate_rows[candidate_count] = block_row_count;
+                candidate_count += 1;
+                block_candidate_count += 1;
+            }
+            block_row_count += 1;
             walk_ordinal += 1;
             if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
             {
@@ -4324,6 +4354,24 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 }
             }
         }
+        row_layout.block_row_counts[block_index] = block_row_count;
+        block_candidate_counts[block_index] = block_candidate_count;
+    }
+    if (!dense_rows)
+    {
+        // Some block's rows are not its dense id range, so program order has
+        // to be written down before the passes below can count through it.
+        row_layout.rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+        u32 gathered_rows = 0;
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            IrBlock* block = function->blocks + block_index;
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            {
+                row_layout.rows[gathered_rows] = id.value;
+                gathered_rows += 1;
+            }
+        }
     }
     // Load aliasing over the promoted locals. The measured cost of
     // promotion is the copy every load lowers to: its source is the local,
@@ -4336,9 +4384,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // only re-enter at a block head, above the load, never between the
     // load and a use.
     u32* load_aliases = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    // The values the sweeps alias, in assignment order.  About an eighth of a
+    // function's values end up aliased, so the pass that hands each one its
+    // local's register reads this list — 128 K entries in a self-compile —
+    // instead of asking all 1.01 M values whether they have an alias.
+    u32* alias_values = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32 alias_count = 0;
     u32* next_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     u32* next_store_epochs = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* block_row_ids = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         load_aliases[value_index] = UINT32_MAX;
@@ -4355,19 +4408,21 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
     {
         u32 walked_ordinals = 0;
+        u32 candidate_base = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
             u32 epoch = alias_sweep * function->block_count + block_index + 1;
-            u32 row_count = 0;
-            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            u32 block_candidate_count = block_candidate_counts[block_index];
+            // Only the candidate rows can move this sweep: every other opcode
+            // leaves the root unrooted and falls straight through, and the
+            // candidates are a subsequence, so reversing them is reversing
+            // the block.
+            for (u32 remaining = block_candidate_count; remaining > 0; remaining -= 1)
             {
-                block_row_ids[row_count++] = id.value;
-            }
-            for (u32 remaining = row_count; remaining > 0; remaining -= 1)
-            {
-                IrInstruction* instruction = function->instructions + block_row_ids[remaining - 1];
-                u32 instruction_ordinal = walked_ordinals + remaining;
+                u32 row_offset = candidate_rows[candidate_base + remaining - 1];
+                IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, walked_ordinals, row_offset);
+                u32 instruction_ordinal = walked_ordinals + row_offset + 1;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     promotable_locals[instruction->operands[0].value])
                 {
@@ -4406,20 +4461,31 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     (value_use_blocks[candidate] == block_index &&
                      (next_store_epochs[root] != epoch || next_store_ordinals[root] > value_last_use_ordinals[candidate])))
                 {
+                    // The second sweep recomputes the first's load aliases
+                    // identically, so the transition is what keeps one value
+                    // out of the list twice.
+                    if (load_aliases[candidate] == UINT32_MAX)
+                    {
+                        alias_values[alias_count] = candidate;
+                        alias_count += 1;
+                    }
                     load_aliases[candidate] = root;
                 }
             }
-            walked_ordinals += row_count;
+            walked_ordinals += row_layout.block_row_counts[block_index];
+            candidate_base += block_candidate_count;
         }
     }
     // Classification pass: direct locals become stack slots, every other
     // scalar result becomes a virtual register, in stable value-id order.
+    u32 classified_rows = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        u32 block_row_count = row_layout.block_row_counts[block_index];
+        for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
         {
-            IrInstruction* instruction = function->instructions + id.value;
+            IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, classified_rows, row_offset);
             if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
             {
                 continue;
@@ -4546,14 +4612,16 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     machine_x64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
             }
         }
+        classified_rows += block_row_count;
     }
     // Aliased load results share their local's virtual register: every use
     // site then names the local directly and the load emits nothing. The
     // result's own classification vreg goes unused, which costs an id and
     // nothing else.
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
     {
-        if (load_aliases[value_index] != UINT32_MAX && selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
+        u32 value_index = alias_values[alias_index];
+        if (selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
         {
             selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
         }
@@ -4588,14 +4656,21 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.atomic_success_registers[value_index] = UINT32_MAX;
         local_store_ordinals[value_index] = 0;
     }
-    u32 fusion_ordinal = 0;
+    // The stores this stamps and the branches it fuses are both candidate
+    // rows, so this pass reads the same compact list the sweeps did.  The
+    // ordinals stay the walk's own: candidate `row_offset` in a block that
+    // starts at `fused_rows` is the row the full walk numbered next.
+    u32 fused_rows = 0;
+    u32 fusion_candidate_base = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        u32 block_candidate_count = block_candidate_counts[block_index];
+        for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
         {
-            IrInstruction* instruction = function->instructions + id.value;
-            fusion_ordinal += 1;
+            u32 row_offset = candidate_rows[fusion_candidate_base + candidate_index];
+            IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, fused_rows, row_offset);
+            u32 fusion_ordinal = fused_rows + row_offset + 1;
             if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                 promotable_locals[instruction->operands[0].value])
             {
@@ -4775,6 +4850,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 selector.fused_dead[dead_zeros[zero_index]] = 1;
             }
         }
+        fused_rows += row_layout.block_row_counts[block_index];
+        fusion_candidate_base += block_candidate_count;
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
     selector.virtual_register_definitions = arena_allocate(arena, u32, selector.virtual_register_count);
@@ -4785,6 +4862,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     }
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
+    u32 selected_rows = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -5023,8 +5101,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 }
             }
         }
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID && selector.supported; id = function->instructions[id.value].next)
+        u32 block_row_count = row_layout.block_row_counts[block_index];
+        for (u32 row_offset = 0; row_offset < block_row_count && selector.supported; row_offset += 1)
         {
+            IrInstructionId id = {.value = machine_selection_row_id(&row_layout, block, selected_rows, row_offset)};
             IrInstruction* instruction = function->instructions + id.value;
             typed_instruction_count += 1;
             simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
@@ -5045,6 +5125,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
+        selected_rows += block_row_count;
     }
     if (!selector.supported)
     {

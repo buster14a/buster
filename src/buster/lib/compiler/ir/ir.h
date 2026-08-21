@@ -438,6 +438,25 @@ BUSTER_CT_CHECK((u32)IR_UNARY_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_BINARY_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_MEMORY_ORDER_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
+// One bit per opcode, so a whole function's opcode population fits in a word.
+// Bit 63 is the marker that the word means anything at all: a function whose
+// rows were written straight into `instructions` (hand-built IR in tests, the
+// bitcode fixtures) never passes through ir_module_add_function, and a cleared
+// bit there would claim an absence nobody established.
+#define IR_OPCODE_BIT(opcode) ((u64)1 << (u32)(opcode))
+#define IR_OPCODE_SUMMARY_KNOWN ((u64)1 << 63)
+BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
+// Only these opcodes are recorded, and each one is rare enough that the
+// summary answers for nearly every function without a scan: six of the 3,814
+// functions in a self-compile hold an atomic or an inline-assembly row. The
+// appender's common path is therefore one bit test against this constant and
+// no store at all. An opcode absent from this list is never recorded and must
+// never be queried: add it here in the same change that adds the query.
+#define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
+    (IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
+
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 
 typedef struct IrBlock IrBlock;
@@ -556,6 +575,11 @@ struct IrFunction
     u32 extra_count;
     u32 extra_capacity;
     IrFunctionState state;
+    // Which IR_OPCODE_SUMMARY_TRACKED opcodes the builder appended, plus
+    // IR_OPCODE_SUMMARY_KNOWN. Consumers ask ir_function_may_contain_opcodes
+    // instead of rescanning every row for a handful of rare ones. The summary
+    // only ever over-approximates: popping a lowered row leaves its bit set.
+    u64 opcode_summary;
 };
 
 typedef struct IrModuleAssembly IrModuleAssembly;
@@ -660,6 +684,11 @@ BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFuncti
 // function's instruction array. The row stopped storing it when the record
 // was packed to one cache line.
 BUSTER_F_DECL IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* instruction);
+// True when `function` may hold one of the IR_OPCODE_BIT opcodes in `mask`,
+// which must name only IR_OPCODE_SUMMARY_TRACKED opcodes. An unknown summary
+// answers yes, so a caller's fallback scan is what a hand-built function gets
+// rather than a wrong absence.
+BUSTER_F_DECL bool ir_function_may_contain_opcodes(IrFunction* function, u64 mask);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value);

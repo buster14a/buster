@@ -400,8 +400,38 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_BRANCH_IF) == 1);
             BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_RETURN) >= 1);
             BUSTER_TEST(arguments, ir_test_binary_operation_count(function, IR_BINARY_SIGNED_LESS) == 1);
+            // The opcode summary is what lets a consumer skip a scan. A
+            // lowered function that holds no atomic and no inline assembly
+            // must answer no, and one built row by row must answer yes for
+            // exactly the opcode it was given.
+            BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0);
+            BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |
+                                                                                 IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
         }
     }
+
+    IrProgram summary_program = ir_program_initialize(arguments->arena, 1, 1, 1, 0);
+    IrFunction* summary_function = ir_module_add_function(arguments->arena, summary_program.modules, (IrFunction){
+                                                                                                        .state = IR_FUNCTION_LOWERED,
+                                                                                                    });
+    BUSTER_TEST(arguments, summary_function != 0);
+    if (summary_function)
+    {
+        BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+        ir_function_add_instruction(arguments->arena, summary_function,
+                                    (IrInstruction){
+                                        .result = IR_VALUE_ID_INVALID,
+                                        .opcode = IR_OPCODE_INLINE_ASSEMBLY,
+                                        .next = IR_INSTRUCTION_ID_INVALID,
+                                    },
+                                    (IrSourceRange){0});
+        BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+        BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD)));
+    }
+    // Rows written straight into `instructions` never reach the builder, so
+    // the summary stays unknown and every query answers yes.
+    IrFunction unbuilt_function = {0};
+    BUSTER_TEST(arguments, ir_function_may_contain_opcodes(&unbuilt_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
     return result;
 }
 #endif

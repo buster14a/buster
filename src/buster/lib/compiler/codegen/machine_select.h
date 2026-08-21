@@ -97,6 +97,31 @@ struct MachineSelectionValueFacts
     u32* use_blocks;
 };
 
+// Program order for one function's rows, accumulated by the walk a target
+// selector has to make anyway so that every later prepass counts rows down
+// instead of chasing `next` again.  The C lowerer appends a block's rows
+// consecutively, so a block's `block_row_counts[b]` rows are the dense id
+// range starting at its `first_instruction` and the layout needs no per-row
+// storage at all.  Anything that leaves a block's rows out of that shape —
+// the selection reordering test relinks two of them on purpose, and a
+// producer that interleaved two blocks' appends would too — is why `rows`
+// exists: it carries the gathered order for the whole function instead.
+typedef struct MachineSelectionRowLayout MachineSelectionRowLayout;
+struct MachineSelectionRowLayout
+{
+    u32* block_row_counts;
+    u32* rows;
+};
+
+// The id of a block's row number `offset`, where `row_base` is the number of
+// rows the enclosing walk has already passed in earlier blocks.  Callers keep
+// that running total anyway: it is also the row's zero-based ordinal.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 machine_selection_row_id(MachineSelectionRowLayout const* layout, IrBlock const* block,
+                                                                                  u32 row_base, u32 offset)
+{
+    return layout->rows ? layout->rows[row_base + offset] : block->first_instruction.value + offset;
+}
+
 BUSTER_F_DECL MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function);
 // Production selectors consume only the ID-keyed definition/use facts below.
 // Keep the full builder above for diagnostics and the declarative matcher;

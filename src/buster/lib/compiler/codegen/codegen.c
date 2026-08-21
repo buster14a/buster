@@ -756,10 +756,18 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_shape_valid(u64 cons
     return true;
 }
 
+// The atomic and inline-assembly rows this asks about are rare — six of the
+// 3,814 functions in a self-compile hold one — so the opcode summary the
+// builder already accumulated answers for every other function without
+// reading a single row.
+#define CODEGEN_X64_SHAPE_OPCODES                                                                                                      \
+    (IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) | \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_shape(IrFunction* function, bool* saves_rbx)
 {
     *saves_rbx = false;
-    if (function)
+    if (function && ir_function_may_contain_opcodes(function, CODEGEN_X64_SHAPE_OPCODES))
     {
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
@@ -6648,7 +6656,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // attempt that could not be kept. It owns all canonical emitter data.
         bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
         bool windows_dynamic_stack = false;
-        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
+        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS &&
+            ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE)))
         {
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {

@@ -905,6 +905,15 @@ that the newest id is on top, because union does not know which line is newer.
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- `IrFunction.opcode_summary` answers *may this function contain opcode X*
+  without a scan, and it answers only for the `IR_OPCODE_SUMMARY_TRACKED`
+  list: an opcode outside that list is never recorded, so
+  `ir_function_may_contain_opcodes` rejects a query naming one rather than
+  reporting a confident absence. Adding a query means adding its opcode to
+  the list in the same change. The summary is exact only for functions
+  created by `ir_module_add_function` and filled by
+  `ir_function_add_instruction`; IR whose rows were written straight into
+  `instructions` reads as unknown and every consumer keeps a scan for it.
 - Source diagnostics in shared layers use canonical `IrSourceRange` and
   `IrSourcePosition`. Do not reintroduce parser-specific source-range APIs into
   codegen, debug information, object writing, or the linker.

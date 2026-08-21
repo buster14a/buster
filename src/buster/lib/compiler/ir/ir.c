@@ -3131,6 +3131,10 @@ IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction fu
         function.id = (IrFunctionId){
             .value = module->function_count,
         };
+        // A function built through this entry point takes its rows through
+        // ir_function_add_instruction, which is what makes a cleared summary
+        // bit mean the opcode is absent rather than merely unrecorded.
+        function.opcode_summary |= IR_OPCODE_SUMMARY_KNOWN;
         module->functions[module->function_count++] = function;
         result = &module->functions[module->function_count - 1];
     }
@@ -3230,6 +3234,14 @@ IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* inst
     return (IrInstructionId){.value = (IrIdUnderlying)(instruction - function->instructions)};
 }
 
+bool ir_function_may_contain_opcodes(IrFunction* function, u64 mask)
+{
+    // Querying an opcode the summary never records would read as a
+    // confident absence; the tracked list is the contract.
+    BUSTER_CHECK((mask & ~(u64)IR_OPCODE_SUMMARY_TRACKED) == 0);
+    return !function || !(function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) || (function->opcode_summary & mask) != 0;
+}
+
 IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source)
 {
     IrInstructionId result;
@@ -3263,6 +3275,10 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             .value = function->instruction_count++,
         };
         function->instructions[id.value] = instruction;
+        if ((IR_OPCODE_SUMMARY_TRACKED >> instruction.opcode) & 1)
+        {
+            function->opcode_summary |= IR_OPCODE_BIT(instruction.opcode);
+        }
         if (function->instruction_canonical_sources)
         {
             function->instruction_canonical_sources[id.value] = canonical_source;
