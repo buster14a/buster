@@ -1878,8 +1878,7 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
     struct CIrDelimiterStackEntry
     {
         u32 token_index;
-        char8 opening;
-        u8 reserved[3];
+        CPunctuator opening;
     };
     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
     CIrDelimiterStackEntry* stack = arena_allocate(temporary.arena, CIrDelimiterStackEntry, builder->body_token_count ? builder->body_token_count : 1);
@@ -1888,22 +1887,28 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
     for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
     {
         u32 token_index = builder->body_token_start + offset;
-        CToken token = builder->preprocess.tokens[token_index];
-        if (token.kind != C_TOKEN_PUNCTUATOR || token.length != 1)
-        {
-            continue;
-        }
-        char8 character = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0];
-        if (character == '(' || character == '[' || character == '{')
+        // The punctuator id alone classifies the token, the same way
+        // c_parse_position_index_build does it: no kind test is needed because
+        // only a C_TOKEN_PUNCTUATOR token ever carries an id (see
+        // c_token_is_punctuator), and the digraph spellings carry distinct ids
+        // so `<%` stays excluded exactly like the old one-byte-spelling test.
+        // Reading the one byte through the pointer avoids both copying the
+        // whole token and materializing its spelling per scanned position.
+        CPunctuator punctuator = (CPunctuator)builder->preprocess.tokens[token_index].punctuator;
+        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+            punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {
             stack[stack_count++] = (CIrDelimiterStackEntry){
                 .token_index = token_index,
-                .opening = character,
+                .opening = punctuator,
             };
             continue;
         }
-        char8 expected = character == ')' ? '(' : character == ']' ? '[' : character == '}' ? '{' : 0;
-        if (!expected)
+        CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                               : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                               : punctuator == C_PUNCTUATOR_RIGHT_BRACE     ? C_PUNCTUATOR_LEFT_BRACE
+                                                                            : C_PUNCTUATOR_NONE;
+        if (expected == C_PUNCTUATOR_NONE)
         {
             continue;
         }
