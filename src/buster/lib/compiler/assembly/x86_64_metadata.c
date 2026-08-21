@@ -11138,178 +11138,138 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_input_contains_avx512_width
            buster_x86_metadata_feature_input_contains_literal(input, S8("avx512vl"));
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offset, BusterX86MetadataFeatureInput input)
+// One rung of the canonical feature ladder: a generated metadata spelling and
+// the canonical CLI feature tokens that must all be present for a form named
+// that way to be authorized.  Fewer than four requirements leaves the rest
+// zeroed, and feature_input_contains_all skips empty entries, so a row with no
+// requirement at all authorizes unconditionally.
+typedef struct
 {
-    // The ladder below compares one pooled requirement spelling against a long
-    // list of canonical names.  Going through the pool offset for each
-    // comparison repeats the terminator lookup, the bounds check and the pool
-    // decode entry every time, so resolve the span once and compare against
-    // that.  The shadowing macro keeps each comparison spelled as before; the
-    // underlying comparison is the same case-insensitive one.
-    u32 canonical_length = 0;
-    if (!buster_x86_metadata_string_offset_terminated(offset, &canonical_length)) return false;
-    String8 canonical_name = buster_x86_metadata_pool_span(offset, canonical_length);
-    if (canonical_name.length != canonical_length) return false;
-#define buster_x86_metadata_pool_string_equal_literal(unused_offset, literal) \
-    buster_x86_metadata_input_string_equal(canonical_name, (literal))
-    // These imported names have an explicit canonical spelling.  Resolve
-    // them before the raw fallback so a generated conjunction such as
-    // APX_F_VMX cannot be authorized by passing that one token alone.
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMD_INVLPGB")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("invlpgb"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ENQCMD")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("enqcmd"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("FRED")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("fred"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("HRESET")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("hreset"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("INVPCID")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("invpcid"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("KEYLOCKER")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("keylocker"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("LKGS")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("lkgs"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("MONITOR")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("monitor"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("MSRLIST")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("msrlist"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("MSR_IMM")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("msr-imm"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PBNDKB")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("pbndkb"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PCONFIG")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("pconfig"), S8(""), S8(""), S8(""));
-    // The generated SGX_ENCLV ISA family is the same public SGX feature.
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SGX")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("SGX_ENCLV")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sgx"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SNP")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("snp"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SMAP")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("smap"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SVM")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("svm"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("TDX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("tdx"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("VTX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("vmx"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("WBNOINVD")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("wbnoinvd"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("WRMSRNS")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("wrmsrns"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("XSAVE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("xsave"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("XSAVES")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("xsaves"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("F16C")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("f16c"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("FMA")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("fma"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSSE3")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("SSSE3MMX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("ssse3"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE4")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse4.1"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE42")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse4.2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("BMI2")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("bmi2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ADX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("adx"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("MOVBE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("movbe"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDRAND")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("rdrand"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDSEED")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("rdseed"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SHA")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sha"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SHA512")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sha512"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SM3")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sm3"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SM4")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sm4"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("WAITPKG")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("waitpkg"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PKU")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("pku"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PTWRITE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("ptwrite"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SERIALIZE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("serialize"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CLFLUSHOPT")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("clflushopt"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CLWB")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("clwb"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDWRFSGS")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("fsgsbase"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RTM")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("rtm"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("TSX_LDTRK")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("tsxldtrk"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("UINTR")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("uintr"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PREFETCHWT1")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("prefetchwt1"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ACE_1")))
+    String8 canonical;
+    String8 required[4];
+} BusterX86MetadataFeatureRule;
+
+// These imported names have an explicit canonical spelling.  They resolve
+// before the raw fallback in buster_x86_metadata_canonical_feature_matches so
+// a generated conjunction such as APX_F_VMX cannot be authorized by passing
+// that one token alone.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_feature_rules_explicit[] = {
+    {S8_INITIALIZER("AMD_INVLPGB"), {S8_INITIALIZER("invlpgb")}},
+    {S8_INITIALIZER("ENQCMD"), {S8_INITIALIZER("enqcmd")}},
+    {S8_INITIALIZER("FRED"), {S8_INITIALIZER("fred")}},
+    {S8_INITIALIZER("HRESET"), {S8_INITIALIZER("hreset")}},
+    {S8_INITIALIZER("INVPCID"), {S8_INITIALIZER("invpcid")}},
+    {S8_INITIALIZER("KEYLOCKER"), {S8_INITIALIZER("keylocker")}},
+    {S8_INITIALIZER("LKGS"), {S8_INITIALIZER("lkgs")}},
+    {S8_INITIALIZER("MONITOR"), {S8_INITIALIZER("monitor")}},
+    {S8_INITIALIZER("MSRLIST"), {S8_INITIALIZER("msrlist")}},
+    {S8_INITIALIZER("MSR_IMM"), {S8_INITIALIZER("msr-imm")}},
+    {S8_INITIALIZER("PBNDKB"), {S8_INITIALIZER("pbndkb")}},
+    {S8_INITIALIZER("PCONFIG"), {S8_INITIALIZER("pconfig")}},
+    {S8_INITIALIZER("SGX"), {S8_INITIALIZER("sgx")}},
+    {S8_INITIALIZER("SGX_ENCLV"), {S8_INITIALIZER("sgx")}},
+    {S8_INITIALIZER("SNP"), {S8_INITIALIZER("snp")}},
+    {S8_INITIALIZER("SMAP"), {S8_INITIALIZER("smap")}},
+    {S8_INITIALIZER("SVM"), {S8_INITIALIZER("svm")}},
+    {S8_INITIALIZER("TDX"), {S8_INITIALIZER("tdx")}},
+    {S8_INITIALIZER("VTX"), {S8_INITIALIZER("vmx")}},
+    {S8_INITIALIZER("WBNOINVD"), {S8_INITIALIZER("wbnoinvd")}},
+    {S8_INITIALIZER("WRMSRNS"), {S8_INITIALIZER("wrmsrns")}},
+    {S8_INITIALIZER("XSAVE"), {S8_INITIALIZER("xsave")}},
+    {S8_INITIALIZER("XSAVES"), {S8_INITIALIZER("xsaves")}},
+    {S8_INITIALIZER("F16C"), {S8_INITIALIZER("f16c")}},
+    {S8_INITIALIZER("FMA"), {S8_INITIALIZER("fma")}},
+    {S8_INITIALIZER("SSSE3"), {S8_INITIALIZER("ssse3")}},
+    {S8_INITIALIZER("SSSE3MMX"), {S8_INITIALIZER("ssse3")}},
+    {S8_INITIALIZER("SSE4"), {S8_INITIALIZER("sse4.1")}},
+    {S8_INITIALIZER("SSE42"), {S8_INITIALIZER("sse4.2")}},
+    {S8_INITIALIZER("BMI2"), {S8_INITIALIZER("bmi2")}},
+    {S8_INITIALIZER("ADX"), {S8_INITIALIZER("adx")}},
+    {S8_INITIALIZER("MOVBE"), {S8_INITIALIZER("movbe")}},
+    {S8_INITIALIZER("RDRAND"), {S8_INITIALIZER("rdrand")}},
+    {S8_INITIALIZER("RDSEED"), {S8_INITIALIZER("rdseed")}},
+    {S8_INITIALIZER("SHA"), {S8_INITIALIZER("sha")}},
+    {S8_INITIALIZER("SHA512"), {S8_INITIALIZER("sha512")}},
+    {S8_INITIALIZER("SM3"), {S8_INITIALIZER("sm3")}},
+    {S8_INITIALIZER("SM4"), {S8_INITIALIZER("sm4")}},
+    {S8_INITIALIZER("WAITPKG"), {S8_INITIALIZER("waitpkg")}},
+    {S8_INITIALIZER("PKU"), {S8_INITIALIZER("pku")}},
+    {S8_INITIALIZER("PTWRITE"), {S8_INITIALIZER("ptwrite")}},
+    {S8_INITIALIZER("SERIALIZE"), {S8_INITIALIZER("serialize")}},
+    {S8_INITIALIZER("CLFLUSHOPT"), {S8_INITIALIZER("clflushopt")}},
+    {S8_INITIALIZER("CLWB"), {S8_INITIALIZER("clwb")}},
+    {S8_INITIALIZER("RDWRFSGS"), {S8_INITIALIZER("fsgsbase")}},
+    {S8_INITIALIZER("RTM"), {S8_INITIALIZER("rtm")}},
+    {S8_INITIALIZER("TSX_LDTRK"), {S8_INITIALIZER("tsxldtrk")}},
+    {S8_INITIALIZER("UINTR"), {S8_INITIALIZER("uintr")}},
+    {S8_INITIALIZER("PREFETCHWT1"), {S8_INITIALIZER("prefetchwt1")}},
+    {S8_INITIALIZER("CMPXCHG16B"), {S8_INITIALIZER("cx16")}},
+    {S8_INITIALIZER("SSE3X87"), {S8_INITIALIZER("sse3")}},
+    {S8_INITIALIZER("FCMOV"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("FCOMI"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("X87"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("PENTIUMMMX"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("SSE2MMX"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("APX_F_CET"), {S8_INITIALIZER("apx"), S8_INITIALIZER("shstk")}},
+    {S8_INITIALIZER("APX_F_ENQCMD"), {S8_INITIALIZER("apx"), S8_INITIALIZER("enqcmd")}},
+    {S8_INITIALIZER("APX_F_INVPCID"), {S8_INITIALIZER("apx"), S8_INITIALIZER("invpcid")}},
+    {S8_INITIALIZER("APX_F_MSR_IMM"), {S8_INITIALIZER("apx"), S8_INITIALIZER("msr-imm")}},
+    {S8_INITIALIZER("APX_F_MOVDIR64B"), {S8_INITIALIZER("apx"), S8_INITIALIZER("movdir64b")}},
+    {S8_INITIALIZER("APX_F_VMX"), {S8_INITIALIZER("apx"), S8_INITIALIZER("vmx")}},
+    // Every target this compiler emits for is 64-bit, so long mode needs no
+    // capability token behind it.
+    {S8_INITIALIZER("LONGMODE")},
+};
+
+// Generated ISA-set names whose gate is a plain conjunction.  These resolve
+// after the raw fallback, so an exact generated spelling supplied by a client
+// still authorizes its own form.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_feature_rules_generated[] = {
+    {S8_INITIALIZER("AMX_TILE"), {S8_INITIALIZER("amx-tile")}},
+    {S8_INITIALIZER("AMX_INT8"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-int8")}},
+    {S8_INITIALIZER("AMX_BF16"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-bf16")}},
+    {S8_INITIALIZER("AMX_FP16"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-fp16")}},
+    {S8_INITIALIZER("AMX_COMPLEX"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-complex")}},
+    {S8_INITIALIZER("AMX_FP8"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-fp8")}},
+    {S8_INITIALIZER("AMX_AVX512"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-avx512")}},
+    {S8_INITIALIZER("AMX_MOVRS"), {S8_INITIALIZER("amx-tile"), S8_INITIALIZER("amx-movrs")}},
+    {S8_INITIALIZER("APX_F"), {S8_INITIALIZER("apx")}},
+    {S8_INITIALIZER("AVX"), {S8_INITIALIZER("avx")}},
+    {S8_INITIALIZER("AVX2"), {S8_INITIALIZER("avx2")}},
+    {S8_INITIALIZER("AVX2GATHER"), {S8_INITIALIZER("avx2")}},
+    {S8_INITIALIZER("AVX_GFNI"), {S8_INITIALIZER("avx"), S8_INITIALIZER("gfni")}},
+    {S8_INITIALIZER("AVX_IFMA"), {S8_INITIALIZER("avx"), S8_INITIALIZER("avx-ifma")}},
+    {S8_INITIALIZER("AVX_NE_CONVERT"), {S8_INITIALIZER("avx"), S8_INITIALIZER("avx-ne-convert")}},
+    {S8_INITIALIZER("AVX_VNNI"), {S8_INITIALIZER("avx2"), S8_INITIALIZER("avx-vnni")}},
+    {S8_INITIALIZER("AVX_VNNI_INT8"), {S8_INITIALIZER("avx2"), S8_INITIALIZER("avx-vnni-int8")}},
+    {S8_INITIALIZER("AVX_VNNI_INT16"), {S8_INITIALIZER("avx2"), S8_INITIALIZER("avx-vnni-int16")}},
+    {S8_INITIALIZER("GFNI"), {S8_INITIALIZER("gfni")}},
+    {S8_INITIALIZER("VAES"), {S8_INITIALIZER("vaes")}},
+    {S8_INITIALIZER("VPCLMULQDQ"), {S8_INITIALIZER("vpclmulqdq")}},
+    {S8_INITIALIZER("AES"), {S8_INITIALIZER("aes")}},
+    {S8_INITIALIZER("PCLMUL"), {S8_INITIALIZER("pclmul")}},
+    {S8_INITIALIZER("SSE"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("SSE2"), {S8_INITIALIZER("sse2")}},
+    {S8_INITIALIZER("SSE3"), {S8_INITIALIZER("sse3")}},
+    {S8_INITIALIZER("ICACHE_PREFETCH"), {S8_INITIALIZER("prefetchi")}},
+};
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const* buster_x86_metadata_feature_rule_find(BusterX86MetadataFeatureRule const* rules, u64 rule_count,
+                                                                                              String8 canonical_name)
+{
+    BusterX86MetadataFeatureRule const* found = 0;
+    for (u64 index = 0; index < rule_count && !found; index += 1)
     {
-        // The driver exposes the canonical CLI spelling, while direct
-        // metadata clients historically supplied the generated ISA-set name.
-        // Accept both exact spellings (case-insensitively), but do not let the
-        // category (AMX_TILE) or extension (ACE) authorize this gate.
-        return buster_x86_metadata_feature_input_contains_literal(input, S8("ace-1")) ||
-               buster_x86_metadata_feature_input_contains_literal(input, S8("ACE_1"));
+        if (buster_x86_metadata_input_string_equal(canonical_name, rules[index].canonical)) found = &rules[index];
     }
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CMPXCHG16B")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("cx16"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3X87")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse3"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("FCMOV")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("FCOMI")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("X87")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("PENTIUMMMX")) ||
-        buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE2MMX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("LONGMODE"))) return true;
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_CET")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("shstk"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_ENQCMD")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("enqcmd"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_INVPCID")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("invpcid"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_MSR_IMM")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("msr-imm"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_MOVDIR64B")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("movdir64b"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_VMX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("vmx"), S8(""), S8(""));
+    return found;
+}
 
-    // Existing metadata clients may still pass an exact generated spelling
-    // for predicates whose canonical mapping is not part of this privileged
-    // feature seam.  Keep that compatibility fallback after the explicit
-    // conjunctions above.
-    if (buster_x86_metadata_feature_input_contains_pool(input, offset)) return true;
-
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_TILE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_INT8")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-int8"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_BF16")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-bf16"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_FP16")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-fp16"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_COMPLEX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-complex"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_FP8")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-fp8"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_AVX512")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-avx512"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_MOVRS")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-movrs"), S8(""), S8(""));
-
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8(""), S8(""), S8(""));
+// The families whose gate follows from the name's prefix and width suffix
+// rather than from an exact spelling.  A name no family claims fails closed.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_family_matches(u32 offset, BusterX86MetadataFeatureInput input)
+{
+    bool matches = false;
     if (buster_x86_metadata_pool_string_has_prefix(offset, S8("APX_F_")))
     {
         bool n3 = buster_x86_metadata_pool_string_contains(offset, S8("N3"));
@@ -11320,117 +11280,107 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         else if (buster_x86_metadata_pool_string_contains(offset, S8("POPCNT"))) secondary = S8("popcnt");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("ADX"))) secondary = S8("adx");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("MOVBE"))) secondary = S8("movbe");
-        else if (buster_x86_metadata_pool_string_contains(offset, S8("AMX_MOVRS")))
-            secondary = S8("amx-movrs");
+        else if (buster_x86_metadata_pool_string_contains(offset, S8("AMX_MOVRS"))) secondary = S8("amx-movrs");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("AMX"))) secondary = S8("amx-tile");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("MOVRS"))) secondary = S8("movrs");
-        else if (!n3)
-            return false;
-        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"),
-                                                               n3 ? S8("apx-nci-ndd-nf") : S8(""), secondary, S8(""));
+        // An APX_F_ name that names neither a secondary feature nor the N3
+        // extension is not a gate this seam knows how to authorize.
+        if (secondary.length || n3)
+            matches = buster_x86_metadata_feature_input_contains_all(input, S8("apx"), n3 ? S8("apx-nci-ndd-nf") : S8(""), secondary, S8(""));
     }
-
-    if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_2_BF16_")))
-    {
-        return buster_x86_metadata_feature_input_contains_all(
-            input, S8("avx10.2"), S8("avx512bf16"),
-            buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
-    }
-    if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_V2_AUX_")))
-    {
-        return buster_x86_metadata_feature_input_contains_all(
-            input, S8("avx10.2"), S8("avx10-v1-aux"),
-            buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
-    }
-    if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_MOVRS_")))
-    {
-        return buster_x86_metadata_feature_input_contains_all(
-            input, S8("avx10.1"), S8("movrs"),
-            buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
-    }
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_2_BF16_")))
+        matches = buster_x86_metadata_feature_input_contains_all(input, S8("avx10.2"), S8("avx512bf16"),
+                                                                 buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_V2_AUX_")))
+        matches = buster_x86_metadata_feature_input_contains_all(input, S8("avx10.2"), S8("avx10-v1-aux"),
+                                                                 buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX10_MOVRS_")))
+        matches = buster_x86_metadata_feature_input_contains_all(input, S8("avx10.1"), S8("movrs"),
+                                                                 buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
     // AVX10.2's newly imported FP8/minmax/saturating-convert families use
     // AVX512-style ISA names even though AVX10.2 is the architectural gate.
     // The 512-bit variants additionally require the AVX10-512 width marker;
     // 128/256-bit and scalar variants deliberately do not.  Keep this rule
     // keyed to the generated ISA family and width suffix so it applies to
     // every matching form without a mnemonic or form inventory.
-    if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_FP8_CONVERT_")) ||
-        buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_MINMAX_")) ||
-        buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_SAT_CVT_")) ||
-        buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_SAT_CVT_DS_")))
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_FP8_CONVERT_")) ||
+             buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_MINMAX_")) ||
+             buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_SAT_CVT_")) ||
+             buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_SAT_CVT_DS_")))
+        matches = buster_x86_metadata_feature_input_contains_all(input, S8("avx10.2"), S8(""),
+                                                                 buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
+    else
     {
-        return buster_x86_metadata_feature_input_contains_all(
-            input, S8("avx10.2"), S8(""),
-            buster_x86_metadata_pool_string_has_suffix(offset, S8("512")) ? S8("avx10-512") : S8(""), S8(""));
+        // AVX-512 forms are width-sensitive.  Require the corresponding
+        // canonical subfeature, and require AVX512VL for the 128/256
+        // encodings.
+        String8 avx512_feature = S8("");
+        if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512F_"))) avx512_feature = S8("avx512f");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512BW_"))) avx512_feature = S8("avx512bw");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512CD_"))) avx512_feature = S8("avx512cd");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512DQ_"))) avx512_feature = S8("avx512dq");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512ER_"))) avx512_feature = S8("avx512er");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512PF_"))) avx512_feature = S8("avx512pf");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_IFMA_"))) avx512_feature = S8("avx512ifma");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI_"))) avx512_feature = S8("avx512vbmi");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI2_"))) avx512_feature = S8("avx512vbmi2");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_"))) avx512_feature = S8("avx512vnni");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT8_"))) avx512_feature = S8("avx-vnni-int8");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT16_"))) avx512_feature = S8("avx-vnni-int16");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BITALG_"))) avx512_feature = S8("avx512bitalg");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPOPCNTDQ_"))) avx512_feature = S8("avx512vpopcntdq");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VP2INTERSECT_"))) avx512_feature = S8("avx512vp2intersect");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4FMAPS_"))) avx512_feature = S8("avx5124fmaps");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4VNNIW_"))) avx512_feature = S8("avx5124vnniw");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_GFNI_"))) avx512_feature = S8("gfni");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VAES_"))) avx512_feature = S8("vaes");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPCLMULQDQ_"))) avx512_feature = S8("vpclmulqdq");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BF16_"))) avx512_feature = S8("avx512bf16");
+        else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_FP16_"))) avx512_feature = S8("avx512fp16");
+        if (avx512_feature.length) matches = buster_x86_metadata_feature_input_contains_avx512_width(offset, input, avx512_feature);
     }
+    return matches;
+}
 
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX2")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX2GATHER")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_GFNI")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx"), S8("gfni"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_IFMA")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx"), S8("avx-ifma"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_NE_CONVERT")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx"), S8("avx-ne-convert"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_VNNI")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx2"), S8("avx-vnni"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_VNNI_INT8")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx2"), S8("avx-vnni-int8"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AVX_VNNI_INT16")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("avx2"), S8("avx-vnni-int16"), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("GFNI")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("gfni"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("VAES")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("vaes"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("VPCLMULQDQ")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("vpclmulqdq"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AES")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("aes"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PCLMUL")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("pclmul"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE2")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("sse3"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ICACHE_PREFETCH")))
-        return buster_x86_metadata_feature_input_contains_all(input, S8("prefetchi"), S8(""), S8(""), S8(""));
-
-    // AVX-512 forms are width-sensitive.  Require the corresponding
-    // canonical subfeature, and require AVX512VL for the 128/256 encodings.
-    String8 avx512_feature = S8("");
-    if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512F_"))) avx512_feature = S8("avx512f");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512BW_"))) avx512_feature = S8("avx512bw");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512CD_"))) avx512_feature = S8("avx512cd");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512DQ_"))) avx512_feature = S8("avx512dq");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512ER_"))) avx512_feature = S8("avx512er");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512PF_"))) avx512_feature = S8("avx512pf");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_IFMA_"))) avx512_feature = S8("avx512ifma");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI_"))) avx512_feature = S8("avx512vbmi");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI2_"))) avx512_feature = S8("avx512vbmi2");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_"))) avx512_feature = S8("avx512vnni");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT8_"))) avx512_feature = S8("avx-vnni-int8");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT16_"))) avx512_feature = S8("avx-vnni-int16");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BITALG_"))) avx512_feature = S8("avx512bitalg");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPOPCNTDQ_"))) avx512_feature = S8("avx512vpopcntdq");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VP2INTERSECT_")))
-        avx512_feature = S8("avx512vp2intersect");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4FMAPS_"))) avx512_feature = S8("avx5124fmaps");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4VNNIW_"))) avx512_feature = S8("avx5124vnniw");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_GFNI_"))) avx512_feature = S8("gfni");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VAES_"))) avx512_feature = S8("vaes");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPCLMULQDQ_"))) avx512_feature = S8("vpclmulqdq");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BF16_"))) avx512_feature = S8("avx512bf16");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_FP16_"))) avx512_feature = S8("avx512fp16");
-    if (avx512_feature.length)
-        return buster_x86_metadata_feature_input_contains_avx512_width(offset, input, avx512_feature);
-    return false;
-#undef buster_x86_metadata_pool_string_equal_literal
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offset, BusterX86MetadataFeatureInput input)
+{
+    // The rule tables compare one pooled requirement spelling against a long
+    // list of canonical names.  Going through the pool offset for each
+    // comparison would repeat the terminator lookup, the bounds check and the
+    // pool decode entry every time, so resolve the span once and compare
+    // against that.
+    bool matches = false;
+    u32 canonical_length = 0;
+    bool terminated = buster_x86_metadata_string_offset_terminated(offset, &canonical_length);
+    String8 canonical_name = terminated ? buster_x86_metadata_pool_span(offset, canonical_length) : (String8){0};
+    if (terminated && canonical_name.length == canonical_length)
+    {
+        BusterX86MetadataFeatureRule const* rule =
+            buster_x86_metadata_feature_rule_find(buster_x86_metadata_feature_rules_explicit,
+                                                  BUSTER_ARRAY_LENGTH(buster_x86_metadata_feature_rules_explicit), canonical_name);
+        if (rule) matches = buster_x86_metadata_feature_input_contains_all(input, rule->required[0], rule->required[1], rule->required[2], rule->required[3]);
+        // The driver exposes the canonical CLI spelling, while direct metadata
+        // clients historically supplied the generated ISA-set name.  Accept
+        // both exact spellings (case-insensitively), but do not let the
+        // category (AMX_TILE) or extension (ACE) authorize this gate.
+        else if (buster_x86_metadata_input_string_equal(canonical_name, S8("ACE_1")))
+            matches = buster_x86_metadata_feature_input_contains_literal(input, S8("ace-1")) ||
+                      buster_x86_metadata_feature_input_contains_literal(input, S8("ACE_1"));
+        // Existing metadata clients may still pass an exact generated spelling
+        // for predicates whose canonical mapping is not part of this
+        // privileged feature seam.  Keep that compatibility fallback after the
+        // explicit conjunctions above.
+        else if (buster_x86_metadata_feature_input_contains_pool(input, offset)) matches = true;
+        else
+        {
+            rule = buster_x86_metadata_feature_rule_find(buster_x86_metadata_feature_rules_generated,
+                                                         BUSTER_ARRAY_LENGTH(buster_x86_metadata_feature_rules_generated), canonical_name);
+            if (rule)
+                matches = buster_x86_metadata_feature_input_contains_all(input, rule->required[0], rule->required[1], rule->required[2], rule->required[3]);
+            else matches = buster_x86_metadata_feature_family_matches(offset, input);
+        }
+    }
+    return matches;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_baseline(BusterX86GeneratedForm form)
