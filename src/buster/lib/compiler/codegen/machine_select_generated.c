@@ -62,39 +62,50 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_generated_target_accepts(Target targe
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_generated_matches(MachineSelectionGeneratedRule const* rule, MachineSelectionRuleContext context)
 {
-    if (!rule || !machine_selection_generated_target_accepts(context.target, rule->match))
+    bool result = false;
+    if (rule && machine_selection_generated_target_accepts(context.target, rule->match))
     {
-        return false;
+        switch (rule->match)
+        {
+            case MACHINE_SELECTION_RULE_MATCH_CONSTANT:
+                result = context.known_constant || machine_selection_generated_opcode_is_constant(context.opcode);
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_LOCAL:
+                result = context.opcode == IR_OPCODE_LOCAL || context.promotable_local;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_MEMORY:
+                result = (context.side_effects & (MACHINE_SELECTION_SIDE_EFFECT_READ_MEMORY | MACHINE_SELECTION_SIDE_EFFECT_WRITE_MEMORY)) != 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_ADDRESS:
+                result = context.address_candidate;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_ARITHMETIC:
+                result = machine_selection_generated_opcode_is_arithmetic(context.opcode) &&
+                         (context.result_class & (MACHINE_SELECTION_RESULT_SCALAR | MACHINE_SELECTION_RESULT_VECTOR)) != 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_CALL:
+                result = context.opcode == IR_OPCODE_CALL || (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_CALL) != 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_CONTROL:
+                result = machine_selection_generated_opcode_is_control(context.opcode) ||
+                         (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_CONTROL) != 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_VECTOR:
+                result = context.vector_features && (context.result_class & MACHINE_SELECTION_RESULT_VECTOR) != 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_SCALAR:
+                result = (context.result_class & MACHINE_SELECTION_RESULT_SCALAR) != 0 &&
+                         (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_UNKNOWN) == 0;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_FALLBACK:
+                result = true;
+                break;
+            case MACHINE_SELECTION_RULE_MATCH_COUNT:
+                break;
+        }
     }
-    switch (rule->match)
-    {
-        case MACHINE_SELECTION_RULE_MATCH_CONSTANT:
-            return context.known_constant || machine_selection_generated_opcode_is_constant(context.opcode);
-        case MACHINE_SELECTION_RULE_MATCH_LOCAL:
-            return context.opcode == IR_OPCODE_LOCAL || context.promotable_local;
-        case MACHINE_SELECTION_RULE_MATCH_MEMORY:
-            return (context.side_effects & (MACHINE_SELECTION_SIDE_EFFECT_READ_MEMORY | MACHINE_SELECTION_SIDE_EFFECT_WRITE_MEMORY)) != 0;
-        case MACHINE_SELECTION_RULE_MATCH_ADDRESS:
-            return context.address_candidate;
-        case MACHINE_SELECTION_RULE_MATCH_ARITHMETIC:
-            return machine_selection_generated_opcode_is_arithmetic(context.opcode) &&
-                   (context.result_class & (MACHINE_SELECTION_RESULT_SCALAR | MACHINE_SELECTION_RESULT_VECTOR)) != 0;
-        case MACHINE_SELECTION_RULE_MATCH_CALL:
-            return context.opcode == IR_OPCODE_CALL || (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_CALL) != 0;
-        case MACHINE_SELECTION_RULE_MATCH_CONTROL:
-            return machine_selection_generated_opcode_is_control(context.opcode) ||
-                   (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_CONTROL) != 0;
-        case MACHINE_SELECTION_RULE_MATCH_VECTOR:
-            return context.vector_features && (context.result_class & MACHINE_SELECTION_RESULT_VECTOR) != 0;
-        case MACHINE_SELECTION_RULE_MATCH_SCALAR:
-            return (context.result_class & MACHINE_SELECTION_RESULT_SCALAR) != 0 &&
-                   (context.side_effects & MACHINE_SELECTION_SIDE_EFFECT_UNKNOWN) == 0;
-        case MACHINE_SELECTION_RULE_MATCH_FALLBACK:
-            return true;
-        case MACHINE_SELECTION_RULE_MATCH_COUNT:
-            break;
-    }
-    return false;
+
+    return result;
 }
 
 MachineSelectionDecision machine_selection_rule_select(MachineSelectionRuleContext context, MachineSelectionMode mode,

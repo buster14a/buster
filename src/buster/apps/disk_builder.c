@@ -54,82 +54,85 @@ ENUM(VerificationError, VERIFICATION_ERROR_DISK_SUCCESS, VERIFICATION_ERROR_DISK
      VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS, VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
      VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA, );
 
-BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
+// The three records after the protective entry must be entirely zero; the scan
+// stops at the first non-zero one because that is already the whole answer.
+BUSTER_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mbr)
 {
-    if (disk_size == 0)
-    {
-        return VERIFICATION_ERROR_DISK_EMPTY;
-    }
-
-    if (disk_size % 512 != 0)
-    {
-        return VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED;
-    }
-
-    let mbr = (ProtectiveMBR*)disk;
-    u64 error_count = 0;
-
-    if (mbr->unique_mbr_disk_signature != 0)
-    {
-        return VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO;
-    }
-
-    if (mbr->unknown != 0)
-    {
-        return VERIFICATION_ERROR_UNKNOWN_NOT_ZERO;
-    }
-
     MBRPartitionRecord zero_record;
     memset(&zero_record, 0, sizeof(zero_record));
 
-    for (int i = 1; i < 4; i += 1)
+    bool result = true;
+    for (int i = 1; i < 4 && result; i += 1)
     {
-        let record = &mbr->partition_records[i];
-        bool is_equal = memcmp(record, &zero_record, sizeof(*record)) == 0;
-        if (!is_equal)
+        result = memcmp(&mbr->partition_records[i], &zero_record, sizeof(zero_record)) == 0;
+    }
+
+    return result;
+}
+
+// Reports the first thing wrong with the image. The checks are ordered so that
+// each one only runs once its predecessors have vouched for the bytes it reads:
+// the sector-size check guards the MBR cast, and the MBR checks guard the
+// protective partition record.
+BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
+{
+    VerificationError result = VERIFICATION_ERROR_DISK_SUCCESS;
+    if (disk_size == 0)
+    {
+        result = VERIFICATION_ERROR_DISK_EMPTY;
+    }
+    else if (disk_size % 512 != 0)
+    {
+        result = VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED;
+    }
+    else
+    {
+        let mbr = (ProtectiveMBR*)disk;
+        let gpt_partition_record = &mbr->partition_records[0];
+
+        if (mbr->unique_mbr_disk_signature != 0)
         {
-            return VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED;
+            result = VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO;
+        }
+        else if (mbr->unknown != 0)
+        {
+            result = VERIFICATION_ERROR_UNKNOWN_NOT_ZERO;
+        }
+        else if (!verify_disk_reserved_partitions_zeroed(mbr))
+        {
+            result = VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED;
+        }
+        else if (mbr->signature[0] != 0x55 || mbr->signature[1] != 0xaa)
+        {
+            result = VERIFICATION_ERROR_MBR_BAD_SIGNATURE;
+        }
+        else if (gpt_partition_record->boot_indicator != 0)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO;
+        }
+        else if (gpt_partition_record->starting_chs != 0x200)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512;
+        }
+        else if (gpt_partition_record->os_type != 0xee)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE;
+        }
+        else if (gpt_partition_record->ending_chs != 0xffffff)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS;
+        }
+        else if (gpt_partition_record->starting_lba != 1)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA;
+        }
+        else if (gpt_partition_record->size_in_lba != 0xffffff)
+        {
+            result = VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA;
         }
     }
 
-    if (mbr->signature[0] != 0x55 || mbr->signature[1] != 0xaa)
-    {
-        return VERIFICATION_ERROR_MBR_BAD_SIGNATURE;
-    }
-
-    let gpt_partition_record = &mbr->partition_records[0];
-
-    if (gpt_partition_record->boot_indicator != 0)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO;
-    }
-
-    if (gpt_partition_record->starting_chs != 0x200)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512;
-    }
-
-    if (gpt_partition_record->os_type != 0xee)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE;
-    }
-
-    if (gpt_partition_record->ending_chs != 0xffffff)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS;
-    }
-
-    if (gpt_partition_record->starting_lba != 1)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA;
-    }
-
-    if (gpt_partition_record->size_in_lba != 0xffffff)
-    {
-        return VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA;
-    }
-
-    return VERIFICATION_ERROR_DISK_SUCCESS;
+    return result;
 }
 
 STRUCT(FileWriter)

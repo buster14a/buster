@@ -194,11 +194,17 @@ static bool arm_a64_is_name_char(char8 c)
 
 static String8 arm_a64_tag_attr(ArmA64XmlTag tag, String8 wanted)
 {
-    for (u32 index = 0; index < tag.attr_count; index += 1)
+    String8 result = {0};
+    // First match wins, and an attribute value may itself be empty, so the scan
+    // stops on `found` rather than on `result` having become non-empty.
+    bool found = false;
+    for (u32 index = 0; index < tag.attr_count && !found; index += 1)
     {
-        if (string_equal(tag.attrs[index].name, wanted)) return tag.attrs[index].value;
+        found = string_equal(tag.attrs[index].name, wanted);
+        if (found) result = tag.attrs[index].value;
     }
-    return (String8){0};
+
+    return result;
 }
 
 static bool arm_a64_xml_next(ArmA64XmlCursor* cursor, ArmA64XmlTag* result)

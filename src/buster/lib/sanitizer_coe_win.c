@@ -30,27 +30,24 @@ bool buster_sanitizer_win_continue_on_error(void)
 __attribute__((used)) void buster_sanitizer_win_raw_write(char const* message) __asm__("?RawWrite@__coe_win@@YAXPEBD@Z");
 void buster_sanitizer_win_raw_write(char const* message)
 {
-    if (message == NULL)
+    BusterWinHandle error_file = message != NULL ? GetStdHandle(BUSTER_STD_ERROR_HANDLE) : NULL;
+    if (error_file != NULL)
     {
-        return;
-    }
-
-    BusterWinHandle error_file = GetStdHandle(BUSTER_STD_ERROR_HANDLE);
-    if (error_file == NULL)
-    {
-        return;
-    }
-
-    BusterWinDword length = buster_sanitizer_win_string_length(message);
-    while (length > 0)
-    {
-        BusterWinDword written = 0;
-        BusterWinBool ok = WriteFile(error_file, message, length, &written, NULL);
-        if (!ok || written == 0)
+        // A short or failed write ends the loop the same way a drained message
+        // does; this runs on the sanitizer's failure path and has no reporting
+        // channel of its own.
+        BusterWinDword length = buster_sanitizer_win_string_length(message);
+        bool writing = true;
+        while (length > 0 && writing)
         {
-            return;
+            BusterWinDword written = 0;
+            BusterWinBool ok = WriteFile(error_file, message, length, &written, NULL);
+            writing = ok && written != 0;
+            if (writing)
+            {
+                message += written;
+                length -= written;
+            }
         }
-        message += written;
-        length -= written;
     }
 }

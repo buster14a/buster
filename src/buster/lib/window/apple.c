@@ -108,46 +108,46 @@ BUSTER_GLOBAL_LOCAL SliceString8 buster_apple_file_paths_from_drag(Arena* arena,
     if (urls)
     {
         u64 url_count = (u64)buster_msg_ulong(urls, "count");
-        if (!wm_native_file_drop_budget_allows(url_count, 0) || !wm_native_file_drop_array_size_allowed(url_count, sizeof(WmAppleFileUrlPath)))
-        {
-            return result;
-        }
+        // Every budget refusal leaves `result` empty, so a single gate carries
+        // all three of them and the measuring pass stops as soon as one trips.
+        bool within_budget =
+            wm_native_file_drop_budget_allows(url_count, 0) && wm_native_file_drop_array_size_allowed(url_count, sizeof(WmAppleFileUrlPath));
 
         u64 output_bytes = 0;
-        for (u64 url_index = 0; url_index < url_count; url_index += 1)
+        for (u64 url_index = 0; url_index < url_count && within_budget; url_index += 1)
         {
             id url = buster_msg_id_ulong(urls, "objectAtIndex:", (BusterNSUInteger)url_index);
             bool is_file_url = false;
             String8 path = buster_apple_file_path_from_url(url, &is_file_url);
             if (is_file_url && wm_file_path_is_valid(path))
             {
-                if (path.length > BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - output_bytes)
+                within_budget = path.length <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES - output_bytes;
+                if (within_budget)
                 {
-                    return result;
+                    output_bytes += path.length;
                 }
-                output_bytes += path.length;
             }
         }
-        if (!wm_native_file_drop_budget_allows(url_count, output_bytes))
-        {
-            return result;
-        }
 
-        TemporalArena scratch = scratch_begin(0, 0);
-        WmAppleFileUrlPath* values = url_count ? arena_allocate(scratch.arena, WmAppleFileUrlPath, url_count) : 0;
-        for (u64 url_index = 0; url_index < url_count; url_index += 1)
+        if (within_budget && wm_native_file_drop_budget_allows(url_count, output_bytes))
         {
-            id url = buster_msg_id_ulong(urls, "objectAtIndex:", (BusterNSUInteger)url_index);
-            bool is_file_url = false;
-            String8 path = buster_apple_file_path_from_url(url, &is_file_url);
-            values[url_index] = (WmAppleFileUrlPath){
-                .path = path,
-                .is_file_url = is_file_url,
-            };
+            TemporalArena scratch = scratch_begin(0, 0);
+            WmAppleFileUrlPath* values = url_count ? arena_allocate(scratch.arena, WmAppleFileUrlPath, url_count) : 0;
+            for (u64 url_index = 0; url_index < url_count; url_index += 1)
+            {
+                id url = buster_msg_id_ulong(urls, "objectAtIndex:", (BusterNSUInteger)url_index);
+                bool is_file_url = false;
+                String8 path = buster_apple_file_path_from_url(url, &is_file_url);
+                values[url_index] = (WmAppleFileUrlPath){
+                    .path = path,
+                    .is_file_url = is_file_url,
+                };
+            }
+            result = wm_apple_file_paths_from_values(arena, (SliceWmAppleFileUrlPath){.pointer = values, .length = url_count});
+            scratch_end(scratch);
         }
-        result = wm_apple_file_paths_from_values(arena, (SliceWmAppleFileUrlPath){.pointer = values, .length = url_count});
-        scratch_end(scratch);
     }
+
     return result;
 }
 

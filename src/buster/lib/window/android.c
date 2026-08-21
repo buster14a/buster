@@ -35,36 +35,37 @@ BUSTER_GLOBAL_LOCAL int32_t buster_android_on_input_event(struct android_app* ap
 {
     WmHandle* windowing = (WmHandle*)app->userData;
 
-    if (!windowing || AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION)
+    int32_t result = 0;
+    if (windowing && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION)
     {
-        return 0;
+        int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+        WmOffset position = {
+            .x = (s16)AMotionEvent_getX(event, 0),
+            .y = (s16)AMotionEvent_getY(event, 0),
+        };
+
+        switch (action)
+        {
+        case AMOTION_EVENT_ACTION_DOWN:
+            wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+            wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position});
+            break;
+        case AMOTION_EVENT_ACTION_MOVE:
+            wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+            break;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_CANCEL:
+            wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
+            wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position});
+            break;
+        default:
+            break;
+        }
+
+        result = 1;
     }
 
-    int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
-    WmOffset position = {
-        .x = (s16)AMotionEvent_getX(event, 0),
-        .y = (s16)AMotionEvent_getY(event, 0),
-    };
-
-    switch (action)
-    {
-    case AMOTION_EVENT_ACTION_DOWN:
-        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
-        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_PRESS, .key = WM_KEY_MOUSE_LEFT, .position = position});
-        break;
-    case AMOTION_EVENT_ACTION_MOVE:
-        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
-        break;
-    case AMOTION_EVENT_ACTION_UP:
-    case AMOTION_EVENT_ACTION_CANCEL:
-        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_MOUSE_MOVE, .position = position});
-        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_BUTTON_RELEASE, .key = WM_KEY_MOUSE_LEFT, .position = position});
-        break;
-    default:
-        break;
-    }
-
-    return 1;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowing)
