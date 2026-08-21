@@ -25,7 +25,11 @@
 // - Calls are discovered and lowered before the surrounding expression
 //   consumes their values (c_ir_prepare_calls_discover,
 //   c_ir_emit_prepared_call_step), so the expression machine sees each
-//   call — builtins included — as one already-computed value.
+//   call — builtins included — as one already-computed value. The exception
+//   is a call in an operand that runs only when a branch is taken — an arm of
+//   a conditional, the right side of && or ||, a _Generic association: that
+//   one is left unprepared, and whichever child expression owns the operand
+//   prepares it inside the block that actually runs.
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
@@ -1121,6 +1125,11 @@ struct CIrPreparedCall
     // An index into c_ir_simd_builtins, or C_IR_SIMD_BUILTIN_NONE.
     u32 builtin_simd;
     bool emitted;
+    // Set when c_ir_prepare_calls_discover left a call inside this one's
+    // parentheses unprepared because it sits in a lazily evaluated operand.
+    // The child expression that owns that operand prepares it itself, which
+    // needs builder->preparing_calls cleared for the duration.
+    bool deferred_calls;
     bool builtin_identity;
     bool builtin_constant_p;
     bool builtin_choose_expr;
@@ -6791,7 +6800,8 @@ struct CIrPreparedCallState
     u32 separator;
     u32 declaration_index;
     bool previous_va_list_operand;
-    u8 reserved[3];
+    bool previous_preparing_calls;
+    u8 reserved[2];
 };
 
 typedef struct CIrLowerVlaLayoutState CIrLowerVlaLayoutState;
@@ -9053,6 +9063,35 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
     return false;
 }
 
+// The only punctuators c_ir_prepare_calls_discover's deferral scan reacts to,
+// classified once by punctuator id so the scan spends one byte load per token
+// instead of a compare per interesting punctuator.
+typedef enum CIrLazyScanClass
+{
+    C_IR_LAZY_SCAN_OTHER,
+    C_IR_LAZY_SCAN_OPEN,
+    C_IR_LAZY_SCAN_CLOSE,
+    C_IR_LAZY_SCAN_QUESTION,
+    C_IR_LAZY_SCAN_COLON,
+    C_IR_LAZY_SCAN_COMMA,
+    C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
+    C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
+} CIrLazyScanClass;
+
+BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
+    [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACE] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_RIGHT_PARENTHESIS] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACKET] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_QUESTION] = C_IR_LAZY_SCAN_QUESTION,
+    [C_PUNCTUATOR_COLON] = C_IR_LAZY_SCAN_COLON,
+    [C_PUNCTUATOR_COMMA] = C_IR_LAZY_SCAN_COMMA,
+    [C_PUNCTUATOR_PIPE_PIPE] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
+    [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
+};
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -9061,6 +9100,19 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     u32* active_calls = arena_allocate(builder->temporary_arena, u32, active_capacity);
     u32 active_call_count = 0;
     u32 last_root = UINT32_MAX;
+    // An operand that only runs when a branch is taken -- either arm of a
+    // conditional, the right operand of && or || -- may not have its calls
+    // hoisted here: hoisting runs them unconditionally. Such a call is left
+    // unprepared and the branch's own lowering prepares it inside the block
+    // that runs, the way c_ir_lower_conditional_value_step already lowers a
+    // conditional it reaches directly. lazy_scan_depth is the bracket depth
+    // the deferral began at (UINT32_MAX outside one) and lazy_questions counts
+    // conditionals still waiting for their colon, so that the comma that ends
+    // a conditional restores hoisting while a comma inside its second operand
+    // does not.
+    u32 scan_depth = 0;
+    u32 lazy_scan_depth = UINT32_MAX;
+    u32 lazy_questions = 0;
     for (u32 index = start; index + 1 < end; index += 1)
     {
         while (active_call_count && index > builder->prepared_calls[active_calls[active_call_count - 1]].close_index)
@@ -9068,6 +9120,63 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             active_call_count -= 1;
         }
         CToken token = builder->preprocess.tokens[index];
+        // One byte load answers this for the whole token stream: every token
+        // the table does not name classifies as C_IR_LAZY_SCAN_OTHER and does
+        // no work at all. A closing delimiter has already left the group it
+        // closes; an opening one is still outside the group it opens.
+        switch (c_ir_lazy_scan_classes[token.punctuator])
+        {
+        case C_IR_LAZY_SCAN_OTHER:
+            break;
+        case C_IR_LAZY_SCAN_OPEN:
+            scan_depth += 1;
+            break;
+        case C_IR_LAZY_SCAN_CLOSE:
+            scan_depth -= scan_depth != 0;
+            if (scan_depth < lazy_scan_depth)
+            {
+                lazy_scan_depth = UINT32_MAX;
+                lazy_questions = 0;
+            }
+            break;
+        case C_IR_LAZY_SCAN_QUESTION:
+            if (lazy_scan_depth == UINT32_MAX)
+            {
+                lazy_scan_depth = scan_depth;
+                lazy_questions = 1;
+            }
+            else if (scan_depth == lazy_scan_depth)
+            {
+                lazy_questions += 1;
+            }
+            break;
+        case C_IR_LAZY_SCAN_COLON:
+            if (lazy_questions && scan_depth == lazy_scan_depth)
+            {
+                lazy_questions -= 1;
+            }
+            break;
+        case C_IR_LAZY_SCAN_COMMA:
+            if (!lazy_questions && scan_depth == lazy_scan_depth)
+            {
+                lazy_scan_depth = UINT32_MAX;
+            }
+            break;
+        case C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR:
+            if (lazy_scan_depth == UINT32_MAX)
+            {
+                lazy_scan_depth = scan_depth;
+            }
+            break;
+        case C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND:
+            // && before an operand is the GNU label-address operator, which
+            // evaluates nothing conditionally.
+            if (lazy_scan_depth == UINT32_MAX && !c_ir_label_address_prefix(builder, start, index))
+            {
+                lazy_scan_depth = scan_depth;
+            }
+            break;
+        }
         // One dense-table classification replaces the former ~25-probe
         // string_equal ladder: interned identifiers answer with a byte load,
         // and only symbol-less tokens (pasted/synthesized) walk the
@@ -9240,6 +9349,14 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             continue;
         }
+        if (lazy_scan_depth != UINT32_MAX)
+        {
+            if (active_call_count)
+            {
+                builder->prepared_calls[active_calls[active_call_count - 1]].deferred_calls = true;
+            }
+            continue;
+        }
         u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (close == UINT32_MAX || builder->prepared_call_count >= builder->prepared_call_capacity)
         {
@@ -9272,6 +9389,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_va_end = builtin_va_end,
             .builtin_va_arg = builtin_va_arg,
             .builtin_generic = builtin_generic,
+            .deferred_calls = builtin_generic,
             .builtin_atomic = builtin_atomic,
             .builtin_math_link_name = builtin_math_link_name,
             .builtin_unary = builtin_unary,
@@ -9504,12 +9622,27 @@ BUSTER_C_INTERNAL IrValueId c_ir_simd_coerce_argument(CIntegerIrBuilder* builder
     return IR_VALUE_ID_INVALID;
 }
 
+// A call whose parentheses hold a lazily evaluated operand had the calls in
+// that operand left unprepared (c_ir_prepare_calls_discover), so the child
+// expression about to be lowered has to prepare them itself, inside whichever
+// block ends up running. That only happens with preparation off; the enclosing
+// pass resumes owning it when the child finishes.
+BUSTER_C_INTERNAL void c_ir_prepared_call_suspend_preparation(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    frame->as.prepared_call.state->previous_preparing_calls = builder->preparing_calls;
+    if (builder->prepared_calls[frame->as.prepared_call.call_index].deferred_calls)
+    {
+        builder->preparing_calls = false;
+    }
+}
+
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                                     CIrPreparedCallContinuation continuation, u32 start, u32 end,
                                                                                     bool va_list_operand)
 {
     frame->as.prepared_call.state->continuation = (u32)continuation;
     frame->stage = C_IR_LOWER_STAGE_CHILD;
+    c_ir_prepared_call_suspend_preparation(builder, frame);
     if (va_list_operand)
     {
         frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
@@ -9528,6 +9661,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expressio
         {
             builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
         }
+        builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
         return C_IR_PREPARED_CALL_STEP_FAILED;
     }
     return C_IR_PREPARED_CALL_STEP_SUSPENDED;
@@ -9538,6 +9672,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIn
 {
     frame->as.prepared_call.state->continuation = (u32)continuation;
     frame->stage = C_IR_LOWER_STAGE_CHILD;
+    c_ir_prepared_call_suspend_preparation(builder, frame);
     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                             .kind = C_IR_LOWER_FRAME_PLACE,
                                             .as.place =
@@ -9547,6 +9682,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIn
                                                 },
                                         }))
     {
+        builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
         return C_IR_PREPARED_CALL_STEP_FAILED;
     }
     return C_IR_PREPARED_CALL_STEP_SUSPENDED;
@@ -9564,6 +9700,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
          continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_ARG))
     {
         builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+    {
+        builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
     }
     u32 remaining = 1;
     do
@@ -9733,7 +9873,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
             {
-                builder->preparing_calls = true;
                 if (!child_success)
                 {
                     return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -9742,14 +9881,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                builder->preparing_calls = false;
-                CIrPreparedCallStepResult requested =
-                    c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start, association_end, false);
-                if (requested != C_IR_PREPARED_CALL_STEP_SUSPENDED)
-                {
-                    builder->preparing_calls = true;
-                }
-                return requested;
+                // The selected association is the only one lowered, and
+                // discovery never looked inside _Generic, so its calls are
+                // prepared by the child expression itself.
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start,
+                                                             association_end, false);
             }
             (void)association_type;
             selected->argument_count = 1;

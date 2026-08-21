@@ -1,0 +1,223 @@
+// The untaken arm of a conditional, and the unevaluated right operand of &&
+// or ||, may not run -- including in the operand positions whose lowering
+// hoists calls out of the surrounding expression before evaluating it
+// (c_ir_prepare_calls_discover in c_gen.c). A call argument and a compound
+// literal item are the two such positions: both used to evaluate every call
+// in both arms and then select the right value, so only a side effect made
+// the miscompile visible. Each check runs the shape twice, once with the
+// branch not taken (the call must not run) and once with it taken (the call
+// must run exactly once and its value must arrive).
+static int calls;
+
+static int make(int payload)
+{
+    calls += 1;
+    return payload;
+}
+
+static int take(int value)
+{
+    return value;
+}
+
+static int take_two(int first, int second)
+{
+    return first * 100 + second;
+}
+
+typedef struct Pair
+{
+    int a;
+    int b;
+} Pair;
+
+static int argument_conditional(int masked, int value)
+{
+    return take(masked ? make(value) : 0);
+}
+
+static int argument_conditional_false_arm(int masked, int value)
+{
+    return take(masked ? 0 : make(value));
+}
+
+static int argument_first_of_two(int masked, int value)
+{
+    return take_two(masked ? make(value) : 0, 7);
+}
+
+static int argument_second_of_two(int masked, int value)
+{
+    return take_two(7, masked ? make(value) : 0);
+}
+
+static int argument_nested_call(int masked, int value)
+{
+    return take(take(masked ? make(value) : 0));
+}
+
+static int argument_logical_and(int masked, int value)
+{
+    return take(masked && make(value));
+}
+
+static int argument_logical_or(int masked, int value)
+{
+    return take(masked || make(value));
+}
+
+static int compound_literal_designated(int masked, int value)
+{
+    Pair pair = (Pair){.a = 1, .b = masked ? make(value) : 0};
+    return pair.b;
+}
+
+static int compound_literal_positional(int masked, int value)
+{
+    Pair pair = (Pair){1, masked ? make(value) : 0};
+    return pair.b;
+}
+
+static int compound_literal_array(int masked, int value)
+{
+    int* items = (int[2]){1, masked ? make(value) : 0};
+    return items[1];
+}
+
+static int compound_literal_logical_and(int masked, int value)
+{
+    Pair pair = (Pair){.a = 1, .b = masked && make(value)};
+    return pair.b;
+}
+
+// The shapes that already branched, kept so a future change to call
+// preparation cannot fix the two above by breaking these.
+static int statement_conditional(int masked, int value)
+{
+    int result = 0;
+    result += masked ? make(value) : 0;
+    return result;
+}
+
+static int declaration_initializer(int masked, int value)
+{
+    Pair pair = {.a = 1, .b = masked ? make(value) : 0};
+    return pair.b;
+}
+
+static int parenthesized_argument(int masked, int value)
+{
+    return take((masked ? make(value) : 0));
+}
+
+static int index_conditional(int masked, int value)
+{
+    static int table[4] = {0, 10, 20, 30};
+    return table[masked ? make(value) : 0];
+}
+
+// Both directions of every shape share one failure code, so the exit status
+// names the shape rather than the symptom.
+static int check(int (*shape)(int, int), int not_taken_result, int taken_result, int code)
+{
+    int before = calls;
+    if (shape(0, 3) != not_taken_result || calls != before)
+    {
+        return code;
+    }
+    if (shape(1, 3) != taken_result || calls != before + 1)
+    {
+        return code;
+    }
+    return 0;
+}
+
+int main(void)
+{
+    int failure = check(argument_conditional, 0, 3, 1);
+    if (failure)
+    {
+        return failure;
+    }
+    // The false arm is the one that runs here, so the roles are swapped.
+    int before = calls;
+    if (argument_conditional_false_arm(1, 3) != 0 || calls != before)
+    {
+        return 2;
+    }
+    if (argument_conditional_false_arm(0, 3) != 3 || calls != before + 1)
+    {
+        return 2;
+    }
+    failure = check(argument_first_of_two, 7, 307, 3);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(argument_second_of_two, 700, 703, 4);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(argument_nested_call, 0, 3, 5);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(argument_logical_and, 0, 1, 6);
+    if (failure)
+    {
+        return failure;
+    }
+    // || is the mirror image: the right operand runs when the left is false.
+    before = calls;
+    if (argument_logical_or(1, 3) != 1 || calls != before)
+    {
+        return 7;
+    }
+    if (argument_logical_or(0, 3) != 1 || calls != before + 1)
+    {
+        return 7;
+    }
+    failure = check(compound_literal_designated, 0, 3, 8);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(compound_literal_positional, 0, 3, 9);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(compound_literal_array, 0, 3, 10);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(compound_literal_logical_and, 0, 1, 11);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(statement_conditional, 0, 3, 12);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(declaration_initializer, 0, 3, 13);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(parenthesized_argument, 0, 3, 14);
+    if (failure)
+    {
+        return failure;
+    }
+    failure = check(index_conditional, 0, 30, 15);
+    if (failure)
+    {
+        return failure;
+    }
+    return 0;
+}

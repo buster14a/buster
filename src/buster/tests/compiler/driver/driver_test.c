@@ -3727,6 +3727,35 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conversions_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // Lazily evaluated operands are only observable at run time -- the wrong
+    // lowering still selects the right value -- so this fixture has to run,
+    // not merely compile.
+    String8 c_conditional_operand_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conditional-operand"), S8(""));
+    String8 c_conditional_operand_command_line[] = {
+        S8("-o"),
+        c_conditional_operand_path,
+        S8("tests/basic_c_conditional_operand.c"),
+    };
+    CompilerDriverResult c_conditional_operand = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_operand_command_line)));
+    BUSTER_TEST(arguments, c_conditional_operand.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_conditional_operand.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_conditional_operand_arguments[] = {
+            c_conditional_operand_path,
+        };
+        ProcessSpawnResult c_conditional_operand_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_operand_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_conditional_operand_spawn.handle != 0);
+        if (c_conditional_operand_spawn.handle)
+        {
+            ProcessWaitResult c_conditional_operand_wait = os_process_wait_sync(arguments->arena, c_conditional_operand_spawn);
+            BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // The calling-convention fixture runs natively, so the host's own ABI and
     // register allocator are executed rather than only inspected: on a
     // Windows runner that is the Win64 positional register assignment, the
