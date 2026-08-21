@@ -613,7 +613,10 @@ history.
   value per case becomes an undecorated `Type result;`, one `result = ...` per
   case, and `default: BUSTER_TODO();` for the impossible case: `BUSTER_TODO`
   never falls through, which is what leaves `result` definitely assigned without
-  a placeholder initializer that a real bug could hide behind.
+  a placeholder initializer that a real bug could hide behind. Do not initialize
+  the result variable when every path already assigns it: `clang_analyze` reports
+  that store as dead and fails the Release tree, and the rule's whole point is
+  that the paths, not an initializer, decide the answer.
 - `BUSTER_F_DECL` belongs on header declarations only. In a `.c` file, a
   module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
   already declares carries no macro at all — the header declaration is what

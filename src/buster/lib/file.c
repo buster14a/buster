@@ -17,17 +17,15 @@ String8 buster_android_internal_data_path = {0};
 // app's Resources directory, so relative paths must be resolved against it.
 BUSTER_GLOBAL_LOCAL const char* buster_ios_bundle_resource_path(void)
 {
+    const char* result = 0;
     id bundle = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSBundle"), sel_registerName("mainBundle"));
-    if (!bundle)
+    id path = bundle ? ((id (*)(id, SEL))objc_msgSend)(bundle, sel_registerName("resourcePath")) : 0;
+    if (path)
     {
-        return 0;
+        result = ((const char* (*)(id, SEL))objc_msgSend)(path, sel_registerName("UTF8String"));
     }
-    id path = ((id (*)(id, SEL))objc_msgSend)(bundle, sel_registerName("resourcePath"));
-    if (!path)
-    {
-        return 0;
-    }
-    return ((const char* (*)(id, SEL))objc_msgSend)(path, sel_registerName("UTF8String"));
+
+    return result;
 }
 #endif
 
@@ -51,22 +49,23 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     FileMapRead result = {0};
 
 #if BUSTER_ANDROID || BUSTER_IOS
+    // Neither platform offers a mapping backend here, so the read path is the
+    // only way to satisfy a caller that did not demand a mapping.
     if (!options.map_required)
     {
         result.bytes = file_read(arena, path, options);
     }
-    return result;
-#endif
-
+#else
+    // Padding and alignment requests cannot be served by a raw mapping.
     if (!path.length || options.start_padding || options.end_padding || options.start_alignment || options.end_alignment)
     {
         if (!options.map_required)
         {
             result.bytes = file_read(arena, path, options);
         }
-        return result;
     }
-
+    else
+    {
 #if BUSTER_WINDOWS
     {
         OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
@@ -124,10 +123,13 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #endif
 
-    if (!result.bytes.pointer && !options.map_required)
-    {
-        result.bytes = file_read(arena, path, options);
+        if (!result.bytes.pointer && !options.map_required)
+        {
+            result.bytes = file_read(arena, path, options);
+        }
     }
+#endif
+
     return result;
 }
 
@@ -167,6 +169,9 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     }
 
 #if BUSTER_ANDROID
+    // An APK asset satisfies the read outright, so the descriptor path below is
+    // skipped rather than returned around.
+    bool asset_resolved = false;
     // The app has no test files on disk; relative paths resolve to APK assets.
     if (buster_android_asset_manager && path.length && path.pointer[0] != '/')
     {
@@ -190,7 +195,8 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
             }
             memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
             AAsset_close(asset);
-            return (ByteSlice){file_buffer + options.start_padding, file_size};
+            result = (ByteSlice){file_buffer + options.start_padding, file_size};
+            asset_resolved = true;
         }
     }
 #endif
@@ -214,23 +220,27 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #endif
 
-    OsFileDescriptor* fd = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-
-    if (fd)
+#if BUSTER_ANDROID
+    if (!asset_resolved)
+#endif
     {
-        u64 file_size = os_file_get_size(fd);
-        u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-        allocation_size = BUSTER_MAX(allocation_size, 1);
-        u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
-        u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-        u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-        if (file_size)
+        OsFileDescriptor* fd = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        if (fd)
         {
-            file_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding, file_size}, file_size);
+            u64 file_size = os_file_get_size(fd);
+            u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+            allocation_size = BUSTER_MAX(allocation_size, 1);
+            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
+            u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
+            u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+            if (file_size)
+            {
+                file_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding, file_size}, file_size);
+            }
+            memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
+            os_file_close(fd);
+            result = (ByteSlice){file_buffer + options.start_padding, file_size};
         }
-        memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
-        os_file_close(fd);
-        result = (ByteSlice){file_buffer + options.start_padding, file_size};
     }
 
     return result;
@@ -239,35 +249,35 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
 bool file_copy(CopyFileArguments arguments)
 {
     bool result = false;
-    if (string_equal(arguments.original_path, arguments.new_path))
+    // Copying a path onto itself would truncate the source before reading it.
+    if (!string_equal(arguments.original_path, arguments.new_path))
     {
-        return result;
-    }
-    OsFileDescriptor* source = os_file_open(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-    if (source)
-    {
-        OsFileDescriptor* destination =
-            os_file_open(arguments.new_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
-        if (destination)
+        OsFileDescriptor* source = os_file_open(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        if (source)
         {
-            result = true;
-            u64 remaining = os_file_get_size(source);
-            u8 buffer[BUSTER_KB(64)];
-            while (remaining)
+            OsFileDescriptor* destination =
+                os_file_open(arguments.new_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            if (destination)
             {
-                u64 requested = BUSTER_MIN(remaining, sizeof(buffer));
-                u64 read_count = os_file_read(source, (ByteSlice){buffer, sizeof(buffer)}, requested);
-                if (read_count != requested)
+                result = true;
+                u64 remaining = os_file_get_size(source);
+                u8 buffer[BUSTER_KB(64)];
+                while (remaining && result)
                 {
-                    result = false;
-                    break;
+                    u64 requested = BUSTER_MIN(remaining, sizeof(buffer));
+                    u64 read_count = os_file_read(source, (ByteSlice){buffer, sizeof(buffer)}, requested);
+                    result = read_count == requested;
+                    if (result)
+                    {
+                        os_file_write(destination, (ByteSlice){buffer, read_count});
+                        remaining -= read_count;
+                    }
                 }
-                os_file_write(destination, (ByteSlice){buffer, read_count});
-                remaining -= read_count;
+                result = os_file_close(destination) && result;
             }
-            result = os_file_close(destination) && result;
+            result = os_file_close(source) && result;
         }
-        result = os_file_close(source) && result;
     }
+
     return result;
 }
