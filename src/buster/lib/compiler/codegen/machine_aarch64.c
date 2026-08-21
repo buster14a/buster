@@ -657,142 +657,153 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_unary(MachineA64Selector* selector, 
     return selected;
 }
 
+// AArch64 has no scalar remainder instruction. Expanding the old encoder
+// macro-op before allocation is what makes quotient and product pressure,
+// scheduling dependencies, and register lifetimes visible to the machine
+// passes: the quotient and the product stay separate SSA values, and MSUB's
+// equivalent `left - quotient * right` is spelled as a SUB here.
+BUSTER_GLOBAL_LOCAL void machine_a64_select_remainder_expansion(MachineA64Selector* selector, u16 arithmetic, bool wide, u32 result_register,
+                                                                u32 left_register, u32 right_register)
+{
+    u16 divide = arithmetic == MACHINE_A64_SREM32   ? MACHINE_A64_SDIV32
+                 : arithmetic == MACHINE_A64_SREM64 ? MACHINE_A64_SDIV64
+                 : arithmetic == MACHINE_A64_UREM32 ? MACHINE_A64_UDIV32
+                                                    : MACHINE_A64_UDIV64;
+    u16 multiply = wide ? MACHINE_A64_MUL64 : MACHINE_A64_MUL32;
+    u16 subtract = wide ? MACHINE_A64_SUB64 : MACHINE_A64_SUB32;
+    u32 quotient_register = machine_a64_synthesize_register(selector);
+    u32 divide_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
+                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                          .opcode = divide,
+                                                      });
+    machine_a64_define(selector, quotient_register, divide_row);
+    u32 product_register = machine_a64_synthesize_register(selector);
+    u32 multiply_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register),
+                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
+                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                            .opcode = multiply,
+                                                        });
+    machine_a64_define(selector, product_register, multiply_row);
+    u32 subtract_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register)},
+                                                            .opcode = subtract,
+                                                        });
+    machine_a64_define(selector, result_register, subtract_row);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_binary(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
+    bool selected = false;
     u32 left_register;
     u32 right_register;
-    if (result_register == UINT32_MAX || !machine_a64_operand_register(selector, instruction->operands[0], &left_register) ||
-        !machine_a64_operand_register(selector, instruction->operands[1], &right_register))
+    // The operand lookups bound the value ids, which is what makes the type
+    // read below safe; nothing here may be hoisted above them.
+    if (result_register != UINT32_MAX && machine_a64_operand_register(selector, instruction->operands[0], &left_register) &&
+        machine_a64_operand_register(selector, instruction->operands[1], &right_register))
     {
-        return false;
-    }
-    IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
-    IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
-    if (!machine_a64_type_is_scalar_register(operand_type))
-    {
-        return false;
-    }
-    bool wide = machine_a64_type_is_64_bit(program, operand_type_id);
-    u16 arithmetic = 0;
-    switch (instruction->binary_operation)
-    {
-        break;
-    case IR_BINARY_INTEGER_ADD:
-        arithmetic = (u16)(wide ? MACHINE_A64_ADD64 : MACHINE_A64_ADD32);
-        break;
-    case IR_BINARY_INTEGER_SUBTRACT:
-        arithmetic = (u16)(wide ? MACHINE_A64_SUB64 : MACHINE_A64_SUB32);
-        break;
-    case IR_BINARY_INTEGER_MULTIPLY:
-        arithmetic = (u16)(wide ? MACHINE_A64_MUL64 : MACHINE_A64_MUL32);
-        break;
-    case IR_BINARY_INTEGER_BITWISE_AND:
-    case IR_BINARY_BOOLEAN_AND:
-        arithmetic = (u16)(wide ? MACHINE_A64_AND64 : MACHINE_A64_AND32);
-        break;
-    case IR_BINARY_INTEGER_BITWISE_OR:
-    case IR_BINARY_BOOLEAN_OR:
-        arithmetic = (u16)(wide ? MACHINE_A64_ORR64 : MACHINE_A64_ORR32);
-        break;
-    case IR_BINARY_INTEGER_BITWISE_XOR:
-        arithmetic = (u16)(wide ? MACHINE_A64_EOR64 : MACHINE_A64_EOR32);
-        break;
-    case IR_BINARY_SHIFT_LEFT:
-        arithmetic = (u16)(wide ? MACHINE_A64_LSL64 : MACHINE_A64_LSL32);
-        break;
-    case IR_BINARY_SIGNED_SHIFT_RIGHT:
-        arithmetic = (u16)(wide ? MACHINE_A64_ASR64 : MACHINE_A64_ASR32);
-        break;
-    case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
-        arithmetic = (u16)(wide ? MACHINE_A64_LSR64 : MACHINE_A64_LSR32);
-        break;
-    case IR_BINARY_SIGNED_DIVIDE:
-        arithmetic = (u16)(wide ? MACHINE_A64_SDIV64 : MACHINE_A64_SDIV32);
-        break;
-    case IR_BINARY_UNSIGNED_DIVIDE:
-        arithmetic = (u16)(wide ? MACHINE_A64_UDIV64 : MACHINE_A64_UDIV32);
-        break;
-    case IR_BINARY_SIGNED_REMAINDER:
-        arithmetic = (u16)(wide ? MACHINE_A64_SREM64 : MACHINE_A64_SREM32);
-        break;
-    case IR_BINARY_UNSIGNED_REMAINDER:
-        arithmetic = (u16)(wide ? MACHINE_A64_UREM64 : MACHINE_A64_UREM32);
-        break;
-    default:
-        arithmetic = 0;
-    }
-    if (arithmetic)
-    {
-        bool remainder = arithmetic == MACHINE_A64_SREM32 || arithmetic == MACHINE_A64_SREM64 || arithmetic == MACHINE_A64_UREM32 ||
-                         arithmetic == MACHINE_A64_UREM64;
-        if (remainder)
+        IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
+        IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
+        if (machine_a64_type_is_scalar_register(operand_type))
         {
-            // AArch64 has no scalar remainder instruction.  Expand the
-            // old encoder macro-op before allocation so quotient and
-            // product pressure, scheduling dependencies, and register
-            // lifetimes are visible to the machine passes.  Keep the
-            // quotient and product as separate SSA values, and represent
-            // MSUB's equivalent `left - quotient * right` with SUB here.
-            u16 divide = arithmetic == MACHINE_A64_SREM32 ? MACHINE_A64_SDIV32
-                          : arithmetic == MACHINE_A64_SREM64 ? MACHINE_A64_SDIV64
-                          : arithmetic == MACHINE_A64_UREM32 ? MACHINE_A64_UDIV32
-                                                              : MACHINE_A64_UDIV64;
-            u16 multiply = wide ? MACHINE_A64_MUL64 : MACHINE_A64_MUL32;
-            u16 subtract = wide ? MACHINE_A64_SUB64 : MACHINE_A64_SUB32;
-            u32 quotient_register = machine_a64_synthesize_register(selector);
-            u32 divide_row = machine_a64_select_row(selector, (MachineInstruction){
-                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
-                                                                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                                    .opcode = divide,
-            });
-            machine_a64_define(selector, quotient_register, divide_row);
-            u32 product_register = machine_a64_synthesize_register(selector);
-            u32 multiply_row = machine_a64_select_row(selector, (MachineInstruction){
-                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register),
-                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
-                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                                      .opcode = multiply,
-                                                                  });
-            machine_a64_define(selector, product_register, multiply_row);
-            u32 subtract_row = machine_a64_select_row(selector, (MachineInstruction){
-                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register)},
-                                                                      .opcode = subtract,
-                                                                  });
-            machine_a64_define(selector, result_register, subtract_row);
-            return true;
+            bool wide = machine_a64_type_is_64_bit(program, operand_type_id);
+            u16 arithmetic = 0;
+            switch (instruction->binary_operation)
+            {
+                break;
+            case IR_BINARY_INTEGER_ADD:
+                arithmetic = (u16)(wide ? MACHINE_A64_ADD64 : MACHINE_A64_ADD32);
+                break;
+            case IR_BINARY_INTEGER_SUBTRACT:
+                arithmetic = (u16)(wide ? MACHINE_A64_SUB64 : MACHINE_A64_SUB32);
+                break;
+            case IR_BINARY_INTEGER_MULTIPLY:
+                arithmetic = (u16)(wide ? MACHINE_A64_MUL64 : MACHINE_A64_MUL32);
+                break;
+            case IR_BINARY_INTEGER_BITWISE_AND:
+            case IR_BINARY_BOOLEAN_AND:
+                arithmetic = (u16)(wide ? MACHINE_A64_AND64 : MACHINE_A64_AND32);
+                break;
+            case IR_BINARY_INTEGER_BITWISE_OR:
+            case IR_BINARY_BOOLEAN_OR:
+                arithmetic = (u16)(wide ? MACHINE_A64_ORR64 : MACHINE_A64_ORR32);
+                break;
+            case IR_BINARY_INTEGER_BITWISE_XOR:
+                arithmetic = (u16)(wide ? MACHINE_A64_EOR64 : MACHINE_A64_EOR32);
+                break;
+            case IR_BINARY_SHIFT_LEFT:
+                arithmetic = (u16)(wide ? MACHINE_A64_LSL64 : MACHINE_A64_LSL32);
+                break;
+            case IR_BINARY_SIGNED_SHIFT_RIGHT:
+                arithmetic = (u16)(wide ? MACHINE_A64_ASR64 : MACHINE_A64_ASR32);
+                break;
+            case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
+                arithmetic = (u16)(wide ? MACHINE_A64_LSR64 : MACHINE_A64_LSR32);
+                break;
+            case IR_BINARY_SIGNED_DIVIDE:
+                arithmetic = (u16)(wide ? MACHINE_A64_SDIV64 : MACHINE_A64_SDIV32);
+                break;
+            case IR_BINARY_UNSIGNED_DIVIDE:
+                arithmetic = (u16)(wide ? MACHINE_A64_UDIV64 : MACHINE_A64_UDIV32);
+                break;
+            case IR_BINARY_SIGNED_REMAINDER:
+                arithmetic = (u16)(wide ? MACHINE_A64_SREM64 : MACHINE_A64_SREM32);
+                break;
+            case IR_BINARY_UNSIGNED_REMAINDER:
+                arithmetic = (u16)(wide ? MACHINE_A64_UREM64 : MACHINE_A64_UREM32);
+                break;
+            default:
+                arithmetic = 0;
+            }
+            if (arithmetic)
+            {
+                bool remainder = arithmetic == MACHINE_A64_SREM32 || arithmetic == MACHINE_A64_SREM64 || arithmetic == MACHINE_A64_UREM32 ||
+                                 arithmetic == MACHINE_A64_UREM64;
+                if (remainder)
+                {
+                    machine_a64_select_remainder_expansion(selector, arithmetic, wide, result_register, left_register, right_register);
+                }
+                else
+                {
+                    u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                                   .opcode = arithmetic,
+                                                               });
+                    machine_a64_define(selector, result_register, row);
+                }
+                selected = true;
+            }
+            else
+            {
+                u32 condition = machine_a64_condition_from_comparison(instruction->binary_operation);
+                if (condition != UINT32_MAX)
+                {
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                         .opcode = (u16)(wide ? MACHINE_A64_CMP64 : MACHINE_A64_CMP32),
+                                                     });
+                    u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                                   .payload = condition,
+                                                                   .opcode = MACHINE_A64_CSET,
+                                                               });
+                    machine_a64_define(selector, result_register, row);
+                    selected = true;
+                }
+            }
         }
-        u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                       .opcode = arithmetic,
-                                                   });
-        machine_a64_define(selector, result_register, row);
-        return true;
     }
-    u32 condition = machine_a64_condition_from_comparison(instruction->binary_operation);
-    if (condition == UINT32_MAX)
-    {
-        return false;
-    }
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                         .opcode = (u16)(wide ? MACHINE_A64_CMP64 : MACHINE_A64_CMP32),
-                                     });
-    u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                   .payload = condition,
-                                                   .opcode = MACHINE_A64_CSET,
-                                               });
-    machine_a64_define(selector, result_register, row);
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_dereference(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
@@ -883,67 +894,62 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_index(MachineA64Selector* selector, 
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
+    bool selected = false;
     u32 index_register;
-    if (result_register == UINT32_MAX || instruction->operand_count < 2 ||
-        !machine_a64_operand_register(selector, instruction->operands[1], &index_register))
+    if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
+        machine_a64_operand_register(selector, instruction->operands[1], &index_register))
     {
-        return false;
-    }
-    IrType* index_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
-    IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
-    if (!index_type || index_type->kind != IR_TYPE_INTEGER || !element || !element->layout.resolved || element->layout.size > INT32_MAX)
-    {
-        return false;
-    }
-    if (!machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register, 0))
-    {
-        return false;
-    }
-    // The scaled index is computed in a synthesized temporary; signed
-    // narrow indexes sign-extend before scaling.
-    u32 scaled_register = machine_a64_synthesize_register(selector);
-    u16 extend_opcode = MACHINE_A64_MOV_RR;
-    if (index_type->is_signed && index_type->bit_width < 64)
-    {
-        extend_opcode = (u16)(index_type->bit_width == 8    ? MACHINE_A64_SXTB
-                              : index_type->bit_width == 16 ? MACHINE_A64_SXTH
-                              : index_type->bit_width == 32 ? MACHINE_A64_SXTW
-                                                            : 0);
-        if (!extend_opcode)
+        IrType* index_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+        IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool typed = index_type && index_type->kind == IR_TYPE_INTEGER && element && element->layout.resolved && element->layout.size <= INT32_MAX;
+        // The scaled index is computed in a synthesized temporary; signed
+        // narrow indexes sign-extend before scaling.  Resolving the extend
+        // before the base address keeps an unsupported index width from
+        // emitting rows the rejection would throw away anyway.
+        u16 extend_opcode = MACHINE_A64_MOV_RR;
+        if (typed && index_type->is_signed && index_type->bit_width < 64)
         {
-            return false;
+            extend_opcode = (u16)(index_type->bit_width == 8    ? MACHINE_A64_SXTB
+                                  : index_type->bit_width == 16 ? MACHINE_A64_SXTH
+                                  : index_type->bit_width == 32 ? MACHINE_A64_SXTW
+                                                                : 0);
+        }
+        if (typed && extend_opcode && machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register, 0))
+        {
+            u32 scaled_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index_register)},
+                                                 .opcode = extend_opcode,
+                                             });
+            if (element->layout.size != 1)
+            {
+                u32 immediate_index = selector->immediates.total_count;
+                u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                *immediate_row = element->layout.size;
+                u32 size_register = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register),
+                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                     .opcode = MACHINE_A64_MOV_RI,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
+                                                     .opcode = MACHINE_A64_MUL64,
+                                                 });
+            }
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register)},
+                                                 .opcode = MACHINE_A64_ADD64,
+                                             });
+            selected = true;
         }
     }
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index_register)},
-                                         .opcode = extend_opcode,
-                                     });
-    if (element->layout.size != 1)
-    {
-        u32 immediate_index = selector->immediates.total_count;
-        u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-        *immediate_row = element->layout.size;
-        u32 size_register = machine_a64_synthesize_register(selector);
-        machine_a64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register),
-                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                             .opcode = MACHINE_A64_MOV_RI,
-                                         });
-        machine_a64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
-                                             .opcode = MACHINE_A64_MUL64,
-                                         });
-    }
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register)},
-                                         .opcode = MACHINE_A64_ADD64,
-                                     });
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_call(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
@@ -1449,35 +1455,29 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector,
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* selector, IrInstruction* instruction)
+// A fused condition re-selects the chain's innermost comparison here,
+// immediately before BCC: only allocator edits can land between the flags
+// define and its use, and every edit form is a flag-preserving instruction
+// (ldr/str, orr copy, movz/movk).
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_fused_branch(MachineA64Selector* selector, IrInstruction* instruction, MachineA64BranchFusion* fusion)
 {
-    IrFunction* function = selector->function;
-
-    // A fused condition re-selects the chain's innermost comparison
-    // here, immediately before BCC: only allocator edits can land
-    // between the flags define and its use, and every edit form is a
-    // flag-preserving instruction (ldr/str, orr copy, movz/movk).
-    MachineA64BranchFusion* fusion =
-        instruction->operands[0].value < function->value_count ? selector->branch_fusions + instruction->operands[0].value : 0;
-    if (fusion && fusion->condition != 0xff)
+    bool selected = false;
+    u32 left_register;
+    u32 right_register;
+    if (machine_a64_operand_register(selector, (IrValueId){.value = fusion->left}, &left_register))
     {
-        u32 left_register;
-        u32 right_register;
-        if (!machine_a64_operand_register(selector, (IrValueId){.value = fusion->left}, &left_register))
-        {
-            return false;
-        }
+        selected = true;
         if (fusion->right != UINT32_MAX)
         {
-            if (!machine_a64_operand_register(selector, (IrValueId){.value = fusion->right}, &right_register))
+            selected = machine_a64_operand_register(selector, (IrValueId){.value = fusion->right}, &right_register);
+            if (selected)
             {
-                return false;
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                     .opcode = (u16)(fusion->wide ? MACHINE_A64_CMP64 : MACHINE_A64_CMP32),
+                                                 });
             }
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                 .opcode = (u16)(fusion->wide ? MACHINE_A64_CMP64 : MACHINE_A64_CMP32),
-                                             });
         }
         else
         {
@@ -1486,30 +1486,49 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* select
                                                  .opcode = MACHINE_A64_CMP_ZERO,
                                              });
         }
-        machine_a64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
-                                                          machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
-                                             .payload = fusion->condition,
-                                             .opcode = MACHINE_A64_BCC,
-                                         });
-        return true;
+        if (selected)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
+                                                 .payload = fusion->condition,
+                                                 .opcode = MACHINE_A64_BCC,
+                                             });
+        }
     }
-    u32 condition_register;
-    if (!machine_a64_operand_register(selector, instruction->operands[0], &condition_register))
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    MachineA64BranchFusion* fusion =
+        instruction->operands[0].value < function->value_count ? selector->branch_fusions + instruction->operands[0].value : 0;
+    if (fusion && fusion->condition != 0xff)
     {
-        return false;
+        selected = machine_a64_select_fused_branch(selector, instruction, fusion);
     }
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register)},
-                                         .opcode = MACHINE_A64_CMP_ZERO,
-                                     });
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
-                                                      machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
-                                         .payload = MACHINE_A64_CONDITION_NOT_EQUAL,
-                                         .opcode = MACHINE_A64_BCC,
-                                     });
-    return true;
+    else
+    {
+        u32 condition_register;
+        if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register))
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register)},
+                                                 .opcode = MACHINE_A64_CMP_ZERO,
+                                             });
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
+                                                 .payload = MACHINE_A64_CONDITION_NOT_EQUAL,
+                                                 .opcode = MACHINE_A64_BCC,
+                                             });
+            selected = true;
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_unreachable(MachineA64Selector* selector)
@@ -1527,6 +1546,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
 {
     IrFunction* function = selector->function;
 
+    bool selected = true;
     if (instruction->operand_count)
     {
         if (selector->return_shape.indirect)
@@ -1537,94 +1557,92 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
             u32 value_slot = instruction->operands[0].value < function->value_count
                                  ? selector->value_stack_slots[instruction->operands[0].value]
                                  : UINT32_MAX;
-            if (value_slot == UINT32_MAX || selector->hidden_return_slot == UINT32_MAX)
+            selected = value_slot != UINT32_MAX && selector->hidden_return_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
+                u32 pointer_register = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
+                                                     .opcode = MACHINE_A64_LOAD_FRAME,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = selector->return_shape.byte_size,
+                                                     .opcode = MACHINE_A64_COPY_PTR_FROM_FRAME,
+                                                 });
             }
-            u32 pointer_register = machine_a64_synthesize_register(selector);
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
-                                                 .opcode = MACHINE_A64_LOAD_FRAME,
-                                             });
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = selector->return_shape.byte_size,
-                                                 .opcode = MACHINE_A64_COPY_PTR_FROM_FRAME,
-                                             });
         }
         else if (selector->return_shape.aggregate)
         {
             u32 value_slot = instruction->operands[0].value < function->value_count
                                  ? selector->value_stack_slots[instruction->operands[0].value]
                                  : UINT32_MAX;
-            if (value_slot == UINT32_MAX)
+            selected = value_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
-            }
-            u32 return_integer_index = 0;
-            u32 return_float_index = 0;
-            for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
-            {
-                if (selector->return_shape.part_is_float[part_index])
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
+                for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
                 {
-                    u32 bounce_register = machine_a64_synthesize_register(selector);
-                    machine_a64_select_row(
-                        selector, (MachineInstruction){
-                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
-                                                   machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                      .payload = selector->return_shape.part_offsets[part_index],
-                                      .opcode = (u16)(selector->return_shape.part_sizes[part_index] == 4 ? MACHINE_A64_LOAD_FRAME32
-                                                                                                         : MACHINE_A64_LOAD_FRAME),
-                                  });
+                    if (selector->return_shape.part_is_float[part_index])
+                    {
+                        u32 bounce_register = machine_a64_synthesize_register(selector);
+                        machine_a64_select_row(
+                            selector, (MachineInstruction){
+                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                       machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                          .payload = selector->return_shape.part_offsets[part_index],
+                                          .opcode = (u16)(selector->return_shape.part_sizes[part_index] == 4 ? MACHINE_A64_LOAD_FRAME32
+                                                                                                             : MACHINE_A64_LOAD_FRAME),
+                                      });
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                         });
+                        return_float_index += 1;
+                        continue;
+                    }
                     machine_a64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                         .payload = return_float_index,
-                                                         .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                         .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, return_integer_index),
+                                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                         .payload = selector->return_shape.part_offsets[part_index],
+                                                         .opcode = MACHINE_A64_LOAD_FRAME,
                                                      });
-                    return_float_index += 1;
-                    continue;
+                    return_integer_index += 1;
                 }
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, return_integer_index),
-                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                     .payload = selector->return_shape.part_offsets[part_index],
-                                                     .opcode = MACHINE_A64_LOAD_FRAME,
-                                                 });
-                return_integer_index += 1;
             }
-        }
-        else if (selector->return_shape.part_is_float[0])
-        {
-            u32 value_register;
-            if (!machine_a64_operand_register(selector, instruction->operands[0], &value_register))
-            {
-                return false;
-            }
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_A64_FMOV_TO_VEC,
-                                             });
         }
         else
         {
             u32 value_register;
-            if (!machine_a64_operand_register(selector, instruction->operands[0], &value_register))
+            selected = machine_a64_operand_register(selector, instruction->operands[0], &value_register);
+            if (selected && selector->return_shape.part_is_float[0])
             {
-                return false;
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                 });
             }
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_A64_MOV_RR,
-                                             });
+            else if (selected)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_A64_MOV_RR,
+                                                 });
+            }
         }
     }
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .opcode = MACHINE_A64_RET,
-                                     });
-    return true;
+    if (selected)
+    {
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .opcode = MACHINE_A64_RET,
+                                         });
+    }
+    return selected;
 }
 
 // Emits result-vreg definition rows for one typed instruction. Returns
