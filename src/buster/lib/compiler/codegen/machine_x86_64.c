@@ -1142,67 +1142,68 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_start(MachineX64Selector* selecto
     IrFunction* function = selector->function;
 
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
-    if (result_slot == UINT32_MAX || selector->va_register_save_slot == UINT32_MAX)
+    bool selected = false;
+    if (result_slot != UINT32_MAX && selector->va_register_save_slot != UINT32_MAX)
     {
-        return false;
+        u32 integer_count;
+        u32 float_count;
+        u32 stack_end;
+        machine_x64_va_named_cursors(selector, &integer_count, &float_count, &stack_end);
+        u64 offsets = (u64)(integer_count * 8u) | ((u64)(48u + float_count * 16u) << 32);
+        u32 packed_register = machine_x64_synthesize_register(selector);
+        u32 packed_immediate = machine_x64_va_append_immediate(selector, offsets);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, packed_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, packed_immediate)},
+                                             .opcode = MACHINE_X64_MOV_RI,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, packed_register)},
+                                             .payload = 0,
+                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                         });
+        u32 overflow_register = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register),
+                                                          machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RBP)},
+                                             .payload = 16u + stack_end,
+                                             .opcode = MACHINE_X64_LEA_OFFSET,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register)},
+                                             .payload = 8,
+                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                         });
+        u32 save_register = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register),
+                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, selector->va_register_save_slot)},
+                                             .opcode = MACHINE_X64_LEA_FRAME,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register)},
+                                             .payload = 16,
+                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                         });
+        u32 zero_register = machine_x64_synthesize_register(selector);
+        u32 zero_immediate = machine_x64_va_append_immediate(selector, 0);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
+                                             .opcode = MACHINE_X64_MOV_RI,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register)},
+                                             .payload = 24,
+                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                         });
+        selected = true;
     }
-    u32 integer_count;
-    u32 float_count;
-    u32 stack_end;
-    machine_x64_va_named_cursors(selector, &integer_count, &float_count, &stack_end);
-    u64 offsets = (u64)(integer_count * 8u) | ((u64)(48u + float_count * 16u) << 32);
-    u32 packed_register = machine_x64_synthesize_register(selector);
-    u32 packed_immediate = machine_x64_va_append_immediate(selector, offsets);
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, packed_register),
-                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, packed_immediate)},
-                                         .opcode = MACHINE_X64_MOV_RI,
-                                     });
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, packed_register)},
-                                         .payload = 0,
-                                         .opcode = MACHINE_X64_STORE_FRAME64,
-                                     });
-    u32 overflow_register = machine_x64_synthesize_register(selector);
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register),
-                                                      machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RBP)},
-                                         .payload = 16u + stack_end,
-                                         .opcode = MACHINE_X64_LEA_OFFSET,
-                                     });
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register)},
-                                         .payload = 8,
-                                         .opcode = MACHINE_X64_STORE_FRAME64,
-                                     });
-    u32 save_register = machine_x64_synthesize_register(selector);
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register),
-                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, selector->va_register_save_slot)},
-                                         .opcode = MACHINE_X64_LEA_FRAME,
-                                     });
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register)},
-                                         .payload = 16,
-                                         .opcode = MACHINE_X64_STORE_FRAME64,
-                                     });
-    u32 zero_register = machine_x64_synthesize_register(selector);
-    u32 zero_immediate = machine_x64_va_append_immediate(selector, 0);
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register),
-                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
-                                         .opcode = MACHINE_X64_MOV_RI,
-                                     });
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register)},
-                                         .payload = 24,
-                                         .opcode = MACHINE_X64_STORE_FRAME64,
-                                     });
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_copy(MachineX64Selector* selector, IrInstruction* instruction)
@@ -3448,33 +3449,32 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_read_modify_write(MachineX64S
 {
     IrProgram* program = selector->program;
 
+    bool selected = false;
     u32 value_register;
-    if (result_register == UINT32_MAX || instruction->operand_count < 2 ||
-        !machine_x64_operand_register(selector, instruction->operands[1], &value_register) ||
-        instruction->atomic_operation >= IR_ATOMIC_OPERATION_COUNT)
+    if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
+        machine_x64_operand_register(selector, instruction->operands[1], &value_register) &&
+        instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT)
     {
-        return false;
+        IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
+        if (size == 1 || size == 2 || size == 4 || size == 8)
+        {
+            u32 address_register = machine_x64_synthesize_register(selector);
+            if (machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+            {
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                               .payload = (u32)size | ((u32)instruction->atomic_operation << 8),
+                                                               .opcode = MACHINE_X64_ATOMIC_RMW,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                selected = true;
+            }
+        }
     }
-    IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
-    u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
-    if (size != 1 && size != 2 && size != 4 && size != 8)
-    {
-        return false;
-    }
-    u32 address_register = machine_x64_synthesize_register(selector);
-    if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
-    {
-        return false;
-    }
-    u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                   .payload = (u32)size | ((u32)instruction->atomic_operation << 8),
-                                                   .opcode = MACHINE_X64_ATOMIC_RMW,
-                                               });
-    machine_x64_define(selector, result_register, row);
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_compare_exchange(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
@@ -3686,136 +3686,125 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
 {
     IrFunction* function = selector->function;
 
+    bool selected = true;
     if (instruction->operand_count)
     {
+        u32 value_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
         if (selector->return_shape.indirect)
         {
-            u32 value_slot = instruction->operands[0].value < function->value_count
-                                 ? selector->value_stack_slots[instruction->operands[0].value]
-                                 : UINT32_MAX;
-            if (value_slot == UINT32_MAX || selector->hidden_return_slot == UINT32_MAX)
+            selected = value_slot != UINT32_MAX && selector->hidden_return_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
+                u32 pointer_register = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
+                                                     .opcode = MACHINE_X64_LOAD_FRAME,
+                                                 });
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = selector->return_shape.byte_size,
+                                                     .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                                                 });
+                // The System V contract returns the hidden pointer in RAX.
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register)},
+                                                     .opcode = MACHINE_X64_MOV_RR,
+                                                 });
             }
-            u32 pointer_register = machine_x64_synthesize_register(selector);
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
-                                                 .opcode = MACHINE_X64_LOAD_FRAME,
-                                             });
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = selector->return_shape.byte_size,
-                                                 .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
-                                             });
-            // The System V contract returns the hidden pointer in RAX.
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register)},
-                                                 .opcode = MACHINE_X64_MOV_RR,
-                                             });
         }
         else if (selector->return_shape.aggregate)
         {
-            u32 value_slot = instruction->operands[0].value < function->value_count
-                                 ? selector->value_stack_slots[instruction->operands[0].value]
-                                 : UINT32_MAX;
-            if (value_slot == UINT32_MAX)
+            selected = value_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
-            }
-            // Populate floating return registers first: MOVQ_TO_XMM uses
-            // RAX as its bridge, so integer-class parts must be loaded
-            // into RAX/RDX only after every float part has crossed.
-            u32 return_integer_index = 0;
-            u32 return_float_index = 0;
-            for (u32 populate_pass = 0; populate_pass < 2; populate_pass += 1)
-            {
-                bool float_pass = populate_pass == 0;
-                for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
+                // Populate floating return registers first: MOVQ_TO_XMM uses
+                // RAX as its bridge, so integer-class parts must be loaded
+                // into RAX/RDX only after every float part has crossed.
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
+                for (u32 populate_pass = 0; populate_pass < 2; populate_pass += 1)
                 {
-                    bool part_float = selector->return_shape.part_is_float[part_index] != 0;
-                    if (part_float != float_pass)
+                    bool float_pass = populate_pass == 0;
+                    for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
                     {
-                        continue;
-                    }
-                    if (!part_float)
-                    {
+                        bool part_float = selector->return_shape.part_is_float[part_index] != 0;
+                        if (part_float != float_pass)
+                        {
+                            continue;
+                        }
+                        if (!part_float)
+                        {
+                            machine_x64_select_row(selector, (MachineInstruction){
+                                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                               return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
+                                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                                 .payload = selector->return_shape.part_offsets[part_index],
+                                                                 .opcode = MACHINE_X64_LOAD_FRAME,
+                                                             });
+                            return_integer_index += 1;
+                            continue;
+                        }
+                        u32 bounce_register = machine_x64_synthesize_register(selector);
                         machine_x64_select_row(selector, (MachineInstruction){
-                                                             .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                           return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
                                                                           machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
                                                              .payload = selector->return_shape.part_offsets[part_index],
                                                              .opcode = MACHINE_X64_LOAD_FRAME,
                                                          });
-                        return_integer_index += 1;
-                        continue;
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                         });
+                        return_float_index += 1;
                     }
-                    u32 bounce_register = machine_x64_synthesize_register(selector);
-                    machine_x64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
-                                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                         .payload = selector->return_shape.part_offsets[part_index],
-                                                         .opcode = MACHINE_X64_LOAD_FRAME,
-                                                     });
-                    machine_x64_select_row(selector, (MachineInstruction){
-                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                         .payload = return_float_index,
-                                                         .opcode = MACHINE_X64_MOVQ_TO_XMM,
-                                                     });
-                    return_float_index += 1;
                 }
             }
-        }
-        else if (selector->return_shape.vector)
-        {
-            // The 512-bit result leaves in ZMM0 and stays live through
-            // the return row, whose vzeroupper the flag below suppresses.
-            u32 value_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &value_register))
-            {
-                return false;
-            }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_X64_VMOV_RR,
-                                             });
-        }
-        else if (selector->return_shape.part_is_float[0])
-        {
-            u32 value_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &value_register))
-            {
-                return false;
-            }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_X64_MOVQ_TO_XMM,
-                                             });
         }
         else
         {
             u32 value_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &value_register))
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &value_register);
+            if (selected && selector->return_shape.vector)
             {
-                return false;
+                // The 512-bit result leaves in ZMM0 and stays live through
+                // the return row, whose vzeroupper the flag below suppresses.
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_X64_VMOV_RR,
+                                                 });
             }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_X64_MOV_RR,
-                                             });
+            else if (selected && selector->return_shape.part_is_float[0])
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                 });
+            }
+            else if (selected)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_X64_MOV_RR,
+                                                 });
+            }
         }
     }
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .opcode = MACHINE_X64_RET,
-                                         .flags = (u16)(instruction->operand_count && selector->return_shape.vector
-                                                            ? MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE
-                                                            : 0),
-                                     });
-    return true;
+    if (selected)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .opcode = MACHINE_X64_RET,
+                                             .flags = (u16)(instruction->operand_count && selector->return_shape.vector
+                                                                ? MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE
+                                                                : 0),
+                                         });
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* selector, IrInstruction* instruction)
