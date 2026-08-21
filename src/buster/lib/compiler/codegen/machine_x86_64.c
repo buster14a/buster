@@ -2448,38 +2448,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_index(MachineX64Selector* selector, 
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+// A place whose address has to be materialized in a register: an explicit
+// pointer expression, or a local the classifier gave indirect storage.
+BUSTER_GLOBAL_LOCAL bool machine_x64_place_is_addressed(MachineX64Selector* selector, IrValueId place, IrInstruction* definition)
+{
+    return definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+           definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, place);
+}
+
+// The virtual register a direct local was promoted into, or UINT32_MAX when the
+// local lives in a frame slot instead.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_promoted_local_register(MachineX64Selector* selector, IrValueId place, IrInstruction* definition)
+{
+    u32 promoted = UINT32_MAX;
+    if (definition->opcode == IR_OPCODE_LOCAL && !machine_x64_local_is_indirect(selector, place))
+    {
+        promoted = selector->value_virtual_registers[place.value];
+    }
+    return promoted;
+}
+
+// The aggregate form of a load: an exact-size chunk copy into the result slot,
+// from a direct local's slot or through an address vreg.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate_load(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+                                                           u32 result_slot)
 {
     IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
 
-    // Aligned x86 loads are already atomic; the atomic form only
-    // excludes the aggregate paths.
-    if (instruction->operands[0].value >= function->value_count || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+    bool selected = false;
+    IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+    if (instruction->opcode != IR_OPCODE_ATOMIC_LOAD && loaded_type && loaded_type->layout.resolved && loaded_type->layout.size <= UINT32_MAX)
     {
-        return false;
-    }
-    IrValue* place = function->values + instruction->operands[0].value;
-    if (place->definition.value >= function->instruction_count)
-    {
-        return false;
-    }
-    IrInstruction* definition = function->instructions + place->definition.value;
-    u32 slot = selector->value_stack_slots[instruction->operands[0].value];
-    u32 result_slot = selector->value_stack_slots[instruction->result.value];
-    if (result_register == UINT32_MAX && result_slot != UINT32_MAX)
-    {
-        if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
-        {
-            return false;
-        }
-        // Aggregate load: exact-size chunk copy into the result slot,
-        // from a direct local slot or through an address vreg.
-        IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
-        if (!loaded_type || !loaded_type->layout.resolved || loaded_type->layout.size > UINT32_MAX)
-        {
-            return false;
-        }
         if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             machine_x64_select_row(selector, (MachineInstruction){
@@ -2488,60 +2487,51 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                                                  .payload = (u32)loaded_type->layout.size,
                                                  .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
                                              });
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
+        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
         {
             u32 address_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            if (selected)
             {
-                return false;
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                     .payload = (u32)loaded_type->layout.size,
+                                                     .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
+                                                 });
             }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                 .payload = (u32)loaded_type->layout.size,
-                                                 .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
-                                             });
-            return true;
         }
-        return false;
     }
-    if (result_register == UINT32_MAX)
+    return selected;
+}
+
+// Whole-vector load into a ZMM-class register: a promoted vector local aliases
+// or copies, a slot-backed one loads from its frame home, and everything else
+// goes through an address vreg.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_load(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+                                                        u32 result_register)
+{
+    bool selected = false;
+    u32 promoted = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
+    if (instruction->opcode != IR_OPCODE_ATOMIC_LOAD && machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
     {
-        return false;
-    }
-    IrType* register_loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
-    if (machine_x64_type_is_vector_register(register_loaded_type))
-    {
-        // Whole-vector load into a ZMM-class register: a promoted
-        // vector local aliases or copies, a slot-backed one loads from
-        // its frame home, and everything else goes through an address
-        // vreg.
-        if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || !machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
+        if (promoted != UINT32_MAX)
         {
-            return false;
-        }
-        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
-            !machine_x64_local_is_indirect(selector, instruction->operands[0]))
-        {
-            if (result_register == selector->value_virtual_registers[instruction->operands[0].value])
+            // Aliased, the load is a name for the local and not code.
+            if (result_register != promoted)
             {
-                // Aliased: the load is a name for the local, not code.
-                return true;
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, promoted)},
+                                                               .opcode = MACHINE_X64_VMOV_RR,
+                                                           });
+                machine_x64_define(selector, result_register, row);
             }
-            u32 row = machine_x64_select_row(
-                selector,
-                (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[instruction->operands[0].value])},
-                    .opcode = MACHINE_X64_VMOV_RR,
-                });
-            machine_x64_define(selector, result_register, row);
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -2549,45 +2539,51 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                                                            .opcode = MACHINE_X64_VLOAD_FRAME,
                                                        });
             machine_x64_define(selector, result_register, row);
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
+        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
         {
             u32 address_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            if (selected)
             {
-                return false;
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                               .opcode = MACHINE_X64_VLOAD_PTR,
+                                                           });
+                machine_x64_define(selector, result_register, row);
             }
+        }
+    }
+    return selected;
+}
+
+// The scalar form: a promoted local reads as a register, a direct local as a
+// frame load, and anything address-shaped as a sized pointer load.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_load(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+                                                        u32 result_register)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
+    u32 promoted = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
+    if (promoted != UINT32_MAX)
+    {
+        // Aliased, the load is a name for the local and not code; promoted
+        // but not aliasable here, it is a register copy.
+        if (result_register != promoted)
+        {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                           .opcode = MACHINE_X64_VLOAD_PTR,
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, promoted)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
                                                        });
             machine_x64_define(selector, result_register, row);
-            return true;
         }
-        return false;
+        selected = true;
     }
-    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
-        !machine_x64_local_is_indirect(selector, instruction->operands[0]))
-    {
-        if (result_register == selector->value_virtual_registers[instruction->operands[0].value])
-        {
-            // Aliased: the load is a name for the local, not code.
-            return true;
-        }
-        // Promoted but not aliasable here: the load is a register copy.
-        u32 row = machine_x64_select_row(
-            selector, (MachineInstruction){
-                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[instruction->operands[0].value])},
-                          .opcode = MACHINE_X64_MOV_RR,
-                      });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+    else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
     {
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -2595,87 +2591,98 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                                                        .opcode = MACHINE_X64_LOAD_FRAME,
                                                    });
         machine_x64_define(selector, result_register, row);
-        return true;
+        selected = true;
     }
-    if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-        definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
+    else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
     {
         u32 address_register;
-        if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+        if (machine_x64_operand_register(selector, instruction->operands[0], &address_register))
         {
-            return false;
+            IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            u64 size = loaded_type && loaded_type->layout.resolved ? loaded_type->layout.size : 0;
+            u16 opcode = size == 1 ? MACHINE_X64_LOAD_PTR8 : size == 2 ? MACHINE_X64_LOAD_PTR16 : size == 4 ? MACHINE_X64_LOAD_PTR32
+                         : size == 8 ? MACHINE_X64_LOAD_PTR64 : 0;
+            if (opcode)
+            {
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                               .opcode = opcode,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                selected = true;
+            }
         }
-        IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
-        u64 size = loaded_type && loaded_type->layout.resolved ? loaded_type->layout.size : 0;
-        u16 opcode = size == 1 ? MACHINE_X64_LOAD_PTR8 : size == 2 ? MACHINE_X64_LOAD_PTR16 : size == 4 ? MACHINE_X64_LOAD_PTR32
-                     : size == 8 ? MACHINE_X64_LOAD_PTR64 : 0;
-        if (!opcode)
-        {
-            return false;
-        }
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                       .opcode = opcode,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
     }
-    return false;
+    return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, IrInstruction* instruction)
+// Aligned x86 loads are already atomic; the atomic form only excludes the
+// aggregate and vector paths.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
-    if (instruction->operands[0].value >= function->value_count || instruction->operands[1].value >= function->value_count)
+    bool selected = false;
+    if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
-        return false;
-    }
-    IrValue* place = function->values + instruction->operands[0].value;
-    if (place->definition.value >= function->instruction_count)
-    {
-        return false;
-    }
-    IrInstruction* definition = function->instructions + place->definition.value;
-    IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
-    u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
-    u32 slot = selector->value_stack_slots[instruction->operands[0].value];
-    u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
-    if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
-    {
-        // Sequentially consistent stores exchange, exactly like the
-        // canonical path; weaker orders are plain x86 stores below.
-        u32 atomic_value_register;
-        if (!machine_x64_operand_register(selector, instruction->operands[1], &atomic_value_register) || (size != 1 && size != 2 && size != 4 && size != 8))
+        IrValue* place = function->values + instruction->operands[0].value;
+        if (place->definition.value < function->instruction_count)
         {
-            return false;
+            IrInstruction* definition = function->instructions + place->definition.value;
+            u32 slot = selector->value_stack_slots[instruction->operands[0].value];
+            u32 result_slot = selector->value_stack_slots[instruction->result.value];
+            IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            if (result_register != UINT32_MAX && machine_x64_type_is_vector_register(loaded_type))
+            {
+                selected = machine_x64_select_vector_load(selector, instruction, definition, slot, result_register);
+            }
+            else if (result_register != UINT32_MAX)
+            {
+                selected = machine_x64_select_scalar_load(selector, instruction, definition, slot, result_register);
+            }
+            else if (result_slot != UINT32_MAX)
+            {
+                selected = machine_x64_select_aggregate_load(selector, instruction, definition, slot, result_slot);
+            }
         }
+    }
+    return selected;
+}
+
+// Sequentially consistent stores exchange, exactly like the canonical path;
+// weaker orders are plain x86 stores.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_sequential_atomic_store(MachineX64Selector* selector, IrInstruction* instruction, u64 size)
+{
+    bool selected = false;
+    u32 atomic_value_register;
+    if (machine_x64_operand_register(selector, instruction->operands[1], &atomic_value_register) &&
+        (size == 1 || size == 2 || size == 4 || size == 8))
+    {
         u32 address_register = machine_x64_synthesize_register(selector);
-        if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+        selected = machine_x64_select_place_address(selector, instruction->operands[0], address_register);
+        if (selected)
         {
-            return false;
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, atomic_value_register)},
+                                                 .payload = (u32)size,
+                                                 .opcode = MACHINE_X64_ATOMIC_STORE_XCHG,
+                                             });
         }
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, atomic_value_register)},
-                                             .payload = (u32)size,
-                                             .opcode = MACHINE_X64_ATOMIC_STORE_XCHG,
-                                         });
-        return true;
     }
-    if (value_slot != UINT32_MAX && selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
+    return selected;
+}
+
+// The aggregate form of a store: an exact-size chunk copy out of the value
+// slot, into a direct local's slot or through an address vreg.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate_store(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u64 size,
+                                                            u32 slot, u32 value_slot)
+{
+    bool selected = false;
+    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && size && size <= UINT32_MAX)
     {
-        if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
-        {
-            return false;
-        }
-        // Aggregate store: exact-size chunk copy out of the value slot.
-        if (!size || size > UINT32_MAX)
-        {
-            return false;
-        }
         if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             machine_x64_select_row(selector, (MachineInstruction){
@@ -2684,129 +2691,171 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
                                                  .payload = (u32)size,
                                                  .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
                                              });
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
+        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
         {
             u32 address_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            if (selected)
             {
-                return false;
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                                                 });
             }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = (u32)size,
-                                                 .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
-                                             });
-            return true;
         }
-        return false;
     }
-    u32 value_register;
-    if (!machine_x64_operand_register(selector, instruction->operands[1], &value_register))
+    return selected;
+}
+
+// Whole-vector store out of a ZMM-class register: a promoted vector local takes
+// a full 512-bit register copy, a slot-backed one stores to its frame home, and
+// everything else goes through an address vreg.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_store(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+                                                         u32 value_register)
+{
+    bool selected = false;
+    u32 place_register = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
+    if (instruction->opcode != IR_OPCODE_ATOMIC_STORE && machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
     {
-        return false;
-    }
-    if (machine_x64_type_is_vector_register(stored_type))
-    {
-        // Whole-vector store out of a ZMM-class register: a promoted
-        // vector local takes a full 512-bit register copy, a
-        // slot-backed one stores to its frame home, and everything
-        // else goes through an address vreg.
-        if (instruction->opcode == IR_OPCODE_ATOMIC_STORE || !machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
+        if (place_register != UINT32_MAX)
         {
-            return false;
-        }
-        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
-            !machine_x64_local_is_indirect(selector, instruction->operands[0]))
-        {
-            u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, place_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
                                                            .opcode = MACHINE_X64_VMOV_RR,
                                                        });
             machine_x64_define(selector, place_register, row);
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
                                                  .opcode = MACHINE_X64_VSTORE_FRAME,
                                              });
-            return true;
+            selected = true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
+        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
         {
             u32 address_register;
-            if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            if (selected)
             {
-                return false;
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_X64_VSTORE_PTR,
+                                                 });
             }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_X64_VSTORE_PTR,
-                                             });
-            return true;
         }
-        return false;
     }
+    return selected;
+}
+
+// The scalar form: a promoted local takes a register copy, a direct local a
+// full-slot frame store, and anything address-shaped a sized pointer store.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u64 size,
+                                                         u32 slot, u32 value_register)
+{
+    bool selected = false;
     u32 size_index = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : size == 8 ? 3 : UINT32_MAX;
-    if (size_index == UINT32_MAX)
+    u32 place_register = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
+    if (size_index != UINT32_MAX)
     {
-        return false;
-    }
-    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
-        !machine_x64_local_is_indirect(selector, instruction->operands[0]))
-    {
-        // Promoted local: the store is a full-width register copy —
-        // the same 64-bit image a direct-slot store writes, since the
-        // register model keeps every value zero-extended.
-        u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, place_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                       .opcode = MACHINE_X64_MOV_RR,
-                                                   });
-        machine_x64_define(selector, place_register, row);
-        return true;
-    }
-    if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
-    {
-        // Direct-slot stores always write the full eight-byte slot,
-        // exactly like the canonical path: the slot is the value's
-        // exclusive home, and narrower stores would leave stale upper
-        // bytes for the sixty-four-bit slot loads and tests that
-        // follow. The pointer stores below stay exactly sized.
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                             .opcode = MACHINE_X64_STORE_FRAME64,
-                                         });
-        return true;
-    }
-    if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-        definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
-    {
-        u32 address_register;
-        if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
+        if (place_register != UINT32_MAX)
         {
-            return false;
+            // Promoted local: the store is a full-width register copy —
+            // the same 64-bit image a direct-slot store writes, since the
+            // register model keeps every value zero-extended.
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, place_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                       });
+            machine_x64_define(selector, place_register, row);
+            selected = true;
         }
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                             .opcode = (u16)(MACHINE_X64_STORE_PTR8 + size_index),
-                                         });
-        return true;
+        else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        {
+            // Direct-slot stores always write the full eight-byte slot,
+            // exactly like the canonical path: the slot is the value's
+            // exclusive home, and narrower stores would leave stale upper
+            // bytes for the sixty-four-bit slot loads and tests that
+            // follow. The pointer stores below stay exactly sized.
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                 .opcode = MACHINE_X64_STORE_FRAME64,
+                                             });
+            selected = true;
+        }
+        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
+        {
+            u32 address_register;
+            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            if (selected)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = (u16)(MACHINE_X64_STORE_PTR8 + size_index),
+                                                 });
+            }
+        }
     }
-    return false;
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    if (instruction->operands[0].value < function->value_count && instruction->operands[1].value < function->value_count)
+    {
+        IrValue* place = function->values + instruction->operands[0].value;
+        if (place->definition.value < function->instruction_count)
+        {
+            IrInstruction* definition = function->instructions + place->definition.value;
+            IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+            u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
+            u32 slot = selector->value_stack_slots[instruction->operands[0].value];
+            u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
+            if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
+            {
+                selected = machine_x64_select_sequential_atomic_store(selector, instruction, size);
+            }
+            else if (value_slot != UINT32_MAX && selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
+            {
+                selected = machine_x64_select_aggregate_store(selector, instruction, definition, size, slot, value_slot);
+            }
+            else
+            {
+                u32 value_register;
+                if (machine_x64_operand_register(selector, instruction->operands[1], &value_register))
+                {
+                    // Spelled as a branch rather than a conditional operand:
+                    // both arms emit rows, and `ide` evaluates both arms of a
+                    // conditional in some operand positions.
+                    if (machine_x64_type_is_vector_register(stored_type))
+                    {
+                        selected = machine_x64_select_vector_store(selector, instruction, definition, slot, value_register);
+                    }
+                    else
+                    {
+                        selected = machine_x64_select_scalar_store(selector, instruction, definition, size, slot, value_register);
+                    }
+                }
+            }
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_function(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
