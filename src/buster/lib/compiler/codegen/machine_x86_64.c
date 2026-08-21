@@ -1410,36 +1410,26 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+// i128 values use the same two-eightbyte frame representation as aggregate
+// values. This path stays direct and bounded: scalar integer extensions and
+// truncations use the existing frame rows, a 128-bit reinterpret is a
+// byte-preserving frame copy, and other aggregate casts continue through the
+// explicit unsupported fallback.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* selector, IrInstruction* instruction, IrType* source_type,
+                                                      IrType* cast_target_type, u32 source_bits, u32 result_register)
 {
-    IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
-    if (instruction->operands[0].value >= function->value_count)
+    bool selected = false;
+    if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
     {
-        return false;
-    }
-    IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-    IrType* cast_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
-    u32 source_bits = machine_x64_scalar_bit_width(source_type);
-    bool source_integer128 = source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
-    bool target_integer128 = cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 128;
-    // i128 values use the same two-eightbyte frame representation as
-    // aggregate values.  Keep this path direct and bounded: scalar
-    // integer extensions/truncations use the existing frame rows, while
-    // a 128-bit reinterpret is a byte-preserving frame copy. Other
-    // aggregate casts continue through the explicit unsupported fallback.
-    if (source_integer128 || target_integer128)
-    {
-        if (!source_type || !cast_target_type || source_type->kind != IR_TYPE_INTEGER || cast_target_type->kind != IR_TYPE_INTEGER)
-        {
-            return false;
-        }
+        bool source_integer128 = source_type->bit_width == 128;
+        bool target_integer128 = cast_target_type->bit_width == 128;
         u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
         u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
         bool reinterpret_i128 = source_integer128 && target_integer128 &&
-                               (instruction->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET ||
-                                instruction->conversion_operation == IR_CONVERSION_IDENTITY);
+                                (instruction->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET ||
+                                 instruction->conversion_operation == IR_CONVERSION_IDENTITY);
         bool truncate_i128 = source_integer128 && !target_integer128 && cast_target_type->bit_width <= 64 &&
                              instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
         bool extend_i128 = target_integer128 && !source_integer128 && source_type->bit_width >= 8 && source_type->bit_width <= 64 &&
@@ -1447,161 +1437,147 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
                             instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND);
         if (reinterpret_i128)
         {
-            if (source_slot == UINT32_MAX || target_slot == UINT32_MAX)
+            selected = source_slot != UINT32_MAX && target_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
-            }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
-                                                 .payload = 16,
-                                                 .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
-                                             });
-            return true;
-        }
-        if (truncate_i128)
-        {
-            if (result_register == UINT32_MAX || source_slot == UINT32_MAX)
-            {
-                return false;
-            }
-            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
-                                                           .opcode = MACHINE_X64_LOAD_FRAME,
-                                                       });
-            machine_x64_define(selector, result_register, row);
-            if (cast_target_type->bit_width < 64)
-            {
-                u16 narrow_opcode = cast_target_type->bit_width == 8   ? MACHINE_X64_MOVZX8_RR
-                                    : cast_target_type->bit_width == 16 ? MACHINE_X64_MOVZX16_RR
-                                                                         : MACHINE_X64_MOV32_RR;
                 machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                     .opcode = narrow_opcode,
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                                     .payload = 16,
+                                                     .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
                                                  });
             }
-            return true;
         }
-        if (extend_i128)
+        else if (truncate_i128)
         {
-            u32 source_register;
-            if (result_register != UINT32_MAX || target_slot == UINT32_MAX || source_bits < 8 || source_bits > 64 ||
-                !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+            selected = result_register != UINT32_MAX && source_slot != UINT32_MAX;
+            if (selected)
             {
-                return false;
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                                               .opcode = MACHINE_X64_LOAD_FRAME,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                if (cast_target_type->bit_width < 64)
+                {
+                    u16 narrow_opcode = cast_target_type->bit_width == 8   ? MACHINE_X64_MOVZX8_RR
+                                        : cast_target_type->bit_width == 16 ? MACHINE_X64_MOVZX16_RR
+                                                                             : MACHINE_X64_MOV32_RR;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                         .opcode = narrow_opcode,
+                                                     });
+                }
             }
-            u32 low_register = source_register;
-            if (source_bits < 64)
+        }
+        else if (extend_i128)
+        {
+            // Only the rows below read this, and only where the operand lookup
+            // that fills it succeeded.
+            u32 source_register = UINT32_MAX;
+            selected = result_register == UINT32_MAX && target_slot != UINT32_MAX && source_bits >= 8 && source_bits <= 64 &&
+                       machine_x64_operand_register(selector, instruction->operands[0], &source_register);
+            if (selected)
             {
-                u16 extend_opcode = instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND
-                                        ? (source_bits == 8 ? MACHINE_X64_MOVSX8_RR
-                                           : source_bits == 16 ? MACHINE_X64_MOVSX16_RR
-                                                               : MACHINE_X64_MOVSX32_RR)
-                                        : (source_bits == 8 ? MACHINE_X64_MOVZX8_RR
-                                           : source_bits == 16 ? MACHINE_X64_MOVZX16_RR
-                                                               : MACHINE_X64_MOV32_RR);
-                low_register = machine_x64_synthesize_register(selector);
+                u32 low_register = source_register;
+                if (source_bits < 64)
+                {
+                    u16 extend_opcode = instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND
+                                            ? (source_bits == 8 ? MACHINE_X64_MOVSX8_RR
+                                               : source_bits == 16 ? MACHINE_X64_MOVSX16_RR
+                                                                   : MACHINE_X64_MOVSX32_RR)
+                                            : (source_bits == 8 ? MACHINE_X64_MOVZX8_RR
+                                               : source_bits == 16 ? MACHINE_X64_MOVZX16_RR
+                                                                   : MACHINE_X64_MOV32_RR);
+                    low_register = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                         .opcode = extend_opcode,
+                                                     });
+                }
                 machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                     .opcode = extend_opcode,
-                                                 });
-            }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
-                                                 .opcode = MACHINE_X64_STORE_FRAME64,
-                                             });
-            u32 high_register = machine_x64_synthesize_register(selector);
-            if (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
-            {
-                // The high half of a signed 64-to-128 extension is the
-                // sign bit replicated across all 64 bits.  Copy the low
-                // half, then arithmetic-shift it by 63 so the runtime
-                // sign (rather than the static type) chooses all ones or
-                // all zeroes.
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
-                                                     .opcode = MACHINE_X64_MOV_RR,
+                                                     .opcode = MACHINE_X64_STORE_FRAME64,
                                                  });
-                u32 shift_register = machine_x64_synthesize_register(selector);
-                u32 immediate_index = selector->immediates.total_count;
-                u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-                *immediate_row = 63;
+                u32 high_register = machine_x64_synthesize_register(selector);
+                if (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
+                {
+                    // The high half of a signed 64-to-128 extension is the
+                    // sign bit replicated across all 64 bits.  Copy the low
+                    // half, then arithmetic-shift it by 63 so the runtime
+                    // sign (rather than the static type) chooses all ones or
+                    // all zeroes.
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
+                                                         .opcode = MACHINE_X64_MOV_RR,
+                                                     });
+                    u32 shift_register = machine_x64_synthesize_register(selector);
+                    u32 immediate_index = selector->immediates.total_count;
+                    u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                    *immediate_row = 63;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register),
+                                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                         .opcode = MACHINE_X64_MOV_RI,
+                                                     });
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register)},
+                                                         .opcode = MACHINE_X64_SAR64,
+                                                     });
+                }
+                else
+                {
+                    u32 immediate_index = selector->immediates.total_count;
+                    u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                    *immediate_row = 0;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                         .opcode = MACHINE_X64_MOV_RI,
+                                                     });
+                }
                 machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register),
-                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                     .opcode = MACHINE_X64_MOV_RI,
-                                                 });
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register)},
-                                                     .opcode = MACHINE_X64_SAR64,
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register)},
+                                                     .payload = 8,
+                                                     .opcode = MACHINE_X64_STORE_FRAME64,
                                                  });
             }
-            else
-            {
-                u32 immediate_index = selector->immediates.total_count;
-                u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-                *immediate_row = 0;
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
-                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                     .opcode = MACHINE_X64_MOV_RI,
-                                                 });
-            }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register)},
-                                                 .payload = 8,
-                                                 .opcode = MACHINE_X64_STORE_FRAME64,
-                                             });
-            return true;
         }
-        return false;
     }
-    u32 source_register;
-    if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+    return selected;
+}
+
+// The 64-bit convert instructions carry every narrower integer case after an
+// extension, and the branchy unsigned-64 sequences stay outside the subset.
+// The 64-bit convert instructions carry every narrower integer case after an
+// extension; the branchy unsigned-64 sequences have rows of their own.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_integer_to_float(MachineX64Selector* selector, IrInstruction* instruction, IrType* cast_target_type,
+                                                                  u32 source_bits, u32 source_register, u32 result_register)
+{
+    bool selected = false;
+    bool cast_signed = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    bool convertible = cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
+                       (cast_target_type->bit_width == 32 || cast_target_type->bit_width == 64) && source_bits;
+    if (convertible && !cast_signed && source_bits == 64)
     {
-        return false;
+        u32 branchy_row = machine_x64_select_row(
+            selector, (MachineInstruction){
+                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                          .opcode = (u16)(cast_target_type->bit_width == 64 ? MACHINE_X64_CVT_U64_TO_F64 : MACHINE_X64_CVT_U64_TO_F32),
+                      });
+        machine_x64_define(selector, result_register, branchy_row);
+        selected = true;
     }
-    // Float conversions mirror the canonical forms: the 64-bit convert
-    // instructions carry every narrower case after an integer extension,
-    // and the branchy unsigned-64 sequences stay outside the subset.
-    if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
+    else if (convertible)
     {
-        bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                       .opcode = (u16)(extend ? MACHINE_X64_CVT_F32_TO_F64 : MACHINE_X64_CVT_F64_TO_F32),
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    if (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
-        instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)
-    {
-        bool cast_signed = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
-        if (!cast_target_type || cast_target_type->kind != IR_TYPE_FLOAT ||
-            (cast_target_type->bit_width != 32 && cast_target_type->bit_width != 64) || !source_bits)
-        {
-            return false;
-        }
-        if (!cast_signed && source_bits == 64)
-        {
-            u32 branchy_row = machine_x64_select_row(
-                selector, (MachineInstruction){
-                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                              .opcode = (u16)(cast_target_type->bit_width == 64 ? MACHINE_X64_CVT_U64_TO_F64 : MACHINE_X64_CVT_U64_TO_F32),
-                          });
-            machine_x64_define(selector, result_register, branchy_row);
-            return true;
-        }
         u32 extended_register = source_register;
         if (source_bits < 64)
         {
@@ -1623,27 +1599,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
                                                                                                          : MACHINE_X64_CVT_I64_TO_F32),
                                                    });
         machine_x64_define(selector, result_register, row);
-        return true;
+        selected = true;
     }
-    if (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
-        instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER)
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_float_to_integer(MachineX64Selector* selector, IrInstruction* instruction, IrType* source_type,
+                                                                  IrType* cast_target_type, u32 source_register, u32 result_register)
+{
+    bool selected = false;
+    bool to_unsigned = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+    bool convertible = source_type && source_type->kind == IR_TYPE_FLOAT && (source_type->bit_width == 32 || source_type->bit_width == 64);
+    if (convertible && to_unsigned && cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 64)
     {
-        bool to_unsigned = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
-        if (!source_type || source_type->kind != IR_TYPE_FLOAT || (source_type->bit_width != 32 && source_type->bit_width != 64))
-        {
-            return false;
-        }
-        if (to_unsigned && cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 64)
-        {
-            u32 branchy_row = machine_x64_select_row(
-                selector, (MachineInstruction){
-                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                              .opcode = (u16)(source_type->bit_width == 64 ? MACHINE_X64_CVT_F64_TO_U64 : MACHINE_X64_CVT_F32_TO_U64),
-                          });
-            machine_x64_define(selector, result_register, branchy_row);
-            return true;
-        }
+        u32 branchy_row = machine_x64_select_row(
+            selector, (MachineInstruction){
+                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                          .opcode = (u16)(source_type->bit_width == 64 ? MACHINE_X64_CVT_F64_TO_U64 : MACHINE_X64_CVT_F32_TO_U64),
+                      });
+        machine_x64_define(selector, result_register, branchy_row);
+        selected = true;
+    }
+    else if (convertible)
+    {
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
@@ -1651,55 +1630,107 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, I
                                                                                                     : MACHINE_X64_CVT_F32_TO_I64),
                                                    });
         machine_x64_define(selector, result_register, row);
-        return true;
+        selected = true;
     }
-    u16 opcode = 0;
-    switch (instruction->conversion_operation)
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    if (instruction->operands[0].value < function->value_count)
     {
-        break;
-    case IR_CONVERSION_IDENTITY:
-    case IR_CONVERSION_INTEGER_REINTERPRET:
-    case IR_CONVERSION_POINTER_REINTERPRET:
-    case IR_CONVERSION_INTEGER_TO_POINTER:
-        opcode = MACHINE_X64_MOV_RR;
-        break;
-    case IR_CONVERSION_INTEGER_TRUNCATE:
-    case IR_CONVERSION_POINTER_TO_INTEGER:
-    {
-        // The register model keeps every value zero-extended to 64
-        // bits, so a narrowing cast must actually clear the discarded
-        // top: a plain 64-bit copy would smuggle the source's high
-        // bits into 64-bit consumers like unsigned index scaling.
-        u32 destination_bits = machine_x64_scalar_bit_width(cast_target_type);
-        opcode = (u16)(destination_bits == 8    ? MACHINE_X64_MOVZX8_RR
-                       : destination_bits == 16 ? MACHINE_X64_MOVZX16_RR
-                       : destination_bits == 32 ? MACHINE_X64_MOV32_RR
-                       : destination_bits == 64 ? MACHINE_X64_MOV_RR
-                                                : 0);
+        IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        IrType* cast_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u32 source_bits = machine_x64_scalar_bit_width(source_type);
+        bool source_integer128 = source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
+        bool target_integer128 = cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 128;
+        // Only the register conversions below read this, and only where the
+        // operand lookup that fills it succeeded.
+        u32 source_register = UINT32_MAX;
+        if (source_integer128 || target_integer128)
+        {
+            selected = machine_x64_select_cast_i128(selector, instruction, source_type, cast_target_type, source_bits, result_register);
+        }
+        // Float conversions mirror the canonical forms.
+        else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+        {
+            if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
+            {
+                bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                               .opcode = (u16)(extend ? MACHINE_X64_CVT_F32_TO_F64 : MACHINE_X64_CVT_F64_TO_F32),
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                selected = true;
+            }
+            else if (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                     instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)
+            {
+                selected = machine_x64_select_cast_integer_to_float(selector, instruction, cast_target_type, source_bits, source_register, result_register);
+            }
+            else if (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                     instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER)
+            {
+                selected = machine_x64_select_cast_float_to_integer(selector, instruction, source_type, cast_target_type, source_register, result_register);
+            }
+            else
+            {
+                u16 opcode = 0;
+                switch (instruction->conversion_operation)
+                {
+                    break;
+                case IR_CONVERSION_IDENTITY:
+                case IR_CONVERSION_INTEGER_REINTERPRET:
+                case IR_CONVERSION_POINTER_REINTERPRET:
+                case IR_CONVERSION_INTEGER_TO_POINTER:
+                    opcode = MACHINE_X64_MOV_RR;
+                    break;
+                case IR_CONVERSION_INTEGER_TRUNCATE:
+                case IR_CONVERSION_POINTER_TO_INTEGER:
+                {
+                    // The register model keeps every value zero-extended to 64
+                    // bits, so a narrowing cast must actually clear the discarded
+                    // top: a plain 64-bit copy would smuggle the source's high
+                    // bits into 64-bit consumers like unsigned index scaling.
+                    u32 destination_bits = machine_x64_scalar_bit_width(cast_target_type);
+                    opcode = (u16)(destination_bits == 8    ? MACHINE_X64_MOVZX8_RR
+                                   : destination_bits == 16 ? MACHINE_X64_MOVZX16_RR
+                                   : destination_bits == 32 ? MACHINE_X64_MOV32_RR
+                                   : destination_bits == 64 ? MACHINE_X64_MOV_RR
+                                                            : 0);
+                }
+                break;
+                case IR_CONVERSION_INTEGER_SIGN_EXTEND:
+                    opcode = (u16)(source_bits == 8 ? MACHINE_X64_MOVSX8_RR : source_bits == 16 ? MACHINE_X64_MOVSX16_RR : source_bits == 32 ? MACHINE_X64_MOVSX32_RR
+                                   : source_bits == 64 ? MACHINE_X64_MOV_RR : 0);
+                    break;
+                case IR_CONVERSION_INTEGER_ZERO_EXTEND:
+                    opcode = (u16)(source_bits == 8 ? MACHINE_X64_MOVZX8_RR : source_bits == 16 ? MACHINE_X64_MOVZX16_RR : source_bits == 32 ? MACHINE_X64_MOV32_RR
+                                   : source_bits == 64 ? MACHINE_X64_MOV_RR : 0);
+                    break;
+                default:
+                    opcode = 0;
+                }
+                selected = opcode != 0;
+                if (selected)
+                {
+                    u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                                   .opcode = opcode,
+                                                               });
+                    machine_x64_define(selector, result_register, row);
+                }
+            }
+        }
     }
-    break;
-    case IR_CONVERSION_INTEGER_SIGN_EXTEND:
-        opcode = (u16)(source_bits == 8 ? MACHINE_X64_MOVSX8_RR : source_bits == 16 ? MACHINE_X64_MOVSX16_RR : source_bits == 32 ? MACHINE_X64_MOVSX32_RR
-                       : source_bits == 64 ? MACHINE_X64_MOV_RR : 0);
-        break;
-    case IR_CONVERSION_INTEGER_ZERO_EXTEND:
-        opcode = (u16)(source_bits == 8 ? MACHINE_X64_MOVZX8_RR : source_bits == 16 ? MACHINE_X64_MOVZX16_RR : source_bits == 32 ? MACHINE_X64_MOV32_RR
-                       : source_bits == 64 ? MACHINE_X64_MOV_RR : 0);
-        break;
-    default:
-        opcode = 0;
-    }
-    if (!opcode)
-    {
-        return false;
-    }
-    u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                   .opcode = opcode,
-                                               });
-    machine_x64_define(selector, result_register, row);
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_unary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
