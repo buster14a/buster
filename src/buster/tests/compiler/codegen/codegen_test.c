@@ -296,6 +296,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_parse_modrm(ByteSlice code, u64 offset
 
 BUSTER_GLOBAL_LOCAL bool codegen_test_x64_modrm_rm_writes(u8 opcode)
 {
+    bool result;
     switch (opcode)
     {
     case 0x00:
@@ -323,16 +324,19 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_modrm_rm_writes(u8 opcode)
     case 0xc6:
     case 0xc7:
     case 0xfe:
-        return true;
+        result = true;
         break;
     default:
-        return false;
+        result = false;
         break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_test_x64_modrm_reg_writes(u8 opcode)
 {
+    bool result;
     switch (opcode)
     {
     case 0x02:
@@ -355,12 +359,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_modrm_reg_writes(u8 opcode)
     case 0x8a:
     case 0x8b:
     case 0x8d:
-        return true;
+        result = true;
         break;
     default:
-        return false;
+        result = false;
         break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_test_x64_decode_instruction(ByteSlice code, u64 offset, u64 end, CodegenTestX64Instruction* result)

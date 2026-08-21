@@ -618,64 +618,78 @@ BUSTER_GLOBAL_LOCAL u64 string_format_integer_max_width(u64 bit_width, StringFor
 
 BUSTER_GLOBAL_LOCAL u64 string_format_integer_radix(StringFormatIntegerKind kind)
 {
+    u64 result;
     switch (kind)
     {
-        break;
     case STRING_FORMAT_INTEGER_KIND_DECIMAL:
-        return 10;
+        result = 10;
+        break;
     case STRING_FORMAT_INTEGER_KIND_BINARY:
-        return 2;
+        result = 2;
+        break;
     case STRING_FORMAT_INTEGER_KIND_OCTAL:
-        return 8;
+        result = 8;
+        break;
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
-        return 16;
+        result = 16;
+        break;
     case STRING_FORMAT_INTEGER_KIND_COUNT:
-        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_TODO();
     }
 
-    BUSTER_UNREACHABLE();
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL char8 string_format_integer_prefix_character(StringFormatIntegerKind kind)
 {
+    char8 result;
     switch (kind)
     {
-        break;
     case STRING_FORMAT_INTEGER_KIND_DECIMAL:
-        return 'd';
+        result = 'd';
+        break;
     case STRING_FORMAT_INTEGER_KIND_BINARY:
-        return 'b';
+        result = 'b';
+        break;
     case STRING_FORMAT_INTEGER_KIND_OCTAL:
-        return 'o';
+        result = 'o';
+        break;
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
-        return 'x';
+        result = 'x';
+        break;
     case STRING_FORMAT_INTEGER_KIND_COUNT:
-        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_TODO();
     }
 
-    BUSTER_UNREACHABLE();
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u64 string_format_integer_digit_group_size(StringFormatIntegerKind kind)
 {
+    u64 result;
     switch (kind)
     {
-        break;
     case STRING_FORMAT_INTEGER_KIND_DECIMAL:
     case STRING_FORMAT_INTEGER_KIND_OCTAL:
-        return 3;
+        result = 3;
+        break;
     case STRING_FORMAT_INTEGER_KIND_BINARY:
-        return 8;
+        result = 8;
+        break;
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_LOWER:
     case STRING_FORMAT_INTEGER_KIND_HEXADECIMAL_UPPER:
-        return 2;
+        result = 2;
+        break;
     case STRING_FORMAT_INTEGER_KIND_COUNT:
-        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_TODO();
     }
 
-    BUSTER_UNREACHABLE();
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void string_append_integer_digits(Arena* arena, String8 digits, StringFormatIntegerKind kind, bool digit_group)

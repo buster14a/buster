@@ -46,13 +46,18 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_generated_opcode_is_control(IrOpcode 
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_generated_target_accepts(Target target, MachineSelectionRuleMatch match)
 {
+    bool result;
     switch (match)
     {
         case MACHINE_SELECTION_RULE_MATCH_VECTOR:
-            return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+            result = target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+            break;
         default:
-            return target.cpu_arch < CPU_ARCH_COUNT;
+            result = target.cpu_arch < CPU_ARCH_COUNT;
+            break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_generated_matches(MachineSelectionGeneratedRule const* rule, MachineSelectionRuleContext context)

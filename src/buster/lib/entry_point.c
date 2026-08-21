@@ -115,25 +115,36 @@ BUSTER_GLOBAL_LOCAL u64 crash_report_append_hex_u64(char8* buffer, u64 length, u
 
 BUSTER_GLOBAL_LOCAL String8 crash_signal_name(int sig)
 {
+    String8 result;
     switch (sig)
     {
     case SIGILL:
-        return S8("SIGILL");
+        result = S8("SIGILL");
+        break;
     case SIGTRAP:
-        return S8("SIGTRAP");
+        result = S8("SIGTRAP");
+        break;
     case SIGABRT:
-        return S8("SIGABRT");
+        result = S8("SIGABRT");
+        break;
     case SIGFPE:
-        return S8("SIGFPE");
+        result = S8("SIGFPE");
+        break;
     case SIGBUS:
-        return S8("SIGBUS");
+        result = S8("SIGBUS");
+        break;
     case SIGSEGV:
-        return S8("SIGSEGV");
+        result = S8("SIGSEGV");
+        break;
     case SIGQUIT:
-        return S8("SIGQUIT");
+        result = S8("SIGQUIT");
+        break;
     default:
-        return S8("signal");
+        result = S8("signal");
+        break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void signal_handler(int sig, siginfo_t* info, void* arg)

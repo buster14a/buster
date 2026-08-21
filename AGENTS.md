@@ -609,7 +609,11 @@ history.
   return. Returns in mutually exclusive `#if`/`#elif`/`#else` arms are one
   return — every configuration compiles exactly one of them — so a
   platform-dispatch body already satisfies this rule and does not need a result
-  variable threaded through the preprocessor.
+  variable threaded through the preprocessor. A `switch` that used to return a
+  value per case becomes an undecorated `Type result;`, one `result = ...` per
+  case, and `default: BUSTER_TODO();` for the impossible case: `BUSTER_TODO`
+  never falls through, which is what leaves `result` definitely assigned without
+  a placeholder initializer that a real bug could hide behind.
 - `BUSTER_F_DECL` belongs on header declarations only. In a `.c` file, a
   module-local function is `BUSTER_GLOBAL_LOCAL`, and a function that a header
   already declares carries no macro at all — the header declaration is what

@@ -291,21 +291,28 @@ BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocat
 
 ObjectFormat object_format_for_target(Target target)
 {
+    ObjectFormat result;
     switch (target.os)
     {
     case OPERATING_SYSTEM_WINDOWS:
     case OPERATING_SYSTEM_UEFI:
-        return OBJECT_FORMAT_COFF;
+        result = OBJECT_FORMAT_COFF;
+        break;
     case OPERATING_SYSTEM_MACOS:
     case OPERATING_SYSTEM_IOS:
-        return OBJECT_FORMAT_MACH_O64;
+        result = OBJECT_FORMAT_MACH_O64;
+        break;
     case OPERATING_SYSTEM_LINUX:
     case OPERATING_SYSTEM_ANDROID:
     case OPERATING_SYSTEM_FREESTANDING:
-        return OBJECT_FORMAT_ELF64;
+        result = OBJECT_FORMAT_ELF64;
+        break;
     default:
-        return OBJECT_FORMAT_COUNT;
+        result = OBJECT_FORMAT_COUNT;
+        break;
     }
+
+    return result;
 }
 
 typedef struct ObjectAssemblyBuffer ObjectAssemblyBuffer;

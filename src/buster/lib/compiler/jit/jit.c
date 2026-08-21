@@ -26,18 +26,25 @@ typedef enum JitProtectionClass
 
 BUSTER_GLOBAL_LOCAL JitProtectionClass jit_section_protection_class(ObjectSectionKind kind)
 {
+    JitProtectionClass result;
     switch (kind)
     {
         case OBJECT_SECTION_TEXT:
-            return JIT_PROTECTION_CLASS_CODE;
+            result = JIT_PROTECTION_CLASS_CODE;
+            break;
         case OBJECT_SECTION_READ_ONLY_DATA:
-            return JIT_PROTECTION_CLASS_READ_ONLY;
+            result = JIT_PROTECTION_CLASS_READ_ONLY;
+            break;
         case OBJECT_SECTION_DATA:
         case OBJECT_SECTION_ZERO:
-            return JIT_PROTECTION_CLASS_DATA;
+            result = JIT_PROTECTION_CLASS_DATA;
+            break;
         default:
-            return JIT_PROTECTION_CLASS_NONE;
+            result = JIT_PROTECTION_CLASS_NONE;
+            break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_section_is_tls(ObjectSectionKind kind)
@@ -238,6 +245,7 @@ bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
 {
+    bool result;
     switch (kind)
     {
         case OBJECT_RELOCATION_X86_64_TPOFF32:
@@ -251,10 +259,14 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
-            return true;
+            result = true;
+            break;
         default:
-            return false;
+            result = false;
+            break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind)
@@ -1037,37 +1049,55 @@ void jit_program_release(JitProgram* program)
 
 String8 jit_error_string(JitError error)
 {
+    String8 result;
     switch (error)
     {
         case JIT_ERROR_NONE:
-            return S8("no JIT error");
+            result = S8("no JIT error");
+            break;
         case JIT_ERROR_INVALID_INPUT:
-            return S8("invalid JIT object");
+            result = S8("invalid JIT object");
+            break;
         case JIT_ERROR_FOREIGN_TARGET:
-            return S8("JIT object target does not match the native target");
+            result = S8("JIT object target does not match the native target");
+            break;
         case JIT_ERROR_CAPACITY:
-            return S8("JIT image or relocation is out of range");
+            result = S8("JIT image or relocation is out of range");
+            break;
         case JIT_ERROR_EXECUTABLE_MEMORY:
-            return S8("could not allocate JIT memory");
+            result = S8("could not allocate JIT memory");
+            break;
         case JIT_ERROR_PROTECTION:
-            return S8("could not finalize JIT memory protection");
+            result = S8("could not finalize JIT memory protection");
+            break;
         case JIT_ERROR_UNRESOLVED_IMPORT:
-            return S8("unresolved JIT import");
+            result = S8("unresolved JIT import");
+            break;
         case JIT_ERROR_TLS_UNSUPPORTED:
-            return S8("thread-local storage is not supported by the JIT");
+            result = S8("thread-local storage is not supported by the JIT");
+            break;
         case JIT_ERROR_UNSUPPORTED_RELOCATION:
-            return S8("unsupported relocation in a loaded JIT section");
+            result = S8("unsupported relocation in a loaded JIT section");
+            break;
         case JIT_ERROR_EXTERNAL_DATA:
-            return S8("external data relocation is unsupported for this JIT target");
+            result = S8("external data relocation is unsupported for this JIT target");
+            break;
         case JIT_ERROR_SYMBOL_BOUNDS:
-            return S8("JIT symbol is outside its loaded section");
+            result = S8("JIT symbol is outside its loaded section");
+            break;
         case JIT_ERROR_SYMBOL_NOT_FOUND:
-            return S8("JIT symbol was not found");
+            result = S8("JIT symbol was not found");
+            break;
         case JIT_ERROR_BINDING_KIND:
-            return S8("JIT host binding kind does not match the imported symbol");
+            result = S8("JIT host binding kind does not match the imported symbol");
+            break;
         case JIT_ERROR_INVALID_BINDING:
-            return S8("invalid JIT host binding");
+            result = S8("invalid JIT host binding");
+            break;
         default:
-            return S8("unknown JIT error");
+            result = S8("unknown JIT error");
+            break;
     }
+
+    return result;
 }

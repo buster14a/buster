@@ -58,6 +58,7 @@
 // inside call sequences and freeze with them.
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
 {
+    bool result;
     switch (opcode)
     {
         case MACHINE_X64_PUSH_FRAME:
@@ -66,10 +67,14 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
         case MACHINE_X64_ADD_RSP:
         case MACHINE_X64_STACK_ALLOCATE:
         case MACHINE_A64_READ_SP:
-            return true;
+            result = true;
+            break;
         default:
-            return false;
+            result = false;
+            break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpcodeInfo const* info)
@@ -89,6 +94,7 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpc
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
 {
+    bool result;
     switch (opcode)
     {
         case MACHINE_X64_LOAD_FRAME:
@@ -125,10 +131,14 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
         case MACHINE_A64_COPY_FRAME_FROM_FRAME:
         case MACHINE_A64_COPY_FRAME_FROM_PTR:
         case MACHINE_A64_COPY_PTR_FROM_FRAME:
-            return true;
+            result = true;
+            break;
         default:
-            return false;
+            result = false;
+            break;
     }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_memory(u16 opcode, MachineOpcodeInfo const* info)
@@ -138,6 +148,7 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_memory(u16 opcode, MachineOpco
 
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
 {
+    bool result;
     switch (opcode)
     {
         case MACHINE_X64_FARITH:
@@ -156,10 +167,14 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
         case MACHINE_X64_MOVQ_FROM_XMM:
         case MACHINE_A64_FMOV_TO_VEC:
         case MACHINE_A64_FMOV_FROM_VEC:
-            return true;
+            result = true;
+            break;
         default:
-            return false;
+            result = false;
+            break;
     }
+
+    return result;
 }
 BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
 {

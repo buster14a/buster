@@ -1773,24 +1773,27 @@ TargetStringSplit target_to_split_string_os(Target target)
 
 String8 cpu_arch_to_string_os(CpuArch arch)
 {
+    String8 result;
     switch (arch)
     {
-        break;
     case CPU_ARCH_X86_64:
-        return S8("x86_64");
+        result = S8("x86_64");
         break;
     case CPU_ARCH_AARCH64:
-        return S8("aarch64");
+        result = S8("aarch64");
         break;
     case CPU_ARCH_WASM64:
-        return S8("wasm64");
+        result = S8("wasm64");
         break;
     case CPU_ARCH_BPFEL:
-        return S8("bpfel");
+        result = S8("bpfel");
         break;
     default:
-        return S8("");
+        result = S8("");
+        break;
     }
+
+    return result;
 }
 
 String8 cpu_brand_string_os(char8* buffer, u64 capacity)

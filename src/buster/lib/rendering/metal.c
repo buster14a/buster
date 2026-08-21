@@ -666,19 +666,21 @@ BUSTER_GLOBAL_LOCAL BusterNSUInteger metal_texture_format(TextureFormat format)
 
 BUSTER_GLOBAL_LOCAL u32 metal_format_channel_count(TextureFormat format)
 {
+    u32 result;
     switch (format)
     {
-        break;
     case TEXTURE_FORMAT_R8_UNORM:
-        return 1;
+        result = 1;
         break;
     case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        return 4;
+        result = 4;
         break;
     case TEXTURE_FORMAT_COUNT:
-        BUSTER_UNREACHABLE();
+    default:
+        BUSTER_TODO();
     }
-    BUSTER_UNREACHABLE();
+
+    return result;
 }
 
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)

@@ -341,36 +341,49 @@ BUSTER_GLOBAL_LOCAL void machine_a64_reject(MachineA64Selector* selector, IrOpco
 // complements, so negation is condition ^ 1.
 BUSTER_GLOBAL_LOCAL u32 machine_a64_condition_from_comparison(IrBinaryOperation operation)
 {
+    u32 result;
     switch (operation)
     {
-        break;
     case IR_BINARY_INTEGER_EQUAL:
     case IR_BINARY_POINTER_EQUAL:
     case IR_BINARY_BOOLEAN_EQUAL:
-        return MACHINE_A64_CONDITION_EQUAL;
+        result = MACHINE_A64_CONDITION_EQUAL;
+        break;
     case IR_BINARY_INTEGER_NOT_EQUAL:
     case IR_BINARY_POINTER_NOT_EQUAL:
     case IR_BINARY_BOOLEAN_NOT_EQUAL:
-        return MACHINE_A64_CONDITION_NOT_EQUAL;
+        result = MACHINE_A64_CONDITION_NOT_EQUAL;
+        break;
     case IR_BINARY_SIGNED_LESS:
-        return MACHINE_A64_CONDITION_LESS;
+        result = MACHINE_A64_CONDITION_LESS;
+        break;
     case IR_BINARY_SIGNED_LESS_EQUAL:
-        return MACHINE_A64_CONDITION_LESS_EQUAL;
+        result = MACHINE_A64_CONDITION_LESS_EQUAL;
+        break;
     case IR_BINARY_SIGNED_GREATER:
-        return MACHINE_A64_CONDITION_GREATER;
+        result = MACHINE_A64_CONDITION_GREATER;
+        break;
     case IR_BINARY_SIGNED_GREATER_EQUAL:
-        return MACHINE_A64_CONDITION_GREATER_EQUAL;
+        result = MACHINE_A64_CONDITION_GREATER_EQUAL;
+        break;
     case IR_BINARY_UNSIGNED_LESS:
-        return MACHINE_A64_CONDITION_BELOW;
+        result = MACHINE_A64_CONDITION_BELOW;
+        break;
     case IR_BINARY_UNSIGNED_LESS_EQUAL:
-        return MACHINE_A64_CONDITION_BELOW_EQUAL;
+        result = MACHINE_A64_CONDITION_BELOW_EQUAL;
+        break;
     case IR_BINARY_UNSIGNED_GREATER:
-        return MACHINE_A64_CONDITION_ABOVE;
+        result = MACHINE_A64_CONDITION_ABOVE;
+        break;
     case IR_BINARY_UNSIGNED_GREATER_EQUAL:
-        return MACHINE_A64_CONDITION_ABOVE_EQUAL;
+        result = MACHINE_A64_CONDITION_ABOVE_EQUAL;
+        break;
     default:
-        return UINT32_MAX;
+        result = UINT32_MAX;
+        break;
     }
+
+    return result;
 }
 
 // A selection-synthesized temporary vreg, defined at the next row to be
