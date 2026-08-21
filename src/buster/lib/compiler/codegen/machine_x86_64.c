@@ -3560,8 +3560,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_compare_exchange(MachineX64Se
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
+    bool selected = false;
     IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
     u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
+    u32 address_register = machine_x64_synthesize_register(selector);
     if (size == 16)
     {
         // CMPXCHG16B consumes and produces two eightbyte values. Keep
@@ -3576,60 +3578,52 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_compare_exchange(MachineX64Se
         u32 desired_slot = instruction->operand_count >= 3 && instruction->operands[2].value < function->value_count
                                ? selector->value_stack_slots[instruction->operands[2].value]
                                : UINT32_MAX;
-        if (!target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_CX16) || instruction->operand_count < 3 ||
-            result_slot == UINT32_MAX || expected_slot == UINT32_MAX || desired_slot == UINT32_MAX)
+        selected = target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_CX16) && instruction->operand_count >= 3 &&
+                   result_slot != UINT32_MAX && expected_slot != UINT32_MAX && desired_slot != UINT32_MAX &&
+                   machine_x64_select_place_address(selector, instruction->operands[0], address_register);
+        if (selected)
         {
-            return false;
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                    machine_ref_make(MACHINE_REF_STACK_SLOT, expected_slot),
+                                                                    machine_ref_make(MACHINE_REF_STACK_SLOT, desired_slot),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                       .opcode = MACHINE_X64_ATOMIC_CMPXCHG16,
+                                                   });
+            u32 success_register = machine_x64_synthesize_register(selector);
+            u32 success_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
+                                                                  .payload = MACHINE_X64_CONDITION_EQUAL,
+                                                                  .opcode = MACHINE_X64_SETCC,
+                                                              });
+            machine_x64_define(selector, success_register, success_row);
+            selector->atomic_success_registers[instruction->result.value] = success_register;
+            selector->atomic_success_registers[instruction->result.value] = success_register;
         }
-        u32 address_register = machine_x64_synthesize_register(selector);
-        if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+    }
+    else
+    {
+        // Both are read only where the lookups that fill them succeeded.
+        u32 expected_register = UINT32_MAX;
+        u32 desired_register = UINT32_MAX;
+        selected = result_register != UINT32_MAX && instruction->operand_count >= 3 && (size == 1 || size == 2 || size == 4 || size == 8) &&
+                   machine_x64_operand_register(selector, instruction->operands[1], &expected_register) &&
+                   machine_x64_operand_register(selector, instruction->operands[2], &desired_register) &&
+                   machine_x64_select_place_address(selector, instruction->operands[0], address_register);
+        if (selected)
         {
-            return false;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, expected_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, desired_register)},
+                                                           .payload = (u32)size,
+                                                           .opcode = MACHINE_X64_ATOMIC_CMPXCHG,
+                                                       });
+            machine_x64_define(selector, result_register, row);
         }
-        machine_x64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
-                                                                machine_ref_make(MACHINE_REF_STACK_SLOT, expected_slot),
-                                                                machine_ref_make(MACHINE_REF_STACK_SLOT, desired_slot),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                   .opcode = MACHINE_X64_ATOMIC_CMPXCHG16,
-                                               });
-        u32 success_register = machine_x64_synthesize_register(selector);
-        u32 success_row = machine_x64_select_row(selector, (MachineInstruction){
-                                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
-                                                              .payload = MACHINE_X64_CONDITION_EQUAL,
-                                                              .opcode = MACHINE_X64_SETCC,
-                                                          });
-        machine_x64_define(selector, success_register, success_row);
-        selector->atomic_success_registers[instruction->result.value] = success_register;
-        return true;
     }
-    u32 expected_register;
-    u32 desired_register;
-    if (result_register == UINT32_MAX || instruction->operand_count < 3 ||
-        !machine_x64_operand_register(selector, instruction->operands[1], &expected_register) ||
-        !machine_x64_operand_register(selector, instruction->operands[2], &desired_register))
-    {
-        return false;
-    }
-    if (size != 1 && size != 2 && size != 4 && size != 8)
-    {
-        return false;
-    }
-    u32 address_register = machine_x64_synthesize_register(selector);
-    if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
-    {
-        return false;
-    }
-    u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, expected_register),
-                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, desired_register)},
-                                                   .payload = (u32)size,
-                                                   .opcode = MACHINE_X64_ATOMIC_CMPXCHG,
-                                               });
-    machine_x64_define(selector, result_register, row);
-    return true;
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_fence(MachineX64Selector* selector, IrInstruction* instruction)
