@@ -75,7 +75,6 @@ u64 buster_hash_64(u8* pointer, u64 length)
         // pointers (P + C1 < P + C2) trips gcc's -Wstrict-overflow=5 whenever the
         // length constant-propagates into a specialized clone.
         u64 i = 0;
-        hash = 0;
 
         if (length >= 32)
         {
