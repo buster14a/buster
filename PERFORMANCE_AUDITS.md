@@ -18,6 +18,60 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-22b` (Linux x86_64, Zen 4 7940HS; **give the cleanup-attribute scans
+the well-known ids, and size what a spelling-to-id swap actually buys**).
+The third hotspot of the 2026-08-21 stage-1 branch-miss survey was
+`c_parse_validate_unattached_cleanup_attributes`, a pure validation pass that
+walks every token of the translation unit and, per identifier, ran two
+`string_equal` calls against `__attribute__` and `__attribute`, each one
+materializing the spelling through `c_token_length`'s oversized-sentinel
+guard.  The survey put the function and its inlined spelling helpers at 1.1%
+of all 25.17 M stage-1 branch misses.
+
+`21d` landed the mechanism this wants while the work was in flight, so the
+fix is `21d`'s and not a second one: `__attribute__` and `__attribute` join
+`CSymbolWellKnown`, and the three cleanup-attribute scans — the whole-unit
+validation walk, `c_parse_cleanup_attribute_at`'s guard, and
+`c_parse_cleanup_attribute_scan`'s per-declaration-range loop — test
+`C_PARSE_ATTRIBUTE_KEYWORDS`, one named set of the two bits, through
+`c_token_in_well_known_set`.  That is one shift and one mask for every token
+the preprocessor interned.  The set's spelling fallback is load-bearing and
+not defensive decoration: interning runs per lexed file, so `##`-pasted and
+otherwise synthesized tokens reach the final stream with symbol 0.  A new
+`c_test_cleanup_diagnostic` case reaches the file-scope placement diagnostic
+through `C_TEST_PASTE(__attri, bute__)` to hold that path honest.
+
+Eleven alternating same-source, CPU-pinned pairs on an idle box (both
+compilers building the pre-change tree, outputs byte-identical) favor the
+candidate 11/11 on retired instructions, median 10,526,550,289 ->
+10,524,630,123, **-1,920,166 (-0.0182%)**, and 11/11 on branches,
+1,956,306,271 -> 1,955,470,053, **-836,218 (-0.0427%)**; a second round of
+twelve repeats the instruction result 12/12.  Cycles are noise as usual
+(6/11, paired median -2.8 M).
+
+**The branch-miss result is worth reading carefully, because it is the whole
+reason this hotspot was picked.**  Pooling both rounds, 23 pairs favor the
+candidate 17/23 with a paired-delta median of **-123,727 (-0.49%)** — real,
+and roughly half of what the survey's 1.1% attribution implied.  Per-symbol
+sampling (`perf record -e branch-misses:u -c 1009`, three recordings a side)
+moves the validation walk's own share from 0.57% to 0.48%, about 20 K misses,
+so only a fifth of the whole-run delta lands on the function the survey
+named; the rest is spread thinner than this measurement resolves.  An earlier
+revision of this work converted the whole-unit walk *alone*, and on a
+contended box it measured no branch-miss change at all while still showing
+the instruction and branch wins — `perf annotate` put that loop's misses on
+the per-token `token.kind != C_TOKEN_IDENTIFIER` filter and the loop-back
+branch, neither of which any of this touches.  Two lessons for the rest of
+that survey: a symbol's branch-miss share names the function, not the line,
+and a per-token spelling compare is mostly *retired* work — the misses that
+remain want not walking every token, which is a design change and stays
+untaken here.
+
+The final `test_self_host` reaches a byte-identical fixed point and the full
+local CI combination matrix (`test_all_combinations_ci`) is green across its
+three `test_all` runs with a clean Clang static analysis; remote a64/Windows
+coverage stays pending on CI as usual.
+
 `2026-08-22a` (Linux x86_64, Zen 4 7940HS; **delete the allocator's
 free-register loop, not just its skip branch**).  A stage-1 branch-miss
 survey put one line of `machine_fast_free_candidates` — the

@@ -3877,6 +3877,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
                               S8("void cleanup_placement(int *value) { (void)value; }\n"
                                  "int value __attribute__((cleanup(cleanup_placement)));\n"),
                               C_PREPROCESS_DIALECT_GNU23, S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+    // The same placement diagnostic reached through a spelling the intern
+    // pass never saw: a pasted token carries symbol 0, so this is what holds
+    // c_token_in_well_known_set's spelling fallback honest for the attribute
+    // keywords.
+    c_test_cleanup_diagnostic(arguments, &result,
+                              S8("#define C_TEST_PASTE(first, second) first##second\n"
+                                 "void cleanup_pasted(int *value) { (void)value; }\n"
+                                 "int value C_TEST_PASTE(__attri, bute__)((cleanup(cleanup_pasted)));\n"),
+                              C_PREPROCESS_DIALECT_GNU23, S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
     c_test_cleanup_diagnostic(arguments, &result,
                               S8("void cleanup_arity(int *value, int extra) { (void)value; (void)extra; }\n"
                                  "int main(void) { int value __attribute__((cleanup(cleanup_arity))) = 1; return value; }\n"),

@@ -4182,6 +4182,13 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
     return index;
 }
 
+// The two GNU attribute spellings as one membership test. The scans below
+// look at every identifier token of a declaration range or of the whole
+// translation unit, so the pair is a set of interned ids rather than two
+// string_equal calls that each materialize the spelling through
+// c_token_length's oversized guard.
+#define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
+
 typedef struct CCleanupAttributeInfo CCleanupAttributeInfo;
 struct CCleanupAttributeInfo
 {
@@ -4202,7 +4209,7 @@ BUSTER_C_INTERNAL bool c_parse_cleanup_attribute_at(CPreprocessResult preprocess
         .function_token = UINT32_MAX,
     };
     if (index + 1 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
-        (!string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__attribute__")) && !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__attribute"))) ||
+        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_ATTRIBUTE_KEYWORDS) ||
         !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         return false;
@@ -4352,7 +4359,7 @@ BUSTER_C_INTERNAL void c_parse_cleanup_attribute_scan(CPreprocessResult preproce
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute__")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute"))) &&
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS) &&
             (!skip_braces || !braces))
         {
             CCleanupAttributeInfo attribute = {0};
@@ -7414,7 +7421,8 @@ BUSTER_C_SHARED void c_parse_validate_unattached_cleanup_attributes(CParseResult
     for (u32 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute__")) && !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute"))))
+        if (token.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
         {
             continue;
         }
