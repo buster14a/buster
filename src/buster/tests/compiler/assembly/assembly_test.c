@@ -15,27 +15,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* e
 
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_half_precision(String8 source)
 {
-    for (u64 index = 0; index < source.length; index += 1)
+    bool result = false;
+    for (u64 index = 0; index < source.length && !result; index += 1)
     {
-        if (source.pointer[index] == 'h' || source.pointer[index] == 'H')
-        {
-            return true;
-        }
+        result = source.pointer[index] == 'h' || source.pointer[index] == 'H';
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_test_source_has_x_register(String8 source)
 {
-    for (u64 index = 0; index + 1 < source.length; index += 1)
+    bool result = false;
+    for (u64 index = 0; index + 1 < source.length && !result; index += 1)
     {
-        if ((source.pointer[index] == 'x' || source.pointer[index] == 'X') &&
-            source.pointer[index + 1] >= '0' && source.pointer[index + 1] <= '9')
-        {
-            return true;
-        }
+        result = (source.pointer[index] == 'x' || source.pointer[index] == 'X') && source.pointer[index + 1] >= '0' &&
+                 source.pointer[index + 1] <= '9';
     }
-    return false;
+
+    return result;
 }
 
 typedef struct AssemblyA64DirectSIMDNeonCase AssemblyA64DirectSIMDNeonCase;

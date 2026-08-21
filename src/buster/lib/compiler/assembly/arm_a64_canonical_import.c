@@ -2078,11 +2078,13 @@ static String8 arm_a64_gpr_feature_name(String8 expression);
 
 static bool arm_a64_scalar_name_in(String8 value, const char* const* names, u32 count)
 {
-    for (u32 index = 0; index < count; index += 1)
+    bool result = false;
+    for (u32 index = 0; index < count && !result; index += 1)
     {
-        if (string_equal(value, string_from_pointer((char8*)names[index]))) return true;
+        result = string_equal(value, string_from_pointer((char8*)names[index]));
     }
-    return false;
+
+    return result;
 }
 
 static ArmA64Field* arm_a64_scalar_field(ArmA64CanonicalRow* row, const char* name)

@@ -485,19 +485,22 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
     void* address = 0;
 
 #if defined(__linux__) || defined(__APPLE__)
+    // An SDK without MAP_JIT cannot honour a JIT reservation, so the mapping is
+    // skipped rather than made without the flag the caller asked for. Only the
+    // `if` is conditional; the block below is not, so the braces balance in
+    // every configuration.
 #if defined(__APPLE__) && !defined(MAP_JIT)
-    if (map.jit)
-    {
-        return 0;
-    }
+    if (!map.jit)
 #endif
-    int protection_flags = os_posix_protection_flags(protection);
-    int map_flags = os_posix_map_flags(map);
-
-    address = mmap(base, size, protection_flags, map_flags, -1, 0);
-    if (address == MAP_FAILED)
     {
-        address = 0;
+        int protection_flags = os_posix_protection_flags(protection);
+        int map_flags = os_posix_map_flags(map);
+
+        address = mmap(base, size, protection_flags, map_flags, -1, 0);
+        if (address == MAP_FAILED)
+        {
+            address = 0;
+        }
     }
 #elif defined(_WIN32)
     DWORD allocation_flags = os_windows_allocation_flags(map);
@@ -671,11 +674,12 @@ OsMutexHandle* os_mutex_create(void)
     if (pthread_mutex_init(&result->mutex, 0) != 0)
     {
         os_entity_release(result);
-        return 0;
+        result = 0;
     }
 #elif defined(_WIN32)
     InitializeCriticalSection(&result->mutex);
 #endif
+
     return (OsMutexHandle*)result;
 }
 
@@ -719,21 +723,24 @@ OsBarrierHandle* os_barrier_create(u32 thread_count)
     result->barrier.arrived = 0;
     result->barrier.generation = 0;
 #if defined(__linux__) || defined(__APPLE__)
+    // The condition variable is only attempted once the mutex exists, and it
+    // unwinds the mutex when it fails; both failures leave `result` null.
     if (pthread_mutex_init(&result->barrier.mutex, 0) != 0)
     {
         os_entity_release(result);
-        return 0;
+        result = 0;
     }
-    if (pthread_cond_init(&result->barrier.condition, 0) != 0)
+    else if (pthread_cond_init(&result->barrier.condition, 0) != 0)
     {
         pthread_mutex_destroy(&result->barrier.mutex);
         os_entity_release(result);
-        return 0;
+        result = 0;
     }
 #elif defined(_WIN32)
     InitializeCriticalSection(&result->barrier.mutex);
     InitializeConditionVariable(&result->barrier.condition);
 #endif
+
     return (OsBarrierHandle*)result;
 }
 
@@ -1103,24 +1110,24 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
 
 bool os_directory_delete(String8 path)
 {
+    bool result = false;
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
-    if (!path.length)
+    if (path.length)
     {
-        return false;
+        BUSTER_CHECK(!path.pointer[path.length]);
+        // The walk holds its pending worklist in this arena for the whole
+        // traversal. A scratch arena would be reachable from any nested
+        // scratch_begin(0, 0) inside the walk, whose scratch_end would rewind the
+        // tasks still queued above it, so own the storage outright instead.
+        Arena* arena = arena_create((ArenaCreation){0});
+        result = os_directory_delete_walk(arena, path);
+        arena_destroy(arena, 1);
     }
-    BUSTER_CHECK(!path.pointer[path.length]);
-    // The walk holds its pending worklist in this arena for the whole
-    // traversal. A scratch arena would be reachable from any nested
-    // scratch_begin(0, 0) inside the walk, whose scratch_end would rewind the
-    // tasks still queued above it, so own the storage outright instead.
-    Arena* arena = arena_create((ArenaCreation){0});
-    bool result = os_directory_delete_walk(arena, path);
-    arena_destroy(arena, 1);
-    return result;
 #else
     BUSTER_UNUSED(path);
-    return false;
 #endif
+
+    return result;
 }
 
 OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions)
@@ -1690,19 +1697,28 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
 // when the deadline has passed, and `no_deadline` when there is none.
 BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microseconds, u64 no_deadline)
 {
+    u64 result;
     if (!deadline_microseconds)
     {
-        return no_deadline;
+        result = no_deadline;
     }
-    u64 now = os_now_microseconds();
-    if (now >= deadline_microseconds)
+    else
     {
-        return 0;
+        u64 now = os_now_microseconds();
+        if (now >= deadline_microseconds)
+        {
+            result = 0;
+        }
+        else
+        {
+            u64 remaining = (deadline_microseconds - now + 999) / 1000;
+            // Wake up at least once a second regardless, so a deadline that
+            // expires while nothing is readable is still noticed promptly.
+            result = remaining < 1000 ? remaining : 1000;
+        }
     }
-    u64 remaining = (deadline_microseconds - now + 999) / 1000;
-    // Wake up at least once a second regardless, so a deadline that expires
-    // while nothing is readable is still noticed promptly.
-    return remaining < 1000 ? remaining : 1000;
+
+    return result;
 }
 
 ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
@@ -2809,6 +2825,10 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
 #endif
 
     LaneContext saved = thread_context->lane_context;
+    // One chain over the three ways to run: inline, a fresh short-lived gang, or
+    // the resident one. Only the second and third exist when threading is on,
+    // so the `else` arms live inside the same #if and the braces balance in
+    // either configuration.
     if (count == 1)
     {
         thread_context->lane_context = (LaneContext){
@@ -2816,23 +2836,24 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
         };
         callback(argument);
         thread_context->lane_context = saved;
-        return;
     }
 #if !BUSTER_SINGLE_THREADED
     // A lane inside an active region gets an independent short-lived gang.
     // Re-entering the resident dispatch barriers would deadlock the outer
     // region and would break the documented nested-gang behavior.
-    if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
+    else if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
     {
         lane_run_fresh(thread_context, count, callback, argument);
-        return;
     }
-    if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
+    else
     {
-        lane_gang_release(thread_context);
-        thread_context->lane_gang = lane_gang_create(thread_context, count);
+        if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
+        {
+            lane_gang_release(thread_context);
+            thread_context->lane_gang = lane_gang_create(thread_context, count);
+        }
+        lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }
-    lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
 #endif
 }
 

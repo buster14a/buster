@@ -73,14 +73,13 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 
 BUSTER_C_INTERNAL bool c_declaration_has_token(CPreprocessResult preprocess, CDeclaration declaration, String8 spelling)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
-    for (u32 index = declaration.token_start; index < end; index += 1)
+    bool result = false;
+    for (u32 index = declaration.token_start; index < end && !result; index += 1)
     {
-        if (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling))
-        {
-            return true;
-        }
+        result = string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling);
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)

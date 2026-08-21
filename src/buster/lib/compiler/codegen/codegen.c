@@ -326,26 +326,24 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_reference(String8 sour
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_mnemonic_allowed(String8 mnemonic)
 {
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_mnemonics); index += 1)
+    bool result = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_mnemonics) && !result; index += 1)
     {
-        if (string_equal(mnemonic, codegen_x64_asm_mnemonics[index]))
-        {
-            return true;
-        }
+        result = string_equal(mnemonic, codegen_x64_asm_mnemonics[index]);
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_name(String8 token)
 {
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_registers); index += 1)
+    bool result = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_registers) && !result; index += 1)
     {
-        if (string_equal(token, codegen_x64_asm_registers[index]))
-        {
-            return true;
-        }
+        result = string_equal(token, codegen_x64_asm_registers[index]);
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_literal_registers_absent(String8 source)
@@ -1300,12 +1298,14 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_value_hashes(u64 shape_s
 // resting on that.
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_query_has_symbol(BusterX86MetadataPhysicalQuery physical)
 {
-    for (u32 operand_index = 0; operand_index < physical.operand_count; operand_index += 1)
+    bool result = false;
+    for (u32 operand_index = 0; operand_index < physical.operand_count && !result; operand_index += 1)
     {
         BusterX86MetadataPhysicalOperand operand = physical.operands[operand_index];
-        if (operand.has_symbol || operand.symbol.length || operand.memory.has_symbol || operand.memory.symbol.length) return true;
+        result = operand.has_symbol || operand.symbol.length || operand.memory.has_symbol || operand.memory.symbol.length;
     }
-    return false;
+
+    return result;
 }
 
 // The byte table is a cache, not a dictionary, and is probed as one: a short

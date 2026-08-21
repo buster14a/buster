@@ -1143,11 +1143,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_bracket_range(char8 cons
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_token_has(char8 const* token, u32 length, char8 needle)
 {
-    for (u32 index = 0; index < length; index += 1)
+    bool result = false;
+    for (u32 index = 0; index < length && !result; index += 1)
     {
-        if (token[index] == needle) return true;
+        result = token[index] == needle;
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_mark_unresolved(BusterX86MetadataPatternSemantics* pattern, u8 blocker)

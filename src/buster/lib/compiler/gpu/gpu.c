@@ -64,14 +64,13 @@ BUSTER_GLOBAL_LOCAL GpuStringComponents gpu_split_components(String8 value)
 
 BUSTER_GLOBAL_LOCAL bool gpu_string_is_one_of(String8 value, const String8* candidates, u32 candidate_count)
 {
-    for (u32 candidate_index = 0; candidate_index < candidate_count; candidate_index += 1)
+    bool result = false;
+    for (u32 candidate_index = 0; candidate_index < candidate_count && !result; candidate_index += 1)
     {
-        if (string_equal(value, candidates[candidate_index]))
-        {
-            return true;
-        }
+        result = string_equal(value, candidates[candidate_index]);
     }
-    return false;
+
+    return result;
 }
 
 GpuShaderStage gpu_shader_stage_from_string(String8 value)

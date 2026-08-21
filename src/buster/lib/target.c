@@ -160,14 +160,13 @@ bool target_cpu_features_equal(TargetCpuFeatures left, TargetCpuFeatures right)
 
 bool target_cpu_features_any(TargetCpuFeatures features)
 {
-    for (u32 word_index = 0; word_index < TARGET_CPU_FEATURE_WORD_COUNT; word_index += 1)
+    bool result = false;
+    for (u32 word_index = 0; word_index < TARGET_CPU_FEATURE_WORD_COUNT && !result; word_index += 1)
     {
-        if (features.words[word_index])
-        {
-            return true;
-        }
+        result = features.words[word_index];
     }
-    return false;
+
+    return result;
 }
 
 bool target_cpu_features_subset(TargetCpuFeatures subset, TargetCpuFeatures superset)

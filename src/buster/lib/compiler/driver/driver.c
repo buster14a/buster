@@ -209,14 +209,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_metal_sdk_is_valid(String8 sdk)
         S8("macosx"), S8("iphoneos"), S8("iphonesimulator"), S8("appletvos"),
         S8("appletvsimulator"), S8("xros"), S8("xrsimulator"),
     };
-    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+    bool result = false;
+    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values) && !result; value_index += 1)
     {
-        if (string_equal(sdk, values[value_index]))
-        {
-            return true;
-        }
+        result = string_equal(sdk, values[value_index]);
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_dxc_shader_model_is_valid(GpuTarget target)

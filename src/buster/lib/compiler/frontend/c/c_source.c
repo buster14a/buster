@@ -3775,15 +3775,14 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__is_target_arch",        "__is_target_environment",
         "__is_target_os",          "__is_target_vendor",
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported); index += 1)
+    bool result = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
-        if (name.length == length && memcmp(name.pointer, supported[index], length) == 0)
-        {
-            return true;
-        }
+        result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(String8 name)

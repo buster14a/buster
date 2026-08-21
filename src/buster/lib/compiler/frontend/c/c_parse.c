@@ -7399,15 +7399,14 @@ BUSTER_C_INTERNAL bool c_parse_validate_cleanup_attribute(Arena* arena, CParseRe
 
 BUSTER_C_INTERNAL bool c_parse_cleanup_attribute_was_checked(CParseResult* result, u32 token)
 {
-    for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+    bool found = false;
+    for (u32 entity_index = 0; entity_index < result->entity_count && !found; entity_index += 1)
     {
         CEntity* entity = &result->entities[entity_index];
-        if (entity->cleanup_attribute_checked && entity->cleanup_attribute_token <= token && token < entity->cleanup_attribute_end)
-        {
-            return true;
-        }
+        found = entity->cleanup_attribute_checked && entity->cleanup_attribute_token <= token && token < entity->cleanup_attribute_end;
     }
-    return false;
+
+    return found;
 }
 
 BUSTER_C_SHARED void c_parse_validate_unattached_cleanup_attributes(CParseResult* result, CPreprocessResult preprocess)

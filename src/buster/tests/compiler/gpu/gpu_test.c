@@ -8,32 +8,29 @@
 
 BUSTER_GLOBAL_LOCAL bool gpu_test_step_has_argument(GpuPipelinePlan plan, u32 step_index, String8 argument)
 {
+    bool result = false;
     if (step_index < plan.step_count && plan.steps[step_index].kind == GPU_PIPELINE_STEP_PROCESS)
     {
         SliceString8 arguments = plan.steps[step_index].arguments;
-        for (u64 index = 0; index < arguments.length; index += 1)
+        for (u64 index = 0; index < arguments.length && !result; index += 1)
         {
-            if (string_equal(arguments.pointer[index], argument))
-            {
-                return true;
-            }
+            result = string_equal(arguments.pointer[index], argument);
         }
     }
 
-    return false;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool gpu_test_plan_has_tool(GpuPipelinePlan plan, String8 tool)
 {
-    for (u32 step_index = 0; step_index < plan.step_count; step_index += 1)
+    bool result = false;
+    for (u32 step_index = 0; step_index < plan.step_count && !result; step_index += 1)
     {
         GpuPipelineStep step = plan.steps[step_index];
-        if (step.kind == GPU_PIPELINE_STEP_PROCESS && step.arguments.length && string_equal(step.arguments.pointer[0], tool))
-        {
-            return true;
-        }
+        result = step.kind == GPU_PIPELINE_STEP_PROCESS && step.arguments.length && string_equal(step.arguments.pointer[0], tool);
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL GpuTarget gpu_test_target(String8 triple)
