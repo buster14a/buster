@@ -1852,183 +1852,133 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_unary(MachineX64Selector* selector, 
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+// Element-wise integer vector binary as one three-address EVEX row; the payload
+// carries the 66 0F map opcode the canonical native path picks by operation and
+// lane width, and bit 8 marks the 64-bit-lane forms whose EVEX encodings are W1
+// (vpaddq/vpsubq — their W0 encodings #UD on real hardware).
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_binary(MachineX64Selector* selector, IrInstruction* instruction, IrType* operand_type, u32 left_register,
+                                                          u32 right_register, u32 result_register)
 {
     IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
 
-    // CMPXCHG16B materializes its success boolean immediately after the
-    // atomic row; later aggregate copies consume that value, never live
-    // flags across unrelated IR rows.
-    if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
-        (instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL) &&
-        instruction->operands[0].value < function->value_count && instruction->operands[1].value < function->value_count)
+    bool selected = false;
+    IrType* element = ir_type_from_id(&program->types, operand_type->element_type);
+    if (machine_x64_type_is_vector_register(operand_type) && machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE) && element &&
+        element->kind == IR_TYPE_INTEGER)
     {
-        u32 success_register = selector->atomic_success_registers[instruction->operands[0].value];
-        IrValue* observed_value = function->values + instruction->operands[0].value;
-        IrInstruction* atomic_instruction = 0;
-        if (observed_value->definition.value < function->instruction_count)
+    u32 vector_opcode = 0;
+    switch (instruction->binary_operation)
+    {
+        break;
+    case IR_BINARY_VECTOR_INTEGER_ADD:
+        vector_opcode = element->bit_width == 8    ? 0xfcu
+                        : element->bit_width == 16 ? 0xfdu
+                        : element->bit_width == 32 ? 0xfeu
+                        : element->bit_width == 64 ? (0xd4u | 0x100u)
+                                                   : 0;
+        break;
+    case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
+        vector_opcode = element->bit_width == 8    ? 0xf8u
+                        : element->bit_width == 16 ? 0xf9u
+                        : element->bit_width == 32 ? 0xfau
+                        : element->bit_width == 64 ? (0xfbu | 0x100u)
+                                                   : 0;
+        break;
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
+        vector_opcode = 0xdbu;
+        break;
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
+        vector_opcode = 0xebu;
+        break;
+    case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
+        vector_opcode = 0xefu;
+        break;
+    default:
+        break;
+    }
+        if (vector_opcode)
         {
-            atomic_instruction = function->instructions + observed_value->definition.value;
-        }
-        bool is_atomic_expected_compare = atomic_instruction && atomic_instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE &&
-                                           atomic_instruction->operand_count >= 2 &&
-                                           atomic_instruction->operands[1].value == instruction->operands[1].value;
-        if (success_register != UINT32_MAX && is_atomic_expected_compare && instruction->binary_operation == IR_BINARY_INTEGER_EQUAL)
-        {
-            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
-                                                           .opcode = MACHINE_X64_MOV_RR,
-                                                       });
-            machine_x64_define(selector, result_register, row);
-            return true;
+    u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                   .payload = vector_opcode,
+                                                   .opcode = MACHINE_X64_VBINARY,
+                                               });
+    machine_x64_define(selector, result_register, row);
+            selected = true;
         }
     }
-    if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count && instruction->result.value < function->value_count)
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_float_binary(MachineX64Selector* selector, IrInstruction* instruction, IrType* operand_type, u32 left_register,
+                                                         u32 right_register, u32 result_register)
+{
+    bool selected = false;
+    if (operand_type->bit_width == 32 || operand_type->bit_width == 64)
     {
-        IrType* left_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-        IrType* result_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
-        if (left_type && result_type && left_type->kind == IR_TYPE_INTEGER && result_type->kind == IR_TYPE_INTEGER &&
-            left_type->bit_width == 128 && result_type->bit_width == 128 &&
-            instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT)
-        {
-            u32 amount;
-            if (!machine_x64_constant_shift_amount(selector, instruction->operands[1], &amount))
-            {
-                return false;
-            }
-            return machine_x64_select_i128_unsigned_shift_right(selector, instruction, amount);
-        }
-    }
-    u32 left_register;
-    u32 right_register;
-    if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &left_register) ||
-        !machine_x64_operand_register(selector, instruction->operands[1], &right_register))
+    u32 float_wide_bit = operand_type->bit_width == 64 ? 0x100u : 0;
+    u32 sse_opcode = 0;
+    u32 compare_payload = 0;
+    switch (instruction->binary_operation)
     {
+        break;
+    case IR_BINARY_FLOAT_ADD:
+        sse_opcode = 0x58;
+        break;
+    case IR_BINARY_FLOAT_SUBTRACT:
+        sse_opcode = 0x5c;
+        break;
+    case IR_BINARY_FLOAT_MULTIPLY:
+        sse_opcode = 0x59;
+        break;
+    case IR_BINARY_FLOAT_DIVIDE:
+        sse_opcode = 0x5e;
+        break;
+    case IR_BINARY_FLOAT_EQUAL:
+        compare_payload = 0x4u | (1u << 9);
+        break;
+    case IR_BINARY_FLOAT_NOT_EQUAL:
+        compare_payload = 0x5u | (2u << 9);
+        break;
+    case IR_BINARY_FLOAT_LESS:
+        compare_payload = 0x2u | (1u << 9);
+        break;
+    case IR_BINARY_FLOAT_LESS_EQUAL:
+        compare_payload = 0x6u | (1u << 9);
+        break;
+    case IR_BINARY_FLOAT_GREATER:
+        compare_payload = 0x7u;
+        break;
+    case IR_BINARY_FLOAT_GREATER_EQUAL:
+        compare_payload = 0x3u;
+        break;
+    default:
         return false;
     }
-    IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
-    IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
-    if (operand_type && operand_type->kind == IR_TYPE_VECTOR)
-    {
-        // Element-wise integer vector binary as one three-address EVEX
-        // row; the payload carries the 66 0F map opcode the canonical
-        // native path picks by operation and lane width, and bit 8
-        // marks the 64-bit-lane forms whose EVEX encodings are W1
-        // (vpaddq/vpsubq — their W0 encodings #UD on real hardware).
-        if (!machine_x64_type_is_vector_register(operand_type) || !machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
+        selected = sse_opcode || compare_payload;
+        if (selected)
         {
-            return false;
+    u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                   .payload = (sse_opcode ? sse_opcode : compare_payload) | float_wide_bit,
+                                                   .opcode = (u16)(sse_opcode ? MACHINE_X64_FARITH : MACHINE_X64_FCMP_SET),
+                                               });
+    machine_x64_define(selector, result_register, row);
         }
-        IrType* element = ir_type_from_id(&program->types, operand_type->element_type);
-        if (!element || element->kind != IR_TYPE_INTEGER)
-        {
-            return false;
-        }
-        u32 vector_opcode = 0;
-        switch (instruction->binary_operation)
-        {
-            break;
-        case IR_BINARY_VECTOR_INTEGER_ADD:
-            vector_opcode = element->bit_width == 8    ? 0xfcu
-                            : element->bit_width == 16 ? 0xfdu
-                            : element->bit_width == 32 ? 0xfeu
-                            : element->bit_width == 64 ? (0xd4u | 0x100u)
-                                                       : 0;
-            break;
-        case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
-            vector_opcode = element->bit_width == 8    ? 0xf8u
-                            : element->bit_width == 16 ? 0xf9u
-                            : element->bit_width == 32 ? 0xfau
-                            : element->bit_width == 64 ? (0xfbu | 0x100u)
-                                                       : 0;
-            break;
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
-            vector_opcode = 0xdbu;
-            break;
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_OR:
-            vector_opcode = 0xebu;
-            break;
-        case IR_BINARY_VECTOR_INTEGER_BITWISE_XOR:
-            vector_opcode = 0xefu;
-            break;
-        default:
-            break;
-        }
-        if (!vector_opcode)
-        {
-            return false;
-        }
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                       .payload = vector_opcode,
-                                                       .opcode = MACHINE_X64_VBINARY,
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
     }
-    if (operand_type && operand_type->kind == IR_TYPE_FLOAT)
-    {
-        if (operand_type->bit_width != 32 && operand_type->bit_width != 64)
-        {
-            return false;
-        }
-        u32 float_wide_bit = operand_type->bit_width == 64 ? 0x100u : 0;
-        u32 sse_opcode = 0;
-        u32 compare_payload = 0;
-        switch (instruction->binary_operation)
-        {
-            break;
-        case IR_BINARY_FLOAT_ADD:
-            sse_opcode = 0x58;
-            break;
-        case IR_BINARY_FLOAT_SUBTRACT:
-            sse_opcode = 0x5c;
-            break;
-        case IR_BINARY_FLOAT_MULTIPLY:
-            sse_opcode = 0x59;
-            break;
-        case IR_BINARY_FLOAT_DIVIDE:
-            sse_opcode = 0x5e;
-            break;
-        case IR_BINARY_FLOAT_EQUAL:
-            compare_payload = 0x4u | (1u << 9);
-            break;
-        case IR_BINARY_FLOAT_NOT_EQUAL:
-            compare_payload = 0x5u | (2u << 9);
-            break;
-        case IR_BINARY_FLOAT_LESS:
-            compare_payload = 0x2u | (1u << 9);
-            break;
-        case IR_BINARY_FLOAT_LESS_EQUAL:
-            compare_payload = 0x6u | (1u << 9);
-            break;
-        case IR_BINARY_FLOAT_GREATER:
-            compare_payload = 0x7u;
-            break;
-        case IR_BINARY_FLOAT_GREATER_EQUAL:
-            compare_payload = 0x3u;
-            break;
-        default:
-            return false;
-        }
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                       .payload = (sse_opcode ? sse_opcode : compare_payload) | float_wide_bit,
-                                                       .opcode = (u16)(sse_opcode ? MACHINE_X64_FARITH : MACHINE_X64_FCMP_SET),
-                                                   });
-        machine_x64_define(selector, result_register, row);
-        return true;
-    }
-    if (!machine_x64_type_is_scalar_register(operand_type))
-    {
-        return false;
-    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_binary(MachineX64Selector* selector, IrInstruction* instruction, IrTypeId operand_type_id,
+                                                          u32 left_register, u32 right_register, u32 result_register)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
     bool wide = machine_x64_type_is_64_bit(program, operand_type_id);
     u16 arithmetic = 0;
     switch (instruction->binary_operation)
@@ -2112,25 +2062,116 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector,
                                                  .opcode = arithmetic,
                                              });
         }
-        return true;
+        selected = true;
     }
-    u32 condition = machine_x64_condition_from_comparison(instruction->binary_operation);
-    if (!condition)
+    else
     {
-        return false;
+        u32 condition = machine_x64_condition_from_comparison(instruction->binary_operation);
+        if (condition)
+        {
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                             .opcode = (u16)(wide ? MACHINE_X64_CMP64 : MACHINE_X64_CMP32),
+                                         });
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = condition,
+                                                       .opcode = MACHINE_X64_SETCC,
+                                                   });
+            machine_x64_define(selector, result_register, row);
+            selected = true;
+        }
     }
-    machine_x64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                         .opcode = (u16)(wide ? MACHINE_X64_CMP64 : MACHINE_X64_CMP32),
-                                     });
-    u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                   .payload = condition,
-                                                   .opcode = MACHINE_X64_SETCC,
-                                               });
-    machine_x64_define(selector, result_register, row);
-    return true;
+    return selected;
+}
+
+// The CMPXCHG16B success boolean, when this comparison is the one that reads
+// it: the atomic row materializes it immediately, and later aggregate copies
+// consume that value rather than live flags across unrelated IR rows.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_atomic_success_source(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+
+    u32 success_register = UINT32_MAX;
+    if (instruction->operand_count >= 2 && instruction->binary_operation == IR_BINARY_INTEGER_EQUAL &&
+        instruction->operands[0].value < function->value_count && instruction->operands[1].value < function->value_count)
+    {
+        IrValue* observed_value = function->values + instruction->operands[0].value;
+        IrInstruction* atomic_instruction =
+            observed_value->definition.value < function->instruction_count ? function->instructions + observed_value->definition.value : 0;
+        bool is_atomic_expected_compare = atomic_instruction && atomic_instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE &&
+                                          atomic_instruction->operand_count >= 2 &&
+                                          atomic_instruction->operands[1].value == instruction->operands[1].value;
+        if (is_atomic_expected_compare)
+        {
+            success_register = selector->atomic_success_registers[instruction->operands[0].value];
+        }
+    }
+    return success_register;
+}
+
+// A 128-bit unsigned right shift, the one i128 binary the subset lowers.
+BUSTER_GLOBAL_LOCAL bool machine_x64_binary_is_i128_shift(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool matched = false;
+    if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count && instruction->result.value < function->value_count)
+    {
+        IrType* left_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        IrType* result_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
+        matched = left_type && result_type && left_type->kind == IR_TYPE_INTEGER && result_type->kind == IR_TYPE_INTEGER &&
+                  left_type->bit_width == 128 && result_type->bit_width == 128 && instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+    }
+    return matched;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    u32 success_register = machine_x64_atomic_success_source(selector, instruction);
+    u32 left_register = UINT32_MAX;
+    u32 right_register = UINT32_MAX;
+    if (result_register != UINT32_MAX && success_register != UINT32_MAX)
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
+                                                       .opcode = MACHINE_X64_MOV_RR,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if (machine_x64_binary_is_i128_shift(selector, instruction))
+    {
+        u32 amount;
+        selected = machine_x64_constant_shift_amount(selector, instruction->operands[1], &amount) &&
+                   machine_x64_select_i128_unsigned_shift_right(selector, instruction, amount);
+    }
+    else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &left_register) &&
+             machine_x64_operand_register(selector, instruction->operands[1], &right_register))
+    {
+        IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
+        IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
+        if (operand_type && operand_type->kind == IR_TYPE_VECTOR)
+        {
+            selected = machine_x64_select_vector_binary(selector, instruction, operand_type, left_register, right_register, result_register);
+        }
+        else if (operand_type && operand_type->kind == IR_TYPE_FLOAT)
+        {
+            selected = machine_x64_select_float_binary(selector, instruction, operand_type, left_register, right_register, result_register);
+        }
+        else if (machine_x64_type_is_scalar_register(operand_type))
+        {
+            selected = machine_x64_select_scalar_binary(selector, instruction, operand_type_id, left_register, right_register, result_register);
+        }
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_dereference(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
