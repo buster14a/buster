@@ -1936,11 +1936,16 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                     bool assume_validated)
 {
-    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    MachineSelectResult result;
+
+    switch (target.cpu_arch)
     {
-        return machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
+        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, assume_validated);
+        break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
+        break; default: BUSTER_TODO();
     }
-    return machine_select_canonical_function_x86_64(arena, program, function, target, assume_validated);
+
+    return result;
 }
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
