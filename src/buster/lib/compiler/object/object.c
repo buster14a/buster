@@ -152,67 +152,67 @@ BUSTER_GLOBAL_LOCAL bool object_mach_page21_instruction_valid(u32 instruction)
 
 BUSTER_GLOBAL_LOCAL bool object_mach_pageoff12_shift(u32 instruction, u32* shift)
 {
-    if (!shift)
+    if (shift)
     {
-        return false;
-    }
-    u32 base = instruction & UINT32_C(0xffc00000);
-    bool valid_ldst = false;
-    switch (base)
-    {
-    case UINT32_C(0x39000000):
-    case UINT32_C(0x39400000):
-    case UINT32_C(0x39800000):
-    case UINT32_C(0x39c00000):
-    case UINT32_C(0x79000000):
-    case UINT32_C(0x79400000):
-    case UINT32_C(0x79800000):
-    case UINT32_C(0x79c00000):
-    case UINT32_C(0xb9000000):
-    case UINT32_C(0xb9400000):
-    case UINT32_C(0xb9800000):
-    case UINT32_C(0xf9000000):
-    case UINT32_C(0xf9400000):
-    case UINT32_C(0xf9800000):
-    case UINT32_C(0x3d000000):
-    case UINT32_C(0x3d400000):
-    case UINT32_C(0x3d800000):
-    case UINT32_C(0x3dc00000):
-    case UINT32_C(0x7d000000):
-    case UINT32_C(0x7d400000):
-    case UINT32_C(0xbd000000):
-    case UINT32_C(0xbd400000):
-    case UINT32_C(0xfd000000):
-    case UINT32_C(0xfd400000):
-        valid_ldst = true;
-        break;
-    default:
-        break;
-    }
-    if (valid_ldst)
-    {
-        u32 implicit_shift = instruction >> 30;
-        if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+        u32 base = instruction & UINT32_C(0xffc00000);
+        bool valid_ldst = false;
+        switch (base)
         {
-            implicit_shift = 4;
+        case UINT32_C(0x39000000):
+        case UINT32_C(0x39400000):
+        case UINT32_C(0x39800000):
+        case UINT32_C(0x39c00000):
+        case UINT32_C(0x79000000):
+        case UINT32_C(0x79400000):
+        case UINT32_C(0x79800000):
+        case UINT32_C(0x79c00000):
+        case UINT32_C(0xb9000000):
+        case UINT32_C(0xb9400000):
+        case UINT32_C(0xb9800000):
+        case UINT32_C(0xf9000000):
+        case UINT32_C(0xf9400000):
+        case UINT32_C(0xf9800000):
+        case UINT32_C(0x3d000000):
+        case UINT32_C(0x3d400000):
+        case UINT32_C(0x3d800000):
+        case UINT32_C(0x3dc00000):
+        case UINT32_C(0x7d000000):
+        case UINT32_C(0x7d400000):
+        case UINT32_C(0xbd000000):
+        case UINT32_C(0xbd400000):
+        case UINT32_C(0xfd000000):
+        case UINT32_C(0xfd400000):
+            valid_ldst = true;
+            break;
+        default:
+            break;
         }
-        if (instruction & (UINT32_C(0xfff) << 10))
+        if (valid_ldst)
         {
-            return false;
+            u32 implicit_shift = instruction >> 30;
+            if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+            {
+                implicit_shift = 4;
+            }
+            if (instruction & (UINT32_C(0xfff) << 10))
+            {
+                return false;
+            }
+            *shift = implicit_shift;
+            return true;
         }
-        *shift = implicit_shift;
-        return true;
+        // The direct PAGEOFF form used by codegen is a 64-bit, non-setting ADD
+        // with no LSL #12.  Registers are intentionally unconstrained: a PAGE
+        // relocation does not imply that this instruction consumes a PAGE21's
+        // destination register.
+        if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+            !(instruction & (UINT32_C(0xfff) << 10)))
+        {
+            *shift = 0;
+            return true;
+        }
     }
-    // The direct PAGEOFF form used by codegen is a 64-bit, non-setting ADD
-    // with no LSL #12.  Registers are intentionally unconstrained: a PAGE
-    // relocation does not imply that this instruction consumes a PAGE21's
-    // destination register.
-    if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-        !(instruction & (UINT32_C(0xfff) << 10)))
-    {
-        *shift = 0;
-        return true;
-    }
+
     return false;
 }
 
@@ -249,43 +249,43 @@ BUSTER_GLOBAL_LOCAL bool object_address_addend(u64 address, s64 addend, u64* res
 
 BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
 {
-    if (!patch || (place & 3))
+    if (patch && !(place & 3))
     {
-        return false;
-    }
-    u64 address = 0;
-    if (!object_address_addend(target, addend, &address))
-    {
-        return false;
-    }
-    u32 instruction = 0;
-    memcpy(&instruction, patch, sizeof(instruction));
-    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
-    {
-        if (!object_mach_page21_instruction_valid(instruction))
+        u64 address = 0;
+        if (!object_address_addend(target, addend, &address))
         {
             return false;
         }
-        u32 patched = 0;
-        if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+        u32 instruction = 0;
+        memcpy(&instruction, patch, sizeof(instruction));
+        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
         {
-            return false;
+            if (!object_mach_page21_instruction_valid(instruction))
+            {
+                return false;
+            }
+            u32 patched = 0;
+            if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+            {
+                return false;
+            }
+            memcpy(patch, &patched, sizeof(patched));
+            return true;
         }
-        memcpy(patch, &patched, sizeof(patched));
-        return true;
-    }
-    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-    {
-        u32 shift = 0;
-        if (!object_mach_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
+        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
         {
-            return false;
+            u32 shift = 0;
+            if (!object_mach_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
+            {
+                return false;
+            }
+            instruction &= ~(UINT32_C(0xfff) << 10);
+            instruction |= (u32)((address & 0xfff) >> shift) << 10;
+            memcpy(patch, &instruction, sizeof(instruction));
+            return true;
         }
-        instruction &= ~(UINT32_C(0xfff) << 10);
-        instruction |= (u32)((address & 0xfff) >> shift) << 10;
-        memcpy(patch, &instruction, sizeof(instruction));
-        return true;
     }
+
     return false;
 }
 
@@ -912,138 +912,138 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
 BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, ObjectRelocation* relocation,
                                                          ByteSlice section_data)
 {
-    if (!relocation || relocation->offset + object_assembly_relocation_size(relocation->kind) > section_data.length)
+    if (relocation && relocation->offset + object_assembly_relocation_size(relocation->kind) <= section_data.length)
     {
-        return false;
-    }
-    switch (relocation->kind)
-    {
-    case OBJECT_RELOCATION_ABSOLUTE64:
-        object_assembly_append_string(buffer, S8("\t.quad "));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_ABSOLUTE32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_COFF_SECREL32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECREL32"));
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_COFF_SECTION16:
-        object_assembly_append_string(buffer, S8("\t.short "));
-        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECT"));
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_COFF_ADDR32NB:
-        object_assembly_append_string(buffer, S8("\t.rva "));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_X86_64_PC32:
-    case OBJECT_RELOCATION_AARCH64_PREL32:
-    case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8(" - ."));
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLVP"));
-        object_assembly_append_string(buffer, S8(" - .\n"));
-        return true;
-    case OBJECT_RELOCATION_X86_64_TPOFF32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TPOFF"));
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_PE_TLS_OFFSET32:
-        object_assembly_append_string(buffer, S8("\t.long "));
-        object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECREL32"));
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    case OBJECT_RELOCATION_AARCH64_CALL26:
-    case OBJECT_RELOCATION_AARCH64_JUMP26:
-    {
-        object_assembly_append_string(buffer, relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? S8("\tbl ") : S8("\tb "));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    }
-    case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
-    case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
-    case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
-    {
-        u32 word = 0;
-        memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word))
+        switch (relocation->kind)
         {
-            return false;
+        case OBJECT_RELOCATION_ABSOLUTE64:
+            object_assembly_append_string(buffer, S8("\t.quad "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_ABSOLUTE32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_COFF_SECREL32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECREL32"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_COFF_SECTION16:
+            object_assembly_append_string(buffer, S8("\t.short "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECT"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_COFF_ADDR32NB:
+            object_assembly_append_string(buffer, S8("\t.rva "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_PC32:
+        case OBJECT_RELOCATION_AARCH64_PREL32:
+        case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8(" - ."));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLVP"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TPOFF32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TPOFF"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_PE_TLS_OFFSET32:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@SECREL32"));
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_AARCH64_CALL26:
+        case OBJECT_RELOCATION_AARCH64_JUMP26:
+        {
+            object_assembly_append_string(buffer, relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? S8("\tbl ") : S8("\tb "));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
         }
-        object_assembly_append_string(buffer, S8("\tadrp "));
-        if ((word & 31) == 31)
+        case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
+        case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
+        case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
         {
-            object_assembly_append_string(buffer, S8("xzr"));
+            u32 word = 0;
+            memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word))
+            {
+                return false;
+            }
+            object_assembly_append_string(buffer, S8("\tadrp "));
+            if ((word & 31) == 31)
+            {
+                object_assembly_append_string(buffer, S8("xzr"));
+            }
+            else
+            {
+                object_assembly_append_aarch64_register(buffer, word);
+            }
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_relocation_value(
+                buffer, object, target, relocation,
+                relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ? S8("@TLVPPAGE")
+                : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ? S8("@PAGE")
+                                                                             : (String8){0}, true);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
         }
-        else
+        case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
+        case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
+        case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
+        case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12:
         {
+            String8 modifier = relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ? S8("@TLVPPAGEOFF")
+                               : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12      ? S8("@PAGEOFF")
+                               : relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12          ? S8(":secrel_lo12:")
+                                                                                                          : S8(":lo12:");
+            return object_assembly_emit_aarch64_immediate_relocation(buffer, object, target, relocation, section_data, modifier,
+                                                                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                                                                         relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
+        }
+        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+        {
+            u32 word = 0;
+            memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+            object_assembly_append_string(buffer, S8("\tadd "));
             object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register(buffer, word >> 5);
+            object_assembly_append_string(buffer, S8(", #:tprel_hi12:"));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
         }
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_relocation_value(
-            buffer, object, target, relocation,
-            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ? S8("@TLVPPAGE")
-            : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ? S8("@PAGE")
-                                                                         : (String8){0}, true);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
+        case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+        {
+            u32 word = 0;
+            memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+            object_assembly_append_string(buffer, S8("\tadd "));
+            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register(buffer, word >> 5);
+            object_assembly_append_string(buffer, S8(", #:tprel_lo12_nc:"));
+            object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        }
+        case OBJECT_RELOCATION_COUNT:
+            break;
+        }
     }
-    case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
-    case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
-    case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
-    case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12:
-    {
-        String8 modifier = relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ? S8("@TLVPPAGEOFF")
-                           : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12      ? S8("@PAGEOFF")
-                           : relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12          ? S8(":secrel_lo12:")
-                                                                                                      : S8(":lo12:");
-        return object_assembly_emit_aarch64_immediate_relocation(buffer, object, target, relocation, section_data, modifier,
-                                                                 relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
-                                                                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
-    }
-    case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
-    {
-        u32 word = 0;
-        memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
-        object_assembly_append_string(buffer, S8("\tadd "));
-        object_assembly_append_aarch64_register(buffer, word);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register(buffer, word >> 5);
-        object_assembly_append_string(buffer, S8(", #:tprel_hi12:"));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    }
-    case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
-    {
-        u32 word = 0;
-        memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
-        object_assembly_append_string(buffer, S8("\tadd "));
-        object_assembly_append_aarch64_register(buffer, word);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register(buffer, word >> 5);
-        object_assembly_append_string(buffer, S8(", #:tprel_lo12_nc:"));
-        object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
-        object_assembly_append_string(buffer, S8("\n"));
-        return true;
-    }
-    case OBJECT_RELOCATION_COUNT:
-        break;
-    }
+
     return false;
 }
 
@@ -1055,27 +1055,27 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_apple_x86_relocation_start(ObjectRelocat
         return UINT64_MAX;
     }
     u64 start = relocation->offset - 1;
-    if (data.pointer[start] == 0xe8)
+    if (data.pointer[start] != 0xe8)
     {
-        return start;
+        if (relocation->offset < 3)
+        {
+            return UINT64_MAX;
+        }
+        start = relocation->offset - 3;
+        if (data.pointer[start] != 0x48)
+        {
+            return UINT64_MAX;
+        }
+        if (data.pointer[start + 1] != 0x8b && data.pointer[start + 1] != 0x8d)
+        {
+            return UINT64_MAX;
+        }
+        if ((data.pointer[start + 2] & 0xc7) != 0x05)
+        {
+            return UINT64_MAX;
+        }
     }
-    if (relocation->offset < 3)
-    {
-        return UINT64_MAX;
-    }
-    start = relocation->offset - 3;
-    if (data.pointer[start] != 0x48)
-    {
-        return UINT64_MAX;
-    }
-    if (data.pointer[start + 1] != 0x8b && data.pointer[start + 1] != 0x8d)
-    {
-        return UINT64_MAX;
-    }
-    if ((data.pointer[start + 2] & 0xc7) != 0x05)
-    {
-        return UINT64_MAX;
-    }
+
     return start;
 }
 
@@ -2603,335 +2603,335 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_aarch64_instruction(ObjectAssemblyB
 {
     BUSTER_UNUSED(object);
     BUSTER_UNUSED(target);
-    if (offset + 4 > end)
+    if (offset + 4 <= end)
     {
-        return 0;
-    }
-    u32 word = 0;
-    memcpy(&word, data.pointer + offset, sizeof(word));
-    if (word == UINT32_C(0xd503201f))
-    {
-        object_assembly_append_string(buffer, S8("\tnop\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd65f0000))
-    {
-        object_assembly_append_string(buffer, S8("\tret"));
-        if (((word >> 5) & 31) != 30)
+        u32 word = 0;
+        memcpy(&word, data.pointer + offset, sizeof(word));
+        if (word == UINT32_C(0xd503201f))
         {
-            object_assembly_append_string(buffer, S8(" "));
+            object_assembly_append_string(buffer, S8("\tnop\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd65f0000))
+        {
+            object_assembly_append_string(buffer, S8("\tret"));
+            if (((word >> 5) & 31) != 30)
+            {
+                object_assembly_append_string(buffer, S8(" "));
+                object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, true);
+            }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd61f0000) || (word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd63f0000))
+        {
+            object_assembly_append_string(buffer, (word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd61f0000) ? S8("\tbr ") : S8("\tblr "));
             object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, true);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
         }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd61f0000) || (word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd63f0000))
-    {
-        object_assembly_append_string(buffer, (word & UINT32_C(0xfffffc1f)) == UINT32_C(0xd61f0000) ? S8("\tbr ") : S8("\tblr "));
-        object_assembly_append_aarch64_zero_register_width(buffer, word >> 5, true);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000))
-    {
-        s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) << 2;
-        u64 target_offset = (u64)((s64)offset + displacement);
-        if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
+        if ((word & UINT32_C(0x7c000000)) == UINT32_C(0x14000000))
         {
-            return 0;
+            s64 displacement = object_assembly_aarch64_sign_extend(word & UINT32_C(0x03ffffff), 26) << 2;
+            u64 target_offset = (u64)((s64)offset + displacement);
+            if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
+            {
+                return 0;
+            }
+            object_assembly_append_string(buffer, word & UINT32_C(0x80000000) ? S8("\tbl ") : S8("\tb "));
+            object_assembly_append_internal_label(buffer, section, target_offset);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
         }
-        object_assembly_append_string(buffer, word & UINT32_C(0x80000000) ? S8("\tbl ") : S8("\tb "));
-        object_assembly_append_internal_label(buffer, section, target_offset);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x18000000))
-    {
-        s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
-        u64 literal_offset = (u64)((s64)offset + displacement);
-        if (!object_assembly_aarch64_target(data, literal_offset) || !object_assembly_has_internal_label(buffer, section, literal_offset))
+        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x18000000))
         {
-            return 0;
-        }
-        object_assembly_append_string(buffer, S8("\tldr "));
-        object_assembly_append_aarch64_register(buffer, word);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_internal_label(buffer, section, literal_offset);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0xff000010)) == UINT32_C(0x54000000))
-    {
-        s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
-        u64 target_offset = (u64)((s64)offset + displacement);
-        if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
-        {
-            return 0;
-        }
-        object_assembly_append_string(buffer, S8("\tb."));
-        object_assembly_append_string(buffer, object_assembly_aarch64_condition(word));
-        object_assembly_append_string(buffer, S8(" "));
-        object_assembly_append_internal_label(buffer, section, target_offset);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x34000000))
-    {
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        bool nonzero = (word & UINT32_C(0x01000000)) != 0;
-        s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
-        u64 target_offset = (u64)((s64)offset + displacement);
-        if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
-        {
-            return 0;
-        }
-        object_assembly_append_string(buffer, nonzero ? S8("\tcbnz ") : S8("\tcbz "));
-        object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_internal_label(buffer, section, target_offset);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x36000000))
-    {
-        bool nonzero = (word & UINT32_C(0x01000000)) != 0;
-        u32 bit = ((word >> 31) & 1) * 32 + ((word >> 19) & 31);
-        s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) << 2;
-        u64 target_offset = (u64)((s64)offset + displacement);
-        if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
-        {
-            return 0;
-        }
-        object_assembly_append_string(buffer, nonzero ? S8("\ttbnz ") : S8("\ttbz "));
-        object_assembly_append_aarch64_zero_register_width(buffer, word, true);
-        object_assembly_append_string(buffer, S8(", #"));
-        object_assembly_append_u64_decimal(buffer, bit);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_internal_label(buffer, section, target_offset);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02000) || (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02400) ||
-        (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02800) || (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02c00))
-    {
-        u32 operation = word & UINT32_C(0x7fe0fc00);
-        object_assembly_append_string(buffer, operation == UINT32_C(0x1ac02000) ? S8("\tlsl ") : operation == UINT32_C(0x1ac02400) ? S8("\tlsr ")
-                                                                                   : operation == UINT32_C(0x1ac02800)          ? S8("\tasr ")
-                                                                                                                               : S8("\tror "));
-        object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1b007c00))
-    {
-        object_assembly_append_string(buffer, S8("\tmul "));
-        object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31)
-    {
-        object_assembly_append_string(buffer, S8("\tcset "));
-        object_assembly_append_aarch64_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_string(buffer, object_assembly_aarch64_condition(((word >> 12) & 15) ^ 1));
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    u32 logical_operation = word & UINT32_C(0x7f200000);
-    if (logical_operation == UINT32_C(0x0a000000) || logical_operation == UINT32_C(0x2a000000) || logical_operation == UINT32_C(0x4a000000))
-    {
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        u32 destination = word & 31;
-        u32 source = (word >> 5) & 31;
-        u32 second = (word >> 16) & 31;
-        String8 name = logical_operation == UINT32_C(0x0a000000) ? S8("and") : logical_operation == UINT32_C(0x2a000000) ? S8("orr") : S8("eor");
-        if (logical_operation == UINT32_C(0x2a000000) && source == 31)
-        {
-            object_assembly_append_string(buffer, S8("\tmov "));
-            object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            u64 literal_offset = (u64)((s64)offset + displacement);
+            if (!object_assembly_aarch64_target(data, literal_offset) || !object_assembly_has_internal_label(buffer, section, literal_offset))
+            {
+                return 0;
+            }
+            object_assembly_append_string(buffer, S8("\tldr "));
+            object_assembly_append_aarch64_register(buffer, word);
             object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
+            object_assembly_append_internal_label(buffer, section, literal_offset);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
         }
-        else
+        if ((word & UINT32_C(0xff000010)) == UINT32_C(0x54000000))
         {
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            u64 target_offset = (u64)((s64)offset + displacement);
+            if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
+            {
+                return 0;
+            }
+            object_assembly_append_string(buffer, S8("\tb."));
+            object_assembly_append_string(buffer, object_assembly_aarch64_condition(word));
+            object_assembly_append_string(buffer, S8(" "));
+            object_assembly_append_internal_label(buffer, section, target_offset);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x34000000))
+        {
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            bool nonzero = (word & UINT32_C(0x01000000)) != 0;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x7ffff), 19) << 2;
+            u64 target_offset = (u64)((s64)offset + displacement);
+            if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
+            {
+                return 0;
+            }
+            object_assembly_append_string(buffer, nonzero ? S8("\tcbnz ") : S8("\tcbz "));
+            object_assembly_append_aarch64_zero_register_width(buffer, word, wide);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_internal_label(buffer, section, target_offset);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x36000000))
+        {
+            bool nonzero = (word & UINT32_C(0x01000000)) != 0;
+            u32 bit = ((word >> 31) & 1) * 32 + ((word >> 19) & 31);
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 5) & UINT32_C(0x3fff), 14) << 2;
+            u64 target_offset = (u64)((s64)offset + displacement);
+            if (!object_assembly_aarch64_target(data, target_offset) || !object_assembly_has_internal_label(buffer, section, target_offset))
+            {
+                return 0;
+            }
+            object_assembly_append_string(buffer, nonzero ? S8("\ttbnz ") : S8("\ttbz "));
+            object_assembly_append_aarch64_zero_register_width(buffer, word, true);
+            object_assembly_append_string(buffer, S8(", #"));
+            object_assembly_append_u64_decimal(buffer, bit);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_internal_label(buffer, section, target_offset);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02000) || (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02400) ||
+            (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02800) || (word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1ac02c00))
+        {
+            u32 operation = word & UINT32_C(0x7fe0fc00);
+            object_assembly_append_string(buffer, operation == UINT32_C(0x1ac02000) ? S8("\tlsl ") : operation == UINT32_C(0x1ac02400) ? S8("\tlsr ")
+                                                                                       : operation == UINT32_C(0x1ac02800)          ? S8("\tasr ")
+                                                                                                                                   : S8("\tror "));
+            object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7fe0fc00)) == UINT32_C(0x1b007c00))
+        {
+            object_assembly_append_string(buffer, S8("\tmul "));
+            object_assembly_append_aarch64_zero_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 16, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7fe00c00)) == UINT32_C(0x1a800400) && ((word >> 5) & 31) == 31 && ((word >> 16) & 31) == 31)
+        {
+            object_assembly_append_string(buffer, S8("\tcset "));
+            object_assembly_append_aarch64_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_string(buffer, object_assembly_aarch64_condition(((word >> 12) & 15) ^ 1));
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        u32 logical_operation = word & UINT32_C(0x7f200000);
+        if (logical_operation == UINT32_C(0x0a000000) || logical_operation == UINT32_C(0x2a000000) || logical_operation == UINT32_C(0x4a000000))
+        {
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            u32 destination = word & 31;
+            u32 source = (word >> 5) & 31;
+            u32 second = (word >> 16) & 31;
+            String8 name = logical_operation == UINT32_C(0x0a000000) ? S8("and") : logical_operation == UINT32_C(0x2a000000) ? S8("orr") : S8("eor");
+            if (logical_operation == UINT32_C(0x2a000000) && source == 31)
+            {
+                object_assembly_append_string(buffer, S8("\tmov "));
+                object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
+            }
+            else
+            {
+                object_assembly_append_string(buffer, S8("\t"));
+                object_assembly_append_string(buffer, name);
+                object_assembly_append_string(buffer, S8(" "));
+                object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
+            }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000))
+        {
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            bool subtract = (word & UINT32_C(0x40000000)) != 0;
+            bool set_flags = (word & UINT32_C(0x20000000)) != 0;
+            u32 immediate = (word >> 10) & 0xfff;
+            if (word & UINT32_C(0x00400000))
+            {
+                immediate <<= 12;
+            }
+            u32 destination = word & 31;
+            u32 source = (word >> 5) & 31;
+            if (set_flags && destination == 31)
+            {
+                object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
+                object_assembly_append_aarch64_sp_register_width(buffer, source, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_immediate(buffer, immediate);
+            }
+            else
+            {
+                object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
+                object_assembly_append_aarch64_sp_register_width(buffer, destination, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_sp_register_width(buffer, source, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_immediate(buffer, immediate);
+            }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x1f200000)) == UINT32_C(0x0b000000))
+        {
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            bool subtract = (word & UINT32_C(0x40000000)) != 0;
+            bool set_flags = (word & UINT32_C(0x20000000)) != 0;
+            u32 destination = word & 31;
+            u32 source = (word >> 5) & 31;
+            u32 second = (word >> 16) & 31;
+            u32 shift = (word >> 10) & 63;
+            if (set_flags && destination == 31)
+            {
+                object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
+                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_register_width(buffer, second, wide);
+            }
+            else
+            {
+                object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
+                object_assembly_append_aarch64_register_width(buffer, destination, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_register_width(buffer, source, wide);
+                object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_register_width(buffer, second, wide);
+                if (shift)
+                {
+                    object_assembly_append_string(buffer, S8(", lsl #"));
+                    object_assembly_append_u64_decimal(buffer, shift);
+                }
+            }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
+            (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000))
+        {
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            u32 operation = (word >> 29) & 3;
+            u32 shift = ((word >> 21) & 3) * 16;
+            u32 immediate = (word >> 5) & 0xffff;
+            String8 name = operation == 2 ? S8("movz") : operation == 3 ? S8("movk") : S8("movn");
             object_assembly_append_string(buffer, S8("\t"));
             object_assembly_append_string(buffer, name);
             object_assembly_append_string(buffer, S8(" "));
-            object_assembly_append_aarch64_zero_register_width(buffer, destination, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_zero_register_width(buffer, source, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_zero_register_width(buffer, second, wide);
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x1f000000)) == UINT32_C(0x11000000))
-    {
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        bool subtract = (word & UINT32_C(0x40000000)) != 0;
-        bool set_flags = (word & UINT32_C(0x20000000)) != 0;
-        u32 immediate = (word >> 10) & 0xfff;
-        if (word & UINT32_C(0x00400000))
-        {
-            immediate <<= 12;
-        }
-        u32 destination = word & 31;
-        u32 source = (word >> 5) & 31;
-        if (set_flags && destination == 31)
-        {
-            object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
-            object_assembly_append_aarch64_sp_register_width(buffer, source, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_immediate(buffer, immediate);
-        }
-        else
-        {
-            object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
-            object_assembly_append_aarch64_sp_register_width(buffer, destination, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_sp_register_width(buffer, source, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_immediate(buffer, immediate);
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x1f200000)) == UINT32_C(0x0b000000))
-    {
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        bool subtract = (word & UINT32_C(0x40000000)) != 0;
-        bool set_flags = (word & UINT32_C(0x20000000)) != 0;
-        u32 destination = word & 31;
-        u32 source = (word >> 5) & 31;
-        u32 second = (word >> 16) & 31;
-        u32 shift = (word >> 10) & 63;
-        if (set_flags && destination == 31)
-        {
-            object_assembly_append_string(buffer, subtract ? S8("\tcmp ") : S8("\tcmn "));
-            object_assembly_append_aarch64_register_width(buffer, source, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, second, wide);
-        }
-        else
-        {
-            object_assembly_append_string(buffer, subtract ? set_flags ? S8("\tsubs ") : S8("\tsub ") : set_flags ? S8("\tadds ") : S8("\tadd "));
-            object_assembly_append_aarch64_register_width(buffer, destination, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, source, wide);
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_register_width(buffer, second, wide);
+            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_string(buffer, S8(", #0x"));
+            object_assembly_append_u64_hex(buffer, immediate, 4);
             if (shift)
             {
                 object_assembly_append_string(buffer, S8(", lsl #"));
                 object_assembly_append_u64_decimal(buffer, shift);
             }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
         }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x7f800000)) == UINT32_C(0x52800000) || (word & UINT32_C(0x7f800000)) == UINT32_C(0x72800000) ||
-        (word & UINT32_C(0x7f800000)) == UINT32_C(0x12800000))
-    {
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        u32 operation = (word >> 29) & 3;
-        u32 shift = ((word >> 21) & 3) * 16;
-        u32 immediate = (word >> 5) & 0xffff;
-        String8 name = operation == 2 ? S8("movz") : operation == 3 ? S8("movk") : S8("movn");
-        object_assembly_append_string(buffer, S8("\t"));
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_string(buffer, S8(" "));
-        object_assembly_append_aarch64_register_width(buffer, word, wide);
-        object_assembly_append_string(buffer, S8(", #0x"));
-        object_assembly_append_u64_hex(buffer, immediate, 4);
-        if (shift)
+        if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000))
         {
-            object_assembly_append_string(buffer, S8(", lsl #"));
-            object_assembly_append_u64_decimal(buffer, shift);
-        }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000))
-    {
-        u32 size_bits = (word >> 30) & 3;
-        u32 bytes = 1u << size_bits;
-        bool load = (word & UINT32_C(0x00400000)) != 0;
-        u32 register_index = word;
-        u32 base = word >> 5;
-        u32 immediate = ((word >> 10) & 0xfff) * bytes;
-        String8 name = size_bits == 0 ? load ? S8("\tldrb ") : S8("\tstrb ") : size_bits == 1 ? load ? S8("\tldrh ") : S8("\tstrh ")
-                                                                                               : load ? S8("\tldr ") : S8("\tstr ");
-        object_assembly_append_string(buffer, name);
-        object_assembly_append_aarch64_load_register(buffer, register_index, size_bits);
-        object_assembly_append_string(buffer, S8(", ["));
-        object_assembly_append_aarch64_sp_register(buffer, base);
-        if (immediate)
-        {
-            object_assembly_append_string(buffer, S8(", "));
-            object_assembly_append_aarch64_immediate(buffer, immediate);
-        }
-        object_assembly_append_string(buffer, S8("]\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000))
-    {
-        bool load = (word & UINT32_C(0x00400000)) != 0;
-        bool wide = (word & UINT32_C(0x80000000)) != 0;
-        u32 mode = (word >> 23) & 3;
-        s64 displacement = object_assembly_aarch64_sign_extend((word >> 15) & 0x7f, 7) * (wide ? 8 : 4);
-        object_assembly_append_string(buffer, load ? S8("\tldp ") : S8("\tstp "));
-        object_assembly_append_aarch64_register_width(buffer, word, wide);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 10, wide);
-        object_assembly_append_string(buffer, S8(", ["));
-        object_assembly_append_aarch64_sp_register(buffer, word >> 5);
-        if (mode == 1)
-        {
-            object_assembly_append_string(buffer, S8("], "));
-            object_assembly_append_aarch64_immediate(buffer, displacement);
-        }
-        else
-        {
-            if (displacement)
+            u32 size_bits = (word >> 30) & 3;
+            u32 bytes = 1u << size_bits;
+            bool load = (word & UINT32_C(0x00400000)) != 0;
+            u32 register_index = word;
+            u32 base = word >> 5;
+            u32 immediate = ((word >> 10) & 0xfff) * bytes;
+            String8 name = size_bits == 0 ? load ? S8("\tldrb ") : S8("\tstrb ") : size_bits == 1 ? load ? S8("\tldrh ") : S8("\tstrh ")
+                                                                                                   : load ? S8("\tldr ") : S8("\tstr ");
+            object_assembly_append_string(buffer, name);
+            object_assembly_append_aarch64_load_register(buffer, register_index, size_bits);
+            object_assembly_append_string(buffer, S8(", ["));
+            object_assembly_append_aarch64_sp_register(buffer, base);
+            if (immediate)
             {
                 object_assembly_append_string(buffer, S8(", "));
+                object_assembly_append_aarch64_immediate(buffer, immediate);
+            }
+            object_assembly_append_string(buffer, S8("]\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0x3a000000)) == UINT32_C(0x28000000))
+        {
+            bool load = (word & UINT32_C(0x00400000)) != 0;
+            bool wide = (word & UINT32_C(0x80000000)) != 0;
+            u32 mode = (word >> 23) & 3;
+            s64 displacement = object_assembly_aarch64_sign_extend((word >> 15) & 0x7f, 7) * (wide ? 8 : 4);
+            object_assembly_append_string(buffer, load ? S8("\tldp ") : S8("\tstp "));
+            object_assembly_append_aarch64_register_width(buffer, word, wide);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 10, wide);
+            object_assembly_append_string(buffer, S8(", ["));
+            object_assembly_append_aarch64_sp_register(buffer, word >> 5);
+            if (mode == 1)
+            {
+                object_assembly_append_string(buffer, S8("], "));
                 object_assembly_append_aarch64_immediate(buffer, displacement);
             }
-            object_assembly_append_string(buffer, S8("]"));
-            if (mode == 3)
+            else
             {
-                object_assembly_append_string(buffer, S8("!"));
+                if (displacement)
+                {
+                    object_assembly_append_string(buffer, S8(", "));
+                    object_assembly_append_aarch64_immediate(buffer, displacement);
+                }
+                object_assembly_append_string(buffer, S8("]"));
+                if (mode == 3)
+                {
+                    object_assembly_append_string(buffer, S8("!"));
+                }
             }
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
         }
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
+        if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x13000000))
+        {
+            object_assembly_append_string(buffer, S8("\tsxtw "));
+            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_string(buffer, S8(", "));
+            object_assembly_append_aarch64_register_width(buffer, word >> 5, false);
+            object_assembly_append_string(buffer, S8("\n"));
+            return 4;
+        }
+        if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xd5000000))
+        {
+            object_assembly_append_string(buffer, S8("\tmrs "));
+            object_assembly_append_aarch64_register(buffer, word);
+            object_assembly_append_string(buffer, S8(", tpidr_el0\n"));
+            return 4;
+        }
     }
-    if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x13000000))
-    {
-        object_assembly_append_string(buffer, S8("\tsxtw "));
-        object_assembly_append_aarch64_register(buffer, word);
-        object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 5, false);
-        object_assembly_append_string(buffer, S8("\n"));
-        return 4;
-    }
-    if ((word & UINT32_C(0xffc00000)) == UINT32_C(0xd5000000))
-    {
-        object_assembly_append_string(buffer, S8("\tmrs "));
-        object_assembly_append_aarch64_register(buffer, word);
-        object_assembly_append_string(buffer, S8(", tpidr_el0\n"));
-        return 4;
-    }
+
     return 0;
 }
 
@@ -3034,17 +3034,17 @@ BUSTER_GLOBAL_LOCAL void object_assembly_prepare_internal_labels(ObjectAssemblyB
 
 BUSTER_GLOBAL_LOCAL u64 object_assembly_next_internal_label(ObjectAssemblyBuffer* buffer, u32 section, u64 offset, u64 end)
 {
-    if (!buffer->internal_labels || buffer->internal_label_section != section)
+    if (buffer->internal_labels && buffer->internal_label_section == section)
     {
-        return end;
-    }
-    for (u64 index = offset; index < end && index < buffer->internal_label_count; index += 1)
-    {
-        if (buffer->internal_labels[index])
+        for (u64 index = offset; index < end && index < buffer->internal_label_count; index += 1)
         {
-            return index;
+            if (buffer->internal_labels[index])
+            {
+                return index;
+            }
         }
     }
+
     return end;
 }
 
@@ -4470,180 +4470,180 @@ bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offse
         ACTION_CAPACITY = 32,
         X64_RBP_REGISTER = 5,
     };
-    if (!arena || !descriptor || function_offset > text.length || function_size > text.length - function_offset || (encoding & 0xf0000000))
+    if (arena && descriptor && function_offset <= text.length && function_size <= text.length - function_offset && !(encoding & 0xf0000000))
     {
-        return false;
-    }
-    if (!object_reader_arena_can_allocate_count(arena, ACTION_CAPACITY, sizeof(CodegenUnwindAction), BUSTER_ALIGN_OF(CodegenUnwindAction)))
-    {
-        return false;
-    }
-    *descriptor = (CodegenFunctionDescriptor){
-        .unwind_actions = arena_allocate(arena, CodegenUnwindAction, ACTION_CAPACITY),
-        .code_offset = function_offset,
-        .code_size = function_size,
-    };
-    u8* code = text.pointer + function_offset;
-    if (target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        // The frame-pointer compact form does not encode prolog positions.
-        // Accept the canonical push/move sequence and reject register saves,
-        // whose RBP-relative locations cannot be represented by the neutral
-        // SP-relative descriptor.
-        if ((encoding & 0x0f000000) != 0x01000000 || (encoding & 0x00007fff) || function_size < 4 || code[0] != 0x55 || code[1] != 0x48 ||
-            !((code[2] == 0x89 && code[3] == 0xe5) || (code[2] == 0x8b && code[3] == 0xec)))
+        if (!object_reader_arena_can_allocate_count(arena, ACTION_CAPACITY, sizeof(CodegenUnwindAction), BUSTER_ALIGN_OF(CodegenUnwindAction)))
         {
             return false;
         }
-        bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_RBP_REGISTER, 0);
-        valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_RBP_REGISTER, 0) && valid;
-        descriptor->prolog_size = 4;
-        return valid;
-    }
-    if (target.cpu_arch != CPU_ARCH_AARCH64 || function_size % 4)
-    {
-        return false;
-    }
-    u32 mode = encoding & 0x0f000000;
-    if (mode == 0x02000000)
-    {
-        if (encoding & 0x00000fff)
+        *descriptor = (CodegenFunctionDescriptor){
+            .unwind_actions = arena_allocate(arena, CodegenUnwindAction, ACTION_CAPACITY),
+            .code_offset = function_offset,
+            .code_size = function_size,
+        };
+        u8* code = text.pointer + function_offset;
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            // The frame-pointer compact form does not encode prolog positions.
+            // Accept the canonical push/move sequence and reject register saves,
+            // whose RBP-relative locations cannot be represented by the neutral
+            // SP-relative descriptor.
+            if ((encoding & 0x0f000000) != 0x01000000 || (encoding & 0x00007fff) || function_size < 4 || code[0] != 0x55 || code[1] != 0x48 ||
+                !((code[2] == 0x89 && code[3] == 0xe5) || (code[2] == 0x8b && code[3] == 0xec)))
+            {
+                return false;
+            }
+            bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_RBP_REGISTER, 0);
+            valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_RBP_REGISTER, 0) && valid;
+            descriptor->prolog_size = 4;
+            return valid;
+        }
+        if (target.cpu_arch != CPU_ARCH_AARCH64 || function_size % 4)
         {
             return false;
         }
-        u32 expected_stack = ((encoding & 0x00fff000) >> 12) * 16;
+        u32 mode = encoding & 0x0f000000;
+        if (mode == 0x02000000)
+        {
+            if (encoding & 0x00000fff)
+            {
+                return false;
+            }
+            u32 expected_stack = ((encoding & 0x00fff000) >> 12) * 16;
+            u32 stack_size = 0;
+            u32 cursor = 0;
+            while (stack_size < expected_stack && cursor + 4 <= function_size)
+            {
+                u32 instruction = 0;
+                memcpy(&instruction, code + cursor, sizeof(instruction));
+                if ((instruction & UINT32_C(0xff8003ff)) != UINT32_C(0xd10003ff))
+                {
+                    return false;
+                }
+                u32 amount = (instruction >> 10) & 0xfff;
+                if (instruction & (1u << 22))
+                {
+                    amount <<= 12;
+                }
+                if (!amount || amount > expected_stack - stack_size)
+                {
+                    return false;
+                }
+                cursor += 4;
+                stack_size += amount;
+                if (!object_mach_compact_action_append(descriptor, ACTION_CAPACITY, cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
+                {
+                    return false;
+                }
+            }
+            descriptor->prolog_size = cursor;
+            return stack_size == expected_stack;
+        }
+        if (mode != 0x04000000 || (encoding & 0x00000f00) || (encoding & 0x000000e0))
+        {
+            return false;
+        }
+        u32 expected_pairs = encoding & 0x1f;
+        u32 seen_pairs = 0;
         u32 stack_size = 0;
         u32 cursor = 0;
-        while (stack_size < expected_stack && cursor + 4 <= function_size)
+        bool frame_pair = false;
+        while (cursor + 4 <= function_size)
         {
             u32 instruction = 0;
             memcpy(&instruction, code + cursor, sizeof(instruction));
-            if ((instruction & UINT32_C(0xff8003ff)) != UINT32_C(0xd10003ff))
+            u32 next_cursor = cursor + 4;
+            if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0xd10003ff))
             {
-                return false;
-            }
-            u32 amount = (instruction >> 10) & 0xfff;
-            if (instruction & (1u << 22))
-            {
-                amount <<= 12;
-            }
-            if (!amount || amount > expected_stack - stack_size)
-            {
-                return false;
-            }
-            cursor += 4;
-            stack_size += amount;
-            if (!object_mach_compact_action_append(descriptor, ACTION_CAPACITY, cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
-            {
-                return false;
-            }
-        }
-        descriptor->prolog_size = cursor;
-        return stack_size == expected_stack;
-    }
-    if (mode != 0x04000000 || (encoding & 0x00000f00) || (encoding & 0x000000e0))
-    {
-        return false;
-    }
-    u32 expected_pairs = encoding & 0x1f;
-    u32 seen_pairs = 0;
-    u32 stack_size = 0;
-    u32 cursor = 0;
-    bool frame_pair = false;
-    while (cursor + 4 <= function_size)
-    {
-        u32 instruction = 0;
-        memcpy(&instruction, code + cursor, sizeof(instruction));
-        u32 next_cursor = cursor + 4;
-        if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0xd10003ff))
-        {
-            u32 amount = (instruction >> 10) & 0xfff;
-            if (instruction & (1u << 22))
-            {
-                amount <<= 12;
-            }
-            if (!amount || stack_size > UINT32_MAX - amount ||
-                !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
-            {
-                return false;
-            }
-            stack_size += amount;
-            cursor = next_cursor;
-            continue;
-        }
-        u32 pair_form = instruction & UINT32_C(0xffc00000);
-        if (pair_form == UINT32_C(0xa9800000) || pair_form == UINT32_C(0xa9000000))
-        {
-            if (((instruction >> 5) & 31) != 31)
-            {
-                return false;
-            }
-            s32 signed_immediate = (s32)((instruction >> 15) & 0x7f);
-            if (signed_immediate & 0x40)
-            {
-                signed_immediate -= 0x80;
-            }
-            signed_immediate *= 8;
-            if (pair_form == UINT32_C(0xa9800000))
-            {
-                if (signed_immediate >= 0 || (u32)-signed_immediate > UINT32_MAX - stack_size ||
-                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
-                                                       (u32)-signed_immediate))
+                u32 amount = (instruction >> 10) & 0xfff;
+                if (instruction & (1u << 22))
+                {
+                    amount <<= 12;
+                }
+                if (!amount || stack_size > UINT32_MAX - amount ||
+                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
                 {
                     return false;
                 }
-                stack_size += (u32)-signed_immediate;
-                signed_immediate = 0;
+                stack_size += amount;
+                cursor = next_cursor;
+                continue;
             }
-            if (signed_immediate < 0 || (u32)signed_immediate > stack_size || (u32)signed_immediate + 16 > stack_size)
+            u32 pair_form = instruction & UINT32_C(0xffc00000);
+            if (pair_form == UINT32_C(0xa9800000) || pair_form == UINT32_C(0xa9000000))
             {
-                return false;
-            }
-            u8 first = (u8)(instruction & 31);
-            u8 second = (u8)((instruction >> 10) & 31);
-            if ((first == 29 && second == 30) || (first == 30 && second == 29))
-            {
-                frame_pair = true;
-            }
-            else
-            {
-                u8 low = BUSTER_MIN(first, second);
-                u32 pair_bit = low == 19 && BUSTER_MAX(first, second) == 20   ? 1u
-                               : low == 21 && BUSTER_MAX(first, second) == 22 ? 2u
-                               : low == 23 && BUSTER_MAX(first, second) == 24 ? 4u
-                               : low == 25 && BUSTER_MAX(first, second) == 26 ? 8u
-                               : low == 27 && BUSTER_MAX(first, second) == 28 ? 16u
-                                                                             : 0;
-                if (!pair_bit || (seen_pairs & pair_bit))
+                if (((instruction >> 5) & 31) != 31)
                 {
                     return false;
                 }
-                seen_pairs |= pair_bit;
+                s32 signed_immediate = (s32)((instruction >> 15) & 0x7f);
+                if (signed_immediate & 0x40)
+                {
+                    signed_immediate -= 0x80;
+                }
+                signed_immediate *= 8;
+                if (pair_form == UINT32_C(0xa9800000))
+                {
+                    if (signed_immediate >= 0 || (u32)-signed_immediate > UINT32_MAX - stack_size ||
+                        !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
+                                                           (u32)-signed_immediate))
+                    {
+                        return false;
+                    }
+                    stack_size += (u32)-signed_immediate;
+                    signed_immediate = 0;
+                }
+                if (signed_immediate < 0 || (u32)signed_immediate > stack_size || (u32)signed_immediate + 16 > stack_size)
+                {
+                    return false;
+                }
+                u8 first = (u8)(instruction & 31);
+                u8 second = (u8)((instruction >> 10) & 31);
+                if ((first == 29 && second == 30) || (first == 30 && second == 29))
+                {
+                    frame_pair = true;
+                }
+                else
+                {
+                    u8 low = BUSTER_MIN(first, second);
+                    u32 pair_bit = low == 19 && BUSTER_MAX(first, second) == 20   ? 1u
+                                   : low == 21 && BUSTER_MAX(first, second) == 22 ? 2u
+                                   : low == 23 && BUSTER_MAX(first, second) == 24 ? 4u
+                                   : low == 25 && BUSTER_MAX(first, second) == 26 ? 8u
+                                   : low == 27 && BUSTER_MAX(first, second) == 28 ? 16u
+                                                                                 : 0;
+                    if (!pair_bit || (seen_pairs & pair_bit))
+                    {
+                        return false;
+                    }
+                    seen_pairs |= pair_bit;
+                }
+                bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, first,
+                                                               (u32)signed_immediate);
+                valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, second,
+                                                          (u32)signed_immediate + 8) && valid;
+                if (!valid)
+                {
+                    return false;
+                }
+                cursor = next_cursor;
+                continue;
             }
-            bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, first,
-                                                           (u32)signed_immediate);
-            valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, second,
-                                                      (u32)signed_immediate + 8) && valid;
-            if (!valid)
+            if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0x910003fd))
             {
-                return false;
+                u32 frame_offset = ((instruction >> 10) & 0xfff) << ((instruction & (1u << 22)) ? 12 : 0);
+                if (!frame_pair || seen_pairs != expected_pairs || frame_offset > stack_size ||
+                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, frame_offset))
+                {
+                    return false;
+                }
+                descriptor->prolog_size = next_cursor;
+                return true;
             }
-            cursor = next_cursor;
-            continue;
+            return false;
         }
-        if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0x910003fd))
-        {
-            u32 frame_offset = ((instruction >> 10) & 0xfff) << ((instruction & (1u << 22)) ? 12 : 0);
-            if (!frame_pair || seen_pairs != expected_pairs || frame_offset > stack_size ||
-                !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, frame_offset))
-            {
-                return false;
-            }
-            descriptor->prolog_size = next_cursor;
-            return true;
-        }
-        return false;
     }
+
     return false;
 }
 
@@ -5685,24 +5685,24 @@ BUSTER_GLOBAL_LOCAL bool object_archive_decimal(u8 const* bytes, u64 length, u64
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_are_object(ByteSlice bytes)
 {
-    if (bytes.length && !bytes.pointer)
+    if (!bytes.length || bytes.pointer)
     {
-        return false;
+        if (bytes.length >= 4 && (memcmp(bytes.pointer,
+                                         "\x7f"
+                                         "ELF",
+                                         4) == 0 ||
+                                  memcmp(bytes.pointer, "\xcf\xfa\xed\xfe", 4) == 0))
+        {
+            return true;
+        }
+        if (bytes.length >= 2)
+        {
+            u16 machine = 0;
+            memcpy(&machine, bytes.pointer, sizeof(machine));
+            return machine == 0x8664 || machine == 0xaa64;
+        }
     }
-    if (bytes.length >= 4 && (memcmp(bytes.pointer,
-                                     "\x7f"
-                                     "ELF",
-                                     4) == 0 ||
-                              memcmp(bytes.pointer, "\xcf\xfa\xed\xfe", 4) == 0))
-    {
-        return true;
-    }
-    if (bytes.length >= 2)
-    {
-        u16 machine = 0;
-        memcpy(&machine, bytes.pointer, sizeof(machine));
-        return machine == 0x8664 || machine == 0xaa64;
-    }
+
     return false;
 }
 
@@ -5712,159 +5712,159 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
         .error = OBJECT_ERROR_INVALID_INPUT,
     };
     static char const archive_magic[] = "!<arch>\n";
-    if (!arena || !bytes.pointer || bytes.length < sizeof(archive_magic) - 1 || memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) != 0)
+    if (arena && bytes.pointer && bytes.length >= sizeof(archive_magic) - 1 && memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) == 0)
     {
-        return result;
-    }
-    u64 member_capacity_u64 = bytes.length / 60;
-    if (member_capacity_u64 > UINT32_MAX)
-    {
-        return result;
-    }
-    u32 member_capacity = (u32)member_capacity_u64;
-    if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
-    {
-        return result;
-    }
-    result.objects = arena_allocate(arena, ObjectFile, member_capacity);
-    if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
-    {
-        return result;
-    }
-    result.member_names = arena_allocate(arena, String8, member_capacity);
-    String8 long_names = {0};
-    u64 member_name_bytes = 0;
-    u64 cursor = sizeof(archive_magic) - 1;
-    while (cursor < bytes.length)
-    {
-        if (cursor > bytes.length || 60 > bytes.length - cursor || bytes.pointer[cursor + 58] != '`' || bytes.pointer[cursor + 59] != '\n')
+        u64 member_capacity_u64 = bytes.length / 60;
+        if (member_capacity_u64 > UINT32_MAX)
         {
             return result;
         }
-        u64 member_size = 0;
-        if (!object_archive_decimal(bytes.pointer + cursor + 48, 10, &member_size))
+        u32 member_capacity = (u32)member_capacity_u64;
+        if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
         {
             return result;
         }
-        u64 member_offset = cursor + 60;
-        if (member_offset > bytes.length || member_size > bytes.length - member_offset)
+        result.objects = arena_allocate(arena, ObjectFile, member_capacity);
+        if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
         {
             return result;
         }
-        String8 raw_name = {
-            .pointer = (char8*)bytes.pointer + cursor,
-            .length = 16,
-        };
-        while (raw_name.length && raw_name.pointer[raw_name.length - 1] == ' ')
+        result.member_names = arena_allocate(arena, String8, member_capacity);
+        String8 long_names = {0};
+        u64 member_name_bytes = 0;
+        u64 cursor = sizeof(archive_magic) - 1;
+        while (cursor < bytes.length)
         {
-            raw_name.length -= 1;
-        }
-        String8 member_name = raw_name;
-        u64 object_offset = member_offset;
-        u64 object_size = member_size;
-        bool metadata = false;
-        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
-        {
-            metadata = true;
-        }
-        else if (string_equal(raw_name, S8("//")))
-        {
-            long_names = (String8){
-                .pointer = (char8*)bytes.pointer + member_offset,
-                .length = member_size,
+            if (cursor > bytes.length || 60 > bytes.length - cursor || bytes.pointer[cursor + 58] != '`' || bytes.pointer[cursor + 59] != '\n')
+            {
+                return result;
+            }
+            u64 member_size = 0;
+            if (!object_archive_decimal(bytes.pointer + cursor + 48, 10, &member_size))
+            {
+                return result;
+            }
+            u64 member_offset = cursor + 60;
+            if (member_offset > bytes.length || member_size > bytes.length - member_offset)
+            {
+                return result;
+            }
+            String8 raw_name = {
+                .pointer = (char8*)bytes.pointer + cursor,
+                .length = 16,
             };
-            metadata = true;
-        }
-        else if (string_starts_with_sequence(raw_name, S8("#1/")))
-        {
-            u64 name_length = 0;
-            if (!object_archive_decimal((u8*)raw_name.pointer + 3, raw_name.length - 3, &name_length) || name_length > object_size)
+            while (raw_name.length && raw_name.pointer[raw_name.length - 1] == ' ')
             {
-                return result;
+                raw_name.length -= 1;
             }
-            member_name = (String8){
-                .pointer = (char8*)bytes.pointer + object_offset,
-                .length = name_length,
+            String8 member_name = raw_name;
+            u64 object_offset = member_offset;
+            u64 object_size = member_size;
+            bool metadata = false;
+            if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
+            {
+                metadata = true;
+            }
+            else if (string_equal(raw_name, S8("//")))
+            {
+                long_names = (String8){
+                    .pointer = (char8*)bytes.pointer + member_offset,
+                    .length = member_size,
+                };
+                metadata = true;
+            }
+            else if (string_starts_with_sequence(raw_name, S8("#1/")))
+            {
+                u64 name_length = 0;
+                if (!object_archive_decimal((u8*)raw_name.pointer + 3, raw_name.length - 3, &name_length) || name_length > object_size)
+                {
+                    return result;
+                }
+                member_name = (String8){
+                    .pointer = (char8*)bytes.pointer + object_offset,
+                    .length = name_length,
+                };
+                object_offset += name_length;
+                object_size -= name_length;
+            }
+            else if (raw_name.length > 1 && raw_name.pointer[0] == '/')
+            {
+                u64 name_offset = 0;
+                if (!long_names.pointer || !object_archive_decimal((u8*)raw_name.pointer + 1, raw_name.length - 1, &name_offset) ||
+                    name_offset >= long_names.length)
+                {
+                    return result;
+                }
+                if (name_offset && long_names.pointer[name_offset - 1] != '\n' && long_names.pointer[name_offset - 1] != 0)
+                {
+                    return result;
+                }
+                u64 name_length = 0;
+                u64 name_remaining = long_names.length - name_offset;
+                while (name_length < name_remaining && long_names.pointer[name_offset + name_length] != '\n' &&
+                       long_names.pointer[name_offset + name_length] != 0)
+                {
+                    name_length += 1;
+                }
+                if (name_length == name_remaining)
+                {
+                    return result;
+                }
+                if (name_length && long_names.pointer[name_offset + name_length - 1] == '/')
+                {
+                    name_length -= 1;
+                }
+                member_name = (String8){
+                    .pointer = long_names.pointer + name_offset,
+                    .length = name_length,
+                };
+            }
+            else if (member_name.length && member_name.pointer[member_name.length - 1] == '/')
+            {
+                member_name.length -= 1;
+            }
+            ByteSlice object_bytes = {
+                .pointer = bytes.pointer + object_offset,
+                .length = object_size,
             };
-            object_offset += name_length;
-            object_size -= name_length;
+            if (!metadata && object_bytes_are_object(object_bytes))
+            {
+                if (member_name.length > UINT64_MAX - member_name_bytes)
+                {
+                    return result;
+                }
+                member_name_bytes += member_name.length;
+                if (!object_reader_arena_can_allocate_bytes(arena, member_name.length, BUSTER_ALIGN_OF(char8)))
+                {
+                    return result;
+                }
+                ObjectFile object = object_read(arena, object_bytes, target);
+                if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
+                {
+                    result.error = object.error;
+                    return result;
+                }
+                result.objects[result.object_count] = object;
+                result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
+                result.object_count += 1;
+            }
+            cursor = member_offset + member_size;
+            if (cursor & 1)
+            {
+                if (cursor >= bytes.length || bytes.pointer[cursor] != '\n')
+                {
+                    return result;
+                }
+                cursor += 1;
+            }
         }
-        else if (raw_name.length > 1 && raw_name.pointer[0] == '/')
+        if (cursor != bytes.length)
         {
-            u64 name_offset = 0;
-            if (!long_names.pointer || !object_archive_decimal((u8*)raw_name.pointer + 1, raw_name.length - 1, &name_offset) ||
-                name_offset >= long_names.length)
-            {
-                return result;
-            }
-            if (name_offset && long_names.pointer[name_offset - 1] != '\n' && long_names.pointer[name_offset - 1] != 0)
-            {
-                return result;
-            }
-            u64 name_length = 0;
-            u64 name_remaining = long_names.length - name_offset;
-            while (name_length < name_remaining && long_names.pointer[name_offset + name_length] != '\n' &&
-                   long_names.pointer[name_offset + name_length] != 0)
-            {
-                name_length += 1;
-            }
-            if (name_length == name_remaining)
-            {
-                return result;
-            }
-            if (name_length && long_names.pointer[name_offset + name_length - 1] == '/')
-            {
-                name_length -= 1;
-            }
-            member_name = (String8){
-                .pointer = long_names.pointer + name_offset,
-                .length = name_length,
-            };
+            return result;
         }
-        else if (member_name.length && member_name.pointer[member_name.length - 1] == '/')
-        {
-            member_name.length -= 1;
-        }
-        ByteSlice object_bytes = {
-            .pointer = bytes.pointer + object_offset,
-            .length = object_size,
-        };
-        if (!metadata && object_bytes_are_object(object_bytes))
-        {
-            if (member_name.length > UINT64_MAX - member_name_bytes)
-            {
-                return result;
-            }
-            member_name_bytes += member_name.length;
-            if (!object_reader_arena_can_allocate_bytes(arena, member_name.length, BUSTER_ALIGN_OF(char8)))
-            {
-                return result;
-            }
-            ObjectFile object = object_read(arena, object_bytes, target);
-            if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
-            {
-                result.error = object.error;
-                return result;
-            }
-            result.objects[result.object_count] = object;
-            result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
-            result.object_count += 1;
-        }
-        cursor = member_offset + member_size;
-        if (cursor & 1)
-        {
-            if (cursor >= bytes.length || bytes.pointer[cursor] != '\n')
-            {
-                return result;
-            }
-            cursor += 1;
-        }
+        result.error = OBJECT_ERROR_NONE;
     }
-    if (cursor != bytes.length)
-    {
-        return result;
-    }
-    result.error = OBJECT_ERROR_NONE;
+
     return result;
 }
 
@@ -5999,80 +5999,80 @@ BUSTER_GLOBAL_LOCAL void object_fuzz_write_u64(u8* bytes, u64 length, u64 offset
 
 BUSTER_GLOBAL_LOCAL bool object_fuzz_elf_find_section(ByteSlice bytes, u32 type, u64* header, u64* offset, u64* size)
 {
-    if (!bytes.pointer || bytes.length < 64)
+    if (bytes.pointer && bytes.length >= 64)
     {
-        return false;
-    }
-    u64 section_table = 0;
-    u16 section_count = 0;
-    if (!object_read_u64(bytes, 40, &section_table) || !object_read_u16(bytes, 60, &section_count) || section_table > bytes.length ||
-        (u64)section_count * 64 > bytes.length - section_table)
-    {
-        return false;
-    }
-    for (u16 section_index = 0; section_index < section_count; section_index += 1)
-    {
-        u64 section = section_table + (u64)section_index * 64;
-        u32 section_type = 0;
-        u64 section_offset = 0;
-        u64 section_size = 0;
-        if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &section_offset) ||
-            !object_read_u64(bytes, section + 32, &section_size))
+        u64 section_table = 0;
+        u16 section_count = 0;
+        if (!object_read_u64(bytes, 40, &section_table) || !object_read_u16(bytes, 60, &section_count) || section_table > bytes.length ||
+            (u64)section_count * 64 > bytes.length - section_table)
         {
             return false;
         }
-        if (section_type == type)
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
         {
-            if (section_offset > bytes.length || section_size > bytes.length - section_offset)
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            u64 section_offset = 0;
+            u64 section_size = 0;
+            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &section_offset) ||
+                !object_read_u64(bytes, section + 32, &section_size))
             {
                 return false;
             }
-            if (header)
+            if (section_type == type)
             {
-                *header = section;
+                if (section_offset > bytes.length || section_size > bytes.length - section_offset)
+                {
+                    return false;
+                }
+                if (header)
+                {
+                    *header = section;
+                }
+                if (offset)
+                {
+                    *offset = section_offset;
+                }
+                if (size)
+                {
+                    *size = section_size;
+                }
+                return true;
             }
-            if (offset)
-            {
-                *offset = section_offset;
-            }
-            if (size)
-            {
-                *size = section_size;
-            }
-            return true;
         }
     }
+
     return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_fuzz_mach_find_command(ByteSlice bytes, u32 kind, u64* result)
 {
-    if (!bytes.pointer || bytes.length < 32)
+    if (bytes.pointer && bytes.length >= 32)
     {
-        return false;
-    }
-    u32 command_count = 0;
-    if (!object_read_u32(bytes, 16, &command_count))
-    {
-        return false;
-    }
-    u64 command = 32;
-    for (u32 command_index = 0; command_index < command_count; command_index += 1)
-    {
-        u32 command_kind = 0;
-        u32 command_size = 0;
-        if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
-            !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+        u32 command_count = 0;
+        if (!object_read_u32(bytes, 16, &command_count))
         {
             return false;
         }
-        if (command_kind == kind)
+        u64 command = 32;
+        for (u32 command_index = 0; command_index < command_count; command_index += 1)
         {
-            *result = command;
-            return true;
+            u32 command_kind = 0;
+            u32 command_size = 0;
+            if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
+                !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+            {
+                return false;
+            }
+            if (command_kind == kind)
+            {
+                *result = command;
+                return true;
+            }
+            command += command_size;
         }
-        command += command_size;
     }
+
     return false;
 }
 
@@ -6080,519 +6080,519 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                                                   u32 mutation_index)
 {
     ByteSlice result = seed;
-    if (!seed.pointer || !seed.length)
+    if (seed.pointer && seed.length)
     {
-        return result;
-    }
-    if (mutation_index == 0)
-    {
-        result.length -= 1;
-        return result;
-    }
-    if (mutation_index == 1)
-    {
-        result.length = BUSTER_MAX((u64)1, seed.length / 2);
-        return result;
-    }
-    u8* bytes = arena_allocate(arena, u8, seed.length);
-    if (!bytes)
-    {
-        return result;
-    }
-    memcpy(bytes, seed.pointer, seed.length);
-    result.pointer = bytes;
-    u64 input_value = 0;
-    if (input_size)
-    {
-        u64 input_index = ((u64)mutation_index * 17 + 5) % input_size;
-        for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+        if (mutation_index == 0)
         {
-            input_value = (input_value << 8) | input[(input_index + byte_index) % input_size];
+            result.length -= 1;
+            return result;
         }
-    }
-    if (mutation_index == 2 || mutation_index == 3 || mutation_index == 7)
-    {
-        u8 value = input_size ? (u8)input_value : 0xa5;
-        u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
-        if (mutation_index == 2)
+        if (mutation_index == 1)
         {
-            bytes[offset] ^= value ? value : 0xa5;
+            result.length = BUSTER_MAX((u64)1, seed.length / 2);
+            return result;
         }
-        else if (mutation_index == 3)
+        u8* bytes = arena_allocate(arena, u8, seed.length);
+        if (!bytes)
         {
-            u64 count = BUSTER_MIN((u64)8, seed.length - offset);
-            for (u64 index = 0; index < count; index += 1)
+            return result;
+        }
+        memcpy(bytes, seed.pointer, seed.length);
+        result.pointer = bytes;
+        u64 input_value = 0;
+        if (input_size)
+        {
+            u64 input_index = ((u64)mutation_index * 17 + 5) % input_size;
+            for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
             {
-                bytes[offset + index] = (u8)(value + index * 17 + mutation_index);
+                input_value = (input_value << 8) | input[(input_index + byte_index) % input_size];
             }
         }
-        else
+        if (mutation_index == 2 || mutation_index == 3 || mutation_index == 7)
         {
-            result.length = BUSTER_MAX((u64)1, (u64)value % seed.length);
-        }
-        return result;
-    }
-    if (archive)
-    {
-        if (mutation_index == 4)
-        {
-            memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length > 56 ? seed.length - 56 : 0));
-        }
-        else if (mutation_index == 5)
-        {
-            memset(bytes + 8, '/', BUSTER_MIN((u64)16, seed.length > 8 ? seed.length - 8 : 0));
-        }
-        else if (mutation_index == 6)
-        {
-            u64 offset = 8 + 58;
-            if (offset < seed.length)
-            {
-                bytes[offset] ^= 1;
-            }
-        }
-        else if (mutation_index == 8)
-        {
-            if (seed.length >= 8)
-            {
-                memset(bytes + 8, ' ', BUSTER_MIN((u64)16, seed.length - 8));
-            }
-            object_fuzz_write_u8(bytes, seed.length, 8, '/');
-            object_fuzz_write_u8(bytes, seed.length, 9, '1');
-        }
-        else if (mutation_index == 9)
-        {
-            if (seed.length >= 56)
-            {
-                memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length - 56));
-            }
-        }
-        else if (mutation_index == 10)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 8 + 58, '`' ^ 1);
-        }
-        else if (mutation_index == 11)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 8 + 59, 'x');
-        }
-        else if (mutation_index == 12)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 8 + 60, 'x');
-        }
-        else if (mutation_index == 13)
-        {
-            if (seed.length > 68)
-            {
-                u64 table_offset = input_size ? input_value % BUSTER_MIN((u64)16, seed.length - 68) : 0;
-                object_fuzz_write_u8(bytes, seed.length, 8 + 60 + table_offset, 0);
-            }
-        }
-        else if (mutation_index == 14)
-        {
-            if (seed.length > 8)
-            {
-                u64 truncation = input_size ? input_value % BUSTER_MIN((u64)32, seed.length - 8) : 1;
-                result.length = BUSTER_MAX((u64)8, seed.length - truncation);
-            }
-        }
-        else
-        {
+            u8 value = input_size ? (u8)input_value : 0xa5;
             u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
-            bytes[offset] ^= (u8)(0x5a + mutation_index);
+            if (mutation_index == 2)
+            {
+                bytes[offset] ^= value ? value : 0xa5;
+            }
+            else if (mutation_index == 3)
+            {
+                u64 count = BUSTER_MIN((u64)8, seed.length - offset);
+                for (u64 index = 0; index < count; index += 1)
+                {
+                    bytes[offset + index] = (u8)(value + index * 17 + mutation_index);
+                }
+            }
+            else
+            {
+                result.length = BUSTER_MAX((u64)1, (u64)value % seed.length);
+            }
+            return result;
         }
-        return result;
+        if (archive)
+        {
+            if (mutation_index == 4)
+            {
+                memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length > 56 ? seed.length - 56 : 0));
+            }
+            else if (mutation_index == 5)
+            {
+                memset(bytes + 8, '/', BUSTER_MIN((u64)16, seed.length > 8 ? seed.length - 8 : 0));
+            }
+            else if (mutation_index == 6)
+            {
+                u64 offset = 8 + 58;
+                if (offset < seed.length)
+                {
+                    bytes[offset] ^= 1;
+                }
+            }
+            else if (mutation_index == 8)
+            {
+                if (seed.length >= 8)
+                {
+                    memset(bytes + 8, ' ', BUSTER_MIN((u64)16, seed.length - 8));
+                }
+                object_fuzz_write_u8(bytes, seed.length, 8, '/');
+                object_fuzz_write_u8(bytes, seed.length, 9, '1');
+            }
+            else if (mutation_index == 9)
+            {
+                if (seed.length >= 56)
+                {
+                    memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length - 56));
+                }
+            }
+            else if (mutation_index == 10)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 8 + 58, '`' ^ 1);
+            }
+            else if (mutation_index == 11)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 8 + 59, 'x');
+            }
+            else if (mutation_index == 12)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 8 + 60, 'x');
+            }
+            else if (mutation_index == 13)
+            {
+                if (seed.length > 68)
+                {
+                    u64 table_offset = input_size ? input_value % BUSTER_MIN((u64)16, seed.length - 68) : 0;
+                    object_fuzz_write_u8(bytes, seed.length, 8 + 60 + table_offset, 0);
+                }
+            }
+            else if (mutation_index == 14)
+            {
+                if (seed.length > 8)
+                {
+                    u64 truncation = input_size ? input_value % BUSTER_MIN((u64)32, seed.length - 8) : 1;
+                    result.length = BUSTER_MAX((u64)8, seed.length - truncation);
+                }
+            }
+            else
+            {
+                u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
+                bytes[offset] ^= (u8)(0x5a + mutation_index);
+            }
+            return result;
+        }
+        switch (format)
+        {
+        case OBJECT_FORMAT_ELF64:
+            if (mutation_index == 4)
+            {
+                object_fuzz_write_u64(bytes, seed.length, 40, UINT64_MAX);
+            }
+            else if (mutation_index == 5)
+            {
+                object_fuzz_write_u16(bytes, seed.length, 60, UINT16_MAX);
+            }
+            else if (mutation_index == 6)
+            {
+                object_fuzz_write_u64(bytes, seed.length, 48, UINT64_MAX);
+            }
+            else if (mutation_index == 8)
+            {
+                u64 symbol_offset = 0;
+                u64 symbol_size = 0;
+                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                {
+                    object_fuzz_write_u64(bytes, seed.length, symbol_offset + 24 + 16, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 9)
+            {
+                u64 symbol_offset = 0;
+                u64 symbol_size = 0;
+                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                {
+                    object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, UINT16_MAX);
+                }
+            }
+            else if (mutation_index == 10)
+            {
+                u64 relocation_offset = 0;
+                u64 relocation_size = 0;
+                if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                {
+                    object_fuzz_write_u64(bytes, seed.length, relocation_offset + 8, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 11)
+            {
+                u64 string_offset = 0;
+                u64 string_size = 0;
+                if (object_fuzz_elf_find_section(seed, 3, 0, &string_offset, &string_size) && string_size)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, string_offset + string_size - 1, 'x');
+                }
+            }
+            else if (mutation_index == 12)
+            {
+                u64 symbol_header = 0;
+                if (object_fuzz_elf_find_section(seed, 2, &symbol_header, 0, 0))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, symbol_header + 40, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 13)
+            {
+                u64 relocation_offset = 0;
+                u64 relocation_size = 0;
+                if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                {
+                    object_fuzz_write_u64(bytes, seed.length, relocation_offset, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 14)
+            {
+                u64 section_offset = 0;
+                u64 section_size = 0;
+                if (object_fuzz_elf_find_section(seed, 1, 0, &section_offset, &section_size) && section_size)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, section_offset + (input_size ? input_value % section_size : 0), (u8)input_value);
+                }
+            }
+            else if (mutation_index == 15)
+            {
+                u64 section_header = 0;
+                if (object_fuzz_elf_find_section(seed, 4, &section_header, 0, 0))
+                {
+                    object_fuzz_write_u64(bytes, seed.length, section_header + 32, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 16)
+            {
+                u64 symbol_offset = 0;
+                u64 symbol_size = 0;
+                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                {
+                    object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, 0x7fff);
+                }
+            }
+            else if (mutation_index == 17)
+            {
+                u64 symbol_offset = 0;
+                u64 symbol_size = 0;
+                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, symbol_offset + 24, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 18)
+            {
+                u64 relocation_header = 0;
+                if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                {
+                    object_fuzz_write_u64(bytes, seed.length, relocation_header + 56, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 19)
+            {
+                u64 relocation_header = 0;
+                if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, relocation_header + 40, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 20)
+            {
+                u64 section_header = 0;
+                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, section_header, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 21)
+            {
+                u64 section_header = 0;
+                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                {
+                    object_fuzz_write_u64(bytes, seed.length, section_header + 48, UINT64_MAX);
+                }
+            }
+            else if (mutation_index == 22)
+            {
+                u64 section_header = 0;
+                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                {
+                    object_fuzz_write_u64(bytes, seed.length, section_header + 8, UINT64_MAX);
+                }
+            }
+            else
+            {
+                object_fuzz_write_u16(bytes, seed.length, 62, (u16)input_value);
+            }
+            break;
+        case OBJECT_FORMAT_COFF:
+            if (mutation_index == 4)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 8, UINT32_MAX);
+            }
+            else if (mutation_index == 5)
+            {
+                object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+            }
+            else if (mutation_index == 6)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 12, UINT32_MAX);
+            }
+            else if (mutation_index == 8)
+            {
+                u32 symbol_offset = 0;
+                u32 symbol_count = 0;
+                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 9)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 20, '/');
+                object_fuzz_write_u8(bytes, seed.length, 21, '9');
+                object_fuzz_write_u8(bytes, seed.length, 22, '9');
+                object_fuzz_write_u8(bytes, seed.length, 23, '9');
+                object_fuzz_write_u8(bytes, seed.length, 24, '9');
+                object_fuzz_write_u8(bytes, seed.length, 25, '9');
+                object_fuzz_write_u8(bytes, seed.length, 26, '9');
+            }
+            else if (mutation_index == 10)
+            {
+                u32 symbol_offset = 0;
+                u32 symbol_count = 0;
+                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                    (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
+                }
+            }
+            else if (mutation_index == 11)
+            {
+                u32 relocation_offset = 0;
+                u16 relocation_count = 0;
+                if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 12)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20 + 20, UINT32_MAX);
+            }
+            else if (mutation_index == 13)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20 + 24, UINT32_MAX);
+            }
+            else if (mutation_index == 14)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20 + 16, UINT32_MAX);
+            }
+            else if (mutation_index == 15)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20 + 36, 0x02000800);
+            }
+            else if (mutation_index == 16)
+            {
+                u32 symbol_offset = 0;
+                if (object_read_u32(seed, 8, &symbol_offset))
+                {
+                    object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
+                }
+            }
+            else if (mutation_index == 17)
+            {
+                u32 symbol_offset = 0;
+                if (object_read_u32(seed, 8, &symbol_offset))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 18)
+            {
+                u32 relocation_offset = 0;
+                u16 relocation_count = 0;
+                if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                {
+                    object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
+                }
+            }
+            else if (mutation_index == 19)
+            {
+                u32 symbol_offset = 0;
+                u32 symbol_count = 0;
+                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                    (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 20)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 20, (u8)input_value);
+            }
+            else if (mutation_index == 21)
+            {
+                u32 symbol_offset = 0;
+                if (object_read_u32(seed, 8, &symbol_offset))
+                {
+                    object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
+                }
+            }
+            else if (mutation_index == 22)
+            {
+                object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+            }
+            else
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20, (u32)input_value);
+            }
+            break;
+        case OBJECT_FORMAT_MACH_O64:
+            if (mutation_index == 4)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 20, UINT32_MAX);
+            }
+            else if (mutation_index == 5)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+            }
+            else if (mutation_index == 6)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 8, UINT32_MAX);
+            }
+            else if (mutation_index == 8)
+            {
+                u64 command = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, command + 8, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 9)
+            {
+                u64 command = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, command + 16, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 10)
+            {
+                u64 command = 0;
+                u32 string_offset = 0;
+                u32 string_size = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
+                    object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
+                }
+            }
+            else if (mutation_index == 11)
+            {
+                u64 command = 0;
+                u32 symbol_offset = 0;
+                u32 symbol_count = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
+                    object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 12)
+            {
+                u64 section = 32 + 72;
+                u32 relocation_offset = 0;
+                u32 relocation_count = 0;
+                if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 13)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 48, UINT32_MAX);
+            }
+            else if (mutation_index == 14)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 56, UINT32_MAX);
+            }
+            else if (mutation_index == 15)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 60, UINT32_MAX);
+            }
+            else if (mutation_index == 16)
+            {
+                u64 command = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, command + 12, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 17)
+            {
+                u64 command = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, command + 20, UINT32_MAX);
+                }
+            }
+            else if (mutation_index == 18)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 4, UINT32_MAX);
+            }
+            else if (mutation_index == 19)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+            }
+            else if (mutation_index == 20)
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 64, UINT32_MAX);
+            }
+            else if (mutation_index == 21)
+            {
+                object_fuzz_write_u8(bytes, seed.length, 32 + 72, (u8)input_value);
+            }
+            else if (mutation_index == 22)
+            {
+                u64 command = 0;
+                if (object_fuzz_mach_find_command(seed, 2, &command))
+                {
+                    object_fuzz_write_u32(bytes, seed.length, command + 4, UINT32_MAX);
+                }
+            }
+            else
+            {
+                object_fuzz_write_u32(bytes, seed.length, 32 + 12, (u32)input_value);
+            }
+            break;
+        case OBJECT_FORMAT_COUNT:
+            break;
+        }
     }
-    switch (format)
-    {
-    case OBJECT_FORMAT_ELF64:
-        if (mutation_index == 4)
-        {
-            object_fuzz_write_u64(bytes, seed.length, 40, UINT64_MAX);
-        }
-        else if (mutation_index == 5)
-        {
-            object_fuzz_write_u16(bytes, seed.length, 60, UINT16_MAX);
-        }
-        else if (mutation_index == 6)
-        {
-            object_fuzz_write_u64(bytes, seed.length, 48, UINT64_MAX);
-        }
-        else if (mutation_index == 8)
-        {
-            u64 symbol_offset = 0;
-            u64 symbol_size = 0;
-            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
-            {
-                object_fuzz_write_u64(bytes, seed.length, symbol_offset + 24 + 16, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 9)
-        {
-            u64 symbol_offset = 0;
-            u64 symbol_size = 0;
-            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
-            {
-                object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, UINT16_MAX);
-            }
-        }
-        else if (mutation_index == 10)
-        {
-            u64 relocation_offset = 0;
-            u64 relocation_size = 0;
-            if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
-            {
-                object_fuzz_write_u64(bytes, seed.length, relocation_offset + 8, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 11)
-        {
-            u64 string_offset = 0;
-            u64 string_size = 0;
-            if (object_fuzz_elf_find_section(seed, 3, 0, &string_offset, &string_size) && string_size)
-            {
-                object_fuzz_write_u8(bytes, seed.length, string_offset + string_size - 1, 'x');
-            }
-        }
-        else if (mutation_index == 12)
-        {
-            u64 symbol_header = 0;
-            if (object_fuzz_elf_find_section(seed, 2, &symbol_header, 0, 0))
-            {
-                object_fuzz_write_u32(bytes, seed.length, symbol_header + 40, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 13)
-        {
-            u64 relocation_offset = 0;
-            u64 relocation_size = 0;
-            if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
-            {
-                object_fuzz_write_u64(bytes, seed.length, relocation_offset, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 14)
-        {
-            u64 section_offset = 0;
-            u64 section_size = 0;
-            if (object_fuzz_elf_find_section(seed, 1, 0, &section_offset, &section_size) && section_size)
-            {
-                object_fuzz_write_u8(bytes, seed.length, section_offset + (input_size ? input_value % section_size : 0), (u8)input_value);
-            }
-        }
-        else if (mutation_index == 15)
-        {
-            u64 section_header = 0;
-            if (object_fuzz_elf_find_section(seed, 4, &section_header, 0, 0))
-            {
-                object_fuzz_write_u64(bytes, seed.length, section_header + 32, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 16)
-        {
-            u64 symbol_offset = 0;
-            u64 symbol_size = 0;
-            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
-            {
-                object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, 0x7fff);
-            }
-        }
-        else if (mutation_index == 17)
-        {
-            u64 symbol_offset = 0;
-            u64 symbol_size = 0;
-            if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
-            {
-                object_fuzz_write_u32(bytes, seed.length, symbol_offset + 24, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 18)
-        {
-            u64 relocation_header = 0;
-            if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
-            {
-                object_fuzz_write_u64(bytes, seed.length, relocation_header + 56, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 19)
-        {
-            u64 relocation_header = 0;
-            if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
-            {
-                object_fuzz_write_u32(bytes, seed.length, relocation_header + 40, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 20)
-        {
-            u64 section_header = 0;
-            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
-            {
-                object_fuzz_write_u32(bytes, seed.length, section_header, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 21)
-        {
-            u64 section_header = 0;
-            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
-            {
-                object_fuzz_write_u64(bytes, seed.length, section_header + 48, UINT64_MAX);
-            }
-        }
-        else if (mutation_index == 22)
-        {
-            u64 section_header = 0;
-            if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
-            {
-                object_fuzz_write_u64(bytes, seed.length, section_header + 8, UINT64_MAX);
-            }
-        }
-        else
-        {
-            object_fuzz_write_u16(bytes, seed.length, 62, (u16)input_value);
-        }
-        break;
-    case OBJECT_FORMAT_COFF:
-        if (mutation_index == 4)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 8, UINT32_MAX);
-        }
-        else if (mutation_index == 5)
-        {
-            object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
-        }
-        else if (mutation_index == 6)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 12, UINT32_MAX);
-        }
-        else if (mutation_index == 8)
-        {
-            u32 symbol_offset = 0;
-            u32 symbol_count = 0;
-            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
-            {
-                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 9)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 20, '/');
-            object_fuzz_write_u8(bytes, seed.length, 21, '9');
-            object_fuzz_write_u8(bytes, seed.length, 22, '9');
-            object_fuzz_write_u8(bytes, seed.length, 23, '9');
-            object_fuzz_write_u8(bytes, seed.length, 24, '9');
-            object_fuzz_write_u8(bytes, seed.length, 25, '9');
-            object_fuzz_write_u8(bytes, seed.length, 26, '9');
-        }
-        else if (mutation_index == 10)
-        {
-            u32 symbol_offset = 0;
-            u32 symbol_count = 0;
-            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
-                (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
-            {
-                object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
-            }
-        }
-        else if (mutation_index == 11)
-        {
-            u32 relocation_offset = 0;
-            u16 relocation_count = 0;
-            if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
-            {
-                object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 12)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20 + 20, UINT32_MAX);
-        }
-        else if (mutation_index == 13)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20 + 24, UINT32_MAX);
-        }
-        else if (mutation_index == 14)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20 + 16, UINT32_MAX);
-        }
-        else if (mutation_index == 15)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20 + 36, 0x02000800);
-        }
-        else if (mutation_index == 16)
-        {
-            u32 symbol_offset = 0;
-            if (object_read_u32(seed, 8, &symbol_offset))
-            {
-                object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
-            }
-        }
-        else if (mutation_index == 17)
-        {
-            u32 symbol_offset = 0;
-            if (object_read_u32(seed, 8, &symbol_offset))
-            {
-                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 18)
-        {
-            u32 relocation_offset = 0;
-            u16 relocation_count = 0;
-            if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
-            {
-                object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
-            }
-        }
-        else if (mutation_index == 19)
-        {
-            u32 symbol_offset = 0;
-            u32 symbol_count = 0;
-            if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
-                (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
-            {
-                object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 20)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 20, (u8)input_value);
-        }
-        else if (mutation_index == 21)
-        {
-            u32 symbol_offset = 0;
-            if (object_read_u32(seed, 8, &symbol_offset))
-            {
-                object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
-            }
-        }
-        else if (mutation_index == 22)
-        {
-            object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
-        }
-        else
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20, (u32)input_value);
-        }
-        break;
-    case OBJECT_FORMAT_MACH_O64:
-        if (mutation_index == 4)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 20, UINT32_MAX);
-        }
-        else if (mutation_index == 5)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
-        }
-        else if (mutation_index == 6)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 8, UINT32_MAX);
-        }
-        else if (mutation_index == 8)
-        {
-            u64 command = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command))
-            {
-                object_fuzz_write_u32(bytes, seed.length, command + 8, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 9)
-        {
-            u64 command = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command))
-            {
-                object_fuzz_write_u32(bytes, seed.length, command + 16, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 10)
-        {
-            u64 command = 0;
-            u32 string_offset = 0;
-            u32 string_size = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
-                object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
-            {
-                object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
-            }
-        }
-        else if (mutation_index == 11)
-        {
-            u64 command = 0;
-            u32 symbol_offset = 0;
-            u32 symbol_count = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
-                object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
-            {
-                object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 12)
-        {
-            u64 section = 32 + 72;
-            u32 relocation_offset = 0;
-            u32 relocation_count = 0;
-            if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
-            {
-                object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 13)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 48, UINT32_MAX);
-        }
-        else if (mutation_index == 14)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 56, UINT32_MAX);
-        }
-        else if (mutation_index == 15)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 60, UINT32_MAX);
-        }
-        else if (mutation_index == 16)
-        {
-            u64 command = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command))
-            {
-                object_fuzz_write_u32(bytes, seed.length, command + 12, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 17)
-        {
-            u64 command = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command))
-            {
-                object_fuzz_write_u32(bytes, seed.length, command + 20, UINT32_MAX);
-            }
-        }
-        else if (mutation_index == 18)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 4, UINT32_MAX);
-        }
-        else if (mutation_index == 19)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
-        }
-        else if (mutation_index == 20)
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 64, UINT32_MAX);
-        }
-        else if (mutation_index == 21)
-        {
-            object_fuzz_write_u8(bytes, seed.length, 32 + 72, (u8)input_value);
-        }
-        else if (mutation_index == 22)
-        {
-            u64 command = 0;
-            if (object_fuzz_mach_find_command(seed, 2, &command))
-            {
-                object_fuzz_write_u32(bytes, seed.length, command + 4, UINT32_MAX);
-            }
-        }
-        else
-        {
-            object_fuzz_write_u32(bytes, seed.length, 32 + 12, (u32)input_value);
-        }
-        break;
-    case OBJECT_FORMAT_COUNT:
-        break;
-    }
+
     return result;
 }
 
@@ -6680,71 +6680,71 @@ s32 object_fuzz_test_input(const u8* pointer, size_t size)
         return -1;
     }
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
-    if (!arena)
+    if (arena)
     {
-        return 0;
-    }
-    ByteSlice input = {.pointer = (u8*)pointer, .length = size};
-    Target targets[] = {
-        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
-        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
-        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
-        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
-        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
-        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
-    };
-    ObjectFormat formats[] = {
-        OBJECT_FORMAT_ELF64,
-        OBJECT_FORMAT_COFF,
-        OBJECT_FORMAT_MACH_O64,
-        OBJECT_FORMAT_ELF64,
-        OBJECT_FORMAT_COFF,
-        OBJECT_FORMAT_MACH_O64,
-    };
-    bool archive_input = size >= 8 && pointer && memcmp(pointer, "!<arch>\n", 8) == 0;
-    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
-    {
-        TemporalArena raw_scope = arena_begin_temporal(arena);
-        object_fuzz_read_candidate(arena, input, targets[target_index], archive_input);
-        arena_set_position(arena, raw_scope.position);
-    }
-    for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(targets); seed_index += 1)
-    {
-        TemporalArena seed_scope = arena_begin_temporal(arena);
-        ObjectArtifact seed = object_fuzz_seed_write(arena, targets[seed_index], formats[seed_index]);
-        if (seed.error == OBJECT_ERROR_NONE && seed.bytes.pointer && seed.bytes.length <= OBJECT_FUZZ_MAX_GENERATED_BYTES)
+        ByteSlice input = {.pointer = (u8*)pointer, .length = size};
+        Target targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        };
+        ObjectFormat formats[] = {
+            OBJECT_FORMAT_ELF64,
+            OBJECT_FORMAT_COFF,
+            OBJECT_FORMAT_MACH_O64,
+            OBJECT_FORMAT_ELF64,
+            OBJECT_FORMAT_COFF,
+            OBJECT_FORMAT_MACH_O64,
+        };
+        bool archive_input = size >= 8 && pointer && memcmp(pointer, "!<arch>\n", 8) == 0;
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
-            TemporalArena parse_scope = arena_begin_temporal(arena);
-            object_fuzz_read_candidate(arena, seed.bytes, targets[seed_index], false);
-            arena_set_position(arena, parse_scope.position);
-            for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
-            {
-                TemporalArena mutation_scope = arena_begin_temporal(arena);
-                ByteSlice mutated = object_fuzz_mutate(arena, seed.bytes, pointer, size, formats[seed_index], false, mutation_index);
-                object_fuzz_read_candidate(arena, mutated, targets[seed_index], false);
-                arena_set_position(arena, mutation_scope.position);
-            }
-            for (u32 archive_kind = 0; archive_kind < 3; archive_kind += 1)
-            {
-                TemporalArena archive_scope = arena_begin_temporal(arena);
-                ByteSlice archive = object_fuzz_archive_make(arena, seed.bytes, archive_kind);
-                if (archive.pointer)
-                {
-                    object_fuzz_read_candidate(arena, archive, targets[seed_index], true);
-                    for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
-                    {
-                        TemporalArena mutation_scope = arena_begin_temporal(arena);
-                        ByteSlice mutated = object_fuzz_mutate(arena, archive, pointer, size, formats[seed_index], true, mutation_index);
-                        object_fuzz_read_candidate(arena, mutated, targets[seed_index], true);
-                        arena_set_position(arena, mutation_scope.position);
-                    }
-                }
-                arena_set_position(arena, archive_scope.position);
-            }
+            TemporalArena raw_scope = arena_begin_temporal(arena);
+            object_fuzz_read_candidate(arena, input, targets[target_index], archive_input);
+            arena_set_position(arena, raw_scope.position);
         }
-        arena_set_position(arena, seed_scope.position);
+        for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(targets); seed_index += 1)
+        {
+            TemporalArena seed_scope = arena_begin_temporal(arena);
+            ObjectArtifact seed = object_fuzz_seed_write(arena, targets[seed_index], formats[seed_index]);
+            if (seed.error == OBJECT_ERROR_NONE && seed.bytes.pointer && seed.bytes.length <= OBJECT_FUZZ_MAX_GENERATED_BYTES)
+            {
+                TemporalArena parse_scope = arena_begin_temporal(arena);
+                object_fuzz_read_candidate(arena, seed.bytes, targets[seed_index], false);
+                arena_set_position(arena, parse_scope.position);
+                for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+                {
+                    TemporalArena mutation_scope = arena_begin_temporal(arena);
+                    ByteSlice mutated = object_fuzz_mutate(arena, seed.bytes, pointer, size, formats[seed_index], false, mutation_index);
+                    object_fuzz_read_candidate(arena, mutated, targets[seed_index], false);
+                    arena_set_position(arena, mutation_scope.position);
+                }
+                for (u32 archive_kind = 0; archive_kind < 3; archive_kind += 1)
+                {
+                    TemporalArena archive_scope = arena_begin_temporal(arena);
+                    ByteSlice archive = object_fuzz_archive_make(arena, seed.bytes, archive_kind);
+                    if (archive.pointer)
+                    {
+                        object_fuzz_read_candidate(arena, archive, targets[seed_index], true);
+                        for (u32 mutation_index = 0; mutation_index < OBJECT_FUZZ_MUTATION_COUNT; mutation_index += 1)
+                        {
+                            TemporalArena mutation_scope = arena_begin_temporal(arena);
+                            ByteSlice mutated = object_fuzz_mutate(arena, archive, pointer, size, formats[seed_index], true, mutation_index);
+                            object_fuzz_read_candidate(arena, mutated, targets[seed_index], true);
+                            arena_set_position(arena, mutation_scope.position);
+                        }
+                    }
+                    arena_set_position(arena, archive_scope.position);
+                }
+            }
+            arena_set_position(arena, seed_scope.position);
+        }
+        arena_destroy(arena, 1);
     }
-    arena_destroy(arena, 1);
+
     return 0;
 }
 #endif
@@ -7077,211 +7077,211 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
     ObjectWindowsUnwindResult result = {
         .function_count = function_count,
     };
-    if (!arena || (function_count && !functions) || function_count > UINT32_MAX / 12)
+    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 12)
     {
-        return result;
-    }
-    result.xdata_offsets = arena_allocate(arena, u32, function_count);
-    u64 xdata_size = 0;
-    for (u32 function_index = 0; function_index < function_count; function_index += 1)
-    {
-        CodegenFunctionDescriptor* function = functions + function_index;
-        if (function->prolog_size > UINT8_MAX)
+        result.xdata_offsets = arena_allocate(arena, u32, function_count);
+        u64 xdata_size = 0;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
         {
-            return result;
-        }
-        u32 frame_action = UINT32_MAX;
-        u32 frame_offset = 0;
-        u32 unwind_slot_count = 0;
-        for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-        {
-            CodegenUnwindAction* action = function->unwind_actions + action_index;
-            if (action->code_offset > UINT8_MAX || action->register_index > 15)
+            CodegenFunctionDescriptor* function = functions + function_index;
+            if (function->prolog_size > UINT8_MAX)
             {
                 return result;
             }
-            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+            u32 frame_action = UINT32_MAX;
+            u32 frame_offset = 0;
+            u32 unwind_slot_count = 0;
+            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
             {
-                unwind_slot_count += 1;
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-            {
-                if (frame_action != UINT32_MAX)
+                CodegenUnwindAction* action = function->unwind_actions + action_index;
+                if (action->code_offset > UINT8_MAX || action->register_index > 15)
                 {
                     return result;
                 }
-                frame_action = action_index;
-                frame_offset = action->value;
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-            {
-                if (action->value % 8)
+                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
                 {
-                    return result;
+                    unwind_slot_count += 1;
                 }
-                unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                if (frame_action != UINT32_MAX)
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
                 {
-                    if (action->value > UINT32_MAX - frame_offset)
+                    if (frame_action != UINT32_MAX)
                     {
                         return result;
                     }
-                    frame_offset += action->value;
+                    frame_action = action_index;
+                    frame_offset = action->value;
                 }
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-            {
-                if (action->value % 8)
+                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+                {
+                    if (action->value % 8)
+                    {
+                        return result;
+                    }
+                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+                    if (frame_action != UINT32_MAX)
+                    {
+                        if (action->value > UINT32_MAX - frame_offset)
+                        {
+                            return result;
+                        }
+                        frame_offset += action->value;
+                    }
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+                {
+                    if (action->value % 8)
+                    {
+                        return result;
+                    }
+                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
+                }
+                else
                 {
                     return result;
                 }
-                unwind_slot_count += action->value <= 524280 ? 2 : 3;
+                if (unwind_slot_count > UINT8_MAX)
+                {
+                    return result;
+                }
             }
-            else
-            {
-                return result;
-            }
+            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
+            unwind_slot_count += encode_frame;
             if (unwind_slot_count > UINT8_MAX)
             {
                 return result;
             }
-        }
-        bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-        unwind_slot_count += encode_frame;
-        if (unwind_slot_count > UINT8_MAX)
-        {
-            return result;
-        }
-        result.xdata_offsets[function_index] = (u32)xdata_size;
-        u64 record_size = align_forward(4 + (u64)unwind_slot_count * 2, 4);
-        if (xdata_size > UINT32_MAX || record_size > UINT32_MAX - xdata_size)
-        {
-            return result;
-        }
-        xdata_size += record_size;
-    }
-    result.pdata = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
-        .length = (u64)function_count * 12,
-    };
-    result.xdata = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, xdata_size),
-        .length = xdata_size,
-    };
-    if (result.pdata.length)
-    {
-        memset(result.pdata.pointer, 0, result.pdata.length);
-    }
-    if (result.xdata.length)
-    {
-        memset(result.xdata.pointer, 0, result.xdata.length);
-    }
-    for (u32 function_index = 0; function_index < function_count; function_index += 1)
-    {
-        CodegenFunctionDescriptor* function = functions + function_index;
-        u32 frame_action = UINT32_MAX;
-        u32 frame_offset = 0;
-        u32 unwind_slot_count = 0;
-        for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-        {
-            CodegenUnwindAction* action = function->unwind_actions + action_index;
-            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+            result.xdata_offsets[function_index] = (u32)xdata_size;
+            u64 record_size = align_forward(4 + (u64)unwind_slot_count * 2, 4);
+            if (xdata_size > UINT32_MAX || record_size > UINT32_MAX - xdata_size)
             {
-                unwind_slot_count += 1;
+                return result;
             }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+            xdata_size += record_size;
+        }
+        result.pdata = (ByteSlice){
+            .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
+            .length = (u64)function_count * 12,
+        };
+        result.xdata = (ByteSlice){
+            .pointer = arena_allocate(arena, u8, xdata_size),
+            .length = xdata_size,
+        };
+        if (result.pdata.length)
+        {
+            memset(result.pdata.pointer, 0, result.pdata.length);
+        }
+        if (result.xdata.length)
+        {
+            memset(result.xdata.pointer, 0, result.xdata.length);
+        }
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        {
+            CodegenFunctionDescriptor* function = functions + function_index;
+            u32 frame_action = UINT32_MAX;
+            u32 frame_offset = 0;
+            u32 unwind_slot_count = 0;
+            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
             {
-                frame_action = action_index;
-                frame_offset = action->value;
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-            {
-                unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                if (frame_action != UINT32_MAX)
+                CodegenUnwindAction* action = function->unwind_actions + action_index;
+                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
                 {
-                    frame_offset += action->value;
+                    unwind_slot_count += 1;
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+                {
+                    frame_action = action_index;
+                    frame_offset = action->value;
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+                {
+                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+                    if (frame_action != UINT32_MAX)
+                    {
+                        frame_offset += action->value;
+                    }
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+                {
+                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
                 }
             }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
+            unwind_slot_count += encode_frame;
+            u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
+            record[0] = 1;
+            record[1] = (u8)function->prolog_size;
+            record[2] = (u8)unwind_slot_count;
+            if (encode_frame)
             {
-                unwind_slot_count += action->value <= 524280 ? 2 : 3;
+                record[3] = (u8)(functions[function_index].unwind_actions[frame_action].register_index | ((frame_offset / 16) << 4));
             }
-        }
-        bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-        unwind_slot_count += encode_frame;
-        u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
-        record[0] = 1;
-        record[1] = (u8)function->prolog_size;
-        record[2] = (u8)unwind_slot_count;
-        if (encode_frame)
-        {
-            record[3] = (u8)(functions[function_index].unwind_actions[frame_action].register_index | ((frame_offset / 16) << 4));
-        }
-        u32 cursor = 4;
-        for (u32 action_index = function->unwind_action_count; action_index > 0; action_index -= 1)
-        {
-            CodegenUnwindAction* action = function->unwind_actions + action_index - 1;
-            if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !encode_frame)
+            u32 cursor = 4;
+            for (u32 action_index = function->unwind_action_count; action_index > 0; action_index -= 1)
             {
-                continue;
-            }
-            record[cursor] = (u8)action->code_offset;
-            if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
-            {
-                record[cursor + 1] = (u8)(action->register_index << 4);
-                cursor += 2;
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-            {
-                record[cursor + 1] = 3;
-                cursor += 2;
-            }
-            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-            {
-                if (action->value <= 524280)
+                CodegenUnwindAction* action = function->unwind_actions + action_index - 1;
+                if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !encode_frame)
                 {
-                    u16 scaled_offset = (u16)(action->value / 8);
-                    record[cursor + 1] = (u8)((action->register_index << 4) | 4);
-                    memcpy(record + cursor + 2, &scaled_offset, sizeof(scaled_offset));
+                    continue;
+                }
+                record[cursor] = (u8)action->code_offset;
+                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+                {
+                    record[cursor + 1] = (u8)(action->register_index << 4);
+                    cursor += 2;
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+                {
+                    record[cursor + 1] = 3;
+                    cursor += 2;
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+                {
+                    if (action->value <= 524280)
+                    {
+                        u16 scaled_offset = (u16)(action->value / 8);
+                        record[cursor + 1] = (u8)((action->register_index << 4) | 4);
+                        memcpy(record + cursor + 2, &scaled_offset, sizeof(scaled_offset));
+                        cursor += 4;
+                    }
+                    else
+                    {
+                        if (action->value > UINT32_MAX)
+                        {
+                            return result;
+                        }
+                        record[cursor + 1] = (u8)((action->register_index << 4) | 5);
+                        u32 far_offset = (u32)action->value;
+                        memcpy(record + cursor + 2, &far_offset, sizeof(far_offset));
+                        cursor += 6;
+                    }
+                }
+                else if (action->value <= 128)
+                {
+                    record[cursor + 1] = (u8)(((action->value / 8 - 1) << 4) | 2);
+                    cursor += 2;
+                }
+                else if (action->value <= 524280)
+                {
+                    u16 scaled_size = (u16)(action->value / 8);
+                    record[cursor + 1] = 1;
+                    memcpy(record + cursor + 2, &scaled_size, sizeof(scaled_size));
                     cursor += 4;
                 }
                 else
                 {
-                    if (action->value > UINT32_MAX)
-                    {
-                        return result;
-                    }
-                    record[cursor + 1] = (u8)((action->register_index << 4) | 5);
-                    u32 far_offset = (u32)action->value;
-                    memcpy(record + cursor + 2, &far_offset, sizeof(far_offset));
+                    record[cursor + 1] = 0x11;
+                    memcpy(record + cursor + 2, &action->value, sizeof(action->value));
                     cursor += 6;
                 }
             }
-            else if (action->value <= 128)
+            if (cursor != 4 + unwind_slot_count * 2)
             {
-                record[cursor + 1] = (u8)(((action->value / 8 - 1) << 4) | 2);
-                cursor += 2;
-            }
-            else if (action->value <= 524280)
-            {
-                u16 scaled_size = (u16)(action->value / 8);
-                record[cursor + 1] = 1;
-                memcpy(record + cursor + 2, &scaled_size, sizeof(scaled_size));
-                cursor += 4;
-            }
-            else
-            {
-                record[cursor + 1] = 0x11;
-                memcpy(record + cursor + 2, &action->value, sizeof(action->value));
-                cursor += 6;
+                return (ObjectWindowsUnwindResult){0};
             }
         }
-        if (cursor != 4 + unwind_slot_count * 2)
-        {
-            return (ObjectWindowsUnwindResult){0};
-        }
+        result.valid = true;
     }
-    result.valid = true;
+
     return result;
 }
 
@@ -7466,92 +7466,92 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(
         .function_count = function_count,
         .aarch64 = true,
     };
-    if (!arena || (function_count && !functions) || function_count > UINT32_MAX / 8)
+    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 8)
     {
-        return result;
-    }
-    result.xdata_offsets = arena_allocate(arena, u32, function_count);
-    u64 xdata_capacity = 0;
-    for (u32 function_index = 0; function_index < function_count; function_index += 1)
-    {
-        CodegenFunctionDescriptor const* function = functions + function_index;
-        if (!function->code_size || function->code_size % 4 || function->code_size / 4 >= (1u << 18) || function->epilog_count > UINT16_MAX)
+        result.xdata_offsets = arena_allocate(arena, u32, function_count);
+        u64 xdata_capacity = 0;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
         {
-            return result;
-        }
-        u64 record_capacity = 8 + (u64)function->epilog_count * 4 + (u64)function->unwind_action_count * 8 + 8;
-        if (xdata_capacity > UINT32_MAX || record_capacity > UINT32_MAX - xdata_capacity)
-        {
-            return result;
-        }
-        xdata_capacity += record_capacity;
-    }
-    result.pdata = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, (u64)function_count * 8),
-        .length = (u64)function_count * 8,
-    };
-    result.xdata.pointer = arena_allocate(arena, u8, xdata_capacity);
-    if (result.pdata.length)
-    {
-        memset(result.pdata.pointer, 0, result.pdata.length);
-    }
-    u32 xdata_cursor = 0;
-    for (u32 function_index = 0; function_index < function_count; function_index += 1)
-    {
-        CodegenFunctionDescriptor const* function = functions + function_index;
-        result.xdata_offsets[function_index] = xdata_cursor;
-        u32 code_capacity = function->unwind_action_count * 8 + 8;
-        ObjectWindowsArm64CodeBuffer codes = {
-            .bytes = arena_allocate(arena, u8, code_capacity),
-            .capacity = code_capacity,
-            .valid = true,
-        };
-        u32 epilog_code_index = 0;
-        if (!object_windows_arm64_codes_build(function, &codes, &epilog_code_index) || epilog_code_index > 1023)
-        {
-            return result;
-        }
-        u32 code_words = (codes.count + 3) / 4;
-        bool extended = function->epilog_count > 31 || code_words > 31;
-        if (code_words > UINT8_MAX)
-        {
-            return result;
-        }
-        u32 header_size = extended ? 8 : 4;
-        u64 record_size = (u64)header_size + (u64)function->epilog_count * 4 + (u64)code_words * 4;
-        if (record_size > xdata_capacity - xdata_cursor)
-        {
-            return result;
-        }
-        u8* record = result.xdata.pointer + xdata_cursor;
-        memset(record, 0, record_size);
-        u32 header = function->code_size / 4;
-        if (!extended)
-        {
-            header |= function->epilog_count << 22;
-            header |= code_words << 27;
-        }
-        memcpy(record, &header, sizeof(header));
-        if (extended)
-        {
-            u32 extension = function->epilog_count | (code_words << 16);
-            memcpy(record + 4, &extension, sizeof(extension));
-        }
-        for (u32 epilog_index = 0; epilog_index < function->epilog_count; epilog_index += 1)
-        {
-            u32 epilog = function->epilog_offsets[epilog_index];
-            if (epilog % 4 || epilog / 4 >= (1u << 18))
+            CodegenFunctionDescriptor const* function = functions + function_index;
+            if (!function->code_size || function->code_size % 4 || function->code_size / 4 >= (1u << 18) || function->epilog_count > UINT16_MAX)
             {
                 return result;
             }
-            u32 scope = epilog / 4 | (epilog_code_index << 22);
-            memcpy(record + header_size + epilog_index * 4, &scope, sizeof(scope));
+            u64 record_capacity = 8 + (u64)function->epilog_count * 4 + (u64)function->unwind_action_count * 8 + 8;
+            if (xdata_capacity > UINT32_MAX || record_capacity > UINT32_MAX - xdata_capacity)
+            {
+                return result;
+            }
+            xdata_capacity += record_capacity;
         }
-        memcpy(record + header_size + function->epilog_count * 4, codes.bytes, codes.count);
-        xdata_cursor += (u32)record_size;
+        result.pdata = (ByteSlice){
+            .pointer = arena_allocate(arena, u8, (u64)function_count * 8),
+            .length = (u64)function_count * 8,
+        };
+        result.xdata.pointer = arena_allocate(arena, u8, xdata_capacity);
+        if (result.pdata.length)
+        {
+            memset(result.pdata.pointer, 0, result.pdata.length);
+        }
+        u32 xdata_cursor = 0;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        {
+            CodegenFunctionDescriptor const* function = functions + function_index;
+            result.xdata_offsets[function_index] = xdata_cursor;
+            u32 code_capacity = function->unwind_action_count * 8 + 8;
+            ObjectWindowsArm64CodeBuffer codes = {
+                .bytes = arena_allocate(arena, u8, code_capacity),
+                .capacity = code_capacity,
+                .valid = true,
+            };
+            u32 epilog_code_index = 0;
+            if (!object_windows_arm64_codes_build(function, &codes, &epilog_code_index) || epilog_code_index > 1023)
+            {
+                return result;
+            }
+            u32 code_words = (codes.count + 3) / 4;
+            bool extended = function->epilog_count > 31 || code_words > 31;
+            if (code_words > UINT8_MAX)
+            {
+                return result;
+            }
+            u32 header_size = extended ? 8 : 4;
+            u64 record_size = (u64)header_size + (u64)function->epilog_count * 4 + (u64)code_words * 4;
+            if (record_size > xdata_capacity - xdata_cursor)
+            {
+                return result;
+            }
+            u8* record = result.xdata.pointer + xdata_cursor;
+            memset(record, 0, record_size);
+            u32 header = function->code_size / 4;
+            if (!extended)
+            {
+                header |= function->epilog_count << 22;
+                header |= code_words << 27;
+            }
+            memcpy(record, &header, sizeof(header));
+            if (extended)
+            {
+                u32 extension = function->epilog_count | (code_words << 16);
+                memcpy(record + 4, &extension, sizeof(extension));
+            }
+            for (u32 epilog_index = 0; epilog_index < function->epilog_count; epilog_index += 1)
+            {
+                u32 epilog = function->epilog_offsets[epilog_index];
+                if (epilog % 4 || epilog / 4 >= (1u << 18))
+                {
+                    return result;
+                }
+                u32 scope = epilog / 4 | (epilog_code_index << 22);
+                memcpy(record + header_size + epilog_index * 4, &scope, sizeof(scope));
+            }
+            memcpy(record + header_size + function->epilog_count * 4, codes.bytes, codes.count);
+            xdata_cursor += (u32)record_size;
+        }
+        result.xdata.length = xdata_cursor;
+        result.valid = true;
     }
-    result.xdata.length = xdata_cursor;
-    result.valid = true;
+
     return result;
 }
 
@@ -7565,44 +7565,44 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
     object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
     object->sections[OBJECT_SECTION_WINDOWS_XDATA].data = built.xdata;
     object->sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = built.xdata.length;
-    if (!built.function_count)
+    if (built.function_count)
     {
-        return true;
-    }
-    u32 xdata_symbol = object->symbol_count++;
-    object->symbols[xdata_symbol] = (ObjectSymbol){
-        .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
-        .size = built.xdata.length,
-        .section = OBJECT_SECTION_WINDOWS_XDATA,
-        .kind = OBJECT_SYMBOL_DATA,
-    };
-    for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
-    {
-        u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
-        object->relocations[object->relocation_count++] = (ObjectRelocation){
-            .offset = offset,
-            .section = OBJECT_SECTION_WINDOWS_PDATA,
-            .symbol = function_index,
-            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        u32 xdata_symbol = object->symbol_count++;
+        object->symbols[xdata_symbol] = (ObjectSymbol){
+            .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
+            .size = built.xdata.length,
+            .section = OBJECT_SECTION_WINDOWS_XDATA,
+            .kind = OBJECT_SYMBOL_DATA,
         };
-        if (!built.aarch64)
+        for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
         {
+            u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
             object->relocations[object->relocation_count++] = (ObjectRelocation){
-                .addend = (s64)object->symbols[function_index].size,
-                .offset = offset + 4,
+                .offset = offset,
                 .section = OBJECT_SECTION_WINDOWS_PDATA,
                 .symbol = function_index,
                 .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
             };
+            if (!built.aarch64)
+            {
+                object->relocations[object->relocation_count++] = (ObjectRelocation){
+                    .addend = (s64)object->symbols[function_index].size,
+                    .offset = offset + 4,
+                    .section = OBJECT_SECTION_WINDOWS_PDATA,
+                    .symbol = function_index,
+                    .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+                };
+            }
+            object->relocations[object->relocation_count++] = (ObjectRelocation){
+                .addend = (s64)built.xdata_offsets[function_index],
+                .offset = offset + (built.aarch64 ? 4 : 8),
+                .section = OBJECT_SECTION_WINDOWS_PDATA,
+                .symbol = xdata_symbol,
+                .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+            };
         }
-        object->relocations[object->relocation_count++] = (ObjectRelocation){
-            .addend = (s64)built.xdata_offsets[function_index],
-            .offset = offset + (built.aarch64 ? 4 : 8),
-            .section = OBJECT_SECTION_WINDOWS_PDATA,
-            .symbol = xdata_symbol,
-            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
-        };
     }
+
     return true;
 }
 
@@ -7652,31 +7652,31 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
 
 BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleRelocationKind source, ObjectRelocationKind* destination)
 {
-    if (!destination)
+    if (destination)
     {
-        return false;
+        switch (source)
+        {
+            case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; return true;
+            case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
+            case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; return true;
+            case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
+            case CODEGEN_MODULE_RELOCATION_COUNT: return false;
+        }
     }
-    switch (source)
-    {
-        case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; return true;
-        case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
-        case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
-        case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
-        case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; return true;
-        case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; return true;
-        case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
-        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
-        case CODEGEN_MODULE_RELOCATION_COUNT: return false;
-    }
+
     return false;
 }
 
@@ -8082,23 +8082,23 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         };
     }
     scratch_end(name_temporary);
-    if (result.error != OBJECT_ERROR_NONE)
+    if (result.error == OBJECT_ERROR_NONE)
     {
-        return result;
+        object_append_dwarf(&result, dwarf);
+        object_append_codeview(&result, codeview);
+        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+        if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+        object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
     }
-    object_append_dwarf(&result, dwarf);
-    object_append_codeview(&result, codeview);
-    if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
-    {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
-    if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
-    {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
-    object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
+
     return result;
 }
 

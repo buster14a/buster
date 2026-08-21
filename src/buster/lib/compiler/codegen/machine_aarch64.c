@@ -1619,816 +1619,816 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
     };
-    if (!arena || !program || !function || target.cpu_arch != CPU_ARCH_AARCH64 || function->state != IR_FUNCTION_LOWERED || !function->block_count ||
-        function->entry.value != 0)
+    if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
+        function->entry.value == 0)
     {
-        return result;
-    }
-    IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-    if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_variadic ||
-        function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
-    {
-        return result;
-    }
-    // The AAPCS64 shape gate: every parameter and the return value must
-    // classify to register parts — integer scalars, float scalars,
-    // one-or-two-part register aggregates, HFAs — or an indirect result.
-    // Indirect and stack arguments stay canonical.
-    IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
-    bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
-    MachineA64ValueShape signature_return_shape = {0};
-    if (returns_value && !machine_a64_value_shape(program, function_type->return_type, target, IR_ABI_USE_RESULT, &signature_return_shape))
-    {
-        return result;
-    }
-    MachineA64ValueShape signature_parameter_shapes[MACHINE_A64_MAX_ARGUMENTS] = {0};
-    MachineA64ArgumentPlacement signature_parameter_placements[MACHINE_A64_MAX_ARGUMENTS] = {0};
-    u32 signature_integer_count = 0;
-    u32 signature_float_count = 0;
-    for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
-    {
-        if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target, IR_ABI_USE_ARGUMENT,
-                                     signature_parameter_shapes + parameter_index) ||
-            !machine_a64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
-                                        signature_parameter_placements + parameter_index))
+        IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
+        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_variadic ||
+            function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
             return result;
         }
-    }
-    MachineA64Selector selector = {
-        .arena = arena,
-        .program = program,
-        .function = function,
-        .builder = machine_function_builder_begin(arena),
-        .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
-        .value_stack_slots = arena_allocate(arena, u32, function->value_count),
-        .supported = true,
-        .failed_opcode = IR_OPCODE_COUNT,
-    };
-    if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
-    {
-        return result;
-    }
-    MachineSelectionValueFacts value_facts = machine_selection_value_facts_allocate(arena, function->value_count);
-    selector.target = target;
-    selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    memset(selector.direct_call_uses, 0, function->value_count);
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction* walk = function->instructions + instruction_index;
-        for (u32 operand_index = 0; operand_index < walk->operand_count; operand_index += 1)
+        // The AAPCS64 shape gate: every parameter and the return value must
+        // classify to register parts — integer scalars, float scalars,
+        // one-or-two-part register aggregates, HFAs — or an indirect result.
+        // Indirect and stack arguments stay canonical.
+        IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
+        bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
+        MachineA64ValueShape signature_return_shape = {0};
+        if (returns_value && !machine_a64_value_shape(program, function_type->return_type, target, IR_ABI_USE_RESULT, &signature_return_shape))
         {
-            IrValueId operand = walk->operands[operand_index];
-            if (operand.value >= function->value_count || selector.direct_call_uses[operand.value] == 2)
-            {
-                continue;
-            }
-            bool direct = walk->opcode == IR_OPCODE_CALL && operand_index == 0;
-            if (direct)
-            {
-                IrInstructionId definition = function->values[operand.value].definition;
-                IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
-                direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == walk->symbol.value;
-            }
-            selector.direct_call_uses[operand.value] = direct ? 1 : 2;
+            return result;
         }
-    }
-    machine_stream_initialize(&selector.immediates, sizeof(u64));
-    machine_stream_initialize(&selector.stack_slots, sizeof(u32));
-    machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
-    machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
-    MachineBuilderStream line_marks;
-    machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
-    selector.return_shape = signature_return_shape;
-    selector.hidden_return_slot = UINT32_MAX;
-    if (signature_return_shape.indirect)
-    {
-        selector.hidden_return_slot = machine_a64_append_slot(&selector, 8, 8);
-    }
-    for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
-    {
-        selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
-        selector.parameter_placements[parameter_index] = signature_parameter_placements[parameter_index];
-    }
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        selector.value_virtual_registers[value_index] = UINT32_MAX;
-        selector.value_stack_slots[value_index] = UINT32_MAX;
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        MachineA64ValueShape signature_parameter_shapes[MACHINE_A64_MAX_ARGUMENTS] = {0};
+        MachineA64ArgumentPlacement signature_parameter_placements[MACHINE_A64_MAX_ARGUMENTS] = {0};
+        u32 signature_integer_count = 0;
+        u32 signature_float_count = 0;
+        for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
-            IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
-            if (parameter->value.value >= function->value_count ||
-                (!machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
+            if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target, IR_ABI_USE_ARGUMENT,
+                                         signature_parameter_shapes + parameter_index) ||
+                !machine_a64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
+                                            signature_parameter_placements + parameter_index))
             {
                 return result;
             }
-            selector.value_virtual_registers[parameter->value.value] =
-                machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                         .definition_point = MACHINE_POINT_INVALID,
-                                                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                         .typed_origin = parameter->value.value,
-                                                                     });
-            value_facts.definition_blocks[parameter->value.value] = function->blocks[block_index].id.value;
         }
-    }
-    for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
-    {
-        selector.argument_values[argument_index] = IR_ID_UNDERLYING_INVALID;
-    }
-    // Local promotion, the mem2reg the machine path was built for: a
-    // scalar local whose address never leaves a load or a store needs no
-    // memory at all. Eligibility by type is derived from the stable
-    // value-definition table while the target-order arrays below are
-    // initialized; disqualification still happens on every use that is not
-    // the place operand of a same-width scalar load or store: a field or
-    // index selection, an address handed to a call, a mixed-width access,
-    // and the volatile forms all keep the local in its slot. The byte size
-    // is recorded so the width check needs no second type walk.
-    u8* promotable_locals = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    // Definition identity is already carried by IrValue. Accumulate its block
-    // and the use facts in the target-order walk below so selection never
-    // rereads the complete canonical row population solely for these facts.
-    u32* value_last_use_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* value_use_blocks = value_facts.use_blocks;
-    u32* local_store_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* value_use_counts = value_facts.use_counts;
-    u32* value_def_blocks = value_facts.definition_blocks;
-    u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        promotable_locals[value_index] = 0;
-        value_last_use_ordinals[value_index] = 0;
-        local_store_counts[value_index] = 0;
-        value_def_ordinals[value_index] = 0;
-        IrInstructionId definition = function->values[value_index].definition;
-        if (definition.value < function->instruction_count)
+        MachineA64Selector selector = {
+            .arena = arena,
+            .program = program,
+            .function = function,
+            .builder = machine_function_builder_begin(arena),
+            .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
+            .value_stack_slots = arena_allocate(arena, u32, function->value_count),
+            .supported = true,
+            .failed_opcode = IR_OPCODE_COUNT,
+        };
+        if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
         {
-            IrInstruction* instruction = function->instructions + definition.value;
-            if (instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
-            {
-                IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-                if (machine_a64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
-                {
-                    promotable_locals[value_index] = (u8)local_type->layout.size;
-                }
-            }
+            return result;
         }
-    }
-    u32 walk_ordinal = 0;
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        MachineSelectionValueFacts value_facts = machine_selection_value_facts_allocate(arena, function->value_count);
+        selector.target = target;
+        selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+        memset(selector.direct_call_uses, 0, function->value_count);
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            IrInstruction* instruction = function->instructions + id.value;
-            walk_ordinal += 1;
-            if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
+            IrInstruction* walk = function->instructions + instruction_index;
+            for (u32 operand_index = 0; operand_index < walk->operand_count; operand_index += 1)
             {
-                value_def_ordinals[instruction->result.value] = walk_ordinal;
-                value_def_blocks[instruction->result.value] = block->id.value;
-            }
-            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-            {
-                u32 used = instruction->operands[operand_index].value;
-                if (used >= function->value_count)
+                IrValueId operand = walk->operands[operand_index];
+                if (operand.value >= function->value_count || selector.direct_call_uses[operand.value] == 2)
                 {
                     continue;
                 }
-                value_use_counts[used] += 1;
-                if (value_use_blocks[used] == MACHINE_SELECTION_INVALID_INDEX)
+                bool direct = walk->opcode == IR_OPCODE_CALL && operand_index == 0;
+                if (direct)
                 {
-                    value_use_blocks[used] = block->id.value;
+                    IrInstructionId definition = function->values[operand.value].definition;
+                    IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+                    direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == walk->symbol.value;
                 }
-                else if (value_use_blocks[used] != block->id.value)
+                selector.direct_call_uses[operand.value] = direct ? 1 : 2;
+            }
+        }
+        machine_stream_initialize(&selector.immediates, sizeof(u64));
+        machine_stream_initialize(&selector.stack_slots, sizeof(u32));
+        machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
+        machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
+        MachineBuilderStream line_marks;
+        machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
+        selector.return_shape = signature_return_shape;
+        selector.hidden_return_slot = UINT32_MAX;
+        if (signature_return_shape.indirect)
+        {
+            selector.hidden_return_slot = machine_a64_append_slot(&selector, 8, 8);
+        }
+        for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
+        {
+            selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
+            selector.parameter_placements[parameter_index] = signature_parameter_placements[parameter_index];
+        }
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            selector.value_virtual_registers[value_index] = UINT32_MAX;
+            selector.value_stack_slots[value_index] = UINT32_MAX;
+        }
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+            {
+                IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
+                if (parameter->value.value >= function->value_count ||
+                    (!machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
                 {
-                    value_use_blocks[used] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                    return result;
                 }
-                value_last_use_ordinals[used] = walk_ordinal;
-                if (!promotable_locals[used])
+                selector.value_virtual_registers[parameter->value.value] =
+                    machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                             .definition_point = MACHINE_POINT_INVALID,
+                                                                             .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                             .typed_origin = parameter->value.value,
+                                                                         });
+                value_facts.definition_blocks[parameter->value.value] = function->blocks[block_index].id.value;
+            }
+        }
+        for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
+        {
+            selector.argument_values[argument_index] = IR_ID_UNDERLYING_INVALID;
+        }
+        // Local promotion, the mem2reg the machine path was built for: a
+        // scalar local whose address never leaves a load or a store needs no
+        // memory at all. Eligibility by type is derived from the stable
+        // value-definition table while the target-order arrays below are
+        // initialized; disqualification still happens on every use that is not
+        // the place operand of a same-width scalar load or store: a field or
+        // index selection, an address handed to a call, a mixed-width access,
+        // and the volatile forms all keep the local in its slot. The byte size
+        // is recorded so the width check needs no second type walk.
+        u8* promotable_locals = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+        // Definition identity is already carried by IrValue. Accumulate its block
+        // and the use facts in the target-order walk below so selection never
+        // rereads the complete canonical row population solely for these facts.
+        u32* value_last_use_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* value_use_blocks = value_facts.use_blocks;
+        u32* local_store_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* value_use_counts = value_facts.use_counts;
+        u32* value_def_blocks = value_facts.definition_blocks;
+        u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            promotable_locals[value_index] = 0;
+            value_last_use_ordinals[value_index] = 0;
+            local_store_counts[value_index] = 0;
+            value_def_ordinals[value_index] = 0;
+            IrInstructionId definition = function->values[value_index].definition;
+            if (definition.value < function->instruction_count)
+            {
+                IrInstruction* instruction = function->instructions + definition.value;
+                if (instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
                 {
-                    continue;
-                }
-                bool place_use = false;
-                if (operand_index == 0 && instruction->opcode == IR_OPCODE_LOAD)
-                {
-                    IrType* access_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    place_use = !instruction->volatile_access && machine_a64_type_is_scalar_register(access_type) &&
-                                access_type->layout.size == promotable_locals[used];
-                }
-                else if (operand_index == 0 && instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 &&
-                         instruction->operands[1].value < function->value_count)
-                {
-                    IrType* access_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
-                    place_use = !instruction->volatile_access && machine_a64_type_is_scalar_register(access_type) &&
-                                access_type->layout.size == promotable_locals[used];
-                    local_store_counts[used] += 1;
-                }
-                if (!place_use)
-                {
-                    promotable_locals[used] = 0;
+                    IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+                    if (machine_a64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
+                    {
+                        promotable_locals[value_index] = (u8)local_type->layout.size;
+                    }
                 }
             }
         }
-    }
-    // Load aliasing over the promoted locals. The measured cost of
-    // promotion is the copy every load lowers to: its source is the local,
-    // which lives on, so the copy never coalesces — one extra register
-    // move per read, and a second instruction whenever the local was not
-    // resident. A load result whose every use sits in the load's own block
-    // before the local's next store *is* the local: it shares the local's
-    // virtual register and the load selects into nothing. The block-local
-    // requirement is what makes the layout reasoning sound — a jump can
-    // only re-enter at a block head, above the load, never between the
-    // load and a use.
-    u32* load_aliases = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* next_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* next_store_epochs = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    u32* block_row_ids = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        load_aliases[value_index] = UINT32_MAX;
-        next_store_ordinals[value_index] = 0;
-        next_store_epochs[value_index] = 0;
-    }
-    // Two identical reverse sweeps: the first aliases loads, the second
-    // extends each alias through IR_OPCODE_DEREFERENCE, whose selection is
-    // a plain pointer copy — an aliased pointer load feeding a dereference
-    // used to coalesce because the load temporary died at the copy, and an
-    // aliased value never dies, so the chain must collapse at selection or
-    // the copy just moves from the load to the address staging. A field or
-    // index base folds its offset into a real address add and stops the
-    // chain.
-    for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
-    {
-        u32 walked_ordinals = 0;
+        u32 walk_ordinal = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
-            u32 epoch = alias_sweep * function->block_count + block_index + 1;
-            u32 row_count = 0;
             for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
             {
-                block_row_ids[row_count++] = id.value;
+                IrInstruction* instruction = function->instructions + id.value;
+                walk_ordinal += 1;
+                if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
+                {
+                    value_def_ordinals[instruction->result.value] = walk_ordinal;
+                    value_def_blocks[instruction->result.value] = block->id.value;
+                }
+                for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                {
+                    u32 used = instruction->operands[operand_index].value;
+                    if (used >= function->value_count)
+                    {
+                        continue;
+                    }
+                    value_use_counts[used] += 1;
+                    if (value_use_blocks[used] == MACHINE_SELECTION_INVALID_INDEX)
+                    {
+                        value_use_blocks[used] = block->id.value;
+                    }
+                    else if (value_use_blocks[used] != block->id.value)
+                    {
+                        value_use_blocks[used] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                    }
+                    value_last_use_ordinals[used] = walk_ordinal;
+                    if (!promotable_locals[used])
+                    {
+                        continue;
+                    }
+                    bool place_use = false;
+                    if (operand_index == 0 && instruction->opcode == IR_OPCODE_LOAD)
+                    {
+                        IrType* access_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        place_use = !instruction->volatile_access && machine_a64_type_is_scalar_register(access_type) &&
+                                    access_type->layout.size == promotable_locals[used];
+                    }
+                    else if (operand_index == 0 && instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 &&
+                             instruction->operands[1].value < function->value_count)
+                    {
+                        IrType* access_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+                        place_use = !instruction->volatile_access && machine_a64_type_is_scalar_register(access_type) &&
+                                    access_type->layout.size == promotable_locals[used];
+                        local_store_counts[used] += 1;
+                    }
+                    if (!place_use)
+                    {
+                        promotable_locals[used] = 0;
+                    }
+                }
             }
-            for (u32 remaining = row_count; remaining > 0; remaining -= 1)
+        }
+        // Load aliasing over the promoted locals. The measured cost of
+        // promotion is the copy every load lowers to: its source is the local,
+        // which lives on, so the copy never coalesces — one extra register
+        // move per read, and a second instruction whenever the local was not
+        // resident. A load result whose every use sits in the load's own block
+        // before the local's next store *is* the local: it shares the local's
+        // virtual register and the load selects into nothing. The block-local
+        // requirement is what makes the layout reasoning sound — a jump can
+        // only re-enter at a block head, above the load, never between the
+        // load and a use.
+        u32* load_aliases = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* next_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* next_store_epochs = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* block_row_ids = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            load_aliases[value_index] = UINT32_MAX;
+            next_store_ordinals[value_index] = 0;
+            next_store_epochs[value_index] = 0;
+        }
+        // Two identical reverse sweeps: the first aliases loads, the second
+        // extends each alias through IR_OPCODE_DEREFERENCE, whose selection is
+        // a plain pointer copy — an aliased pointer load feeding a dereference
+        // used to coalesce because the load temporary died at the copy, and an
+        // aliased value never dies, so the chain must collapse at selection or
+        // the copy just moves from the load to the address staging. A field or
+        // index base folds its offset into a real address add and stops the
+        // chain.
+        for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
+        {
+            u32 walked_ordinals = 0;
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
             {
-                IrInstruction* instruction = function->instructions + block_row_ids[remaining - 1];
-                u32 instruction_ordinal = walked_ordinals + remaining;
+                IrBlock* block = function->blocks + block_index;
+                u32 epoch = alias_sweep * function->block_count + block_index + 1;
+                u32 row_count = 0;
+                for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+                {
+                    block_row_ids[row_count++] = id.value;
+                }
+                for (u32 remaining = row_count; remaining > 0; remaining -= 1)
+                {
+                    IrInstruction* instruction = function->instructions + block_row_ids[remaining - 1];
+                    u32 instruction_ordinal = walked_ordinals + remaining;
+                    if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
+                        promotable_locals[instruction->operands[0].value])
+                    {
+                        next_store_ordinals[instruction->operands[0].value] = instruction_ordinal;
+                        next_store_epochs[instruction->operands[0].value] = epoch;
+                    }
+                    // The rooting local of a candidate: the load's own place,
+                    // or the alias the previous sweep gave a dereference's
+                    // pointer operand.
+                    u32 root = UINT32_MAX;
+                    if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
+                        promotable_locals[instruction->operands[0].value])
+                    {
+                        root = instruction->operands[0].value;
+                    }
+                    else if (instruction->opcode == IR_OPCODE_DEREFERENCE && instruction->operand_count >= 1 &&
+                             instruction->operands[0].value < function->value_count)
+                    {
+                        root = load_aliases[instruction->operands[0].value];
+                    }
+                    if (root == UINT32_MAX || instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
+                    {
+                        continue;
+                    }
+                    u32 candidate = instruction->result.value;
+                    // A single-store local — a saved parameter, an init-once
+                    // configuration value — never changes after its one store,
+                    // so every read of it everywhere is the local, uses in
+                    // other blocks included. Otherwise the reverse walk means
+                    // next_store already names the nearest store strictly
+                    // below this row when its epoch stamp is current, and the
+                    // block-local containment is what keeps the layout
+                    // reasoning sound: a jump can only re-enter at a block
+                    // head, above the row, never between it and a use.
+                    if (local_store_counts[root] == 1 ||
+                        (value_use_blocks[candidate] == block_index &&
+                         (next_store_epochs[root] != epoch || next_store_ordinals[root] > value_last_use_ordinals[candidate])))
+                    {
+                        load_aliases[candidate] = root;
+                    }
+                }
+                walked_ordinals += row_count;
+            }
+        }
+        // Classification pass: direct locals become stack slots, every other
+        // scalar result becomes a virtual register, in stable value-id order.
+        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        {
+            IrBlock* block = function->blocks + block_index;
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            {
+                IrInstruction* instruction = function->instructions + id.value;
+                if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
+                {
+                    continue;
+                }
+                IrValue* value = function->values + instruction->result.value;
+                if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
+                    instruction->immediates[0] < BUSTER_ARRAY_LENGTH(selector.argument_values))
+                {
+                    selector.argument_values[instruction->immediates[0]] = instruction->result.value;
+                }
+                if (instruction->opcode == IR_OPCODE_LOCAL)
+                {
+                    IrType* local_type = ir_type_from_id(&program->types, value->canonical_type);
+                    u32 local_alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
+                    if (!local_type || !local_type->layout.resolved || local_alignment > 16 || local_type->layout.size > UINT32_MAX - 7)
+                    {
+                        machine_a64_reject(&selector, instruction->opcode);
+                        break;
+                    }
+                    if (promotable_locals[instruction->result.value])
+                    {
+                        // Promoted: the local is a virtual register for its
+                        // whole life and never owns a frame slot. Its loads
+                        // and stores lower to copies, and its definition point
+                        // is patched at the first store like any other
+                        // classification vreg.
+                        selector.value_virtual_registers[instruction->result.value] =
+                            machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                                    .definition_point = MACHINE_POINT_INVALID,
+                                                                                    .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                    .typed_origin = instruction->result.value,
+                                                                                });
+                        continue;
+                    }
+                    selector.value_stack_slots[instruction->result.value] =
+                        machine_a64_append_slot(&selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
+                    continue;
+                }
+                IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+                // Float scalars hold their bit image in a general register, and
+                // address producers hold an 8-byte address no matter what their
+                // declared canonical type is.
+                if (machine_a64_type_is_scalar_register(value_type) || machine_a64_type_is_float_scalar(value_type) ||
+                    machine_a64_opcode_produces_address(instruction->opcode))
+                {
+                    u32 register_index = machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                                                 .definition_point = MACHINE_POINT_INVALID,
+                                                                                                 .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                                 .typed_origin = instruction->result.value,
+                                                                                             });
+                    selector.value_virtual_registers[instruction->result.value] = register_index;
+                }
+                else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                          instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
+                         value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
+                         (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
+                          ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
+                {
+                    // Aggregate values own a frame slot like the canonical
+                    // path's per-value storage; copies and ABI part transfers
+                    // address it directly.
+                    selector.value_stack_slots[instruction->result.value] =
+                        machine_a64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
+                }
+            }
+        }
+        // Aliased load results share their local's virtual register: every use
+        // site then names the local directly and the load emits nothing. The
+        // result's own classification vreg goes unused, which costs an id and
+        // nothing else.
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            if (load_aliases[value_index] != UINT32_MAX && selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
+            {
+                selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
+            }
+        }
+        // Compare/branch fusion, mirroring the x86-64 selector: a chain of
+        // compare → widen → (!= 0) whose every member has exactly one use in
+        // the branch's own block folds into CMP (or CMP_ZERO) + BCC at the
+        // terminator, and the members select into nothing. The walk keeps the
+        // invariant that the branch outcome equals truthy(chain value) xor
+        // negate through (!= 0)/(== 0) against a literal zero (possibly
+        // behind one widening cast), truthiness-preserving extensions, and
+        // BOOLEAN_NOT. The fused compare reads its operands at the branch row
+        // instead of the member's, and promoted locals are the one source of
+        // multi-definition vregs: a store between the compare and the branch
+        // would redefine what the sunk read sees, so the walk stamps every
+        // promoted local's latest store ordinal and the commit compares.
+        selector.branch_fusions = arena_allocate(arena, MachineA64BranchFusion, function->value_count ? function->value_count : 1);
+        selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+        u32* local_store_ordinals = local_store_counts;
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            selector.branch_fusions[value_index] = (MachineA64BranchFusion){.condition = 0xff};
+            selector.fused_dead[value_index] = 0;
+            local_store_ordinals[value_index] = 0;
+        }
+        u32 fusion_ordinal = 0;
+        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        {
+            IrBlock* block = function->blocks + block_index;
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            {
+                IrInstruction* instruction = function->instructions + id.value;
+                fusion_ordinal += 1;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     promotable_locals[instruction->operands[0].value])
                 {
-                    next_store_ordinals[instruction->operands[0].value] = instruction_ordinal;
-                    next_store_epochs[instruction->operands[0].value] = epoch;
+                    local_store_ordinals[instruction->operands[0].value] = fusion_ordinal;
                 }
-                // The rooting local of a candidate: the load's own place,
-                // or the alias the previous sweep gave a dereference's
-                // pointer operand.
-                u32 root = UINT32_MAX;
-                if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
-                    promotable_locals[instruction->operands[0].value])
-                {
-                    root = instruction->operands[0].value;
-                }
-                else if (instruction->opcode == IR_OPCODE_DEREFERENCE && instruction->operand_count >= 1 &&
-                         instruction->operands[0].value < function->value_count)
-                {
-                    root = load_aliases[instruction->operands[0].value];
-                }
-                if (root == UINT32_MAX || instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
+                if (instruction->opcode != IR_OPCODE_BRANCH_IF || instruction->operand_count < 1 || instruction->operands[0].value >= function->value_count)
                 {
                     continue;
                 }
-                u32 candidate = instruction->result.value;
-                // A single-store local — a saved parameter, an init-once
-                // configuration value — never changes after its one store,
-                // so every read of it everywhere is the local, uses in
-                // other blocks included. Otherwise the reverse walk means
-                // next_store already names the nearest store strictly
-                // below this row when its epoch stamp is current, and the
-                // block-local containment is what keeps the layout
-                // reasoning sound: a jump can only re-enter at a block
-                // head, above the row, never between it and a use.
-                if (local_store_counts[root] == 1 ||
-                    (value_use_blocks[candidate] == block_index &&
-                     (next_store_epochs[root] != epoch || next_store_ordinals[root] > value_last_use_ordinals[candidate])))
+                u32 chain_value = instruction->operands[0].value;
+                u32 absorbed_members[16];
+                u32 absorbed_count = 0;
+                u32 dead_zeros[16];
+                u32 dead_zero_count = 0;
+                u32 negate = 0;
+                u32 innermost_ordinal = 0;
+                u32 read_left = UINT32_MAX;
+                u32 read_right = UINT32_MAX;
+                u32 condition = 0xff;
+                bool wide = false;
+                while (absorbed_count < BUSTER_ARRAY_LENGTH(absorbed_members))
                 {
-                    load_aliases[candidate] = root;
-                }
-            }
-            walked_ordinals += row_count;
-        }
-    }
-    // Classification pass: direct locals become stack slots, every other
-    // scalar result becomes a virtual register, in stable value-id order.
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
-        {
-            IrInstruction* instruction = function->instructions + id.value;
-            if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
-            {
-                continue;
-            }
-            IrValue* value = function->values + instruction->result.value;
-            if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
-                instruction->immediates[0] < BUSTER_ARRAY_LENGTH(selector.argument_values))
-            {
-                selector.argument_values[instruction->immediates[0]] = instruction->result.value;
-            }
-            if (instruction->opcode == IR_OPCODE_LOCAL)
-            {
-                IrType* local_type = ir_type_from_id(&program->types, value->canonical_type);
-                u32 local_alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
-                if (!local_type || !local_type->layout.resolved || local_alignment > 16 || local_type->layout.size > UINT32_MAX - 7)
-                {
-                    machine_a64_reject(&selector, instruction->opcode);
-                    break;
-                }
-                if (promotable_locals[instruction->result.value])
-                {
-                    // Promoted: the local is a virtual register for its
-                    // whole life and never owns a frame slot. Its loads
-                    // and stores lower to copies, and its definition point
-                    // is patched at the first store like any other
-                    // classification vreg.
-                    selector.value_virtual_registers[instruction->result.value] =
-                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                                .definition_point = MACHINE_POINT_INVALID,
-                                                                                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                                .typed_origin = instruction->result.value,
-                                                                            });
-                    continue;
-                }
-                selector.value_stack_slots[instruction->result.value] =
-                    machine_a64_append_slot(&selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
-                continue;
-            }
-            IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-            // Float scalars hold their bit image in a general register, and
-            // address producers hold an 8-byte address no matter what their
-            // declared canonical type is.
-            if (machine_a64_type_is_scalar_register(value_type) || machine_a64_type_is_float_scalar(value_type) ||
-                machine_a64_opcode_produces_address(instruction->opcode))
-            {
-                u32 register_index = machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                                             .definition_point = MACHINE_POINT_INVALID,
-                                                                                             .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                                             .typed_origin = instruction->result.value,
-                                                                                         });
-                selector.value_virtual_registers[instruction->result.value] = register_index;
-            }
-            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                      instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
-                     value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
-                     (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
-                      ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
-            {
-                // Aggregate values own a frame slot like the canonical
-                // path's per-value storage; copies and ABI part transfers
-                // address it directly.
-                selector.value_stack_slots[instruction->result.value] =
-                    machine_a64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
-            }
-        }
-    }
-    // Aliased load results share their local's virtual register: every use
-    // site then names the local directly and the load emits nothing. The
-    // result's own classification vreg goes unused, which costs an id and
-    // nothing else.
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        if (load_aliases[value_index] != UINT32_MAX && selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
-        {
-            selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
-        }
-    }
-    // Compare/branch fusion, mirroring the x86-64 selector: a chain of
-    // compare → widen → (!= 0) whose every member has exactly one use in
-    // the branch's own block folds into CMP (or CMP_ZERO) + BCC at the
-    // terminator, and the members select into nothing. The walk keeps the
-    // invariant that the branch outcome equals truthy(chain value) xor
-    // negate through (!= 0)/(== 0) against a literal zero (possibly
-    // behind one widening cast), truthiness-preserving extensions, and
-    // BOOLEAN_NOT. The fused compare reads its operands at the branch row
-    // instead of the member's, and promoted locals are the one source of
-    // multi-definition vregs: a store between the compare and the branch
-    // would redefine what the sunk read sees, so the walk stamps every
-    // promoted local's latest store ordinal and the commit compares.
-    selector.branch_fusions = arena_allocate(arena, MachineA64BranchFusion, function->value_count ? function->value_count : 1);
-    selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
-    u32* local_store_ordinals = local_store_counts;
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        selector.branch_fusions[value_index] = (MachineA64BranchFusion){.condition = 0xff};
-        selector.fused_dead[value_index] = 0;
-        local_store_ordinals[value_index] = 0;
-    }
-    u32 fusion_ordinal = 0;
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
-        {
-            IrInstruction* instruction = function->instructions + id.value;
-            fusion_ordinal += 1;
-            if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
-                promotable_locals[instruction->operands[0].value])
-            {
-                local_store_ordinals[instruction->operands[0].value] = fusion_ordinal;
-            }
-            if (instruction->opcode != IR_OPCODE_BRANCH_IF || instruction->operand_count < 1 || instruction->operands[0].value >= function->value_count)
-            {
-                continue;
-            }
-            u32 chain_value = instruction->operands[0].value;
-            u32 absorbed_members[16];
-            u32 absorbed_count = 0;
-            u32 dead_zeros[16];
-            u32 dead_zero_count = 0;
-            u32 negate = 0;
-            u32 innermost_ordinal = 0;
-            u32 read_left = UINT32_MAX;
-            u32 read_right = UINT32_MAX;
-            u32 condition = 0xff;
-            bool wide = false;
-            while (absorbed_count < BUSTER_ARRAY_LENGTH(absorbed_members))
-            {
-                if (chain_value >= function->value_count || value_use_counts[chain_value] != 1 || value_def_blocks[chain_value] != block_index ||
-                    function->values[chain_value].definition.value == UINT32_MAX)
-                {
-                    break;
-                }
-                IrInstruction* member = function->instructions + function->values[chain_value].definition.value;
-                if (member->opcode == IR_OPCODE_BINARY && member->operand_count >= 2 && member->operands[0].value < function->value_count &&
-                    member->operands[1].value < function->value_count)
-                {
-                    u32 member_condition = machine_a64_condition_from_comparison(member->binary_operation);
-                    IrTypeId member_operand_type_id = function->values[member->operands[0].value].canonical_type;
-                    if (member_condition == UINT32_MAX || !machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, member_operand_type_id)))
+                    if (chain_value >= function->value_count || value_use_counts[chain_value] != 1 || value_def_blocks[chain_value] != block_index ||
+                        function->values[chain_value].definition.value == UINT32_MAX)
                     {
                         break;
                     }
-                    if (member_condition == MACHINE_A64_CONDITION_EQUAL || member_condition == MACHINE_A64_CONDITION_NOT_EQUAL)
+                    IrInstruction* member = function->instructions + function->values[chain_value].definition.value;
+                    if (member->opcode == IR_OPCODE_BINARY && member->operand_count >= 2 && member->operands[0].value < function->value_count &&
+                        member->operands[1].value < function->value_count)
                     {
-                        // A literal zero side may sit behind one widening
-                        // cast (extending zero is zero). The cast dies only
-                        // when this compare is its one use, and the
-                        // constant only once nothing still reads it.
-                        u32 zero_side = UINT32_MAX;
-                        u32 zero_cast = UINT32_MAX;
-                        u32 zero_constant = UINT32_MAX;
-                        for (u32 side = 0; side < 2 && zero_side == UINT32_MAX; side += 1)
+                        u32 member_condition = machine_a64_condition_from_comparison(member->binary_operation);
+                        IrTypeId member_operand_type_id = function->values[member->operands[0].value].canonical_type;
+                        if (member_condition == UINT32_MAX || !machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, member_operand_type_id)))
                         {
-                            u32 constant_value = member->operands[side].value;
-                            u32 through_cast = UINT32_MAX;
-                            if (function->values[constant_value].definition.value == UINT32_MAX)
+                            break;
+                        }
+                        if (member_condition == MACHINE_A64_CONDITION_EQUAL || member_condition == MACHINE_A64_CONDITION_NOT_EQUAL)
+                        {
+                            // A literal zero side may sit behind one widening
+                            // cast (extending zero is zero). The cast dies only
+                            // when this compare is its one use, and the
+                            // constant only once nothing still reads it.
+                            u32 zero_side = UINT32_MAX;
+                            u32 zero_cast = UINT32_MAX;
+                            u32 zero_constant = UINT32_MAX;
+                            for (u32 side = 0; side < 2 && zero_side == UINT32_MAX; side += 1)
                             {
-                                continue;
-                            }
-                            IrInstruction* side_definition = function->instructions + function->values[constant_value].definition.value;
-                            if (side_definition->opcode == IR_OPCODE_CAST && side_definition->operand_count >= 1 &&
-                                side_definition->operands[0].value < function->value_count &&
-                                (side_definition->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
-                                 side_definition->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
-                                 side_definition->conversion_operation == IR_CONVERSION_IDENTITY))
-                            {
-                                through_cast = constant_value;
-                                constant_value = side_definition->operands[0].value;
+                                u32 constant_value = member->operands[side].value;
+                                u32 through_cast = UINT32_MAX;
                                 if (function->values[constant_value].definition.value == UINT32_MAX)
                                 {
                                     continue;
                                 }
-                                side_definition = function->instructions + function->values[constant_value].definition.value;
+                                IrInstruction* side_definition = function->instructions + function->values[constant_value].definition.value;
+                                if (side_definition->opcode == IR_OPCODE_CAST && side_definition->operand_count >= 1 &&
+                                    side_definition->operands[0].value < function->value_count &&
+                                    (side_definition->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                                     side_definition->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                                     side_definition->conversion_operation == IR_CONVERSION_IDENTITY))
+                                {
+                                    through_cast = constant_value;
+                                    constant_value = side_definition->operands[0].value;
+                                    if (function->values[constant_value].definition.value == UINT32_MAX)
+                                    {
+                                        continue;
+                                    }
+                                    side_definition = function->instructions + function->values[constant_value].definition.value;
+                                }
+                                if (side_definition->opcode == IR_OPCODE_CONSTANT_INTEGER && side_definition->immediate_count && side_definition->immediates &&
+                                    side_definition->immediates[0] == 0)
+                                {
+                                    zero_side = side;
+                                    zero_cast = through_cast;
+                                    zero_constant = constant_value;
+                                }
                             }
-                            if (side_definition->opcode == IR_OPCODE_CONSTANT_INTEGER && side_definition->immediate_count && side_definition->immediates &&
-                                side_definition->immediates[0] == 0)
+                            if (zero_side != UINT32_MAX)
                             {
-                                zero_side = side;
-                                zero_cast = through_cast;
-                                zero_constant = constant_value;
+                                absorbed_members[absorbed_count++] = chain_value;
+                                innermost_ordinal = value_def_ordinals[chain_value];
+                                bool cast_dies = zero_cast == UINT32_MAX ||
+                                                 (value_use_counts[zero_cast] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros));
+                                if (zero_cast != UINT32_MAX && cast_dies)
+                                {
+                                    dead_zeros[dead_zero_count++] = zero_cast;
+                                }
+                                if (cast_dies && value_use_counts[zero_constant] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros))
+                                {
+                                    dead_zeros[dead_zero_count++] = zero_constant;
+                                }
+                                negate ^= member_condition == MACHINE_A64_CONDITION_EQUAL;
+                                chain_value = member->operands[1 - zero_side].value;
+                                continue;
                             }
                         }
-                        if (zero_side != UINT32_MAX)
-                        {
-                            absorbed_members[absorbed_count++] = chain_value;
-                            innermost_ordinal = value_def_ordinals[chain_value];
-                            bool cast_dies = zero_cast == UINT32_MAX ||
-                                             (value_use_counts[zero_cast] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros));
-                            if (zero_cast != UINT32_MAX && cast_dies)
-                            {
-                                dead_zeros[dead_zero_count++] = zero_cast;
-                            }
-                            if (cast_dies && value_use_counts[zero_constant] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros))
-                            {
-                                dead_zeros[dead_zero_count++] = zero_constant;
-                            }
-                            negate ^= member_condition == MACHINE_A64_CONDITION_EQUAL;
-                            chain_value = member->operands[1 - zero_side].value;
-                            continue;
-                        }
+                        absorbed_members[absorbed_count++] = chain_value;
+                        innermost_ordinal = value_def_ordinals[chain_value];
+                        read_left = member->operands[0].value;
+                        read_right = member->operands[1].value;
+                        condition = member_condition ^ negate;
+                        wide = machine_a64_type_is_64_bit(program, member_operand_type_id);
+                        break;
                     }
-                    absorbed_members[absorbed_count++] = chain_value;
-                    innermost_ordinal = value_def_ordinals[chain_value];
-                    read_left = member->operands[0].value;
-                    read_right = member->operands[1].value;
-                    condition = member_condition ^ negate;
-                    wide = machine_a64_type_is_64_bit(program, member_operand_type_id);
+                    if (member->opcode == IR_OPCODE_CAST && member->operand_count >= 1 && member->operands[0].value < function->value_count &&
+                        (member->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                         member->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND || member->conversion_operation == IR_CONVERSION_IDENTITY) &&
+                        machine_a64_type_is_scalar_register(
+                            ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
+                    {
+                        absorbed_members[absorbed_count++] = chain_value;
+                        innermost_ordinal = value_def_ordinals[chain_value];
+                        chain_value = member->operands[0].value;
+                        continue;
+                    }
+                    if (member->opcode == IR_OPCODE_UNARY && member->unary_operation == IR_UNARY_BOOLEAN_NOT && member->operand_count >= 1 &&
+                        member->operands[0].value < function->value_count &&
+                        machine_a64_type_is_scalar_register(
+                            ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
+                    {
+                        absorbed_members[absorbed_count++] = chain_value;
+                        innermost_ordinal = value_def_ordinals[chain_value];
+                        negate ^= 1;
+                        chain_value = member->operands[0].value;
+                        continue;
+                    }
                     break;
                 }
-                if (member->opcode == IR_OPCODE_CAST && member->operand_count >= 1 && member->operands[0].value < function->value_count &&
-                    (member->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
-                     member->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND || member->conversion_operation == IR_CONVERSION_IDENTITY) &&
-                    machine_a64_type_is_scalar_register(
-                        ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
-                {
-                    absorbed_members[absorbed_count++] = chain_value;
-                    innermost_ordinal = value_def_ordinals[chain_value];
-                    chain_value = member->operands[0].value;
-                    continue;
-                }
-                if (member->opcode == IR_OPCODE_UNARY && member->unary_operation == IR_UNARY_BOOLEAN_NOT && member->operand_count >= 1 &&
-                    member->operands[0].value < function->value_count &&
-                    machine_a64_type_is_scalar_register(
-                        ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
-                {
-                    absorbed_members[absorbed_count++] = chain_value;
-                    innermost_ordinal = value_def_ordinals[chain_value];
-                    negate ^= 1;
-                    chain_value = member->operands[0].value;
-                    continue;
-                }
-                break;
-            }
-            if (!absorbed_count)
-            {
-                continue;
-            }
-            if (read_left == UINT32_MAX)
-            {
-                // Truthiness terminal: CMP_ZERO's 64-bit compare is exact
-                // because sub-64-bit values sit extended with clean upper
-                // bits, matching the compare-against-zero it replaces.
-                if (chain_value >= function->value_count ||
-                    !machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, function->values[chain_value].canonical_type)))
+                if (!absorbed_count)
                 {
                     continue;
                 }
-                read_left = chain_value;
-                condition = MACHINE_A64_CONDITION_NOT_EQUAL ^ negate;
-            }
-            bool reads_safe = selector.value_virtual_registers[read_left] != UINT32_MAX &&
-                              (read_right == UINT32_MAX || selector.value_virtual_registers[read_right] != UINT32_MAX);
-            for (u32 read_side = 0; read_side < 2 && reads_safe; read_side += 1)
-            {
-                u32 read_value = read_side ? read_right : read_left;
-                if (read_value == UINT32_MAX)
+                if (read_left == UINT32_MAX)
                 {
-                    continue;
-                }
-                u32 read_root = load_aliases[read_value];
-                if (read_root != UINT32_MAX && local_store_ordinals[read_root] > innermost_ordinal)
-                {
-                    reads_safe = false;
-                }
-            }
-            if (!reads_safe)
-            {
-                continue;
-            }
-            selector.branch_fusions[instruction->operands[0].value] = (MachineA64BranchFusion){
-                .left = read_left,
-                .right = read_right,
-                .condition = (u8)condition,
-                .wide = wide,
-            };
-            for (u32 member_index = 0; member_index < absorbed_count; member_index += 1)
-            {
-                selector.fused_dead[absorbed_members[member_index]] = 1;
-            }
-            for (u32 zero_index = 0; zero_index < dead_zero_count; zero_index += 1)
-            {
-                selector.fused_dead[dead_zeros[zero_index]] = 1;
-            }
-        }
-    }
-    selector.virtual_register_count = selector.builder.virtual_registers.total_count;
-    selector.virtual_register_definitions = arena_allocate(arena, u32, selector.virtual_register_count);
-    if (selector.virtual_register_count)
-    {
-        memset(selector.virtual_register_definitions, 0xff,
-               sizeof(*selector.virtual_register_definitions) * selector.virtual_register_count);
-    }
-    u32 typed_instruction_count = 0;
-    u32 simd_operation_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        machine_builder_block_begin(&selector.builder);
-        u32 parameter_offset = selector.builder.block_parameters.total_count;
-        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
-        {
-            machine_builder_block_parameter(&selector.builder,
-                                            (MachineBlockParameter){.virtual_register = selector.value_virtual_registers[parameter->value.value]});
-        }
-        if (block_index == 0)
-        {
-            // Capture every incoming argument register at entry, before any
-            // body row can use an argument register as an operand scratch.
-            // Integer parts capture first because float captures scratch
-            // general registers; the vector file survives that pass
-            // untouched. The hidden result pointer arrives in X8, outside
-            // the argument registers.
-            if (selector.return_shape.indirect)
-            {
-                machine_a64_select_row(&selector, (MachineInstruction){
-                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.hidden_return_slot),
-                                                                   machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X8)},
-                                                      .opcode = MACHINE_A64_STORE_FRAME64,
-                                                  });
-            }
-            for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
-            {
-                bool float_pass = capture_pass == 1;
-                for (u32 argument_index = 0; argument_index < function_type->parameter_count; argument_index += 1)
-                {
-                    u32 argument_value = selector.argument_values[argument_index];
-                    if (argument_value == IR_ID_UNDERLYING_INVALID)
+                    // Truthiness terminal: CMP_ZERO's 64-bit compare is exact
+                    // because sub-64-bit values sit extended with clean upper
+                    // bits, matching the compare-against-zero it replaces.
+                    if (chain_value >= function->value_count ||
+                        !machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, function->values[chain_value].canonical_type)))
                     {
                         continue;
                     }
-                    MachineA64ValueShape* shape = selector.parameter_shapes + argument_index;
-                    MachineA64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
-                    u32 next_integer = parameter_placement->first_integer;
-                    u32 next_float = parameter_placement->first_float;
-                    if (shape->aggregate)
+                    read_left = chain_value;
+                    condition = MACHINE_A64_CONDITION_NOT_EQUAL ^ negate;
+                }
+                bool reads_safe = selector.value_virtual_registers[read_left] != UINT32_MAX &&
+                                  (read_right == UINT32_MAX || selector.value_virtual_registers[read_right] != UINT32_MAX);
+                for (u32 read_side = 0; read_side < 2 && reads_safe; read_side += 1)
+                {
+                    u32 read_value = read_side ? read_right : read_left;
+                    if (read_value == UINT32_MAX)
                     {
-                        u32 slot = selector.value_stack_slots[argument_value];
-                        if (slot == UINT32_MAX)
+                        continue;
+                    }
+                    u32 read_root = load_aliases[read_value];
+                    if (read_root != UINT32_MAX && local_store_ordinals[read_root] > innermost_ordinal)
+                    {
+                        reads_safe = false;
+                    }
+                }
+                if (!reads_safe)
+                {
+                    continue;
+                }
+                selector.branch_fusions[instruction->operands[0].value] = (MachineA64BranchFusion){
+                    .left = read_left,
+                    .right = read_right,
+                    .condition = (u8)condition,
+                    .wide = wide,
+                };
+                for (u32 member_index = 0; member_index < absorbed_count; member_index += 1)
+                {
+                    selector.fused_dead[absorbed_members[member_index]] = 1;
+                }
+                for (u32 zero_index = 0; zero_index < dead_zero_count; zero_index += 1)
+                {
+                    selector.fused_dead[dead_zeros[zero_index]] = 1;
+                }
+            }
+        }
+        selector.virtual_register_count = selector.builder.virtual_registers.total_count;
+        selector.virtual_register_definitions = arena_allocate(arena, u32, selector.virtual_register_count);
+        if (selector.virtual_register_count)
+        {
+            memset(selector.virtual_register_definitions, 0xff,
+                   sizeof(*selector.virtual_register_definitions) * selector.virtual_register_count);
+        }
+        u32 typed_instruction_count = 0;
+        u32 simd_operation_count = 0;
+        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        {
+            IrBlock* block = function->blocks + block_index;
+            machine_builder_block_begin(&selector.builder);
+            u32 parameter_offset = selector.builder.block_parameters.total_count;
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            {
+                machine_builder_block_parameter(&selector.builder,
+                                                (MachineBlockParameter){.virtual_register = selector.value_virtual_registers[parameter->value.value]});
+            }
+            if (block_index == 0)
+            {
+                // Capture every incoming argument register at entry, before any
+                // body row can use an argument register as an operand scratch.
+                // Integer parts capture first because float captures scratch
+                // general registers; the vector file survives that pass
+                // untouched. The hidden result pointer arrives in X8, outside
+                // the argument registers.
+                if (selector.return_shape.indirect)
+                {
+                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.hidden_return_slot),
+                                                                       machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X8)},
+                                                          .opcode = MACHINE_A64_STORE_FRAME64,
+                                                      });
+                }
+                for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
+                {
+                    bool float_pass = capture_pass == 1;
+                    for (u32 argument_index = 0; argument_index < function_type->parameter_count; argument_index += 1)
+                    {
+                        u32 argument_value = selector.argument_values[argument_index];
+                        if (argument_value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            continue;
+                        }
+                        MachineA64ValueShape* shape = selector.parameter_shapes + argument_index;
+                        MachineA64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
+                        u32 next_integer = parameter_placement->first_integer;
+                        u32 next_float = parameter_placement->first_float;
+                        if (shape->aggregate)
+                        {
+                            u32 slot = selector.value_stack_slots[argument_value];
+                            if (slot == UINT32_MAX)
+                            {
+                                machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                break;
+                            }
+                            for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                            {
+                                bool part_float = shape->part_is_float[part_index] != 0;
+                                u32 part_integer = next_integer;
+                                u32 part_float_register = next_float;
+                                next_integer += !part_float;
+                                next_float += part_float;
+                                if (part_float != float_pass)
+                                {
+                                    continue;
+                                }
+                                if (part_float)
+                                {
+                                    u32 bounce_register = machine_a64_synthesize_register(&selector);
+                                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                          .payload = part_float_register,
+                                                                          .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                                      });
+                                    machine_a64_select_row(&selector,
+                                                           (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                               .payload = shape->part_offsets[part_index],
+                                                               .opcode = (u16)(shape->part_sizes[part_index] == 4 ? MACHINE_A64_STORE_FRAME32
+                                                                                                                 : MACHINE_A64_STORE_FRAME64),
+                                                           });
+                                }
+                                else
+                                {
+                                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                       machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, part_integer)},
+                                                                          .payload = shape->part_offsets[part_index],
+                                                                          .opcode = MACHINE_A64_STORE_FRAME64,
+                                                                      });
+                                }
+                            }
+                            continue;
+                        }
+                        bool scalar_float = shape->part_is_float[0] != 0;
+                        if (scalar_float != float_pass)
+                        {
+                            continue;
+                        }
+                        u32 argument_register = selector.value_virtual_registers[argument_value];
+                        if (argument_register == UINT32_MAX)
                         {
                             machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
                             break;
                         }
-                        for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                        u32 row;
+                        if (scalar_float)
                         {
-                            bool part_float = shape->part_is_float[part_index] != 0;
-                            u32 part_integer = next_integer;
-                            u32 part_float_register = next_float;
-                            next_integer += !part_float;
-                            next_float += part_float;
-                            if (part_float != float_pass)
-                            {
-                                continue;
-                            }
-                            if (part_float)
-                            {
-                                u32 bounce_register = machine_a64_synthesize_register(&selector);
-                                machine_a64_select_row(&selector, (MachineInstruction){
-                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                                      .payload = part_float_register,
-                                                                      .opcode = MACHINE_A64_FMOV_FROM_VEC,
-                                                                  });
-                                machine_a64_select_row(&selector,
-                                                       (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
-                                                           .payload = shape->part_offsets[part_index],
-                                                           .opcode = (u16)(shape->part_sizes[part_index] == 4 ? MACHINE_A64_STORE_FRAME32
-                                                                                                             : MACHINE_A64_STORE_FRAME64),
-                                                       });
-                            }
-                            else
-                            {
-                                machine_a64_select_row(&selector, (MachineInstruction){
-                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                                                   machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, part_integer)},
-                                                                      .payload = shape->part_offsets[part_index],
-                                                                      .opcode = MACHINE_A64_STORE_FRAME64,
-                                                                  });
-                            }
+                            row = machine_a64_select_row(&selector, (MachineInstruction){
+                                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register)},
+                                                                        .payload = next_float,
+                                                                        .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                                    });
                         }
-                        continue;
+                        else
+                        {
+                            row = machine_a64_select_row(&selector, (MachineInstruction){
+                                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
+                                                                                     machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, next_integer)},
+                                                                        .opcode = MACHINE_A64_MOV_RR,
+                                                                    });
+                        }
+                        machine_a64_define(&selector, argument_register, row);
                     }
-                    bool scalar_float = shape->part_is_float[0] != 0;
-                    if (scalar_float != float_pass)
-                    {
-                        continue;
-                    }
-                    u32 argument_register = selector.value_virtual_registers[argument_value];
-                    if (argument_register == UINT32_MAX)
-                    {
-                        machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
-                        break;
-                    }
-                    u32 row;
-                    if (scalar_float)
-                    {
-                        row = machine_a64_select_row(&selector, (MachineInstruction){
-                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register)},
-                                                                    .payload = next_float,
-                                                                    .opcode = MACHINE_A64_FMOV_FROM_VEC,
-                                                                });
-                    }
-                    else
-                    {
-                        row = machine_a64_select_row(&selector, (MachineInstruction){
-                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
-                                                                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, next_integer)},
-                                                                    .opcode = MACHINE_A64_MOV_RR,
-                                                                });
-                    }
-                    machine_a64_define(&selector, argument_register, row);
                 }
             }
-        }
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID && selector.supported;
-             id = function->instructions[id.value].next)
-        {
-            IrInstruction* instruction = function->instructions + id.value;
-            typed_instruction_count += 1;
-            simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
-            IrSourceRange mark_source = ir_instruction_canonical_source(function, id);
-            if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID && selector.supported;
+                 id = function->instructions[id.value].next)
             {
-                MachineLineMark* mark = (MachineLineMark*)machine_stream_append(arena, &line_marks);
-                *mark = (MachineLineMark){
-                    .row = selector.builder.instructions.total_count,
-                    .source = mark_source.source.value,
-                    .offset = mark_source.offset,
-                };
-            }
-            if (!machine_a64_select_instruction(&selector, instruction))
-            {
-                machine_a64_reject(&selector, instruction->opcode);
-                break;
-            }
-        }
-        machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
-    }
-    if (!selector.supported)
-    {
-        result.failed_opcode = selector.failed_opcode;
-        return result;
-    }
-    for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
-    {
-        IrBlock* destination = function->blocks + destination_block;
-        for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
-        {
-            u32 copy_offset = selector.builder.edge_copy_sources.total_count;
-            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
-            {
-                IrIncoming* incoming = parameter->first_incoming;
-                while (incoming && incoming->predecessor.value != predecessor->block.value)
+                IrInstruction* instruction = function->instructions + id.value;
+                typed_instruction_count += 1;
+                simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
+                IrSourceRange mark_source = ir_instruction_canonical_source(function, id);
+                if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
                 {
-                    incoming = incoming->next;
+                    MachineLineMark* mark = (MachineLineMark*)machine_stream_append(arena, &line_marks);
+                    *mark = (MachineLineMark){
+                        .row = selector.builder.instructions.total_count,
+                        .source = mark_source.source.value,
+                        .offset = mark_source.offset,
+                    };
                 }
-                if (!incoming || incoming->value.value >= function->value_count || selector.value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                if (!machine_a64_select_instruction(&selector, instruction))
                 {
-                    return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+                    machine_a64_reject(&selector, instruction->opcode);
+                    break;
                 }
-                machine_builder_edge_copy_source(
-                    &selector.builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]));
             }
-            machine_builder_edge(&selector.builder,
-                                 (MachineEdge){.source_block = predecessor->block.value,
-                                               .destination_block = destination_block,
-                                               .copy_offset = copy_offset,
-                                               .copy_count = (u16)destination->parameter_count});
+            machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
         }
+        if (!selector.supported)
+        {
+            result.failed_opcode = selector.failed_opcode;
+            return result;
+        }
+        for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
+        {
+            IrBlock* destination = function->blocks + destination_block;
+            for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
+            {
+                u32 copy_offset = selector.builder.edge_copy_sources.total_count;
+                for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
+                {
+                    IrIncoming* incoming = parameter->first_incoming;
+                    while (incoming && incoming->predecessor.value != predecessor->block.value)
+                    {
+                        incoming = incoming->next;
+                    }
+                    if (!incoming || incoming->value.value >= function->value_count || selector.value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                    {
+                        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+                    }
+                    machine_builder_edge_copy_source(
+                        &selector.builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]));
+                }
+                machine_builder_edge(&selector.builder,
+                                     (MachineEdge){.source_block = predecessor->block.value,
+                                                   .destination_block = destination_block,
+                                                   .copy_offset = copy_offset,
+                                                   .copy_count = (u16)destination->parameter_count});
+            }
+        }
+        result.function = machine_function_builder_finish(arena, &selector.builder);
+        result.function.target = &machine_aarch64_description;
+        result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
+        result.function.immediate_count = selector.immediates.total_count;
+        machine_stream_flatten(&selector.immediates, result.function.immediates);
+        result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
+        result.function.stack_slot_count = selector.stack_slots.total_count;
+        machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
+        result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
+        machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
+        result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
+        result.function.call_target_count = selector.call_targets.total_count;
+        machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+        result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
+        result.function.line_mark_count = line_marks.total_count;
+        machine_stream_flatten(&line_marks, result.function.line_marks);
+        // Only classification vregs need their definition patched; synthesized
+        // temporaries carried their points from creation.
+        for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
+        {
+            result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
+        }
+        result.supported = true;
+        result.selector_certified = true;
+        result.returns_value = returns_value;
+        result.selected_typed_instructions = typed_instruction_count;
+        result.machine_instructions = result.function.instruction_count;
+        result.simd_operation_count = simd_operation_count;
+        result.selection_counters = selector.selection_counters;
     }
-    result.function = machine_function_builder_finish(arena, &selector.builder);
-    result.function.target = &machine_aarch64_description;
-    result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
-    result.function.immediate_count = selector.immediates.total_count;
-    machine_stream_flatten(&selector.immediates, result.function.immediates);
-    result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
-    result.function.stack_slot_count = selector.stack_slots.total_count;
-    machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
-    result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
-    machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
-    result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
-    result.function.call_target_count = selector.call_targets.total_count;
-    machine_stream_flatten(&selector.call_targets, result.function.call_targets);
-    result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
-    result.function.line_mark_count = line_marks.total_count;
-    machine_stream_flatten(&line_marks, result.function.line_marks);
-    // Only classification vregs need their definition patched; synthesized
-    // temporaries carried their points from creation.
-    for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
-    {
-        result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
-    }
-    result.supported = true;
-    result.selector_certified = true;
-    result.returns_value = returns_value;
-    result.selected_typed_instructions = typed_instruction_count;
-    result.machine_instructions = result.function.instruction_count;
-    result.simd_operation_count = simd_operation_count;
-    result.selection_counters = selector.selection_counters;
+
     return result;
 }
 
@@ -2989,47 +2989,47 @@ bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement
 u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 displacement)
 {
     A64Opcode opcode = (A64Opcode)opcode_value;
-    if ((u64)displacement & 3u)
+    if (!((u64)displacement & 3u))
     {
-        return UINT8_MAX;
-    }
-    u32 word = 0;
-    u32 patched = 0;
-    if (opcode == A64_OPCODE_B)
-    {
-        word = UINT32_C(0x14000000);
-        return a64_pc_relative_patch(opcode, word, displacement, &patched) ? 0u : 2u;
-    }
-    if (opcode == A64_OPCODE_B_COND && condition < 16u)
-    {
-        if (!a64_mc_encode(&(A64MCInst){
-                               .operands = {
-                                   {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
-                                   {.value = condition, .kind = A64_MC_OPERAND_IMMEDIATE},
+        u32 word = 0;
+        u32 patched = 0;
+        if (opcode == A64_OPCODE_B)
+        {
+            word = UINT32_C(0x14000000);
+            return a64_pc_relative_patch(opcode, word, displacement, &patched) ? 0u : 2u;
+        }
+        if (opcode == A64_OPCODE_B_COND && condition < 16u)
+        {
+            if (!a64_mc_encode(&(A64MCInst){
+                                   .operands = {
+                                       {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                                       {.value = condition, .kind = A64_MC_OPERAND_IMMEDIATE},
+                                   },
+                                   .opcode = A64_OPCODE_B_COND,
+                                   .operand_count = 2,
                                },
-                               .opcode = A64_OPCODE_B_COND,
-                               .operand_count = 2,
-                           },
-                           &word))
-        {
-            return UINT8_MAX;
+                               &word))
+            {
+                return UINT8_MAX;
+            }
+            if (a64_pc_relative_patch(A64_OPCODE_B_COND, word, displacement, &patched))
+            {
+                return 0u;
+            }
+            u32 inverse = 0;
+            if (!a64_condition_invert(condition, &inverse))
+            {
+                return UINT8_MAX;
+            }
+            if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
+            {
+                return 2u;
+            }
+            word = UINT32_C(0x14000000);
+            return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
         }
-        if (a64_pc_relative_patch(A64_OPCODE_B_COND, word, displacement, &patched))
-        {
-            return 0u;
-        }
-        u32 inverse = 0;
-        if (!a64_condition_invert(condition, &inverse))
-        {
-            return UINT8_MAX;
-        }
-        if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
-        {
-            return 2u;
-        }
-        word = UINT32_C(0x14000000);
-        return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
     }
+
     return UINT8_MAX;
 }
 

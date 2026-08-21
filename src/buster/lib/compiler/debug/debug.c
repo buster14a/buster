@@ -173,47 +173,47 @@ BUSTER_GLOBAL_LOCAL u32 debug_location_bucket(IrSymbolId symbol, u32 bucket_mask
 DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* locations, u32 location_count)
 {
     DebugLocationIndex result = {0};
-    if (!arena || !locations || !location_count)
+    if (arena && locations && location_count)
     {
-        return result;
+        u32 bucket_count = 1;
+        while (bucket_count < location_count && bucket_count < (1u << 30))
+        {
+            bucket_count <<= 1;
+        }
+        u32 bucket_mask = bucket_count - 1;
+        u32* bucket_ends = arena_allocate(arena, u32, bucket_count);
+        u32* order = arena_allocate(arena, u32, location_count);
+        if (!bucket_ends || !order)
+        {
+            return result;
+        }
+        memset(bucket_ends, 0, sizeof(u32) * bucket_count);
+        for (u32 index = 0; index < location_count; index += 1)
+        {
+            bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
+        }
+        u32 running = 0;
+        for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
+        {
+            u32 count = bucket_ends[bucket];
+            bucket_ends[bucket] = running;
+            running += count;
+        }
+        // Filling through the exclusive prefix sums advances every entry to its
+        // bucket's end offset, which is exactly what queries need.
+        for (u32 index = 0; index < location_count; index += 1)
+        {
+            order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
+        }
+        result = (DebugLocationIndex){
+            .locations = locations,
+            .bucket_ends = bucket_ends,
+            .order = order,
+            .bucket_count = bucket_count,
+            .location_count = location_count,
+        };
     }
-    u32 bucket_count = 1;
-    while (bucket_count < location_count && bucket_count < (1u << 30))
-    {
-        bucket_count <<= 1;
-    }
-    u32 bucket_mask = bucket_count - 1;
-    u32* bucket_ends = arena_allocate(arena, u32, bucket_count);
-    u32* order = arena_allocate(arena, u32, location_count);
-    if (!bucket_ends || !order)
-    {
-        return result;
-    }
-    memset(bucket_ends, 0, sizeof(u32) * bucket_count);
-    for (u32 index = 0; index < location_count; index += 1)
-    {
-        bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
-    }
-    u32 running = 0;
-    for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
-    {
-        u32 count = bucket_ends[bucket];
-        bucket_ends[bucket] = running;
-        running += count;
-    }
-    // Filling through the exclusive prefix sums advances every entry to its
-    // bucket's end offset, which is exactly what queries need.
-    for (u32 index = 0; index < location_count; index += 1)
-    {
-        order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
-    }
-    result = (DebugLocationIndex){
-        .locations = locations,
-        .bucket_ends = bucket_ends,
-        .order = order,
-        .bucket_count = bucket_count,
-        .location_count = location_count,
-    };
+
     return result;
 }
 
@@ -455,138 +455,137 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         .comp_dir = debug_string(arena, input.comp_dir),
         .root_scope = DEBUG_SCOPE_INVALID,
     };
-    if (!arena || !input.program || (input.function_count && !input.functions))
+    if (arena && input.program && (!input.function_count || input.functions))
     {
-        return result;
-    }
-
-    DebugLocationIndex location_index = {0};
-    if (!input.location_index)
-    {
-        location_index = debug_location_index_build(arena, input.locations, input.location_count);
-        input.location_index = &location_index;
-    }
-
-    result.type_count = input.program->types.count;
-    result.function_count = input.function_count;
-    result.inline_site_count = input.inline_site_count;
-
-    u32 variable_capacity = 1;
-    if (input.module)
-    {
-        variable_capacity = input.module->global_count + 1;
-        for (u32 function_index = 0; function_index < input.module->function_count; function_index += 1)
+        DebugLocationIndex location_index = {0};
+        if (!input.location_index)
         {
-            variable_capacity += input.module->functions[function_index].debug_local_count;
+            location_index = debug_location_index_build(arena, input.locations, input.location_count);
+            input.location_index = &location_index;
         }
-    }
-    u32 scope_capacity = input.function_count + variable_capacity + 1;
-    result.types = result.type_count ? arena_allocate(arena, DebugType, result.type_count) : 0;
-    result.functions = input.function_count ? arena_allocate(arena, DebugFunction, input.function_count) : 0;
-    result.scopes = arena_allocate(arena, DebugScope, scope_capacity ? scope_capacity : 1);
-    result.variables = arena_allocate(arena, DebugVariable, variable_capacity ? variable_capacity : 1);
-    result.inline_sites = input.inline_site_count ? arena_allocate(arena, DebugInlineSite, input.inline_site_count) : 0;
-    debug_model_fill_sources(arena, &result, &input);
 
-    DebugSourceLocation root_declaration = {
-        .source = 0,
-        .line = 1,
-        .column = 1,
-    };
-    u32 root_variable_capacity = input.module ? input.module->global_count + 1 : variable_capacity;
-    result.root_scope = debug_scope_add(arena, &result, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_LEXICAL, root_declaration, 0, 1, root_variable_capacity);
+        result.type_count = input.program->types.count;
+        result.function_count = input.function_count;
+        result.inline_site_count = input.inline_site_count;
 
-    for (u32 type_index = 0; type_index < result.type_count; type_index += 1)
-    {
-        debug_fill_ir_type(arena, &result, input.program, input.program->types.types + type_index, result.types + type_index);
-    }
-
-    for (u32 symbol_index = 0; symbol_index < input.program->symbols.count; symbol_index += 1)
-    {
-        IrSymbol* symbol = input.program->symbols.symbols + symbol_index;
-        if (symbol->kind == IR_SYMBOL_TYPE && symbol->type.value < result.type_count)
+        u32 variable_capacity = 1;
+        if (input.module)
         {
-            result.types[symbol->type.value].declaration = debug_source_from_ir(arena, input.program, symbol->source);
-            result.types[symbol->type.value].declaration_name = debug_string(arena, symbol->name);
-            if (!result.types[symbol->type.value].name.length)
+            variable_capacity = input.module->global_count + 1;
+            for (u32 function_index = 0; function_index < input.module->function_count; function_index += 1)
             {
-                result.types[symbol->type.value].name = debug_string(arena, symbol->name);
+                variable_capacity += input.module->functions[function_index].debug_local_count;
             }
         }
-    }
+        u32 scope_capacity = input.function_count + variable_capacity + 1;
+        result.types = result.type_count ? arena_allocate(arena, DebugType, result.type_count) : 0;
+        result.functions = input.function_count ? arena_allocate(arena, DebugFunction, input.function_count) : 0;
+        result.scopes = arena_allocate(arena, DebugScope, scope_capacity ? scope_capacity : 1);
+        result.variables = arena_allocate(arena, DebugVariable, variable_capacity ? variable_capacity : 1);
+        result.inline_sites = input.inline_site_count ? arena_allocate(arena, DebugInlineSite, input.inline_site_count) : 0;
+        debug_model_fill_sources(arena, &result, &input);
 
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        DebugFunctionSeed* seed = input.functions + function_index;
-        DebugFunction* function = result.functions + function_index;
-        DebugSourceLocation declaration = debug_function_declaration(arena, &input, seed);
-        IrTypeId canonical_type = IR_TYPE_ID_INVALID;
-        if (seed->symbol.value < input.program->symbols.count)
-        {
-            canonical_type = input.program->symbols.symbols[seed->symbol.value].type;
-        }
-        *function = (DebugFunction){
-            .name = debug_string(arena, seed->name),
-            .declaration = declaration,
-            .symbol = seed->symbol,
-            .type = debug_canonical_type_id(&result, canonical_type),
-            .code_offset = seed->code_offset,
-            .code_size = seed->code_size,
-            .variable_start = result.variable_count,
+        DebugSourceLocation root_declaration = {
+            .source = 0,
+            .line = 1,
+            .column = 1,
         };
-        if (!function->name.length && declaration.source < result.source_count)
+        u32 root_variable_capacity = input.module ? input.module->global_count + 1 : variable_capacity;
+        result.root_scope = debug_scope_add(arena, &result, DEBUG_SCOPE_INVALID, DEBUG_SCOPE_LEXICAL, root_declaration, 0, 1, root_variable_capacity);
+
+        for (u32 type_index = 0; type_index < result.type_count; type_index += 1)
         {
-            function->name = result.source_paths[declaration.source];
+            debug_fill_ir_type(arena, &result, input.program, input.program->types.types + type_index, result.types + type_index);
         }
-        u32 function_variable_capacity = 1;
-        if (input.module && function_index < input.module->function_count)
+
+        for (u32 symbol_index = 0; symbol_index < input.program->symbols.count; symbol_index += 1)
         {
-            function_variable_capacity = input.module->functions[function_index].debug_local_count;
-            if (!function_variable_capacity)
+            IrSymbol* symbol = input.program->symbols.symbols + symbol_index;
+            if (symbol->kind == IR_SYMBOL_TYPE && symbol->type.value < result.type_count)
             {
-                function_variable_capacity = 1;
+                result.types[symbol->type.value].declaration = debug_source_from_ir(arena, input.program, symbol->source);
+                result.types[symbol->type.value].declaration_name = debug_string(arena, symbol->name);
+                if (!result.types[symbol->type.value].name.length)
+                {
+                    result.types[symbol->type.value].name = debug_string(arena, symbol->name);
+                }
             }
         }
-        function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
-                                          function->code_offset + function->code_size, function_variable_capacity);
-        if (input.module && function_index < input.module->function_count)
-        {
-            debug_add_canonical_locals(arena, &result, &input, function, seed, input.module->functions + function_index, scope_capacity,
-                                       function_variable_capacity);
-        }
-    }
-    debug_add_canonical_globals(arena, &result, &input, variable_capacity);
 
-    for (u32 inline_index = 0; inline_index < input.inline_site_count; inline_index += 1)
-    {
-        DebugInlineSeed* seed = input.inline_sites + inline_index;
-        DebugInlineSite* site = result.inline_sites + inline_index;
-        *site = (DebugInlineSite){
-            .function = seed->function_index < result.function_count ? result.functions + seed->function_index : 0,
-            .parent = seed->parent_index < result.inline_site_count && seed->parent_index != UINT32_MAX ? result.inline_sites + seed->parent_index : 0,
-            .call_site = seed->call_site,
-            .start = seed->start,
-            .end = seed->end,
-            .has_ranges = seed->end > seed->start,
-        };
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
+        {
+            DebugFunctionSeed* seed = input.functions + function_index;
+            DebugFunction* function = result.functions + function_index;
+            DebugSourceLocation declaration = debug_function_declaration(arena, &input, seed);
+            IrTypeId canonical_type = IR_TYPE_ID_INVALID;
+            if (seed->symbol.value < input.program->symbols.count)
+            {
+                canonical_type = input.program->symbols.symbols[seed->symbol.value].type;
+            }
+            *function = (DebugFunction){
+                .name = debug_string(arena, seed->name),
+                .declaration = declaration,
+                .symbol = seed->symbol,
+                .type = debug_canonical_type_id(&result, canonical_type),
+                .code_offset = seed->code_offset,
+                .code_size = seed->code_size,
+                .variable_start = result.variable_count,
+            };
+            if (!function->name.length && declaration.source < result.source_count)
+            {
+                function->name = result.source_paths[declaration.source];
+            }
+            u32 function_variable_capacity = 1;
+            if (input.module && function_index < input.module->function_count)
+            {
+                function_variable_capacity = input.module->functions[function_index].debug_local_count;
+                if (!function_variable_capacity)
+                {
+                    function_variable_capacity = 1;
+                }
+            }
+            function->scope = debug_scope_add(arena, &result, result.root_scope, DEBUG_SCOPE_FUNCTION, declaration, function->code_offset,
+                                              function->code_offset + function->code_size, function_variable_capacity);
+            if (input.module && function_index < input.module->function_count)
+            {
+                debug_add_canonical_locals(arena, &result, &input, function, seed, input.module->functions + function_index, scope_capacity,
+                                           function_variable_capacity);
+            }
+        }
+        debug_add_canonical_globals(arena, &result, &input, variable_capacity);
+
+        for (u32 inline_index = 0; inline_index < input.inline_site_count; inline_index += 1)
+        {
+            DebugInlineSeed* seed = input.inline_sites + inline_index;
+            DebugInlineSite* site = result.inline_sites + inline_index;
+            *site = (DebugInlineSite){
+                .function = seed->function_index < result.function_count ? result.functions + seed->function_index : 0,
+                .parent = seed->parent_index < result.inline_site_count && seed->parent_index != UINT32_MAX ? result.inline_sites + seed->parent_index : 0,
+                .call_site = seed->call_site,
+                .start = seed->start,
+                .end = seed->end,
+                .has_ranges = seed->end > seed->start,
+            };
+        }
+        result.valid = true;
     }
-    result.valid = true;
+
     return result;
 }
 
 DebugTypeId debug_model_find_canonical_type(DebugModel* model, IrTypeId type)
 {
-    if (!model)
+    if (model)
     {
-        return DEBUG_ID_INVALID;
-    }
-    for (u32 index = 0; index < model->type_count; index += 1)
-    {
-        if (model->types[index].canonical_type.value == type.value)
+        for (u32 index = 0; index < model->type_count; index += 1)
         {
-            return index;
+            if (model->types[index].canonical_type.value == type.value)
+            {
+                return index;
+            }
         }
     }
+
     return DEBUG_ID_INVALID;
 }
 

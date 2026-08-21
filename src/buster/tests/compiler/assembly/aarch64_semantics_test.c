@@ -16,14 +16,17 @@ static bool a64_semantic_string_is(BusterA64SemanticString actual, String8 expec
 
 static bool a64_semantic_string_contains(BusterA64SemanticString actual, String8 needle)
 {
-    if (needle.length > actual.length) return false;
-    for (u32 start = 0; start + needle.length <= actual.length; start += 1)
+    if (needle.length <= actual.length)
     {
-        bool equal = true;
-        for (u32 index = 0; index < needle.length; index += 1)
-            if (buster_a64_semantic_string_byte(actual, start + index) != needle.pointer[index]) equal = false;
-        if (equal) return true;
+        for (u32 start = 0; start + needle.length <= actual.length; start += 1)
+        {
+            bool equal = true;
+            for (u32 index = 0; index < needle.length; index += 1)
+                if (buster_a64_semantic_string_byte(actual, start + index) != needle.pointer[index]) equal = false;
+            if (equal) return true;
+        }
     }
+
     return false;
 }
 

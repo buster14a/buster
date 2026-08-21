@@ -326,38 +326,38 @@ static bool buster_a64_direct_simd_member_offset(BusterA64SemanticString symbol,
             break;
         }
     }
-    if (plus == UINT32_MAX)
+    if (plus != UINT32_MAX)
     {
-        return true;
-    }
-    if (plus + 1 >= symbol.length)
-    {
-        return false;
-    }
-    u32 end = symbol.length;
-    if (end != 0 && buster_a64_semantic_string_byte(symbol, end - 1) == '>')
-    {
-        end -= 1;
-    }
-    if (plus + 1 >= end)
-    {
-        return false;
-    }
-    u32 value = 0;
-    for (u32 index = plus + 1; index < end; index += 1)
-    {
-        char8 digit = buster_a64_semantic_string_byte(symbol, index);
-        if (digit < '0' || digit > '9')
+        if (plus + 1 >= symbol.length)
         {
             return false;
         }
-        value = value * 10u + (u32)(digit - '0');
+        u32 end = symbol.length;
+        if (end != 0 && buster_a64_semantic_string_byte(symbol, end - 1) == '>')
+        {
+            end -= 1;
+        }
+        if (plus + 1 >= end)
+        {
+            return false;
+        }
+        u32 value = 0;
+        for (u32 index = plus + 1; index < end; index += 1)
+        {
+            char8 digit = buster_a64_semantic_string_byte(symbol, index);
+            if (digit < '0' || digit > '9')
+            {
+                return false;
+            }
+            value = value * 10u + (u32)(digit - '0');
+        }
+        if (value > 31)
+        {
+            return false;
+        }
+        *offset = value;
     }
-    if (value > 31)
-    {
-        return false;
-    }
-    *offset = value;
+
     return true;
 }
 
@@ -505,18 +505,18 @@ bool buster_a64_direct_simd_arrangement_binding(u32 row_index, u32 operand_index
 
 bool buster_a64_direct_simd_arrangement_from_string(String8 text, BusterA64DirectSIMDArrangement* result)
 {
-    if (!result)
+    if (result)
     {
-        return false;
-    }
-    for (u32 index = 1; index < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT; index += 1)
-    {
-        if (buster_a64_direct_simd_string_equal(text, buster_a64_direct_simd_arrangement_text((BusterA64DirectSIMDArrangement)index)))
+        for (u32 index = 1; index < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT; index += 1)
         {
-            *result = (BusterA64DirectSIMDArrangement)index;
-            return true;
+            if (buster_a64_direct_simd_string_equal(text, buster_a64_direct_simd_arrangement_text((BusterA64DirectSIMDArrangement)index)))
+            {
+                *result = (BusterA64DirectSIMDArrangement)index;
+                return true;
+            }
         }
     }
+
     return false;
 }
 

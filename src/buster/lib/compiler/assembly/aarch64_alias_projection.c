@@ -57,20 +57,20 @@ static bool alias_form(u32 form_id, BusterA64SemanticForm* result)
 
 static bool alias_row_for_form(u32 form_id, u32* ordinal, BusterA64AliasGeneratedRow const** result)
 {
-    if (!ordinal || !result)
+    if (ordinal && result)
     {
-        return false;
-    }
-    for (u32 index = 0; index < BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT; index += 1)
-    {
-        BusterA64AliasGeneratedRow const* row = 0;
-        if (alias_row_generated(index, &row) && row->alias_form_index == form_id)
+        for (u32 index = 0; index < BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT; index += 1)
         {
-            *ordinal = index;
-            *result = row;
-            return true;
+            BusterA64AliasGeneratedRow const* row = 0;
+            if (alias_row_generated(index, &row) && row->alias_form_index == form_id)
+            {
+                *ordinal = index;
+                *result = row;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -102,19 +102,19 @@ static bool alias_field_name_equal(BusterA64SemanticString left, String8 right)
 
 static bool alias_find_field(BusterA64SemanticForm form, String8 name, u32* local)
 {
-    if (!local)
+    if (local)
     {
-        return false;
-    }
-    for (u32 index = 0; index < form.field_count; index += 1)
-    {
-        BusterA64SemanticField field = {0};
-        if (buster_a64_semantic_field(form.field_first + index, &field) && alias_field_name_equal(field.name, name))
+        for (u32 index = 0; index < form.field_count; index += 1)
         {
-            *local = index;
-            return true;
+            BusterA64SemanticField field = {0};
+            if (buster_a64_semantic_field(form.field_first + index, &field) && alias_field_name_equal(field.name, name))
+            {
+                *local = index;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -402,48 +402,48 @@ static bool alias_pattern(String8 token, u32* value, u32* mask)
 static bool alias_token_value(BusterA64SemanticForm alias_form, BusterA64SemanticForm target_form, u32 const* alias_fields, u32 const* target_fields,
                               String8 token, u32* value, u32* mask)
 {
-    if (!value || !mask || !token.pointer)
+    if (value && mask && token.pointer)
     {
-        return false;
-    }
-    if (alias_pattern(token, value, mask))
-    {
-        return true;
-    }
-    u32 local = 0;
-    if (alias_find_field(alias_form, token, &local))
-    {
-        BusterA64SemanticField field = {0};
-        if (!buster_a64_semantic_field(alias_form.field_first + local, &field))
+        if (alias_pattern(token, value, mask))
         {
-            return false;
+            return true;
         }
-        *value = alias_fields[local];
-        *mask = alias_width_mask(field.width);
-        return true;
-    }
-    if (alias_find_field(target_form, token, &local))
-    {
-        BusterA64SemanticField field = {0};
-        if (!buster_a64_semantic_field(target_form.field_first + local, &field))
+        u32 local = 0;
+        if (alias_find_field(alias_form, token, &local))
         {
-            return false;
+            BusterA64SemanticField field = {0};
+            if (!buster_a64_semantic_field(alias_form.field_first + local, &field))
+            {
+                return false;
+            }
+            *value = alias_fields[local];
+            *mask = alias_width_mask(field.width);
+            return true;
         }
-        *value = target_fields[local];
-        *mask = alias_width_mask(field.width);
-        return true;
+        if (alias_find_field(target_form, token, &local))
+        {
+            BusterA64SemanticField field = {0};
+            if (!buster_a64_semantic_field(target_form.field_first + local, &field))
+            {
+                return false;
+            }
+            *value = target_fields[local];
+            *mask = alias_width_mask(field.width);
+            return true;
+        }
+        /* Some Arm alias predicates refer to constraint symbols rather than raw
+         * fields (for example the atomic-memory A bit).  The canonical raw
+         * decoder has already validated those constraints before predicate
+         * evaluation; expose the only bounded constraint symbol used by the
+         * executable alias subset as its fixed zero value. */
+        if (alias_string_equal(token, S8("A")))
+        {
+            *value = 0;
+            *mask = 1;
+            return true;
+        }
     }
-    /* Some Arm alias predicates refer to constraint symbols rather than raw
-     * fields (for example the atomic-memory A bit).  The canonical raw
-     * decoder has already validated those constraints before predicate
-     * evaluation; expose the only bounded constraint symbol used by the
-     * executable alias subset as its fixed zero value. */
-    if (alias_string_equal(token, S8("A")))
-    {
-        *value = 0;
-        *mask = 1;
-        return true;
-    }
+
     return false;
 }
 
@@ -587,94 +587,94 @@ static bool alias_eval_program(u32 form_id, u32 word, bool preference, bool* sup
     {
         return false;
     }
-    if (!alias_program_syntax_supported(form_id, preference))
+    if (alias_program_syntax_supported(form_id, preference))
     {
-        return true;
-    }
-    BusterA64SemanticForm target_form = {0};
-    BusterA64AliasRowInfo info = {0};
-    if (!buster_a64_alias_row_by_form(form_id, &info) || !buster_a64_semantic_form(info.target_form_id, &target_form))
-    {
-        return false;
-    }
-    u32 alias_values[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
-    u32 target_values[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
-    u32 target_canonical_index = 0;
-    if (alias_semantic_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS || target_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS ||
-        !alias_canonical_index(info.target_source_digest, &target_canonical_index, 0) ||
-        !buster_aarch64_canonical_raw_decode(target_canonical_index, word, target_values, target_form.field_count))
-    {
-        return false;
-    }
-    for (u32 index = 0; index < alias_semantic_form.field_count; index += 1)
-    {
-        if (!alias_field_value_from_word(alias_semantic_form, index, word, &alias_values[index]))
+        BusterA64SemanticForm target_form = {0};
+        BusterA64AliasRowInfo info = {0};
+        if (!buster_a64_alias_row_by_form(form_id, &info) || !buster_a64_semantic_form(info.target_form_id, &target_form))
         {
             return false;
         }
-    }
-    u32 token_count = preference ? alias.preference_condition_count : alias.condition_count;
-    if (token_count == 0)
-    {
+        u32 alias_values[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
+        u32 target_values[BUSTER_A64_ALIAS_MAX_FIELDS] = {0};
+        u32 target_canonical_index = 0;
+        if (alias_semantic_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS || target_form.field_count > BUSTER_A64_ALIAS_MAX_FIELDS ||
+            !alias_canonical_index(info.target_source_digest, &target_canonical_index, 0) ||
+            !buster_aarch64_canonical_raw_decode(target_canonical_index, word, target_values, target_form.field_count))
+        {
+            return false;
+        }
+        for (u32 index = 0; index < alias_semantic_form.field_count; index += 1)
+        {
+            if (!alias_field_value_from_word(alias_semantic_form, index, word, &alias_values[index]))
+            {
+                return false;
+            }
+        }
+        u32 token_count = preference ? alias.preference_condition_count : alias.condition_count;
+        if (token_count == 0)
+        {
+            *supported = true;
+            *result = true;
+            return true;
+        }
+        if (token_count == 1)
+        {
+            char8 token_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            String8 token = {0};
+            if (!alias_program_token(form_id, preference, 0, token_storage, sizeof(token_storage), &token))
+            {
+                return false;
+            }
+            *supported = true;
+            *result = alias_string_equal(token, S8("Unconditionally"));
+            return true;
+        }
+        bool expression = true;
+        u32 index = 0;
+        while (index < token_count)
+        {
+            char8 lhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 operator_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 rhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 brace_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            char8 close_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            String8 lhs = {0}, operator = {0}, rhs = {0};
+            u32 atom_length = 0;
+            if (!alias_program_atom_tokens(form_id, preference, index, token_count, lhs_storage, operator_storage, rhs_storage, brace_storage, close_storage,
+                                           &lhs, &operator, &rhs, &atom_length))
+            {
+                return false;
+            }
+            u32 lhs_value = 0, lhs_mask = 0, rhs_value = 0, rhs_mask = 0;
+            if (!alias_token_value(alias_semantic_form, target_form, alias_values, target_values, lhs, &lhs_value, &lhs_mask) ||
+                !alias_token_value(alias_semantic_form, target_form, alias_values, target_values, rhs, &rhs_value, &rhs_mask))
+            {
+                return false;
+            }
+            bool equal = ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0 && ((lhs_mask & rhs_mask) != 0);
+            bool atom_result = alias_string_equal(operator, S8("==")) ? equal :
+                               alias_string_equal(operator, S8("!=")) ? !equal :
+                               ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0;
+            expression = expression && atom_result;
+            index += atom_length;
+            if (index == token_count)
+            {
+                break;
+            }
+            char8 conjunction_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
+            String8 conjunction = {0};
+            if (!alias_program_token(form_id, preference, index, conjunction_storage, sizeof(conjunction_storage), &conjunction) ||
+                !alias_string_equal(conjunction, S8("&&")))
+            {
+                return false;
+            }
+            index += 1;
+        }
         *supported = true;
-        *result = true;
-        return true;
+        *result = expression;
     }
-    if (token_count == 1)
-    {
-        char8 token_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        String8 token = {0};
-        if (!alias_program_token(form_id, preference, 0, token_storage, sizeof(token_storage), &token))
-        {
-            return false;
-        }
-        *supported = true;
-        *result = alias_string_equal(token, S8("Unconditionally"));
-        return true;
-    }
-    bool expression = true;
-    u32 index = 0;
-    while (index < token_count)
-    {
-        char8 lhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 operator_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 rhs_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 brace_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        char8 close_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        String8 lhs = {0}, operator = {0}, rhs = {0};
-        u32 atom_length = 0;
-        if (!alias_program_atom_tokens(form_id, preference, index, token_count, lhs_storage, operator_storage, rhs_storage, brace_storage, close_storage,
-                                       &lhs, &operator, &rhs, &atom_length))
-        {
-            return false;
-        }
-        u32 lhs_value = 0, lhs_mask = 0, rhs_value = 0, rhs_mask = 0;
-        if (!alias_token_value(alias_semantic_form, target_form, alias_values, target_values, lhs, &lhs_value, &lhs_mask) ||
-            !alias_token_value(alias_semantic_form, target_form, alias_values, target_values, rhs, &rhs_value, &rhs_mask))
-        {
-            return false;
-        }
-        bool equal = ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0 && ((lhs_mask & rhs_mask) != 0);
-        bool atom_result = alias_string_equal(operator, S8("==")) ? equal :
-                           alias_string_equal(operator, S8("!=")) ? !equal :
-                           ((lhs_value ^ rhs_value) & lhs_mask & rhs_mask) == 0;
-        expression = expression && atom_result;
-        index += atom_length;
-        if (index == token_count)
-        {
-            break;
-        }
-        char8 conjunction_storage[BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS] = {0};
-        String8 conjunction = {0};
-        if (!alias_program_token(form_id, preference, index, conjunction_storage, sizeof(conjunction_storage), &conjunction) ||
-            !alias_string_equal(conjunction, S8("&&")))
-        {
-            return false;
-        }
-        index += 1;
-    }
-    *supported = true;
-    *result = expression;
+
     return true;
 }
 
@@ -738,24 +738,24 @@ bool buster_a64_alias_row_by_form(u32 alias_form_id, BusterA64AliasRowInfo* resu
 
 bool buster_a64_alias_find(String8 id, u32 ordinal, u32* alias_form_id)
 {
-    if (!alias_form_id)
+    if (alias_form_id)
     {
-        return false;
-    }
-    u32 seen = 0;
-    for (u32 index = 0; index < BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT; index += 1)
-    {
-        BusterA64AliasRowInfo row = {0};
-        if (buster_a64_alias_row(index, &row) && alias_string_equal(row.alias_id, id))
+        u32 seen = 0;
+        for (u32 index = 0; index < BUSTER_A64_ALIAS_PROJECTION_ALIAS_COUNT; index += 1)
         {
-            if (seen == ordinal)
+            BusterA64AliasRowInfo row = {0};
+            if (buster_a64_alias_row(index, &row) && alias_string_equal(row.alias_id, id))
             {
-                *alias_form_id = row.alias_form_id;
-                return true;
+                if (seen == ordinal)
+                {
+                    *alias_form_id = row.alias_form_id;
+                    return true;
+                }
+                seen += 1;
             }
-            seen += 1;
         }
     }
+
     return false;
 }
 

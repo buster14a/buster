@@ -861,45 +861,45 @@ BUSTER_GLOBAL_LOCAL bool vulkan_blur_images_ensure(RenderingHandle* rendering, R
 
 BUSTER_GLOBAL_LOCAL bool vulkan_blur_descriptor_sets_update(RenderingHandle* rendering, RenderingWindowHandle* window, WindowFrame* frame)
 {
-    if (frame->blur_descriptor_valid)
+    if (!frame->blur_descriptor_valid)
     {
-        return true;
-    }
-    if (!window->blur_source.view || !window->blur_horizontal.view || !rendering->blur_sampler)
-    {
-        return false;
-    }
-    VkDescriptorImageInfo source_descriptor = {
-        .sampler = rendering->blur_sampler,
-        .imageView = window->blur_source.view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    VkDescriptorImageInfo horizontal_descriptor = source_descriptor;
-    horizontal_descriptor.imageView = window->blur_horizontal.view;
-    VkWriteDescriptorSet writes[2] = {
+        if (!window->blur_source.view || !window->blur_horizontal.view || !rendering->blur_sampler)
         {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = frame->blur_descriptor_sets[0],
-            .dstBinding = 0,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &source_descriptor,
-        },
+            return false;
+        }
+        VkDescriptorImageInfo source_descriptor = {
+            .sampler = rendering->blur_sampler,
+            .imageView = window->blur_source.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkDescriptorImageInfo horizontal_descriptor = source_descriptor;
+        horizontal_descriptor.imageView = window->blur_horizontal.view;
+        VkWriteDescriptorSet writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = frame->blur_descriptor_sets[0],
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &source_descriptor,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = frame->blur_descriptor_sets[1],
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &horizontal_descriptor,
+            },
+        };
+        if (!writes[0].dstSet || !writes[1].dstSet || writes[0].dstSet == writes[1].dstSet)
         {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = frame->blur_descriptor_sets[1],
-            .dstBinding = 0,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &horizontal_descriptor,
-        },
-    };
-    if (!writes[0].dstSet || !writes[1].dstSet || writes[0].dstSet == writes[1].dstSet)
-    {
-        return false;
+            return false;
+        }
+        vkUpdateDescriptorSets(rendering->device, BUSTER_ARRAY_LENGTH(writes), writes, 0, 0);
+        frame->blur_descriptor_valid = true;
     }
-    vkUpdateDescriptorSets(rendering->device, BUSTER_ARRAY_LENGTH(writes), writes, 0, 0);
-    frame->blur_descriptor_valid = true;
+
     return true;
 }
 
@@ -1115,104 +1115,102 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_device_extensions(Arena* arena, VkPhys
 BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_surface_formats(Arena* arena, VkPhysicalDevice physical_device, VkSurfaceKHR surface,
                                                           VkSurfaceFormatKHR** formats_out, u32* count_out)
 {
-    if (!vkGetPhysicalDeviceSurfaceFormatsKHR)
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR)
     {
-        return false;
-    }
-
-    u32 capacity = 0;
-    VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &capacity, 0);
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
-    {
-        return false;
-    }
-    if (capacity == 0)
-    {
-        *formats_out = 0;
-        *count_out = 0;
-        return true;
-    }
-
-    for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
-    {
-        VkSurfaceFormatKHR* formats = arena_allocate(arena, VkSurfaceFormatKHR, capacity);
-        u32 reported_count = capacity;
-        result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &reported_count, formats);
-        if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
-        {
-            *formats_out = formats;
-            *count_out = reported_count;
-            return true;
-        }
+        u32 capacity = 0;
+        VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &capacity, 0);
         if (result != VK_SUCCESS && result != VK_INCOMPLETE)
         {
             return false;
         }
-        if (reported_count > capacity)
+        if (capacity == 0)
         {
-            capacity = reported_count;
+            *formats_out = 0;
+            *count_out = 0;
+            return true;
         }
-        else if (capacity <= UINT32_MAX / 2)
+
+        for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
         {
-            capacity *= 2;
-        }
-        else
-        {
-            return false;
+            VkSurfaceFormatKHR* formats = arena_allocate(arena, VkSurfaceFormatKHR, capacity);
+            u32 reported_count = capacity;
+            result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &reported_count, formats);
+            if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+            {
+                *formats_out = formats;
+                *count_out = reported_count;
+                return true;
+            }
+            if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+            {
+                return false;
+            }
+            if (reported_count > capacity)
+            {
+                capacity = reported_count;
+            }
+            else if (capacity <= UINT32_MAX / 2)
+            {
+                capacity *= 2;
+            }
+            else
+            {
+                return false;
+            }
         }
     }
+
     return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_present_modes(Arena* arena, VkPhysicalDevice physical_device, VkSurfaceKHR surface, VkPresentModeKHR** modes_out,
                                                         u32* count_out)
 {
-    if (!vkGetPhysicalDeviceSurfacePresentModesKHR)
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR)
     {
-        return false;
-    }
-
-    u32 capacity = 0;
-    VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &capacity, 0);
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
-    {
-        return false;
-    }
-    if (capacity == 0)
-    {
-        *modes_out = 0;
-        *count_out = 0;
-        return true;
-    }
-
-    for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
-    {
-        VkPresentModeKHR* modes = arena_allocate(arena, VkPresentModeKHR, capacity);
-        u32 reported_count = capacity;
-        result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &reported_count, modes);
-        if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
-        {
-            *modes_out = modes;
-            *count_out = reported_count;
-            return true;
-        }
+        u32 capacity = 0;
+        VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &capacity, 0);
         if (result != VK_SUCCESS && result != VK_INCOMPLETE)
         {
             return false;
         }
-        if (reported_count > capacity)
+        if (capacity == 0)
         {
-            capacity = reported_count;
+            *modes_out = 0;
+            *count_out = 0;
+            return true;
         }
-        else if (capacity <= UINT32_MAX / 2)
+
+        for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
         {
-            capacity *= 2;
-        }
-        else
-        {
-            return false;
+            VkPresentModeKHR* modes = arena_allocate(arena, VkPresentModeKHR, capacity);
+            u32 reported_count = capacity;
+            result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &reported_count, modes);
+            if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+            {
+                *modes_out = modes;
+                *count_out = reported_count;
+                return true;
+            }
+            if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+            {
+                return false;
+            }
+            if (reported_count > capacity)
+            {
+                capacity = reported_count;
+            }
+            else if (capacity <= UINT32_MAX / 2)
+            {
+                capacity *= 2;
+            }
+            else
+            {
+                return false;
+            }
         }
     }
+
     return false;
 }
 
@@ -1332,21 +1330,21 @@ BUSTER_GLOBAL_LOCAL bool vulkan_choose_surface_format(VkSurfaceFormatKHR* format
 
 BUSTER_GLOBAL_LOCAL bool vulkan_surface_format_is_compatible(VkSurfaceFormatKHR* formats, u32 count, VkFormat format, VkColorSpaceKHR color_space)
 {
-    if (!formats || count == 0)
+    if (formats && count != 0)
     {
-        return false;
-    }
-    if (formats[0].format == VK_FORMAT_UNDEFINED)
-    {
-        return rendering_vulkan_surface_format_sentinel_is_compatible((u32)formats[0].colorSpace, (u32)color_space);
-    }
-    for (u32 i = 0; i < count; i += 1)
-    {
-        if (formats[i].format == format && formats[i].colorSpace == color_space)
+        if (formats[0].format == VK_FORMAT_UNDEFINED)
         {
-            return true;
+            return rendering_vulkan_surface_format_sentinel_is_compatible((u32)formats[0].colorSpace, (u32)color_space);
+        }
+        for (u32 i = 0; i < count; i += 1)
+        {
+            if (formats[i].format == format && formats[i].colorSpace == color_space)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 

@@ -842,35 +842,34 @@ BUSTER_GLOBAL_LOCAL bool metal_blur_resources_ensure(RenderingHandle* rendering,
     }
     u32 half_width = dimensions.half_width;
     u32 half_height = dimensions.half_height;
-    if (frame->blur_source && frame->blur_horizontal && frame->blur_width == half_width && frame->blur_height == half_height)
+    if (!frame->blur_source || !frame->blur_horizontal || frame->blur_width != half_width || frame->blur_height != half_height)
     {
-        return true;
-    }
-
-    id texture_descriptor_class = (id)objc_getClass("MTLTextureDescriptor");
-    metal_blur_frame_destroy(frame);
-    id source_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
-        texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
-        (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
-    metal_msg_void_ulong(source_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
-    metal_msg_void_ulong(source_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
-    frame->blur_source = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), source_descriptor);
-    metal_release(source_descriptor);
-
-    id horizontal_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
-        texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
-        (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
-    metal_msg_void_ulong(horizontal_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
-    metal_msg_void_ulong(horizontal_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
-    frame->blur_horizontal = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), horizontal_descriptor);
-    metal_release(horizontal_descriptor);
-    if (!frame->blur_source || !frame->blur_horizontal)
-    {
+        id texture_descriptor_class = (id)objc_getClass("MTLTextureDescriptor");
         metal_blur_frame_destroy(frame);
-        return false;
+        id source_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
+            texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
+            (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
+        metal_msg_void_ulong(source_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
+        metal_msg_void_ulong(source_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
+        frame->blur_source = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), source_descriptor);
+        metal_release(source_descriptor);
+
+        id horizontal_descriptor = ((id (*)(id, SEL, BusterNSUInteger, BusterNSUInteger, BusterNSUInteger, bool))objc_msgSend)(
+            texture_descriptor_class, metal_sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM,
+            (BusterNSUInteger)half_width, (BusterNSUInteger)half_height, false);
+        metal_msg_void_ulong(horizontal_descriptor, "setUsage:", BUSTER_MTL_TEXTURE_USAGE_SHADER_READ | BUSTER_MTL_TEXTURE_USAGE_RENDER_TARGET);
+        metal_msg_void_ulong(horizontal_descriptor, "setStorageMode:", BUSTER_MTL_STORAGE_MODE_SHARED);
+        frame->blur_horizontal = ((id (*)(id, SEL, id))objc_msgSend)(rendering->device, metal_sel("newTextureWithDescriptor:"), horizontal_descriptor);
+        metal_release(horizontal_descriptor);
+        if (!frame->blur_source || !frame->blur_horizontal)
+        {
+            metal_blur_frame_destroy(frame);
+            return false;
+        }
+        frame->blur_width = half_width;
+        frame->blur_height = half_height;
     }
-    frame->blur_width = half_width;
-    frame->blur_height = half_height;
+
     return true;
 }
 

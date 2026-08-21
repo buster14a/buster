@@ -420,37 +420,40 @@ bool buster_aarch64_syntax_mnemonic_range_at(u32 index, BusterAarch64SyntaxMnemo
 
 bool buster_aarch64_syntax_mnemonic_lookup(String8 mnemonic, BusterAarch64SyntaxMnemonicRange* result)
 {
-    if (!result || !mnemonic.length || !mnemonic.pointer) return false;
-    u32 low = 0;
-    u32 high = BUSTER_AARCH64_SYNTAX_GENERATED_MNEMONIC_RANGE_COUNT;
-    while (low < high)
+    if (result && mnemonic.length && mnemonic.pointer)
     {
-        u32 middle = low + (high - low) / 2;
-        BusterAarch64SyntaxMnemonicRange range = {0};
-        if (!buster_aarch64_syntax_mnemonic_range_at(middle, &range)) return false;
-        // Generated keys are uppercase ASCII and sorted lexicographically.
-        u64 common = BUSTER_MIN(mnemonic.length, range.key.length);
-        int compare = 0;
-        for (u64 index = 0; index < common; index += 1)
+        u32 low = 0;
+        u32 high = BUSTER_AARCH64_SYNTAX_GENERATED_MNEMONIC_RANGE_COUNT;
+        while (low < high)
         {
-            u8 left = (u8)mnemonic.pointer[index];
-            u8 right = (u8)range.key.pointer[index];
-            if (left >= 'a' && left <= 'z') left = (u8)(left - 'a' + 'A');
-            if (left != right)
+            u32 middle = low + (high - low) / 2;
+            BusterAarch64SyntaxMnemonicRange range = {0};
+            if (!buster_aarch64_syntax_mnemonic_range_at(middle, &range)) return false;
+            // Generated keys are uppercase ASCII and sorted lexicographically.
+            u64 common = BUSTER_MIN(mnemonic.length, range.key.length);
+            int compare = 0;
+            for (u64 index = 0; index < common; index += 1)
             {
-                compare = left < right ? -1 : 1;
-                break;
+                u8 left = (u8)mnemonic.pointer[index];
+                u8 right = (u8)range.key.pointer[index];
+                if (left >= 'a' && left <= 'z') left = (u8)(left - 'a' + 'A');
+                if (left != right)
+                {
+                    compare = left < right ? -1 : 1;
+                    break;
+                }
             }
+            if (!compare && mnemonic.length != range.key.length) compare = mnemonic.length < range.key.length ? -1 : 1;
+            if (!compare)
+            {
+                *result = range;
+                return true;
+            }
+            if (compare < 0) high = middle;
+            else low = middle + 1;
         }
-        if (!compare && mnemonic.length != range.key.length) compare = mnemonic.length < range.key.length ? -1 : 1;
-        if (!compare)
-        {
-            *result = range;
-            return true;
-        }
-        if (compare < 0) high = middle;
-        else low = middle + 1;
     }
+
     return false;
 }
 
@@ -563,9 +566,12 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_take(String8 input, u64* cu
 {
     if (!cursor || *cursor > input.length || literal.length > input.length - *cursor ||
         (!input.pointer && input.length) || (!literal.pointer && literal.length)) return false;
-    if (!literal.length) return true;
-    if (!buster_aarch64_syntax_ascii_bytes_equal((String8){.pointer = input.pointer + *cursor, .length = literal.length}, literal)) return false;
-    *cursor += literal.length;
+    if (literal.length)
+    {
+        if (!buster_aarch64_syntax_ascii_bytes_equal((String8){.pointer = input.pointer + *cursor, .length = literal.length}, literal)) return false;
+        *cursor += literal.length;
+    }
+
     return true;
 }
 

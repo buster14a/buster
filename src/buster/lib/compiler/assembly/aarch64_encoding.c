@@ -142,20 +142,20 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_count_range_valid(u32 total, u32 first, u3
 BUSTER_GLOBAL_LOCAL bool a64_metadata_string_descriptor(u32 offset, BusterAarch64MetadataString* result)
 {
     A64_METADATA_PACKED_ACCESS();
-    if (!result || offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
+    if (result && offset < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
     {
-        return false;
-    }
-    u32 length = 0;
-    while (offset + length < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
-    {
-        if (!buster_aarch64_generated_string_byte((u64)offset + length))
+        u32 length = 0;
+        while (offset + length < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
         {
-            *result = (BusterAarch64MetadataString){.offset = offset, .length = length};
-            return true;
+            if (!buster_aarch64_generated_string_byte((u64)offset + length))
+            {
+                *result = (BusterAarch64MetadataString){.offset = offset, .length = length};
+                return true;
+            }
+            length += 1;
         }
-        length += 1;
     }
+
     return false;
 }
 
@@ -358,18 +358,18 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_predicate_feature(u32 predicate_offset, Ta
         {.name = "HasSME", .feature = TARGET_CPU_FEATURE_AARCH64_SME},
         {.name = "HasTRACEV8_4", .feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4},
     };
-    if (!feature)
+    if (feature)
     {
-        return false;
-    }
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(predicate_features); index += 1)
-    {
-        if (a64_metadata_string_equals(predicate_offset, predicate_features[index].name))
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(predicate_features); index += 1)
         {
-            *feature = predicate_features[index].feature;
-            return true;
+            if (a64_metadata_string_equals(predicate_offset, predicate_features[index].name))
+            {
+                *feature = predicate_features[index].feature;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -555,23 +555,23 @@ bool buster_aarch64_metadata_mnemonic_range(u32 range_index, BusterAarch64Metada
 bool buster_aarch64_metadata_mnemonic_lookup(String8 mnemonic, BusterAarch64MetadataCandidateRange* result)
 {
     A64_METADATA_PACKED_ACCESS();
-    if (!result || !mnemonic.pointer || !mnemonic.length)
+    if (result && mnemonic.pointer && mnemonic.length)
     {
-        return false;
-    }
-    for (u32 range_index = 0; range_index < BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT; range_index += 1)
-    {
-        BusterAarch64MetadataCandidateRange candidate_range = {0};
-        if (!buster_aarch64_metadata_mnemonic_range(range_index, &candidate_range))
+        for (u32 range_index = 0; range_index < BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT; range_index += 1)
         {
-            return false;
-        }
-        if (a64_metadata_string_case_equal(candidate_range.key, mnemonic))
-        {
-            *result = candidate_range;
-            return true;
+            BusterAarch64MetadataCandidateRange candidate_range = {0};
+            if (!buster_aarch64_metadata_mnemonic_range(range_index, &candidate_range))
+            {
+                return false;
+            }
+            if (a64_metadata_string_case_equal(candidate_range.key, mnemonic))
+            {
+                *result = candidate_range;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -695,18 +695,18 @@ bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpel
 
 bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result)
 {
-    if (!result || !spelling.pointer || !spelling.length)
+    if (result && spelling.pointer && spelling.length)
     {
-        return false;
-    }
-    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT; index += 1)
-    {
-        BusterAarch64ArmM1GeneratedFixedRow const* row = buster_aarch64_arm_m1_generated_fixed_rows + index;
-        if (a64_fixed_row_spelling_equal(spelling, row->spelling))
+        for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT; index += 1)
         {
-            return buster_aarch64_arm_m1_fixed_spelling(index, result);
+            BusterAarch64ArmM1GeneratedFixedRow const* row = buster_aarch64_arm_m1_generated_fixed_rows + index;
+            if (a64_fixed_row_spelling_equal(spelling, row->spelling))
+            {
+                return buster_aarch64_arm_m1_fixed_spelling(index, result);
+            }
         }
     }
+
     return false;
 }
 
@@ -1002,18 +1002,21 @@ BUSTER_GLOBAL_LOCAL bool a64_scalar_operand_valid(BusterAarch64ArmM1ScalarIntege
 BUSTER_GLOBAL_LOCAL bool a64_scalar_modifiers_valid(A64ScalarIntModifier const* modifiers, u32 modifier_count)
 {
     if (modifier_count > 1 || (modifier_count && !modifiers)) return false;
-    if (!modifier_count) return true;
-    A64ScalarIntModifier modifier = modifiers[0];
-    if (!modifier.present || modifier.kind > A64_SCALAR_INT_MODIFIER_EXTEND ||
-        (modifier.kind == A64_SCALAR_INT_MODIFIER_SHIFT && modifier.value > A64_SCALAR_INT_SHIFT_ROR) ||
-        (modifier.kind == A64_SCALAR_INT_MODIFIER_EXTEND && modifier.value > A64_SCALAR_INT_EXTEND_SXTX))
+    if (modifier_count)
     {
-        return false;
+        A64ScalarIntModifier modifier = modifiers[0];
+        if (!modifier.present || modifier.kind > A64_SCALAR_INT_MODIFIER_EXTEND ||
+            (modifier.kind == A64_SCALAR_INT_MODIFIER_SHIFT && modifier.value > A64_SCALAR_INT_SHIFT_ROR) ||
+            (modifier.kind == A64_SCALAR_INT_MODIFIER_EXTEND && modifier.value > A64_SCALAR_INT_EXTEND_SXTX))
+        {
+            return false;
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modifier.reserved); index += 1)
+        {
+            if (modifier.reserved[index]) return false;
+        }
     }
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modifier.reserved); index += 1)
-    {
-        if (modifier.reserved[index]) return false;
-    }
+
     return true;
 }
 
@@ -1032,35 +1035,38 @@ BUSTER_GLOBAL_LOCAL u64 a64_scalar_rotate_right(u64 value, u32 rotation, u32 wid
 
 BUSTER_GLOBAL_LOCAL bool a64_scalar_logical_immediate_encode(u64 value, u8 width, u32* encoded)
 {
-    if (!encoded || (width != 32 && width != 64)) return false;
-    u64 mask = a64_scalar_width_mask(width);
-    if ((value & ~mask) || !value || value == mask) return false;
-    for (u32 element_width = 2; element_width <= width; element_width <<= 1)
+    if (encoded && (width == 32 || width == 64))
     {
-        u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
-        u64 element = value & element_mask;
-        bool replicated = true;
-        for (u32 offset = element_width; offset < width; offset += element_width)
+        u64 mask = a64_scalar_width_mask(width);
+        if ((value & ~mask) || !value || value == mask) return false;
+        for (u32 element_width = 2; element_width <= width; element_width <<= 1)
         {
-            if (((value >> offset) & element_mask) != element)
+            u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
+            u64 element = value & element_mask;
+            bool replicated = true;
+            for (u32 offset = element_width; offset < width; offset += element_width)
             {
-                replicated = false;
-                break;
+                if (((value >> offset) & element_mask) != element)
+                {
+                    replicated = false;
+                    break;
+                }
             }
-        }
-        if (!replicated || !element || element == element_mask) continue;
-        for (u32 ones = 1; ones < element_width; ones += 1)
-        {
-            u64 ones_mask = (UINT64_C(1) << ones) - 1;
-            for (u32 rotation = 0; rotation < element_width; rotation += 1)
+            if (!replicated || !element || element == element_mask) continue;
+            for (u32 ones = 1; ones < element_width; ones += 1)
             {
-                if (a64_scalar_rotate_right(ones_mask, rotation, element_width) != element) continue;
-                u32 levels = (~(element_width * 2u - 1u)) & 0x3fu;
-                *encoded = ((element_width == 64 ? 1u : 0u) << 22) | (rotation << 16) | (levels | (ones - 1u)) << 10;
-                return true;
+                u64 ones_mask = (UINT64_C(1) << ones) - 1;
+                for (u32 rotation = 0; rotation < element_width; rotation += 1)
+                {
+                    if (a64_scalar_rotate_right(ones_mask, rotation, element_width) != element) continue;
+                    u32 levels = (~(element_width * 2u - 1u)) & 0x3fu;
+                    *encoded = ((element_width == 64 ? 1u : 0u) << 22) | (rotation << 16) | (levels | (ones - 1u)) << 10;
+                    return true;
+                }
             }
         }
     }
+
     return false;
 }
 
@@ -1558,17 +1564,17 @@ bool buster_aarch64_metadata_form_supported_for_target(u32 form_id, Target targe
 
 bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target)
 {
-    if (target >= BUSTER_AARCH64_METADATA_TARGET_COUNT)
+    if (target < BUSTER_AARCH64_METADATA_TARGET_COUNT)
     {
-        return false;
+        switch (target)
+        {
+        case BUSTER_AARCH64_METADATA_TARGET_APPLE_M1:
+            return buster_aarch64_metadata_form_supported_for_target(form_id, a64_metadata_apple_m1_target());
+        case BUSTER_AARCH64_METADATA_TARGET_COUNT:
+            return false;
+        }
     }
-    switch (target)
-    {
-    case BUSTER_AARCH64_METADATA_TARGET_APPLE_M1:
-        return buster_aarch64_metadata_form_supported_for_target(form_id, a64_metadata_apple_m1_target());
-    case BUSTER_AARCH64_METADATA_TARGET_COUNT:
-        return false;
-    }
+
     return false;
 }
 
@@ -1996,51 +2002,51 @@ BUSTER_GLOBAL_LOCAL bool a64_mc_operand(A64MCInst const* instruction, u32 index,
 BUSTER_GLOBAL_LOCAL bool a64_pc_relative_insert(A64PCRelativeLayout layout, u32 word, s64 displacement, u32* patched)
 {
     u32 immediate = 0;
-    if (!patched)
+    if (patched)
     {
-        return false;
+        switch (layout)
+        {
+        case A64_PC_RELATIVE_IMM26:
+            if (!a64_signed_scaled_immediate_encode(displacement, 26, 2, &immediate))
+            {
+                return false;
+            }
+            *patched = (word & ~UINT32_C(0x03ffffff)) | immediate;
+            return true;
+        case A64_PC_RELATIVE_IMM19:
+            if (!a64_signed_scaled_immediate_encode(displacement, 19, 2, &immediate))
+            {
+                return false;
+            }
+            *patched = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
+            return true;
+        case A64_PC_RELATIVE_IMM14:
+            if (!a64_signed_scaled_immediate_encode(displacement, 14, 2, &immediate))
+            {
+                return false;
+            }
+            *patched = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
+            return true;
+        case A64_PC_RELATIVE_ADRP:
+            if (!a64_signed_scaled_immediate_encode(displacement, 21, 12, &immediate))
+            {
+                return false;
+            }
+            *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+            return true;
+        case A64_PC_RELATIVE_ADR:
+            if (!a64_signed_scaled_immediate_encode(displacement, 21, 0, &immediate))
+            {
+                return false;
+            }
+            *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+            return true;
+        case A64_PC_RELATIVE_NONE:
+        case A64_PC_RELATIVE_LAYOUT_COUNT:
+            return false;
+        }
     }
-    switch (layout)
-    {
-    case A64_PC_RELATIVE_IMM26:
-        if (!a64_signed_scaled_immediate_encode(displacement, 26, 2, &immediate))
-        {
-            return false;
-        }
-        *patched = (word & ~UINT32_C(0x03ffffff)) | immediate;
-        return true;
-    case A64_PC_RELATIVE_IMM19:
-        if (!a64_signed_scaled_immediate_encode(displacement, 19, 2, &immediate))
-        {
-            return false;
-        }
-        *patched = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
-        return true;
-    case A64_PC_RELATIVE_IMM14:
-        if (!a64_signed_scaled_immediate_encode(displacement, 14, 2, &immediate))
-        {
-            return false;
-        }
-        *patched = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
-        return true;
-    case A64_PC_RELATIVE_ADRP:
-        if (!a64_signed_scaled_immediate_encode(displacement, 21, 12, &immediate))
-        {
-            return false;
-        }
-        *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-        return true;
-    case A64_PC_RELATIVE_ADR:
-        if (!a64_signed_scaled_immediate_encode(displacement, 21, 0, &immediate))
-        {
-            return false;
-        }
-        *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-        return true;
-    case A64_PC_RELATIVE_NONE:
-    case A64_PC_RELATIVE_LAYOUT_COUNT:
-        return false;
-    }
+
     return false;
 }
 
@@ -2206,111 +2212,111 @@ BUSTER_GLOBAL_LOCAL A64MCOperand a64_mc_operand_make(A64MCOperandKind kind, s64 
 
 bool a64_mc_decode(u32 word, A64MCInst* instruction)
 {
-    if (!instruction)
+    if (instruction)
     {
-        return false;
+        // Specific fixed forms precede the broad PC-relative masks. The current
+        // descriptors have no decode collisions; this explicit order becomes the
+        // seed for the generated decoder's priority table.
+        static A64Opcode const decode_order[] = {
+            A64_OPCODE_NOP,  A64_OPCODE_RET, A64_OPCODE_BR, A64_OPCODE_BLR, A64_OPCODE_B_COND, A64_OPCODE_LDR_LITERAL_64,
+            A64_OPCODE_ADRP, A64_OPCODE_ADR, A64_OPCODE_CBZ_W, A64_OPCODE_CBNZ_W, A64_OPCODE_CBZ_X, A64_OPCODE_CBNZ_X,
+            A64_OPCODE_TBZ,   A64_OPCODE_TBNZ, A64_OPCODE_BL, A64_OPCODE_B,
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(decode_order); index += 1)
+        {
+            A64Opcode opcode = decode_order[index];
+            A64OpcodeDescriptor const* descriptor = a64_opcode_descriptor(opcode);
+            if ((word & descriptor->fixed_mask) != descriptor->fixed_value)
+            {
+                continue;
+            }
+            A64MCInst result = {.opcode = opcode, .operand_count = descriptor->operand_count};
+            s64 displacement = 0;
+            switch (opcode)
+            {
+            case A64_OPCODE_NOP:
+                break;
+            case A64_OPCODE_B:
+            case A64_OPCODE_BL:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                break;
+            case A64_OPCODE_B_COND:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_IMMEDIATE, word & 15);
+                break;
+            case A64_OPCODE_RET:
+            case A64_OPCODE_BR:
+            case A64_OPCODE_BLR:
+            {
+                u32 register_number = (word >> 5) & 31;
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, register_number);
+            }
+            break;
+            case A64_OPCODE_LDR_LITERAL_64:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                break;
+            case A64_OPCODE_ADRP:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                break;
+            case A64_OPCODE_ADR:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                break;
+            case A64_OPCODE_CBZ_W:
+            case A64_OPCODE_CBNZ_W:
+            case A64_OPCODE_CBZ_X:
+            case A64_OPCODE_CBNZ_X:
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+                break;
+            case A64_OPCODE_TBZ:
+            case A64_OPCODE_TBNZ:
+            {
+                if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+                {
+                    return false;
+                }
+                u32 bit = ((word >> 31) & 1) << 5 | ((word >> 19) & 0x1f);
+                result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+                result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_IMMEDIATE, bit);
+                result.operands[2] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+            }
+            break;
+            case A64_OPCODE_INVALID:
+            case A64_OPCODE_COUNT:
+                return false;
+            }
+            *instruction = result;
+            return true;
+        }
     }
-    // Specific fixed forms precede the broad PC-relative masks. The current
-    // descriptors have no decode collisions; this explicit order becomes the
-    // seed for the generated decoder's priority table.
-    static A64Opcode const decode_order[] = {
-        A64_OPCODE_NOP,  A64_OPCODE_RET, A64_OPCODE_BR, A64_OPCODE_BLR, A64_OPCODE_B_COND, A64_OPCODE_LDR_LITERAL_64,
-        A64_OPCODE_ADRP, A64_OPCODE_ADR, A64_OPCODE_CBZ_W, A64_OPCODE_CBNZ_W, A64_OPCODE_CBZ_X, A64_OPCODE_CBNZ_X,
-        A64_OPCODE_TBZ,   A64_OPCODE_TBNZ, A64_OPCODE_BL, A64_OPCODE_B,
-    };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(decode_order); index += 1)
-    {
-        A64Opcode opcode = decode_order[index];
-        A64OpcodeDescriptor const* descriptor = a64_opcode_descriptor(opcode);
-        if ((word & descriptor->fixed_mask) != descriptor->fixed_value)
-        {
-            continue;
-        }
-        A64MCInst result = {.opcode = opcode, .operand_count = descriptor->operand_count};
-        s64 displacement = 0;
-        switch (opcode)
-        {
-        case A64_OPCODE_NOP:
-            break;
-        case A64_OPCODE_B:
-        case A64_OPCODE_BL:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            break;
-        case A64_OPCODE_B_COND:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_IMMEDIATE, word & 15);
-            break;
-        case A64_OPCODE_RET:
-        case A64_OPCODE_BR:
-        case A64_OPCODE_BLR:
-        {
-            u32 register_number = (word >> 5) & 31;
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, register_number);
-        }
-        break;
-        case A64_OPCODE_LDR_LITERAL_64:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            break;
-        case A64_OPCODE_ADRP:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            break;
-        case A64_OPCODE_ADR:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            break;
-        case A64_OPCODE_CBZ_W:
-        case A64_OPCODE_CBNZ_W:
-        case A64_OPCODE_CBZ_X:
-        case A64_OPCODE_CBNZ_X:
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-            break;
-        case A64_OPCODE_TBZ:
-        case A64_OPCODE_TBNZ:
-        {
-            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
-            {
-                return false;
-            }
-            u32 bit = ((word >> 31) & 1) << 5 | ((word >> 19) & 0x1f);
-            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
-            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_IMMEDIATE, bit);
-            result.operands[2] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
-        }
-        break;
-        case A64_OPCODE_INVALID:
-        case A64_OPCODE_COUNT:
-            return false;
-        }
-        *instruction = result;
-        return true;
-    }
+
     return false;
 }
 

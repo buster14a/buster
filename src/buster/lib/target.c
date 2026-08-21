@@ -172,14 +172,14 @@ bool target_cpu_features_subset(TargetCpuFeatures subset, TargetCpuFeatures supe
 TargetCpuFeatures target_cpu_features_from_array(TargetCpuFeature const* features, u32 count)
 {
     TargetCpuFeatures result = target_cpu_features_empty();
-    if (!features)
+    if (features)
     {
-        return result;
+        for (u32 index = 0; index < count; index += 1)
+        {
+            result = target_cpu_features_add(result, features[index]);
+        }
     }
-    for (u32 index = 0; index < count; index += 1)
-    {
-        result = target_cpu_features_add(result, features[index]);
-    }
+
     return result;
 }
 
@@ -306,57 +306,57 @@ BUSTER_GLOBAL_LOCAL bool target_component_starts_with(String8 component, String8
 
 BUSTER_GLOBAL_LOCAL bool target_parse_version_suffix(String8 component, u64 prefix_length, Target* target)
 {
-    if (component.length == prefix_length)
+    if (component.length != prefix_length)
     {
-        return true;
-    }
-    if (component.length < prefix_length || !target)
-    {
-        return false;
-    }
-    u32 components[3] = {0};
-    u32 component_count = 0;
-    u64 index = prefix_length;
-    while (index < component.length)
-    {
-        if (component_count >= BUSTER_ARRAY_LENGTH(components) || component.pointer[index] < '0' || component.pointer[index] > '9')
+        if (component.length < prefix_length || !target)
         {
             return false;
         }
-        u32 value = 0;
-        while (index < component.length && component.pointer[index] >= '0' && component.pointer[index] <= '9')
+        u32 components[3] = {0};
+        u32 component_count = 0;
+        u64 index = prefix_length;
+        while (index < component.length)
         {
-            u32 digit = (u32)(component.pointer[index] - '0');
-            if (value > (UINT32_MAX - digit) / 10)
+            if (component_count >= BUSTER_ARRAY_LENGTH(components) || component.pointer[index] < '0' || component.pointer[index] > '9')
             {
                 return false;
             }
-            value = value * 10 + digit;
+            u32 value = 0;
+            while (index < component.length && component.pointer[index] >= '0' && component.pointer[index] <= '9')
+            {
+                u32 digit = (u32)(component.pointer[index] - '0');
+                if (value > (UINT32_MAX - digit) / 10)
+                {
+                    return false;
+                }
+                value = value * 10 + digit;
+                index += 1;
+            }
+            components[component_count++] = value;
+            if (index == component.length)
+            {
+                break;
+            }
+            if (component.pointer[index] != '.')
+            {
+                return false;
+            }
             index += 1;
+            if (index == component.length)
+            {
+                return false;
+            }
         }
-        components[component_count++] = value;
-        if (index == component.length)
-        {
-            break;
-        }
-        if (component.pointer[index] != '.')
-        {
-            return false;
-        }
-        index += 1;
-        if (index == component.length)
+        if (!component_count || components[0] > UINT16_MAX || (component_count > 1 && components[1] > UINT8_MAX) ||
+            (component_count > 2 && components[2] > UINT8_MAX))
         {
             return false;
         }
+        target->os_version_major = (u16)components[0];
+        target->os_version_minor = component_count > 1 ? (u8)components[1] : 0;
+        target->os_version_patch = component_count > 2 ? (u8)components[2] : 0;
     }
-    if (!component_count || components[0] > UINT16_MAX || (component_count > 1 && components[1] > UINT8_MAX) ||
-        (component_count > 2 && components[2] > UINT8_MAX))
-    {
-        return false;
-    }
-    target->os_version_major = (u16)components[0];
-    target->os_version_minor = component_count > 1 ? (u8)components[1] : 0;
-    target->os_version_patch = component_count > 2 ? (u8)components[2] : 0;
+
     return true;
 }
 
@@ -1177,308 +1177,308 @@ bool target_cpu_features_are_valid(Target target)
     {
         return false;
     }
-    if (!target.cpu_features_explicit)
+    if (target.cpu_features_explicit)
     {
-        return true;
-    }
-    TargetCpuFeatures features = target.cpu_features;
-    if (target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
-    {
-        return !target_cpu_features_any(features);
-    }
-    if (target.cpu_arch == CPU_ARCH_AARCH64)
-    {
+        TargetCpuFeatures features = target.cpu_features;
+        if (target.cpu_arch == CPU_ARCH_WASM64 || target.cpu_arch == CPU_ARCH_BPFEL)
+        {
+            return !target_cpu_features_any(features);
+        }
+        if (target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            TargetCpuFeature const known_feature_list[] = {
+                TARGET_CPU_FEATURE_AARCH64_V8_4A,
+                TARGET_CPU_FEATURE_AARCH64_AES,
+                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+                TARGET_CPU_FEATURE_AARCH64_CCDP,
+                TARGET_CPU_FEATURE_AARCH64_CCPP,
+                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+                TARGET_CPU_FEATURE_AARCH64_CRC,
+                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+                TARGET_CPU_FEATURE_AARCH64_FLAGM,
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_FP16FML,
+                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+                TARGET_CPU_FEATURE_AARCH64_JSCONV,
+                TARGET_CPU_FEATURE_AARCH64_LSE,
+                TARGET_CPU_FEATURE_AARCH64_LOR,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+                TARGET_CPU_FEATURE_AARCH64_PAUTH,
+                TARGET_CPU_FEATURE_AARCH64_PERFMON,
+                TARGET_CPU_FEATURE_AARCH64_PREDRES,
+                TARGET_CPU_FEATURE_AARCH64_RAS,
+                TARGET_CPU_FEATURE_AARCH64_RCPC,
+                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+                TARGET_CPU_FEATURE_AARCH64_RDM,
+                TARGET_CPU_FEATURE_AARCH64_SB,
+                TARGET_CPU_FEATURE_AARCH64_SHA2,
+                TARGET_CPU_FEATURE_AARCH64_SHA3,
+                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+                TARGET_CPU_FEATURE_AARCH64_SSBS,
+                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+                TARGET_CPU_FEATURE_AARCH64_SME,
+            };
+            TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
+            if (!target_cpu_features_subset(features, known))
+            {
+                return false;
+            }
+            TargetCpuFeatures neon_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_AES,
+                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+                TARGET_CPU_FEATURE_AARCH64_FP16FML,
+                TARGET_CPU_FEATURE_AARCH64_RDM,
+                TARGET_CPU_FEATURE_AARCH64_SHA2,
+                TARGET_CPU_FEATURE_AARCH64_SHA3,
+            }, 7);
+            TargetCpuFeatures fp_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+                TARGET_CPU_FEATURE_AARCH64_JSCONV,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+            }, 4);
+            if ((target_cpu_features_any(target_cpu_features_intersection(features, neon_dependents)) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_NEON)) ||
+                (target_cpu_features_any(target_cpu_features_intersection(features, fp_dependents)) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP_ARMV8)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_ALTNZCV) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FLAGM)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCDP) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCPP)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP16FML) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FULLFP16)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA3) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA2)))
+            {
+                return false;
+            }
+            return true;
+        }
+        if (target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            return false;
+        }
         TargetCpuFeature const known_feature_list[] = {
-            TARGET_CPU_FEATURE_AARCH64_V8_4A,
-            TARGET_CPU_FEATURE_AARCH64_AES,
-            TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
-            TARGET_CPU_FEATURE_AARCH64_CCDP,
-            TARGET_CPU_FEATURE_AARCH64_CCPP,
-            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
-            TARGET_CPU_FEATURE_AARCH64_CRC,
-            TARGET_CPU_FEATURE_AARCH64_DOTPROD,
-            TARGET_CPU_FEATURE_AARCH64_FLAGM,
-            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
-            TARGET_CPU_FEATURE_AARCH64_FP16FML,
-            TARGET_CPU_FEATURE_AARCH64_FPTOINT,
-            TARGET_CPU_FEATURE_AARCH64_FULLFP16,
-            TARGET_CPU_FEATURE_AARCH64_JSCONV,
-            TARGET_CPU_FEATURE_AARCH64_LSE,
-            TARGET_CPU_FEATURE_AARCH64_LOR,
-            TARGET_CPU_FEATURE_AARCH64_NEON,
-            TARGET_CPU_FEATURE_AARCH64_PAUTH,
-            TARGET_CPU_FEATURE_AARCH64_PERFMON,
-            TARGET_CPU_FEATURE_AARCH64_PREDRES,
-            TARGET_CPU_FEATURE_AARCH64_RAS,
-            TARGET_CPU_FEATURE_AARCH64_RCPC,
-            TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
-            TARGET_CPU_FEATURE_AARCH64_RDM,
-            TARGET_CPU_FEATURE_AARCH64_SB,
-            TARGET_CPU_FEATURE_AARCH64_SHA2,
-            TARGET_CPU_FEATURE_AARCH64_SHA3,
-            TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
-            TARGET_CPU_FEATURE_AARCH64_SSBS,
-            TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
-            TARGET_CPU_FEATURE_AARCH64_SME,
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+            TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2,
+            TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_AVX512BW,
+            TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
+            TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AVX512CD,
+            TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF,
+            TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2,
+            TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ,
+            TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
+            TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI,
+            TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AES,
+            TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF,
+            TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16,
+            TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8,
+            TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI,
+            TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA,
+            TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_3DNOW,
+            TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP,
+            TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_IBT,
+            TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK,
+            TARGET_CPU_FEATURE_X86_SSE4A,
+            TARGET_CPU_FEATURE_X86_VMX, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_ENQCMD,
+            TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_INVLPGB,
+            TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_LKGS,
+            TARGET_CPU_FEATURE_X86_MSR_IMM, TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_MONITOR,
+            TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PBNDKB, TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_SMAP,
+            TARGET_CPU_FEATURE_X86_SGX, TARGET_CPU_FEATURE_X86_SNP, TARGET_CPU_FEATURE_X86_TDX,
+            TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_XSAVE,
+            TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_ACE_1,
+            TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSSE3,
+            TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
+            TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND,
+            TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_SHA512,
+            TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
+            TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
+            TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
+            TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1,
         };
         TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
-        if (!target_cpu_features_subset(features, known))
+        if (!target_cpu_features_subset(features, known) || !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
         {
             return false;
         }
-        TargetCpuFeatures neon_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_AARCH64_AES,
-            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
-            TARGET_CPU_FEATURE_AARCH64_DOTPROD,
-            TARGET_CPU_FEATURE_AARCH64_FP16FML,
-            TARGET_CPU_FEATURE_AARCH64_RDM,
-            TARGET_CPU_FEATURE_AARCH64_SHA2,
-            TARGET_CPU_FEATURE_AARCH64_SHA3,
-        }, 7);
-        TargetCpuFeatures fp_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_AARCH64_FPTOINT,
-            TARGET_CPU_FEATURE_AARCH64_FULLFP16,
-            TARGET_CPU_FEATURE_AARCH64_JSCONV,
-            TARGET_CPU_FEATURE_AARCH64_NEON,
-        }, 4);
-        if ((target_cpu_features_any(target_cpu_features_intersection(features, neon_dependents)) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_NEON)) ||
-            (target_cpu_features_any(target_cpu_features_intersection(features, fp_dependents)) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP_ARMV8)) ||
-            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_ALTNZCV) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FLAGM)) ||
-            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCDP) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCPP)) ||
-            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP16FML) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FULLFP16)) ||
-            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC)) ||
-            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA3) &&
-             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA2)))
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVES) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVE))
         {
             return false;
         }
-        return true;
-    }
-    if (target.cpu_arch != CPU_ARCH_X86_64)
-    {
-        return false;
-    }
-    TargetCpuFeature const known_feature_list[] = {
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
-        TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2,
-        TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_AVX512BW,
-        TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
-        TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AVX512CD,
-        TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF,
-        TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2,
-        TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ,
-        TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
-        TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI,
-        TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AES,
-        TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF,
-        TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16,
-        TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8,
-        TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI,
-        TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA,
-        TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_3DNOW,
-        TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP,
-        TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_IBT,
-        TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK,
-        TARGET_CPU_FEATURE_X86_SSE4A,
-        TARGET_CPU_FEATURE_X86_VMX, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_ENQCMD,
-        TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_INVLPGB,
-        TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_LKGS,
-        TARGET_CPU_FEATURE_X86_MSR_IMM, TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_MONITOR,
-        TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PBNDKB, TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_SMAP,
-        TARGET_CPU_FEATURE_X86_SGX, TARGET_CPU_FEATURE_X86_SNP, TARGET_CPU_FEATURE_X86_TDX,
-        TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_XSAVE,
-        TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_ACE_1,
-        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSSE3,
-        TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
-        TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND,
-        TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_SHA512,
-        TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
-        TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
-        TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
-        TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1,
-    };
-    TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
-    if (!target_cpu_features_subset(features, known) || !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVES) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVE))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
-    {
-        return false;
-    }
-    TargetCpuFeatures fma4_or_xop = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_XOP}, 2);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, fma4_or_xop)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_3DNOWA) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_3DNOW))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
-    {
-        return false;
-    }
-    TargetCpuFeatures sse2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2,
-        TARGET_CPU_FEATURE_X86_SHA}, 4);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, sse2_dependent_features)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
-    {
-        return false;
-    }
-    TargetCpuFeatures avx_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SM3}, 3);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, avx_dependent_features)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
-    {
-        return false;
-    }
-    TargetCpuFeatures crypto_avx2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM4}, 2);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, crypto_avx2_dependent_features)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE4A) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) &&
-        (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX) ||
-         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2)))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512VL) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F))
-    {
-        if (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
+        {
+            return false;
+        }
+        TargetCpuFeatures fma4_or_xop = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_XOP}, 2);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, fma4_or_xop)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_3DNOWA) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_3DNOW))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+        {
+            return false;
+        }
+        TargetCpuFeatures sse2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2,
+            TARGET_CPU_FEATURE_X86_SHA}, 4);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, sse2_dependent_features)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+        {
+            return false;
+        }
+        TargetCpuFeatures avx_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SM3}, 3);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, avx_dependent_features)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
+        {
+            return false;
+        }
+        TargetCpuFeatures crypto_avx2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM4}, 2);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, crypto_avx2_dependent_features)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE4A) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) &&
+            (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX) ||
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2)))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512VL) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F))
+        {
+            if (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
+            {
+                return false;
+            }
+        }
+        TargetCpuFeatures avx512f_or_avx10_512 = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_512}, 2);
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW) &&
+            !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_512)))
+        {
+            if (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
+            {
+                return false;
+            }
+        }
+        TargetCpuFeatures avx512_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA,
+            TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI,
+            TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG,
+            TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW,
+            TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
+            TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16}, 15);
+        TargetCpuFeatures avx512f_or_avx10_1 = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_1}, 2);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, avx512_subfeatures)) &&
+            !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_1)))
+        {
+            return false;
+        }
+        TargetCpuFeatures avx512_bw_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2,
+            TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512BITALG,
+            TARGET_CPU_FEATURE_X86_AVX512FP16}, 5);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, avx512_bw_subfeatures)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_GFNI) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_VAES) &&
+            (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) ||
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AES)))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_VPCLMULQDQ) &&
+            (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX) ||
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_PCLMUL)))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+            (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) ||
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) ||
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_512)))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_2) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
+        {
+            return false;
+        }
+        // Native decoding conservatively under-reports malformed hardware pairs;
+        // explicit synthetic targets must obey the same AVX10 co-enumeration rule.
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_2) !=
+            target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_512) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
+        {
+            return false;
+        }
+        // APX-F and APX_NCI_NDD_NF are likewise a co-enumerated hardware pair.
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_APX) !=
+            target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF))
+        {
+            return false;
+        }
+        TargetCpuFeatures avx2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8,
+            TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA,
+            TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT}, 5);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, avx2_dependent_features)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2))
+        {
+            return false;
+        }
+        TargetCpuFeatures amx_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16,
+            TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8,
+            TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS}, 7);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, amx_subfeatures)) &&
+            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AMX_TILE))
+        {
+            return false;
+        }
+        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AMX_AVX512) &&
+            !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_1)))
         {
             return false;
         }
     }
-    TargetCpuFeatures avx512f_or_avx10_512 = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_512}, 2);
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW) &&
-        !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_512)))
-    {
-        if (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
-        {
-            return false;
-        }
-    }
-    TargetCpuFeatures avx512_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA,
-        TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI,
-        TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG,
-        TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW,
-        TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
-        TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16}, 15);
-    TargetCpuFeatures avx512f_or_avx10_1 = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_1}, 2);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, avx512_subfeatures)) &&
-        !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_1)))
-    {
-        return false;
-    }
-    TargetCpuFeatures avx512_bw_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2,
-        TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512BITALG,
-        TARGET_CPU_FEATURE_X86_AVX512FP16}, 5);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, avx512_bw_subfeatures)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512BW))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_GFNI) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_VAES) &&
-        (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) ||
-         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AES)))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_VPCLMULQDQ) &&
-        (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX) ||
-         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_PCLMUL)))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1) &&
-        (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2) ||
-         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX512F) ||
-         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_512)))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_2) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
-    {
-        return false;
-    }
-    // Native decoding conservatively under-reports malformed hardware pairs;
-    // explicit synthetic targets must obey the same AVX10 co-enumeration rule.
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_2) !=
-        target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_512) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX10_1))
-    {
-        return false;
-    }
-    // APX-F and APX_NCI_NDD_NF are likewise a co-enumerated hardware pair.
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_APX) !=
-        target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF))
-    {
-        return false;
-    }
-    TargetCpuFeatures avx2_dependent_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8,
-        TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA,
-        TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT}, 5);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, avx2_dependent_features)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX2))
-    {
-        return false;
-    }
-    TargetCpuFeatures amx_subfeatures = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16,
-        TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8,
-        TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS}, 7);
-    if (target_cpu_features_any(target_cpu_features_intersection(features, amx_subfeatures)) &&
-        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AMX_TILE))
-    {
-        return false;
-    }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AMX_AVX512) &&
-        !target_cpu_features_any(target_cpu_features_intersection(features, avx512f_or_avx10_1)))
-    {
-        return false;
-    }
+
     return true;
 }
 

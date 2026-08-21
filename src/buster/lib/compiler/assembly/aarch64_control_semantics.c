@@ -85,32 +85,32 @@ BUSTER_GLOBAL_LOCAL bool a64_control_operand_schema_matches(BusterAarch64Control
 
 BUSTER_GLOBAL_LOCAL bool a64_control_pc_encode(BusterAarch64ControlPcRelative pc, s64 displacement, u32 word, u32* result)
 {
-    if (!result || pc.layout == BUSTER_AARCH64_CONTROL_PC_NONE || !pc.bits || pc.bits > 32 ||
-        (pc.alignment && displacement % (s64)pc.alignment != 0) || displacement < pc.minimum || displacement > pc.maximum)
+    if (result && pc.layout != BUSTER_AARCH64_CONTROL_PC_NONE && pc.bits && pc.bits <= 32 && (!pc.alignment || displacement % (s64)pc.alignment == 0) &&
+        displacement >= pc.minimum && displacement <= pc.maximum)
     {
-        return false;
+        u32 immediate = 0;
+        if (!a64_signed_scaled_immediate_encode(displacement, pc.bits, pc.scale_log2, &immediate)) return false;
+        switch ((BusterAarch64ControlPcRelativeLayout)pc.layout)
+        {
+        case BUSTER_AARCH64_CONTROL_PC_IMM26:
+            *result = (word & ~UINT32_C(0x03ffffff)) | immediate;
+            return true;
+        case BUSTER_AARCH64_CONTROL_PC_IMM19:
+            *result = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
+            return true;
+        case BUSTER_AARCH64_CONTROL_PC_IMM14:
+            *result = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
+            return true;
+        case BUSTER_AARCH64_CONTROL_PC_ADRP:
+        case BUSTER_AARCH64_CONTROL_PC_ADR:
+            *result = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3u) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+            return true;
+        case BUSTER_AARCH64_CONTROL_PC_NONE:
+        case BUSTER_AARCH64_CONTROL_PC_COUNT:
+            break;
+        }
     }
-    u32 immediate = 0;
-    if (!a64_signed_scaled_immediate_encode(displacement, pc.bits, pc.scale_log2, &immediate)) return false;
-    switch ((BusterAarch64ControlPcRelativeLayout)pc.layout)
-    {
-    case BUSTER_AARCH64_CONTROL_PC_IMM26:
-        *result = (word & ~UINT32_C(0x03ffffff)) | immediate;
-        return true;
-    case BUSTER_AARCH64_CONTROL_PC_IMM19:
-        *result = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
-        return true;
-    case BUSTER_AARCH64_CONTROL_PC_IMM14:
-        *result = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
-        return true;
-    case BUSTER_AARCH64_CONTROL_PC_ADRP:
-    case BUSTER_AARCH64_CONTROL_PC_ADR:
-        *result = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3u) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-        return true;
-    case BUSTER_AARCH64_CONTROL_PC_NONE:
-    case BUSTER_AARCH64_CONTROL_PC_COUNT:
-        break;
-    }
+
     return false;
 }
 
@@ -292,17 +292,20 @@ bool buster_aarch64_control_semantic_row(u32 row, BusterAarch64ControlSemanticRe
 
 bool buster_aarch64_control_semantic_lookup(String8 id, u32* row)
 {
-    if (!row) return false;
-    for (u32 index = 0; index < BUSTER_AARCH64_CONTROL_SEMANTIC_ROW_COUNT; index += 1)
+    if (row)
     {
-        BusterAarch64ControlSemanticRecord const* candidate = a64_control_row(index);
-        String8 candidate_id = {0};
-        if (buster_aarch64_control_semantic_string(candidate->id, &candidate_id) && string_equal(candidate_id, id))
+        for (u32 index = 0; index < BUSTER_AARCH64_CONTROL_SEMANTIC_ROW_COUNT; index += 1)
         {
-            *row = index;
-            return true;
+            BusterAarch64ControlSemanticRecord const* candidate = a64_control_row(index);
+            String8 candidate_id = {0};
+            if (buster_aarch64_control_semantic_string(candidate->id, &candidate_id) && string_equal(candidate_id, id))
+            {
+                *row = index;
+                return true;
+            }
         }
     }
+
     return false;
 }
 

@@ -120,18 +120,21 @@ bool buster_aarch64_system_semantic_row(u32 row, BusterAarch64SystemSemanticReco
 
 bool buster_aarch64_system_semantic_lookup(String8 id, u32* row)
 {
-    if (!row || !id.pointer || !id.length) return false;
-    for (u32 index = 0; index < BUSTER_AARCH64_SYSTEM_SEMANTIC_ROW_COUNT; index += 1)
+    if (row && id.pointer && id.length)
     {
-        BusterAarch64SystemGeneratedRow const* candidate = a64_system_generated_row(index);
-        String8 candidate_id = {0};
-        if (candidate && buster_aarch64_system_semantic_string(a64_system_string_from_generated(candidate->id), &candidate_id) &&
-            string_equal(candidate_id, id))
+        for (u32 index = 0; index < BUSTER_AARCH64_SYSTEM_SEMANTIC_ROW_COUNT; index += 1)
         {
-            *row = index;
-            return true;
+            BusterAarch64SystemGeneratedRow const* candidate = a64_system_generated_row(index);
+            String8 candidate_id = {0};
+            if (candidate && buster_aarch64_system_semantic_string(a64_system_string_from_generated(candidate->id), &candidate_id) &&
+                string_equal(candidate_id, id))
+            {
+                *row = index;
+                return true;
+            }
         }
     }
+
     return false;
 }
 

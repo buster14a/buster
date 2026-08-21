@@ -1900,29 +1900,29 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
         return S8("bpfel-unknown-linux");
     }
     bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
-    if (!aarch64 && target.cpu_arch != CPU_ARCH_X86_64)
+    if (aarch64 || target.cpu_arch == CPU_ARCH_X86_64)
     {
-        return (String8){0};
+        switch (target.os)
+        {
+        case OPERATING_SYSTEM_LINUX:
+            return aarch64 ? S8("aarch64-unknown-linux-gnu") : S8("x86_64-unknown-linux-gnu");
+        case OPERATING_SYSTEM_ANDROID:
+            return aarch64 ? S8("aarch64-unknown-linux-android") : S8("x86_64-unknown-linux-android");
+        case OPERATING_SYSTEM_MACOS:
+            return aarch64 ? S8("arm64-apple-macosx") : S8("x86_64-apple-macosx");
+        case OPERATING_SYSTEM_IOS:
+            return aarch64 ? S8("arm64-apple-ios") : S8("x86_64-apple-ios-simulator");
+        case OPERATING_SYSTEM_WINDOWS:
+            return aarch64 ? S8("aarch64-pc-windows-msvc") : S8("x86_64-pc-windows-msvc");
+        case OPERATING_SYSTEM_UEFI:
+            return aarch64 ? S8("aarch64-unknown-windows") : S8("x86_64-unknown-windows");
+        case OPERATING_SYSTEM_FREESTANDING:
+            return aarch64 ? S8("aarch64-unknown-none") : S8("x86_64-unknown-none");
+        case OPERATING_SYSTEM_COUNT:
+            break;
+        }
     }
-    switch (target.os)
-    {
-    case OPERATING_SYSTEM_LINUX:
-        return aarch64 ? S8("aarch64-unknown-linux-gnu") : S8("x86_64-unknown-linux-gnu");
-    case OPERATING_SYSTEM_ANDROID:
-        return aarch64 ? S8("aarch64-unknown-linux-android") : S8("x86_64-unknown-linux-android");
-    case OPERATING_SYSTEM_MACOS:
-        return aarch64 ? S8("arm64-apple-macosx") : S8("x86_64-apple-macosx");
-    case OPERATING_SYSTEM_IOS:
-        return aarch64 ? S8("arm64-apple-ios") : S8("x86_64-apple-ios-simulator");
-    case OPERATING_SYSTEM_WINDOWS:
-        return aarch64 ? S8("aarch64-pc-windows-msvc") : S8("x86_64-pc-windows-msvc");
-    case OPERATING_SYSTEM_UEFI:
-        return aarch64 ? S8("aarch64-unknown-windows") : S8("x86_64-unknown-windows");
-    case OPERATING_SYSTEM_FREESTANDING:
-        return aarch64 ? S8("aarch64-unknown-none") : S8("x86_64-unknown-none");
-    case OPERATING_SYSTEM_COUNT:
-        break;
-    }
+
     return (String8){0};
 }
 

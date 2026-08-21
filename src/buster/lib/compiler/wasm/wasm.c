@@ -625,30 +625,30 @@ static IrTypeId wasm64_function_type_from_symbol(Wasm64Context* context, IrSymbo
 
 static bool wasm64_symbol_is_function_definition(Wasm64Context* context, IrSymbolId symbol_id, IrFunction** function_out, u32* module_out)
 {
-    if (!context->program || symbol_id.value >= context->program->symbols.count)
+    if (context->program && symbol_id.value < context->program->symbols.count)
     {
-        return false;
-    }
-    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
-    {
-        IrModule* module = context->modules + module_index;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
         {
-            IrFunction* function = module->functions + function_index;
-            if (function->symbol.value == symbol_id.value && function->state == IR_FUNCTION_LOWERED)
+            IrModule* module = context->modules + module_index;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
             {
-                if (function_out)
+                IrFunction* function = module->functions + function_index;
+                if (function->symbol.value == symbol_id.value && function->state == IR_FUNCTION_LOWERED)
                 {
-                    *function_out = function;
+                    if (function_out)
+                    {
+                        *function_out = function;
+                    }
+                    if (module_out)
+                    {
+                        *module_out = module_index;
+                    }
+                    return true;
                 }
-                if (module_out)
-                {
-                    *module_out = module_index;
-                }
-                return true;
             }
         }
     }
+
     return false;
 }
 

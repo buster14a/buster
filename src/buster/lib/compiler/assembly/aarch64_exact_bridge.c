@@ -41,19 +41,19 @@ bool a64_exact_crosswalk(u32 index, A64ExactCrosswalkEntry* result)
 
 bool a64_exact_lookup(String8 llvm_name, A64ExactFormKey* result)
 {
-    if (!result || !llvm_name.pointer || !llvm_name.length)
+    if (result && llvm_name.pointer && llvm_name.length)
     {
-        return false;
-    }
-    for (u32 index = 0; index < BUSTER_AARCH64_EXACT_CROSSWALK_COUNT; index += 1)
-    {
-        BusterAarch64ExactCrosswalkRow const* row = &buster_aarch64_exact_crosswalk_rows[index];
-        if (a64_exact_string_equal(row->llvm_name, llvm_name))
+        for (u32 index = 0; index < BUSTER_AARCH64_EXACT_CROSSWALK_COUNT; index += 1)
         {
-            *result = (A64ExactFormKey){.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest};
-            return true;
+            BusterAarch64ExactCrosswalkRow const* row = &buster_aarch64_exact_crosswalk_rows[index];
+            if (a64_exact_string_equal(row->llvm_name, llvm_name))
+            {
+                *result = (A64ExactFormKey){.form_index = row->canonical_form_index, .row_digest = row->arm_row_digest};
+                return true;
+            }
         }
     }
+
     return false;
 }
 

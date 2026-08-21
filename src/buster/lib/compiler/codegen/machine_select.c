@@ -487,27 +487,27 @@ MachineSelectionRuleContext machine_selection_rule_context(MachineSelectionPrepa
                                                            Target target)
 {
     MachineSelectionRuleContext context = {.opcode = IR_OPCODE_COUNT, .target = target};
-    if (!prepass || !prepass->function || instruction.value >= prepass->instruction_count)
+    if (prepass && prepass->function && instruction.value < prepass->instruction_count)
     {
-        return context;
+        IrInstruction* row = prepass->function->instructions + instruction.value;
+        context.opcode = row->opcode;
+        context.result_class = machine_selection_result_class(prepass, instruction);
+        context.side_effects = machine_selection_side_effects(prepass, instruction);
+        context.operand_count = row->operand_count;
+        context.target_count = row->target_count;
+        context.immediate_count = row->immediate_count;
+        context.volatile_access = row->volatile_access;
+        context.vector_features = target.cpu_arch == CPU_ARCH_AARCH64 ||
+                                  (target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
+                                   target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW));
+        if (row->result.value < prepass->value_count)
+        {
+            context.known_constant = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_KNOWN_CONSTANT);
+            context.address_candidate = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_ADDRESS_CANDIDATE);
+            context.promotable_local = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL);
+        }
     }
-    IrInstruction* row = prepass->function->instructions + instruction.value;
-    context.opcode = row->opcode;
-    context.result_class = machine_selection_result_class(prepass, instruction);
-    context.side_effects = machine_selection_side_effects(prepass, instruction);
-    context.operand_count = row->operand_count;
-    context.target_count = row->target_count;
-    context.immediate_count = row->immediate_count;
-    context.volatile_access = row->volatile_access;
-    context.vector_features = target.cpu_arch == CPU_ARCH_AARCH64 ||
-                              (target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
-                               target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW));
-    if (row->result.value < prepass->value_count)
-    {
-        context.known_constant = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_KNOWN_CONSTANT);
-        context.address_candidate = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_ADDRESS_CANDIDATE);
-        context.promotable_local = machine_selection_prepass_value_flag(prepass, row->result, MACHINE_SELECTION_VALUE_PROMOTABLE_LOCAL);
-    }
+
     return context;
 }
 

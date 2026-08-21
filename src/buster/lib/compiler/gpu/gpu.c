@@ -282,171 +282,17 @@ GpuTargetParseResult gpu_target_parse(String8 triple)
     GpuTargetParseResult result = {
         .error = GPU_TARGET_PARSE_ERROR_NOT_GPU,
     };
-    if (!triple.length)
+    if (triple.length)
     {
-        return result;
-    }
-
-    if (string_equal(triple, S8("ptx"))) triple = S8("nvptx64");
-    if (string_equal(triple, S8("amdgpu"))) triple = S8("amdgcn");
-    if (string_equal(triple, S8("metal"))) triple = S8("air64");
-    if (string_equal(triple, S8("dxil")))
-    {
-        result.target = (GpuTarget){
-            .entry_point = S8("main"),
-            .kind = GPU_TARGET_DXIL,
-            .stage = GPU_SHADER_STAGE_COMPUTE,
-            .shader_model_major = 6,
-            .shader_model_minor = 6,
-            .address_bits = 32,
-        };
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
-    }
-
-    GpuStringComponents components = gpu_split_components(triple);
-    if (!components.valid || !components.count)
-    {
-        return result;
-    }
-    String8 architecture = components.values[0];
-    GpuTargetKind spirv_kind = GPU_TARGET_NONE;
-    u8 spirv_address_bits = 0;
-    bool spirv_prefix = string_starts_with_sequence(architecture, S8("spirv"));
-    bool spirv_architecture = gpu_spirv_architecture_parse(architecture, &spirv_kind, &spirv_address_bits);
-    bool recognized = spirv_prefix || string_equal(architecture, S8("nvptx")) || string_equal(architecture, S8("nvptx64")) ||
-                      string_equal(architecture, S8("amdgcn")) || string_equal(architecture, S8("amdgpu")) ||
-                      string_equal(architecture, S8("air64")) || string_equal(architecture, S8("metal")) ||
-                      string_equal(architecture, S8("dxil"));
-    if (!recognized)
-    {
-        return result;
-    }
-    result.error = GPU_TARGET_PARSE_ERROR_INVALID_TRIPLE;
-    result.invalid_component = triple;
-
-    if (spirv_prefix)
-    {
-        if (!spirv_architecture || (components.count != 1 && components.count != 3 && components.count != 4))
+        if (string_equal(triple, S8("ptx"))) triple = S8("nvptx64");
+        if (string_equal(triple, S8("amdgpu"))) triple = S8("amdgcn");
+        if (string_equal(triple, S8("metal"))) triple = S8("air64");
+        if (string_equal(triple, S8("dxil")))
         {
-            result.invalid_component = architecture;
-            return result;
-        }
-        if (components.count >= 3)
-        {
-            String8 vendors[] = {S8("unknown"), S8("amd")};
-            if (!gpu_string_is_one_of(components.values[1], vendors, BUSTER_ARRAY_LENGTH(vendors)))
-            {
-                result.invalid_component = components.values[1];
-                return result;
-            }
-            if (!gpu_spirv_runtime_is_valid(components.values[2]))
-            {
-                result.invalid_component = components.values[2];
-                return result;
-            }
-            if (components.count == 4 && !string_equal(components.values[3], S8("unknown")))
-            {
-                result.invalid_component = components.values[3];
-                return result;
-            }
-        }
-        result.target = (GpuTarget){
-            .entry_point = S8("main"),
-            .backend_triple = triple,
-            .kind = spirv_kind,
-            .stage = GPU_SHADER_STAGE_COMPUTE,
-            .shader_model_major = 6,
-            .shader_model_minor = 6,
-            .address_bits = spirv_address_bits,
-        };
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
-    }
-
-    if (string_equal(architecture, S8("nvptx")) || string_equal(architecture, S8("nvptx64")))
-    {
-        if (components.count != 1 && components.count != 3)
-        {
-            return result;
-        }
-        if (components.count == 3 &&
-            (!string_equal(components.values[1], S8("nvidia")) ||
-             (!string_equal(components.values[2], S8("cuda")) && !string_equal(components.values[2], S8("nvcl")))))
-        {
-            result.invalid_component = !string_equal(components.values[1], S8("nvidia")) ? components.values[1] : components.values[2];
-            return result;
-        }
-        result.target = (GpuTarget){
-            .kind = string_equal(architecture, S8("nvptx")) ? GPU_TARGET_NVPTX32 : GPU_TARGET_NVPTX64,
-            .stage = GPU_SHADER_STAGE_COMPUTE,
-            .address_bits = string_equal(architecture, S8("nvptx")) ? 32 : 64,
-        };
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
-    }
-
-    if (string_equal(architecture, S8("amdgcn")) || string_equal(architecture, S8("amdgpu")))
-    {
-        if (components.count != 1 && components.count != 3)
-        {
-            return result;
-        }
-        if (components.count == 3 &&
-            (!string_equal(components.values[1], S8("amd")) || !string_equal(components.values[2], S8("amdhsa"))))
-        {
-            result.invalid_component = !string_equal(components.values[1], S8("amd")) ? components.values[1] : components.values[2];
-            return result;
-        }
-        result.target = (GpuTarget){
-            .kind = GPU_TARGET_AMDGCN,
-            .stage = GPU_SHADER_STAGE_COMPUTE,
-            .address_bits = 64,
-        };
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
-    }
-
-    if (string_equal(architecture, S8("air64")) || string_equal(architecture, S8("metal")))
-    {
-        if (components.count != 1 && components.count != 3)
-        {
-            return result;
-        }
-        String8 sdk = S8("macosx");
-        if (components.count == 3)
-        {
-            sdk = gpu_metal_sdk_from_os(components.values[2]);
-            if (!string_equal(components.values[1], S8("apple")) || !sdk.length)
-            {
-                result.invalid_component = !string_equal(components.values[1], S8("apple")) ? components.values[1] : components.values[2];
-                return result;
-            }
-        }
-        result.target = (GpuTarget){
-            .metal_sdk = sdk,
-            .kind = GPU_TARGET_METAL_AIR64,
-            .address_bits = 64,
-        };
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
-    }
-
-    if (string_equal(architecture, S8("dxil")))
-    {
-        if (components.count == 2)
-        {
-            GpuShaderStage stage = gpu_shader_stage_from_string(components.values[1]);
-            if (stage == GPU_SHADER_STAGE_NONE)
-            {
-                result.error = GPU_TARGET_PARSE_ERROR_STAGE;
-                result.invalid_component = components.values[1];
-                return result;
-            }
             result.target = (GpuTarget){
-                .entry_point = stage >= GPU_SHADER_STAGE_COMPUTE && stage <= GPU_SHADER_STAGE_AMPLIFICATION ? S8("main") : (String8){0},
+                .entry_point = S8("main"),
                 .kind = GPU_TARGET_DXIL,
-                .stage = stage,
+                .stage = GPU_SHADER_STAGE_COMPUTE,
                 .shader_model_major = 6,
                 .shader_model_minor = 6,
                 .address_bits = 32,
@@ -454,43 +300,195 @@ GpuTargetParseResult gpu_target_parse(String8 triple)
             result.error = GPU_TARGET_PARSE_ERROR_NONE;
             return result;
         }
-        if (components.count != 4 ||
-            (!string_equal(components.values[1], S8("pc")) && !string_equal(components.values[1], S8("unknown"))))
+
+        GpuStringComponents components = gpu_split_components(triple);
+        if (!components.valid || !components.count)
         {
-            if (components.count >= 2) result.invalid_component = components.values[1];
             return result;
         }
-        u16 major = 0;
-        u16 minor = 0;
-        if (!gpu_parse_shader_model(components.values[2], &major, &minor))
+        String8 architecture = components.values[0];
+        GpuTargetKind spirv_kind = GPU_TARGET_NONE;
+        u8 spirv_address_bits = 0;
+        bool spirv_prefix = string_starts_with_sequence(architecture, S8("spirv"));
+        bool spirv_architecture = gpu_spirv_architecture_parse(architecture, &spirv_kind, &spirv_address_bits);
+        bool recognized = spirv_prefix || string_equal(architecture, S8("nvptx")) || string_equal(architecture, S8("nvptx64")) ||
+                          string_equal(architecture, S8("amdgcn")) || string_equal(architecture, S8("amdgpu")) ||
+                          string_equal(architecture, S8("air64")) || string_equal(architecture, S8("metal")) ||
+                          string_equal(architecture, S8("dxil"));
+        if (!recognized)
         {
-            result.error = GPU_TARGET_PARSE_ERROR_SHADER_MODEL;
-            result.invalid_component = components.values[2];
             return result;
         }
-        GpuShaderStage stage = gpu_shader_stage_from_string(components.values[3]);
-        if (stage == GPU_SHADER_STAGE_NONE)
+        result.error = GPU_TARGET_PARSE_ERROR_INVALID_TRIPLE;
+        result.invalid_component = triple;
+
+        if (spirv_prefix)
         {
-            result.error = GPU_TARGET_PARSE_ERROR_STAGE;
-            result.invalid_component = components.values[3];
+            if (!spirv_architecture || (components.count != 1 && components.count != 3 && components.count != 4))
+            {
+                result.invalid_component = architecture;
+                return result;
+            }
+            if (components.count >= 3)
+            {
+                String8 vendors[] = {S8("unknown"), S8("amd")};
+                if (!gpu_string_is_one_of(components.values[1], vendors, BUSTER_ARRAY_LENGTH(vendors)))
+                {
+                    result.invalid_component = components.values[1];
+                    return result;
+                }
+                if (!gpu_spirv_runtime_is_valid(components.values[2]))
+                {
+                    result.invalid_component = components.values[2];
+                    return result;
+                }
+                if (components.count == 4 && !string_equal(components.values[3], S8("unknown")))
+                {
+                    result.invalid_component = components.values[3];
+                    return result;
+                }
+            }
+            result.target = (GpuTarget){
+                .entry_point = S8("main"),
+                .backend_triple = triple,
+                .kind = spirv_kind,
+                .stage = GPU_SHADER_STAGE_COMPUTE,
+                .shader_model_major = 6,
+                .shader_model_minor = 6,
+                .address_bits = spirv_address_bits,
+            };
+            result.error = GPU_TARGET_PARSE_ERROR_NONE;
             return result;
         }
-        result.target = (GpuTarget){
-            .entry_point = gpu_dxc_stage_uses_entry_point(stage) ? S8("main") : (String8){0},
-            .kind = GPU_TARGET_DXIL,
-            .stage = stage,
-            .shader_model_major = major,
-            .shader_model_minor = minor,
-            .address_bits = 32,
-        };
-        if (!gpu_dxc_target_fields_are_valid(result.target))
+
+        if (string_equal(architecture, S8("nvptx")) || string_equal(architecture, S8("nvptx64")))
         {
-            result.error = GPU_TARGET_PARSE_ERROR_SHADER_MODEL;
-            result.invalid_component = components.values[2];
+            if (components.count != 1 && components.count != 3)
+            {
+                return result;
+            }
+            if (components.count == 3 &&
+                (!string_equal(components.values[1], S8("nvidia")) ||
+                 (!string_equal(components.values[2], S8("cuda")) && !string_equal(components.values[2], S8("nvcl")))))
+            {
+                result.invalid_component = !string_equal(components.values[1], S8("nvidia")) ? components.values[1] : components.values[2];
+                return result;
+            }
+            result.target = (GpuTarget){
+                .kind = string_equal(architecture, S8("nvptx")) ? GPU_TARGET_NVPTX32 : GPU_TARGET_NVPTX64,
+                .stage = GPU_SHADER_STAGE_COMPUTE,
+                .address_bits = string_equal(architecture, S8("nvptx")) ? 32 : 64,
+            };
+            result.error = GPU_TARGET_PARSE_ERROR_NONE;
             return result;
         }
-        result.error = GPU_TARGET_PARSE_ERROR_NONE;
-        return result;
+
+        if (string_equal(architecture, S8("amdgcn")) || string_equal(architecture, S8("amdgpu")))
+        {
+            if (components.count != 1 && components.count != 3)
+            {
+                return result;
+            }
+            if (components.count == 3 &&
+                (!string_equal(components.values[1], S8("amd")) || !string_equal(components.values[2], S8("amdhsa"))))
+            {
+                result.invalid_component = !string_equal(components.values[1], S8("amd")) ? components.values[1] : components.values[2];
+                return result;
+            }
+            result.target = (GpuTarget){
+                .kind = GPU_TARGET_AMDGCN,
+                .stage = GPU_SHADER_STAGE_COMPUTE,
+                .address_bits = 64,
+            };
+            result.error = GPU_TARGET_PARSE_ERROR_NONE;
+            return result;
+        }
+
+        if (string_equal(architecture, S8("air64")) || string_equal(architecture, S8("metal")))
+        {
+            if (components.count != 1 && components.count != 3)
+            {
+                return result;
+            }
+            String8 sdk = S8("macosx");
+            if (components.count == 3)
+            {
+                sdk = gpu_metal_sdk_from_os(components.values[2]);
+                if (!string_equal(components.values[1], S8("apple")) || !sdk.length)
+                {
+                    result.invalid_component = !string_equal(components.values[1], S8("apple")) ? components.values[1] : components.values[2];
+                    return result;
+                }
+            }
+            result.target = (GpuTarget){
+                .metal_sdk = sdk,
+                .kind = GPU_TARGET_METAL_AIR64,
+                .address_bits = 64,
+            };
+            result.error = GPU_TARGET_PARSE_ERROR_NONE;
+            return result;
+        }
+
+        if (string_equal(architecture, S8("dxil")))
+        {
+            if (components.count == 2)
+            {
+                GpuShaderStage stage = gpu_shader_stage_from_string(components.values[1]);
+                if (stage == GPU_SHADER_STAGE_NONE)
+                {
+                    result.error = GPU_TARGET_PARSE_ERROR_STAGE;
+                    result.invalid_component = components.values[1];
+                    return result;
+                }
+                result.target = (GpuTarget){
+                    .entry_point = stage >= GPU_SHADER_STAGE_COMPUTE && stage <= GPU_SHADER_STAGE_AMPLIFICATION ? S8("main") : (String8){0},
+                    .kind = GPU_TARGET_DXIL,
+                    .stage = stage,
+                    .shader_model_major = 6,
+                    .shader_model_minor = 6,
+                    .address_bits = 32,
+                };
+                result.error = GPU_TARGET_PARSE_ERROR_NONE;
+                return result;
+            }
+            if (components.count != 4 ||
+                (!string_equal(components.values[1], S8("pc")) && !string_equal(components.values[1], S8("unknown"))))
+            {
+                if (components.count >= 2) result.invalid_component = components.values[1];
+                return result;
+            }
+            u16 major = 0;
+            u16 minor = 0;
+            if (!gpu_parse_shader_model(components.values[2], &major, &minor))
+            {
+                result.error = GPU_TARGET_PARSE_ERROR_SHADER_MODEL;
+                result.invalid_component = components.values[2];
+                return result;
+            }
+            GpuShaderStage stage = gpu_shader_stage_from_string(components.values[3]);
+            if (stage == GPU_SHADER_STAGE_NONE)
+            {
+                result.error = GPU_TARGET_PARSE_ERROR_STAGE;
+                result.invalid_component = components.values[3];
+                return result;
+            }
+            result.target = (GpuTarget){
+                .entry_point = gpu_dxc_stage_uses_entry_point(stage) ? S8("main") : (String8){0},
+                .kind = GPU_TARGET_DXIL,
+                .stage = stage,
+                .shader_model_major = major,
+                .shader_model_minor = minor,
+                .address_bits = 32,
+            };
+            if (!gpu_dxc_target_fields_are_valid(result.target))
+            {
+                result.error = GPU_TARGET_PARSE_ERROR_SHADER_MODEL;
+                result.invalid_component = components.values[2];
+                return result;
+            }
+            result.error = GPU_TARGET_PARSE_ERROR_NONE;
+            return result;
+        }
     }
 
     return result;
@@ -498,41 +496,41 @@ GpuTargetParseResult gpu_target_parse(String8 triple)
 
 bool gpu_target_is_valid(GpuTarget target)
 {
-    if (target.kind <= GPU_TARGET_NONE || target.kind >= GPU_TARGET_COUNT)
+    if (target.kind > GPU_TARGET_NONE && target.kind < GPU_TARGET_COUNT)
     {
-        return false;
-    }
-    switch (target.kind)
-    {
-    case GPU_TARGET_SPIRV:
-    case GPU_TARGET_SPIRV32:
-    case GPU_TARGET_SPIRV64:
-    {
-        if (!target.backend_triple.length)
+        switch (target.kind)
         {
-            return false;
-        }
-        GpuTargetParseResult parsed = gpu_target_parse(target.backend_triple);
-        if (parsed.error != GPU_TARGET_PARSE_ERROR_NONE || parsed.target.kind != target.kind || parsed.target.address_bits != target.address_bits)
+        case GPU_TARGET_SPIRV:
+        case GPU_TARGET_SPIRV32:
+        case GPU_TARGET_SPIRV64:
         {
-            return false;
+            if (!target.backend_triple.length)
+            {
+                return false;
+            }
+            GpuTargetParseResult parsed = gpu_target_parse(target.backend_triple);
+            if (parsed.error != GPU_TARGET_PARSE_ERROR_NONE || parsed.target.kind != target.kind || parsed.target.address_bits != target.address_bits)
+            {
+                return false;
+            }
+            if (target.kind != GPU_TARGET_SPIRV && target.stage != GPU_SHADER_STAGE_COMPUTE)
+            {
+                return false;
+            }
+            return gpu_dxc_target_fields_are_valid(target);
         }
-        if (target.kind != GPU_TARGET_SPIRV && target.stage != GPU_SHADER_STAGE_COMPUTE)
-        {
-            return false;
+        case GPU_TARGET_NVPTX32: return target.address_bits == 32 && target.stage == GPU_SHADER_STAGE_COMPUTE;
+        case GPU_TARGET_NVPTX64: return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_COMPUTE;
+        case GPU_TARGET_AMDGCN:
+            return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_COMPUTE && target.architecture.length != 0;
+        case GPU_TARGET_METAL_AIR64:
+            return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_NONE && gpu_metal_sdk_is_valid(target.metal_sdk);
+        case GPU_TARGET_DXIL: return target.address_bits == 32 && gpu_dxc_target_fields_are_valid(target);
+        case GPU_TARGET_NONE:
+        case GPU_TARGET_COUNT: break;
         }
-        return gpu_dxc_target_fields_are_valid(target);
     }
-    case GPU_TARGET_NVPTX32: return target.address_bits == 32 && target.stage == GPU_SHADER_STAGE_COMPUTE;
-    case GPU_TARGET_NVPTX64: return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_COMPUTE;
-    case GPU_TARGET_AMDGCN:
-        return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_COMPUTE && target.architecture.length != 0;
-    case GPU_TARGET_METAL_AIR64:
-        return target.address_bits == 64 && target.stage == GPU_SHADER_STAGE_NONE && gpu_metal_sdk_is_valid(target.metal_sdk);
-    case GPU_TARGET_DXIL: return target.address_bits == 32 && gpu_dxc_target_fields_are_valid(target);
-    case GPU_TARGET_NONE:
-    case GPU_TARGET_COUNT: break;
-    }
+
     return false;
 }
 
@@ -987,15 +985,15 @@ BUSTER_GLOBAL_LOCAL String8 gpu_spirv_dxc_environment(GpuTarget target, bool* su
 {
     *supported = true;
     GpuStringComponents components = gpu_split_components(gpu_spirv_backend_triple(target));
-    if (!components.valid || components.count < 3 || string_equal(components.values[2], S8("unknown")))
+    if (components.valid && components.count >= 3 && !string_equal(components.values[2], S8("unknown")))
     {
-        return (String8){0};
+        if (string_starts_with_sequence(components.values[2], S8("vulkan")))
+        {
+            return components.values[2];
+        }
+        *supported = false;
     }
-    if (string_starts_with_sequence(components.values[2], S8("vulkan")))
-    {
-        return components.values[2];
-    }
-    *supported = false;
+
     return (String8){0};
 }
 
@@ -1942,37 +1940,37 @@ BUSTER_GLOBAL_LOCAL void gpu_pipeline_cleanup(GpuPipelinePlan plan, bool save_te
 
 BUSTER_GLOBAL_LOCAL bool gpu_bytes_contains(ByteSlice bytes, String8 needle)
 {
-    if (!needle.length || needle.length > bytes.length)
+    if (needle.length && needle.length <= bytes.length)
     {
-        return false;
-    }
-    u64 limit = bytes.length - needle.length;
-    for (u64 offset = 0; offset <= limit; offset += 1)
-    {
-        if (memcmp(bytes.pointer + offset, needle.pointer, needle.length) == 0)
+        u64 limit = bytes.length - needle.length;
+        for (u64 offset = 0; offset <= limit; offset += 1)
         {
-            return true;
+            if (memcmp(bytes.pointer + offset, needle.pointer, needle.length) == 0)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool gpu_elf_u16(ByteSlice bytes, u64 offset, u16* value)
 {
-    if (bytes.length < offset + 2 || !value)
+    if (bytes.length >= offset + 2 && value)
     {
-        return false;
+        if (bytes.pointer[5] == 1)
+        {
+            *value = (u16)(bytes.pointer[offset] | (u16)bytes.pointer[offset + 1] << 8);
+            return true;
+        }
+        if (bytes.pointer[5] == 2)
+        {
+            *value = (u16)((u16)bytes.pointer[offset] << 8 | bytes.pointer[offset + 1]);
+            return true;
+        }
     }
-    if (bytes.pointer[5] == 1)
-    {
-        *value = (u16)(bytes.pointer[offset] | (u16)bytes.pointer[offset + 1] << 8);
-        return true;
-    }
-    if (bytes.pointer[5] == 2)
-    {
-        *value = (u16)((u16)bytes.pointer[offset] << 8 | bytes.pointer[offset + 1]);
-        return true;
-    }
+
     return false;
 }
 

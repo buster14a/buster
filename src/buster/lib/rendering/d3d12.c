@@ -889,60 +889,59 @@ BUSTER_GLOBAL_LOCAL bool d3d12_blur_resources_ensure(RenderingHandle* rendering,
     }
     u32 half_width = dimensions.half_width;
     u32 half_height = dimensions.half_height;
-    if (frame->blur_width == half_width && frame->blur_height == half_height && frame->blur_capture && frame->blur_horizontal)
+    if (frame->blur_width != half_width || frame->blur_height != half_height || !frame->blur_capture || !frame->blur_horizontal)
     {
-        return true;
-    }
+        D3D12_HEAP_PROPERTIES default_heap = {
+            .Type = D3D12_HEAP_TYPE_DEFAULT,
+            .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+            .CreationNodeMask = 1,
+            .VisibleNodeMask = 1,
+        };
+        D3D12_RESOURCE_DESC capture_desc = {
+            .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment = 0,
+            .Width = half_width,
+            .Height = half_height,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+            .SampleDesc = {.Count = 1, .Quality = 0},
+            .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        };
+        D3D12_RESOURCE_DESC horizontal_desc = capture_desc;
+        horizontal_desc.Width = half_width;
+        horizontal_desc.Height = half_height;
+        horizontal_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE clear_value = {
+            .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+            .Color = {0.0f, 0.0f, 0.0f, 0.0f},
+        };
 
-    D3D12_HEAP_PROPERTIES default_heap = {
-        .Type = D3D12_HEAP_TYPE_DEFAULT,
-        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
-        .CreationNodeMask = 1,
-        .VisibleNodeMask = 1,
-    };
-    D3D12_RESOURCE_DESC capture_desc = {
-        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        .Alignment = 0,
-        .Width = half_width,
-        .Height = half_height,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-        .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-    };
-    D3D12_RESOURCE_DESC horizontal_desc = capture_desc;
-    horizontal_desc.Width = half_width;
-    horizontal_desc.Height = half_height;
-    horizontal_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    D3D12_CLEAR_VALUE clear_value = {
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-        .Color = {0.0f, 0.0f, 0.0f, 0.0f},
-    };
-
-    d3d12_blur_frame_destroy(frame);
-    HRESULT capture_result = ID3D12Device_CreateCommittedResource(rendering->device, &default_heap, D3D12_HEAP_FLAG_NONE, &capture_desc,
-                                                                   D3D12_RESOURCE_STATE_RENDER_TARGET, &clear_value, &IID_ID3D12Resource,
-                                                                   (void**)&frame->blur_capture);
-    HRESULT horizontal_result = ID3D12Device_CreateCommittedResource(rendering->device, &default_heap, D3D12_HEAP_FLAG_NONE, &horizontal_desc,
-                                                                      D3D12_RESOURCE_STATE_COMMON, &clear_value, &IID_ID3D12Resource,
-                                                                      (void**)&frame->blur_horizontal);
-    if (!d3d12_ok(capture_result) || !d3d12_ok(horizontal_result))
-    {
         d3d12_blur_frame_destroy(frame);
-        string_print(S8("DirectX 12 blur target creation failed: capture={u64:x}, horizontal={u64:x}, size={u32}x{u32}\n"),
-                     (u64)(u32)capture_result, (u64)(u32)horizontal_result, half_width, half_height);
-        return false;
+        HRESULT capture_result = ID3D12Device_CreateCommittedResource(rendering->device, &default_heap, D3D12_HEAP_FLAG_NONE, &capture_desc,
+                                                                       D3D12_RESOURCE_STATE_RENDER_TARGET, &clear_value, &IID_ID3D12Resource,
+                                                                       (void**)&frame->blur_capture);
+        HRESULT horizontal_result = ID3D12Device_CreateCommittedResource(rendering->device, &default_heap, D3D12_HEAP_FLAG_NONE, &horizontal_desc,
+                                                                          D3D12_RESOURCE_STATE_COMMON, &clear_value, &IID_ID3D12Resource,
+                                                                          (void**)&frame->blur_horizontal);
+        if (!d3d12_ok(capture_result) || !d3d12_ok(horizontal_result))
+        {
+            d3d12_blur_frame_destroy(frame);
+            string_print(S8("DirectX 12 blur target creation failed: capture={u64:x}, horizontal={u64:x}, size={u32}x{u32}\n"),
+                         (u64)(u32)capture_result, (u64)(u32)horizontal_result, half_width, half_height);
+            return false;
+        }
+
+        D3D12_CPU_DESCRIPTOR_HANDLE capture_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_capture_rtv_descriptor);
+        D3D12_CPU_DESCRIPTOR_HANDLE horizontal_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_rtv_descriptor);
+        ID3D12Device_CreateRenderTargetView(rendering->device, frame->blur_capture, 0, capture_rtv);
+        ID3D12Device_CreateRenderTargetView(rendering->device, frame->blur_horizontal, 0, horizontal_rtv);
+        frame->blur_width = half_width;
+        frame->blur_height = half_height;
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE capture_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_capture_rtv_descriptor);
-    D3D12_CPU_DESCRIPTOR_HANDLE horizontal_rtv = d3d12_cpu_descriptor(window->rtv_heap, window->rtv_descriptor_size, frame->blur_rtv_descriptor);
-    ID3D12Device_CreateRenderTargetView(rendering->device, frame->blur_capture, 0, capture_rtv);
-    ID3D12Device_CreateRenderTargetView(rendering->device, frame->blur_horizontal, 0, horizontal_rtv);
-    frame->blur_width = half_width;
-    frame->blur_height = half_height;
     return true;
 }
 

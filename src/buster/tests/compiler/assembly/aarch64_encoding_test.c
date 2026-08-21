@@ -194,97 +194,100 @@ BUSTER_GLOBAL_LOCAL bool aarch64_scalar_test_fixture_operands(BusterAarch64ArmM1
                                                                A64ScalarIntModifier* modifier,
                                                                u32* modifier_count)
 {
-    if (!operands || !modifier || !modifier_count) return false;
-    for (u32 index = 0; index < 4; index += 1) operands[index] = (A64ScalarIntOperand){0};
-    *modifier = (A64ScalarIntModifier){0};
-    *modifier_count = 0;
-    switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form.recipe)
+    if (operands && modifier && modifier_count)
     {
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT:
-        if (form.operand_count != 3) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
-        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, 32);
-        *modifier = (A64ScalarIntModifier){
-            .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
-            .value = A64_SCALAR_INT_EXTEND_UXTW,
-            .amount = 1,
-            .present = true,
-        };
-        *modifier_count = 1;
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM:
-        if (form.operand_count != 3) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 123};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT:
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT:
-        if (form.operand_count != 3) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
-        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
-        *modifier = (A64ScalarIntModifier){
-            .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
-            .value = form.recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT ? A64_SCALAR_INT_SHIFT_LSR : A64_SCALAR_INT_SHIFT_LSL,
-            .amount = 3,
-            .present = true,
-        };
-        *modifier_count = 1;
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
-        if (form.operand_count != 3) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0xff};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD:
-        if (form.operand_count != 4) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
-        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 12};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT:
-        if (form.operand_count != 4) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
-        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
-        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE:
-        if (form.operand_count != 2) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 0, form.operands[0].width);
-        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM:
-        if (form.operand_count != 4) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
-        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 7};
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
-        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG:
-        if (form.operand_count != 4) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
-        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 2, form.operands[1].width);
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
-        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF:
-        if (form.operand_count != 3) return false;
-        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
-        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
-        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF:
-        if (form.operand_count != 1) return false;
-        operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
-        return true;
-    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT:
-        return false;
+        for (u32 index = 0; index < 4; index += 1) operands[index] = (A64ScalarIntOperand){0};
+        *modifier = (A64ScalarIntModifier){0};
+        *modifier_count = 0;
+        switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form.recipe)
+        {
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT:
+            if (form.operand_count != 3) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
+            aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, 32);
+            *modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
+                .value = A64_SCALAR_INT_EXTEND_UXTW,
+                .amount = 1,
+                .present = true,
+            };
+            *modifier_count = 1;
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM:
+            if (form.operand_count != 3) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 123};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT:
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT:
+            if (form.operand_count != 3) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+            aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
+            *modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
+                .value = form.recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT ? A64_SCALAR_INT_SHIFT_LSR : A64_SCALAR_INT_SHIFT_LSL,
+                .amount = 3,
+                .present = true,
+            };
+            *modifier_count = 1;
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
+            if (form.operand_count != 3) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0xff};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD:
+            if (form.operand_count != 4) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+            operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 12};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT:
+            if (form.operand_count != 4) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+            aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
+            operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE:
+            if (form.operand_count != 2) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 0, form.operands[0].width);
+            operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM:
+            if (form.operand_count != 4) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+            operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 7};
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+            operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG:
+            if (form.operand_count != 4) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+            aarch64_scalar_test_set_register(operands + 1, form.operands[1], 2, form.operands[1].width);
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+            operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF:
+            if (form.operand_count != 3) return false;
+            aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+            operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+            operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF:
+            if (form.operand_count != 1) return false;
+            operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
+            return true;
+        case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT:
+            return false;
+        }
     }
+
     return false;
 }
 

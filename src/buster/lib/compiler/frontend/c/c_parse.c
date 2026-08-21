@@ -376,23 +376,23 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
         machine->failed = true;
         return false;
     }
-    if (id.value >= machine->mutation_type_limit)
+    if (id.value < machine->mutation_type_limit)
     {
-        return true;
+        if (machine->mutation_count >= machine->mutation_capacity)
+        {
+            machine->failed = true;
+            return false;
+        }
+        machine->mutations[machine->mutation_count++] = (CTypeMutation){
+            .id = id,
+            .previous = result->types[id.value],
+        };
+        if (id.value < machine->layout_cache.capacity)
+        {
+            machine->layout_cache.states[id.value] = 0;
+        }
     }
-    if (machine->mutation_count >= machine->mutation_capacity)
-    {
-        machine->failed = true;
-        return false;
-    }
-    machine->mutations[machine->mutation_count++] = (CTypeMutation){
-        .id = id,
-        .previous = result->types[id.value],
-    };
-    if (id.value < machine->layout_cache.capacity)
-    {
-        machine->layout_cache.states[id.value] = 0;
-    }
+
     return true;
 }
 
@@ -2792,23 +2792,23 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_member_slot(CParseResult* result, CTyp
 
 BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseResult* result, CType* type, u32 slot)
 {
-    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
+    if (result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION))
     {
-        return 0;
-    }
-    u32 current = 0;
-    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
-    {
-        CMember* member = result->members + type->member_start + field_index;
-        if (!c_parse_initializer_member_is_slot(member))
+        u32 current = 0;
+        for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
         {
-            continue;
-        }
-        if (current++ == slot || type->kind == C_TYPE_UNION)
-        {
-            return member;
+            CMember* member = result->members + type->member_start + field_index;
+            if (!c_parse_initializer_member_is_slot(member))
+            {
+                continue;
+            }
+            if (current++ == slot || type->kind == C_TYPE_UNION)
+            {
+                return member;
+            }
         }
     }
+
     return 0;
 }
 
@@ -2919,33 +2919,33 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
         *slots_out = UINT64_MAX;
         return true;
     }
-    if (frame->type.value >= result->type_count)
+    if (frame->type.value < result->type_count)
     {
-        return false;
-    }
-    CType* type = result->types + frame->type.value;
-    if (type->kind == C_TYPE_ARRAY)
-    {
-        if (type->array_bound >= result->array_bound_count)
+        CType* type = result->types + frame->type.value;
+        if (type->kind == C_TYPE_ARRAY)
         {
-            return false;
+            if (type->array_bound >= result->array_bound_count)
+            {
+                return false;
+            }
+            CArrayBound bound = result->array_bounds[type->array_bound];
+            u64 count = bound.inferred_count;
+            if (!bound.has_inferred_count &&
+                (!bound.token_count || !c_parse_integer_constant_range(machine, arena, preprocess, result, scope, bound.token_start,
+                                                                         bound.token_start + bound.token_count, &count)))
+            {
+                return false;
+            }
+            *slots_out = count;
+            return true;
         }
-        CArrayBound bound = result->array_bounds[type->array_bound];
-        u64 count = bound.inferred_count;
-        if (!bound.has_inferred_count &&
-            (!bound.token_count || !c_parse_integer_constant_range(machine, arena, preprocess, result, scope, bound.token_start,
-                                                                     bound.token_start + bound.token_count, &count)))
+        if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
         {
-            return false;
+            *slots_out = c_parse_initializer_member_count(result, type);
+            return true;
         }
-        *slots_out = count;
-        return true;
     }
-    if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
-    {
-        *slots_out = c_parse_initializer_member_count(result, type);
-        return true;
-    }
+
     return false;
 }
 
@@ -4095,49 +4095,49 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
 
 BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKind kind, String8 tag)
 {
-    if (!tag.length)
+    if (tag.length)
     {
-        return C_TYPE_ID_INVALID;
-    }
-    CAggregateLookup* lookup = result->aggregate_lookup;
-    if (lookup)
-    {
-        u32 mask = lookup->slot_count - 1;
-        u32 slot_index = (u32)(c_macro_name_hash(tag) & mask) ^ ((u32)kind & mask);
-        CAggregateLookupSlot* slot = lookup->slots + slot_index;
-        bool stale = false;
-        while (slot->used)
+        CAggregateLookup* lookup = result->aggregate_lookup;
+        if (lookup)
         {
-            if (slot->kind == (u32)kind && string_equal(slot->tag, tag))
+            u32 mask = lookup->slot_count - 1;
+            u32 slot_index = (u32)(c_macro_name_hash(tag) & mask) ^ ((u32)kind & mask);
+            CAggregateLookupSlot* slot = lookup->slots + slot_index;
+            bool stale = false;
+            while (slot->used)
             {
-                u32 type_index = slot->type_index;
-                if (type_index < result->type_count && result->types[type_index].kind == kind && string_equal(result->types[type_index].tag, tag))
+                if (slot->kind == (u32)kind && string_equal(slot->tag, tag))
                 {
-                    return (CTypeId){
-                        .value = type_index,
-                    };
+                    u32 type_index = slot->type_index;
+                    if (type_index < result->type_count && result->types[type_index].kind == kind && string_equal(result->types[type_index].tag, tag))
+                    {
+                        return (CTypeId){
+                            .value = type_index,
+                        };
+                    }
+                    stale = true;
+                    break;
                 }
-                stale = true;
-                break;
+                slot_index = (slot_index + 1) & mask;
+                slot = lookup->slots + slot_index;
             }
-            slot_index = (slot_index + 1) & mask;
-            slot = lookup->slots + slot_index;
+            if (!stale && !lookup->saturated)
+            {
+                return C_TYPE_ID_INVALID;
+            }
         }
-        if (!stale && !lookup->saturated)
+        for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
         {
-            return C_TYPE_ID_INVALID;
+            CType* type = &result->types[type_index];
+            if (type->kind == kind && string_equal(type->tag, tag))
+            {
+                return (CTypeId){
+                    .value = type_index,
+                };
+            }
         }
     }
-    for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
-    {
-        CType* type = &result->types[type_index];
-        if (type->kind == kind && string_equal(type->tag, tag))
-        {
-            return (CTypeId){
-                .value = type_index,
-            };
-        }
-    }
+
     return C_TYPE_ID_INVALID;
 }
 
@@ -4687,36 +4687,36 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
             type = result->entities[typedef_entity.value].type;
         }
     }
-    if (type.value == C_ID_UNDERLYING_INVALID)
+    if (type.value != C_ID_UNDERLYING_INVALID)
     {
-        return type;
-    }
-    u32 qualifier_index = typedef_index + 1;
-    while (qualifier_index < end && preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
-    {
-        u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, qualifier_index, end);
-        if (alignment_end != qualifier_index)
+        u32 qualifier_index = typedef_index + 1;
+        while (qualifier_index < end && preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
         {
-            qualifier_index = c_parse_skip_attributes(preprocess, alignment_end, end);
-            continue;
+            u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, qualifier_index, end);
+            if (alignment_end != qualifier_index)
+            {
+                qualifier_index = c_parse_skip_attributes(preprocess, alignment_end, end);
+                continue;
+            }
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[qualifier_index]);
+            if (c_parse_type_qualifier_word(spelling, &qualifiers))
+            {
+                has_qualifier = true;
+            }
+            else if (!c_parse_atomic_declaration_prefix(spelling, preprocess.dialect, &qualifiers))
+            {
+                break;
+            }
+            qualifier_index += 1;
+            qualifier_index = c_parse_skip_attributes(preprocess, qualifier_index, end);
         }
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[qualifier_index]);
-        if (c_parse_type_qualifier_word(spelling, &qualifiers))
+        *declarator_start = qualifier_index;
+        if (has_qualifier)
         {
-            has_qualifier = true;
+            type = c_parse_add_qualified_type(result, type, qualifiers);
         }
-        else if (!c_parse_atomic_declaration_prefix(spelling, preprocess.dialect, &qualifiers))
-        {
-            break;
-        }
-        qualifier_index += 1;
-        qualifier_index = c_parse_skip_attributes(preprocess, qualifier_index, end);
     }
-    *declarator_start = qualifier_index;
-    if (has_qualifier)
-    {
-        type = c_parse_add_qualified_type(result, type, qualifiers);
-    }
+
     return type;
 }
 
@@ -7658,61 +7658,60 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, Stri
 
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name)
 {
-    if (!result)
+    if (result)
     {
-        return C_ENTITY_ID_INVALID;
-    }
-
-    // A complete parse has a power-of-two bucket table and a terminated chain.
-    // Hand-built or partially rolled-back results can omit either table, point
-    // at an invalid entity, or leave a cycle. Prove the chain before entering
-    // the canonical lookup, whose hot path intentionally assumes this shape.
-    bool bucket_chain_valid = result->entities && result->typedef_lookup_buckets && result->entity_lookup_bucket_count &&
-                              (result->entity_lookup_bucket_count & (result->entity_lookup_bucket_count - 1)) == 0;
-    if (bucket_chain_valid)
-    {
-        u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
-        CEntityId entity = result->typedef_lookup_buckets[bucket];
-        u32 steps = 0;
-        while (entity.value != C_ID_UNDERLYING_INVALID)
-        {
-            if (steps >= result->entity_count || entity.value >= result->entity_count)
-            {
-                bucket_chain_valid = false;
-                break;
-            }
-            CEntity* candidate = &result->entities[entity.value];
-            if (candidate->kind != C_ENTITY_TYPEDEF)
-            {
-                bucket_chain_valid = false;
-                break;
-            }
-            entity = candidate->next_typedef_in_lookup;
-            steps += 1;
-        }
+        // A complete parse has a power-of-two bucket table and a terminated chain.
+        // Hand-built or partially rolled-back results can omit either table, point
+        // at an invalid entity, or leave a cycle. Prove the chain before entering
+        // the canonical lookup, whose hot path intentionally assumes this shape.
+        bool bucket_chain_valid = result->entities && result->typedef_lookup_buckets && result->entity_lookup_bucket_count &&
+                                  (result->entity_lookup_bucket_count & (result->entity_lookup_bucket_count - 1)) == 0;
         if (bucket_chain_valid)
         {
-            // Keep the canonical newest-first lookup as the source of the
-            // result after validation; oldest=true preserves the historical
-            // ascending entity scan's first exact typedef.
-            return c_parse_lookup_typedef_name(result, name, true);
+            u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
+            CEntityId entity = result->typedef_lookup_buckets[bucket];
+            u32 steps = 0;
+            while (entity.value != C_ID_UNDERLYING_INVALID)
+            {
+                if (steps >= result->entity_count || entity.value >= result->entity_count)
+                {
+                    bucket_chain_valid = false;
+                    break;
+                }
+                CEntity* candidate = &result->entities[entity.value];
+                if (candidate->kind != C_ENTITY_TYPEDEF)
+                {
+                    bucket_chain_valid = false;
+                    break;
+                }
+                entity = candidate->next_typedef_in_lookup;
+                steps += 1;
+            }
+            if (bucket_chain_valid)
+            {
+                // Keep the canonical newest-first lookup as the source of the
+                // result after validation; oldest=true preserves the historical
+                // ascending entity scan's first exact typedef.
+                return c_parse_lookup_typedef_name(result, name, true);
+            }
+        }
+
+        // Preserve the original fallback for absent or malformed lookup metadata.
+        // Ascending entity order is the language's oldest-typedef tie breaker.
+        if (!result->entities)
+        {
+            return C_ENTITY_ID_INVALID;
+        }
+        for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+        {
+            CEntity* entity = &result->entities[entity_index];
+            if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
+            {
+                return (CEntityId){.value = entity_index};
+            }
         }
     }
 
-    // Preserve the original fallback for absent or malformed lookup metadata.
-    // Ascending entity order is the language's oldest-typedef tie breaker.
-    if (!result->entities)
-    {
-        return C_ENTITY_ID_INVALID;
-    }
-    for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
-    {
-        CEntity* entity = &result->entities[entity_index];
-        if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
-        {
-            return (CEntityId){.value = entity_index};
-        }
-    }
     return C_ENTITY_ID_INVALID;
 }
 
@@ -7887,61 +7886,61 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
         return false;
     }
     CEntity* entity = &result->entities[entity_id.value];
-    if (!entity->is_constexpr || entity->type.value >= result->type_count)
+    if (entity->is_constexpr && entity->type.value < result->type_count)
     {
-        return true;
-    }
-    CType value_type = result->types[entity->type.value];
-    if (!c_type_kind_is_integer(value_type.kind))
-    {
-        return true;
-    }
-    Arena* conflicts[] = {
-        arena,
-    };
-    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    u64 value = 0;
-    bool evaluated =
-        c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
-    scratch_end(temporary);
-    if (!evaluated)
-    {
-        c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                           S8("integer constexpr initializer must be an integer constant expression"));
-        return false;
-    }
-    bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
-    bool negative = value > INT64_MAX && !expression_unsigned;
-    u64 magnitude = negative ? 0 - value : value;
-    u64 size = 0;
-    u32 alignment = 0;
-    bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
-    BUSTER_UNUSED(alignment);
-    if (representable && size <= 8)
-    {
-        u32 bits = (u32)(size * 8);
-        bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
-        if (target_signed)
+        CType value_type = result->types[entity->type.value];
+        if (!c_type_kind_is_integer(value_type.kind))
         {
-            u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
-            u64 negative_max = positive_max + 1;
-            representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+            return true;
         }
-        else
+        Arena* conflicts[] = {
+            arena,
+        };
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        u64 value = 0;
+        bool evaluated =
+            c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+        scratch_end(temporary);
+        if (!evaluated)
         {
-            u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
-            representable = !negative && magnitude <= maximum;
+            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                               S8("integer constexpr initializer must be an integer constant expression"));
+            return false;
         }
+        bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
+        bool negative = value > INT64_MAX && !expression_unsigned;
+        u64 magnitude = negative ? 0 - value : value;
+        u64 size = 0;
+        u32 alignment = 0;
+        bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
+        BUSTER_UNUSED(alignment);
+        if (representable && size <= 8)
+        {
+            u32 bits = (u32)(size * 8);
+            bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
+            if (target_signed)
+            {
+                u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
+                u64 negative_max = positive_max + 1;
+                representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+            }
+            else
+            {
+                u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
+                representable = !negative && magnitude <= maximum;
+            }
+        }
+        if (!representable)
+        {
+            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                               S8("integer constexpr initializer is not exactly representable in the declared type"));
+            return false;
+        }
+        entity->has_constant_value = true;
+        entity->constant_is_negative = negative;
+        entity->constant_value = magnitude;
     }
-    if (!representable)
-    {
-        c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                           S8("integer constexpr initializer is not exactly representable in the declared type"));
-        return false;
-    }
-    entity->has_constant_value = true;
-    entity->constant_is_negative = negative;
-    entity->constant_value = magnitude;
+
     return true;
 }
 
@@ -7954,61 +7953,61 @@ BUSTER_C_SHARED bool c_parse_validate_constexpr_initializer(CTypeParseMachine* m
         return false;
     }
     CEntity* entity = result->entities + entity_id.value;
-    if (!entity->is_constexpr || entity->type.value >= result->type_count)
+    if (entity->is_constexpr && entity->type.value < result->type_count)
     {
-        return true;
-    }
-    CType* type = result->types + entity->type.value;
-    if (c_type_kind_is_integer(type->kind))
-    {
-        return c_parse_record_constexpr_integer(machine, arena, result, preprocess, scope, entity_id, initializer_start, initializer_end);
-    }
-    if (type->kind != C_TYPE_POINTER && type->kind != C_TYPE_NULLPTR)
-    {
-        return true;
-    }
-    while (initializer_start < initializer_end && c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 depth = 0;
-        u32 close = initializer_start;
-        for (; close < initializer_end; close += 1)
+        CType* type = result->types + entity->type.value;
+        if (c_type_kind_is_integer(type->kind))
         {
-            CToken token = preprocess.tokens[close];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!depth)
-                {
-                    break;
-                }
-                depth -= 1;
-                if (!depth)
-                {
-                    break;
-                }
-            }
+            return c_parse_record_constexpr_integer(machine, arena, result, preprocess, scope, entity_id, initializer_start, initializer_end);
         }
-        if (close != initializer_end - 1)
+        if (type->kind != C_TYPE_POINTER && type->kind != C_TYPE_NULLPTR)
         {
-            break;
+            return true;
         }
-        initializer_start += 1;
-        initializer_end -= 1;
+        while (initializer_start < initializer_end && c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 depth = 0;
+            u32 close = initializer_start;
+            for (; close < initializer_end; close += 1)
+            {
+                CToken token = preprocess.tokens[close];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!depth)
+                    {
+                        break;
+                    }
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        break;
+                    }
+                }
+            }
+            if (close != initializer_end - 1)
+            {
+                break;
+            }
+            initializer_start += 1;
+            initializer_end -= 1;
+        }
+        bool nullptr_value = c_preprocess_dialect_is_c23(preprocess.dialect) && initializer_end == initializer_start + 1 &&
+                             preprocess.tokens[initializer_start].kind == C_TOKEN_IDENTIFIER &&
+                             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[initializer_start]), S8("nullptr"));
+        u64 integer_value = UINT64_MAX;
+        bool integer_null = c_parse_integer_constant_range(machine, arena, preprocess, result, scope, initializer_start, initializer_end, &integer_value) &&
+                            integer_value == 0;
+        if (!nullptr_value && !integer_null)
+        {
+            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("pointer constexpr initializer must have a null pointer value"));
+            return false;
+        }
     }
-    bool nullptr_value = c_preprocess_dialect_is_c23(preprocess.dialect) && initializer_end == initializer_start + 1 &&
-                         preprocess.tokens[initializer_start].kind == C_TOKEN_IDENTIFIER &&
-                         string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[initializer_start]), S8("nullptr"));
-    u64 integer_value = UINT64_MAX;
-    bool integer_null = c_parse_integer_constant_range(machine, arena, preprocess, result, scope, initializer_start, initializer_end, &integer_value) &&
-                        integer_value == 0;
-    if (!nullptr_value && !integer_null)
-    {
-        c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("pointer constexpr initializer must have a null pointer value"));
-        return false;
-    }
+
     return true;
 }
 
@@ -9138,79 +9137,19 @@ BUSTER_C_SHARED bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u3
 
 BUSTER_C_INTERNAL bool c_parse_asm_operand_name_token(CPreprocessResult preprocess, u32 open, u32 close, u32 token_index)
 {
-    if (open >= close || close > preprocess.token_count || token_index >= close || preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+    if (open < close && close <= preprocess.token_count && token_index < close && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER)
     {
-        return false;
-    }
-    u32 separators[4] = {0};
-    u32 separator_count = 0;
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
-    u32 template_end = open + 1;
-    while (template_end < close && preprocess.tokens[template_end].kind == C_TOKEN_STRING_LITERAL)
-    {
-        template_end += 1;
-    }
-    for (u32 index = template_end; index < close; index += 1)
-    {
-        u32 punctuator = preprocess.tokens[index].punctuator;
-        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+        u32 separators[4] = {0};
+        u32 separator_count = 0;
+        u32 parentheses = 0;
+        u32 brackets = 0;
+        u32 braces = 0;
+        u32 template_end = open + 1;
+        while (template_end < close && preprocess.tokens[template_end].kind == C_TOKEN_STRING_LITERAL)
         {
-            parentheses += 1;
+            template_end += 1;
         }
-        else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
-        {
-            parentheses -= 1;
-        }
-        else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
-        {
-            brackets += 1;
-        }
-        else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
-        {
-            brackets -= 1;
-        }
-        else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
-        {
-            braces += 1;
-        }
-        else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
-        {
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COLON)
-        {
-            if (separator_count >= BUSTER_ARRAY_LENGTH(separators))
-            {
-                return false;
-            }
-            separators[separator_count++] = index;
-        }
-    }
-    if (!separator_count)
-    {
-        return false;
-    }
-    u32 ranges[4] = {
-        separators[0] + 1,
-        separator_count >= 2 ? separators[1] : close,
-        separator_count >= 2 ? separators[1] + 1 : close,
-        separator_count >= 3 ? separators[2] : close,
-    };
-    for (u32 range_index = 0; range_index < 2; range_index += 1)
-    {
-        u32 start = ranges[range_index * 2];
-        u32 end = ranges[range_index * 2 + 1];
-        if (token_index < start || token_index >= end)
-        {
-            continue;
-        }
-        u32 segment_start = start;
-        parentheses = 0;
-        brackets = 0;
-        braces = 0;
-        for (u32 index = start; index <= token_index && index < end; index += 1)
+        for (u32 index = template_end; index < close; index += 1)
         {
             u32 punctuator = preprocess.tokens[index].punctuator;
             if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
@@ -9237,15 +9176,75 @@ BUSTER_C_INTERNAL bool c_parse_asm_operand_name_token(CPreprocessResult preproce
             {
                 braces -= 1;
             }
-            else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
+            else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COLON)
             {
-                segment_start = index + 1;
+                if (separator_count >= BUSTER_ARRAY_LENGTH(separators))
+                {
+                    return false;
+                }
+                separators[separator_count++] = index;
             }
         }
-        return token_index == segment_start + 1 && segment_start + 2 < end &&
-               c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
-               c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
+        if (!separator_count)
+        {
+            return false;
+        }
+        u32 ranges[4] = {
+            separators[0] + 1,
+            separator_count >= 2 ? separators[1] : close,
+            separator_count >= 2 ? separators[1] + 1 : close,
+            separator_count >= 3 ? separators[2] : close,
+        };
+        for (u32 range_index = 0; range_index < 2; range_index += 1)
+        {
+            u32 start = ranges[range_index * 2];
+            u32 end = ranges[range_index * 2 + 1];
+            if (token_index < start || token_index >= end)
+            {
+                continue;
+            }
+            u32 segment_start = start;
+            parentheses = 0;
+            brackets = 0;
+            braces = 0;
+            for (u32 index = start; index <= token_index && index < end; index += 1)
+            {
+                u32 punctuator = preprocess.tokens[index].punctuator;
+                if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+                {
+                    parentheses += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
+                {
+                    parentheses -= 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+                {
+                    brackets += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
+                {
+                    brackets -= 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+                {
+                    braces += 1;
+                }
+                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
+                {
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
+                {
+                    segment_start = index + 1;
+                }
+            }
+            return token_index == segment_start + 1 && segment_start + 2 < end &&
+                   c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
+                   c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
+        }
     }
+
     return false;
 }
 

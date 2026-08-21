@@ -495,35 +495,81 @@ bool c_test_translate_plain_run_paths_agree(String8 source)
 BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source)
 {
     CTranslatedSource result = {0};
-    if (source.length > UINT32_MAX - 2)
+    if (source.length <= UINT32_MAX - 2)
     {
-        return result;
-    }
-    char8* translated = space ? c_space_allocate(space, source.length + 1) : arena_allocate(arena, char8, source.length + 1);
-    result.translated_offset = space ? c_space_offset(space, translated) : 0;
-    IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, source.length + 2);
-    u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
-    u32 checkpoint_count = 0;
-    u64 input = 0;
-    u64 output = 0;
-    u32 line = 1;
-    u32 column = 1;
-    // The next output byte starts a new linear run; initially true so the
-    // first byte records the first checkpoint.
-    bool run_broken = true;
-    while (input < source.length)
-    {
-        // A run containing no '\r', '\n', or '\\' keeps line/column linear,
-        // so it copies through whole and only those three bytes reach the exact
-        // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
-        // time; every fallback retains the previous eight-byte SWAR scan.
-#if BUSTER_C_TRANSLATE_AVX512
-        u64 plain_end = c_translate_plain_run_end_avx512(source, input);
-#else
-        u64 plain_end = c_translate_plain_run_end_swar(source, input);
-#endif
-        if (plain_end > input)
+        char8* translated = space ? c_space_allocate(space, source.length + 1) : arena_allocate(arena, char8, source.length + 1);
+        result.translated_offset = space ? c_space_offset(space, translated) : 0;
+        IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, source.length + 2);
+        u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
+        u32 checkpoint_count = 0;
+        u64 input = 0;
+        u64 output = 0;
+        u32 line = 1;
+        u32 column = 1;
+        // The next output byte starts a new linear run; initially true so the
+        // first byte records the first checkpoint.
+        bool run_broken = true;
+        while (input < source.length)
         {
+            // A run containing no '\r', '\n', or '\\' keeps line/column linear,
+            // so it copies through whole and only those three bytes reach the exact
+            // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
+            // time; every fallback retains the previous eight-byte SWAR scan.
+#if BUSTER_C_TRANSLATE_AVX512
+            u64 plain_end = c_translate_plain_run_end_avx512(source, input);
+#else
+            u64 plain_end = c_translate_plain_run_end_swar(source, input);
+#endif
+            if (plain_end > input)
+            {
+                if (run_broken)
+                {
+                    checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+                        .offset = (u32)input,
+                        .line = line,
+                        .column = column,
+                    };
+                    checkpoint_offsets[checkpoint_count] = (u32)output;
+                    checkpoint_count += 1;
+                    run_broken = false;
+                }
+                u64 plain_length = plain_end - input;
+                memcpy(translated + output, source.pointer + input, plain_length);
+                output += plain_length;
+                column += (u32)plain_length;
+                input = plain_end;
+                continue;
+            }
+            char8 character = source.pointer[input];
+            u64 newline_length = 0;
+            if (character == '\r')
+            {
+                newline_length = input + 1 < source.length && source.pointer[input + 1] == '\n' ? 2 : 1;
+            }
+            else if (character == '\n')
+            {
+                newline_length = 1;
+            }
+            if (character == '\\' && input + 1 < source.length)
+            {
+                u64 splice_length = 0;
+                if (source.pointer[input + 1] == '\n')
+                {
+                    splice_length = 2;
+                }
+                else if (source.pointer[input + 1] == '\r')
+                {
+                    splice_length = input + 2 < source.length && source.pointer[input + 2] == '\n' ? 3 : 2;
+                }
+                if (splice_length)
+                {
+                    input += splice_length;
+                    line += 1;
+                    column = 1;
+                    run_broken = true;
+                    continue;
+                }
+            }
             if (run_broken)
             {
                 checkpoints[checkpoint_count] = (IrSourceCheckpoint){
@@ -535,108 +581,62 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                 checkpoint_count += 1;
                 run_broken = false;
             }
-            u64 plain_length = plain_end - input;
-            memcpy(translated + output, source.pointer + input, plain_length);
-            output += plain_length;
-            column += (u32)plain_length;
-            input = plain_end;
-            continue;
-        }
-        char8 character = source.pointer[input];
-        u64 newline_length = 0;
-        if (character == '\r')
-        {
-            newline_length = input + 1 < source.length && source.pointer[input + 1] == '\n' ? 2 : 1;
-        }
-        else if (character == '\n')
-        {
-            newline_length = 1;
-        }
-        if (character == '\\' && input + 1 < source.length)
-        {
-            u64 splice_length = 0;
-            if (source.pointer[input + 1] == '\n')
+            if (newline_length)
             {
-                splice_length = 2;
-            }
-            else if (source.pointer[input + 1] == '\r')
-            {
-                splice_length = input + 2 < source.length && source.pointer[input + 2] == '\n' ? 3 : 2;
-            }
-            if (splice_length)
-            {
-                input += splice_length;
+                translated[output++] = '\n';
+                input += newline_length;
                 line += 1;
                 column = 1;
                 run_broken = true;
-                continue;
+            }
+            else
+            {
+                translated[output++] = character;
+                input += 1;
+                column += 1;
             }
         }
-        if (run_broken)
+        translated[output] = 0;
+        checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+            .offset = (u32)source.length,
+            .line = line,
+            .column = column,
+        };
+        checkpoint_offsets[checkpoint_count] = (u32)output;
+        checkpoint_count += 1;
+        if (space)
         {
-            checkpoints[checkpoint_count] = (IrSourceCheckpoint){
-                .offset = (u32)input,
-                .line = line,
-                .column = column,
-            };
-            checkpoint_offsets[checkpoint_count] = (u32)output;
-            checkpoint_count += 1;
-            run_broken = false;
+            // The translated copy only shrinks (splices delete bytes); hand the
+            // unused tail back so the next spelling packs against it.
+            c_space_shrink(space, source.length - output);
         }
-        if (newline_length)
+        result.source = (String8){
+            .pointer = translated,
+            .length = output,
+        };
+        result.checkpoints = checkpoints;
+        result.checkpoint_offsets = checkpoint_offsets;
+        result.checkpoint_count = checkpoint_count;
+        // The page bracket for the checkpoints, built in the one linear pass the
+        // finished offsets allow. It is what keeps a line-table consumer's
+        // per-line lookup from binary-searching the whole file.
+        result.checkpoint_page_count = (u32)(output >> IR_SOURCE_CHECKPOINT_PAGE_SHIFT) + 1;
+        result.checkpoint_pages = arena_allocate(arena, u32, result.checkpoint_page_count);
+        u32 fill_checkpoint = 0;
+        for (u32 page = 0; page < result.checkpoint_page_count; page += 1)
         {
-            translated[output++] = '\n';
-            input += newline_length;
-            line += 1;
-            column = 1;
-            run_broken = true;
+            u32 page_start = page << IR_SOURCE_CHECKPOINT_PAGE_SHIFT;
+            while (fill_checkpoint + 1 < checkpoint_count && checkpoint_offsets[fill_checkpoint + 1] <= page_start)
+            {
+                fill_checkpoint += 1;
+            }
+            result.checkpoint_pages[page] = fill_checkpoint;
         }
-        else
-        {
-            translated[output++] = character;
-            input += 1;
-            column += 1;
-        }
+        // `line` counts breaks, so it is one past the lines that ended; a column
+        // past the first means bytes followed the last break and opened one more.
+        result.raw_lines = line - 1 + (column > 1);
     }
-    translated[output] = 0;
-    checkpoints[checkpoint_count] = (IrSourceCheckpoint){
-        .offset = (u32)source.length,
-        .line = line,
-        .column = column,
-    };
-    checkpoint_offsets[checkpoint_count] = (u32)output;
-    checkpoint_count += 1;
-    if (space)
-    {
-        // The translated copy only shrinks (splices delete bytes); hand the
-        // unused tail back so the next spelling packs against it.
-        c_space_shrink(space, source.length - output);
-    }
-    result.source = (String8){
-        .pointer = translated,
-        .length = output,
-    };
-    result.checkpoints = checkpoints;
-    result.checkpoint_offsets = checkpoint_offsets;
-    result.checkpoint_count = checkpoint_count;
-    // The page bracket for the checkpoints, built in the one linear pass the
-    // finished offsets allow. It is what keeps a line-table consumer's
-    // per-line lookup from binary-searching the whole file.
-    result.checkpoint_page_count = (u32)(output >> IR_SOURCE_CHECKPOINT_PAGE_SHIFT) + 1;
-    result.checkpoint_pages = arena_allocate(arena, u32, result.checkpoint_page_count);
-    u32 fill_checkpoint = 0;
-    for (u32 page = 0; page < result.checkpoint_page_count; page += 1)
-    {
-        u32 page_start = page << IR_SOURCE_CHECKPOINT_PAGE_SHIFT;
-        while (fill_checkpoint + 1 < checkpoint_count && checkpoint_offsets[fill_checkpoint + 1] <= page_start)
-        {
-            fill_checkpoint += 1;
-        }
-        result.checkpoint_pages[page] = fill_checkpoint;
-    }
-    // `line` counts breaks, so it is one past the lines that ended; a column
-    // past the first means bytes followed the last break and opened one more.
-    result.raw_lines = line - 1 + (column > 1);
+
     return result;
 }
 
@@ -999,30 +999,30 @@ BUSTER_C_INTERNAL bool c_literal_prefix(String8 source, u64 offset, u64* prefix_
 {
     *prefix_length = 0;
     *delimiter = 0;
-    if (offset >= source.length)
+    if (offset < source.length)
     {
-        return false;
+        char8 character = source.pointer[offset];
+        if (character == '\'' || character == '"')
+        {
+            *delimiter = character;
+            return true;
+        }
+        if (character == 'u' && offset + 2 < source.length && source.pointer[offset + 1] == '8' &&
+            (source.pointer[offset + 2] == '\'' || source.pointer[offset + 2] == '"'))
+        {
+            *prefix_length = 2;
+            *delimiter = source.pointer[offset + 2];
+            return true;
+        }
+        if ((character == 'u' || character == 'U' || character == 'L') && offset + 1 < source.length &&
+            (source.pointer[offset + 1] == '\'' || source.pointer[offset + 1] == '"'))
+        {
+            *prefix_length = 1;
+            *delimiter = source.pointer[offset + 1];
+            return true;
+        }
     }
-    char8 character = source.pointer[offset];
-    if (character == '\'' || character == '"')
-    {
-        *delimiter = character;
-        return true;
-    }
-    if (character == 'u' && offset + 2 < source.length && source.pointer[offset + 1] == '8' &&
-        (source.pointer[offset + 2] == '\'' || source.pointer[offset + 2] == '"'))
-    {
-        *prefix_length = 2;
-        *delimiter = source.pointer[offset + 2];
-        return true;
-    }
-    if ((character == 'u' || character == 'U' || character == 'L') && offset + 1 < source.length &&
-        (source.pointer[offset + 1] == '\'' || source.pointer[offset + 1] == '"'))
-    {
-        *prefix_length = 1;
-        *delimiter = source.pointer[offset + 1];
-        return true;
-    }
+
     return false;
 }
 
@@ -1975,99 +1975,99 @@ u64 c_test_lex_punctuator_nfa_mismatches(void)
 BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
 {
     CLexResult result = {0};
-    if (!arena || (source.length && !source.pointer))
+    if (arena && (!source.length || source.pointer))
     {
-        return result;
-    }
-    CTranslatedSource translated = c_translate_source(arena, space, source);
-    result.translated_source = translated.source;
-    result.spelling_base = space ? space->base : translated.source.pointer;
-    result.checkpoints = translated.checkpoints;
-    result.checkpoint_offsets = translated.checkpoint_offsets;
-    result.checkpoint_pages = translated.checkpoint_pages;
-    result.checkpoint_page_count = translated.checkpoint_page_count;
-    result.checkpoint_count = translated.checkpoint_count;
-    result.translated_offset = translated.translated_offset;
-    // One token per byte bounds the stream including the end marker exactly as
-    // the scalar loop needs; eight more absorb the tail rows of the emitter's
-    // full-width interleaved stores, which the next window overwrites.
-    result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 8);
-    if (translated.source.length > UINT64_MAX / sizeof(CDiagnostic) - 1)
-    {
-        return result;
-    }
-    u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
-    if (diagnostic_bytes > (UINT64_MAX - BUSTER_MB(1)) / 2)
-    {
-        return result;
-    }
-    u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
-    Arena* conflicts[] = {
-        arena,
-    };
-    TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    Arena* diagnostic_arena = diagnostic_temporary.arena;
-    bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
-    if (!diagnostic_arena_is_scratch)
-    {
-        scratch_end(diagnostic_temporary);
-        diagnostic_arena = arena_create((ArenaCreation){
-            .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
-        });
-    }
-    if (!diagnostic_arena)
-    {
-        return result;
-    }
-    CLexState state = {
-        .result = &result,
-        .translated = translated,
-        .diagnostic_arena = diagnostic_arena,
-        .maximum_diagnostic_count = translated.source.length + 1,
-    };
-    state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
-    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
-    // Source measurement rides the branches the lexer already takes; see
-    // CSourceMetrics.
-    result.metrics.files = 1;
-    result.metrics.bytes = source.length;
-    result.metrics.translated_bytes = translated.source.length;
-    result.metrics.lines = translated.raw_lines;
+        CTranslatedSource translated = c_translate_source(arena, space, source);
+        result.translated_source = translated.source;
+        result.spelling_base = space ? space->base : translated.source.pointer;
+        result.checkpoints = translated.checkpoints;
+        result.checkpoint_offsets = translated.checkpoint_offsets;
+        result.checkpoint_pages = translated.checkpoint_pages;
+        result.checkpoint_page_count = translated.checkpoint_page_count;
+        result.checkpoint_count = translated.checkpoint_count;
+        result.translated_offset = translated.translated_offset;
+        // One token per byte bounds the stream including the end marker exactly as
+        // the scalar loop needs; eight more absorb the tail rows of the emitter's
+        // full-width interleaved stores, which the next window overwrites.
+        result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 8);
+        if (translated.source.length > UINT64_MAX / sizeof(CDiagnostic) - 1)
+        {
+            return result;
+        }
+        u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
+        if (diagnostic_bytes > (UINT64_MAX - BUSTER_MB(1)) / 2)
+        {
+            return result;
+        }
+        u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
+        Arena* conflicts[] = {
+            arena,
+        };
+        TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        Arena* diagnostic_arena = diagnostic_temporary.arena;
+        bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
+        if (!diagnostic_arena_is_scratch)
+        {
+            scratch_end(diagnostic_temporary);
+            diagnostic_arena = arena_create((ArenaCreation){
+                .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
+            });
+        }
+        if (!diagnostic_arena)
+        {
+            return result;
+        }
+        CLexState state = {
+            .result = &result,
+            .translated = translated,
+            .diagnostic_arena = diagnostic_arena,
+            .maximum_diagnostic_count = translated.source.length + 1,
+        };
+        state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
+        result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
+        // Source measurement rides the branches the lexer already takes; see
+        // CSourceMetrics.
+        result.metrics.files = 1;
+        result.metrics.bytes = source.length;
+        result.metrics.translated_bytes = translated.source.length;
+        result.metrics.lines = translated.raw_lines;
 #if BUSTER_C_LEX_COMPACT
-    if (force_scalar)
-    {
-        c_lex_scalar(&state);
-    }
-    else
-    {
-        c_lex_compact(&state);
-    }
+        if (force_scalar)
+        {
+            c_lex_scalar(&state);
+        }
+        else
+        {
+            c_lex_compact(&state);
+        }
 #else
-    BUSTER_UNUSED(force_scalar);
-    c_lex_scalar(&state);
+        BUSTER_UNUSED(force_scalar);
+        c_lex_scalar(&state);
 #endif
-    // A file whose last line has no terminating newline still ends a line.
-    if (translated.source.length > state.line_start)
-    {
-        c_source_metrics_line(&result.metrics, state.line_has_code, state.line_has_comment);
+        // A file whose last line has no terminating newline still ends a line.
+        if (translated.source.length > state.line_start)
+        {
+            c_source_metrics_line(&result.metrics, state.line_has_code, state.line_has_comment);
+        }
+        result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
+        result.metrics.tokens = result.token_count - state.newline_tokens;
+        c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+        CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
+        if (result.diagnostic_count)
+        {
+            memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
+        }
+        result.diagnostics = diagnostics;
+        if (diagnostic_arena_is_scratch)
+        {
+            scratch_end(diagnostic_temporary);
+        }
+        else
+        {
+            arena_destroy(diagnostic_arena, 1);
+        }
     }
-    result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
-    result.metrics.tokens = result.token_count - state.newline_tokens;
-    c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
-    CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
-    if (result.diagnostic_count)
-    {
-        memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
-    }
-    result.diagnostics = diagnostics;
-    if (diagnostic_arena_is_scratch)
-    {
-        scratch_end(diagnostic_temporary);
-    }
-    else
-    {
-        arena_destroy(diagnostic_arena, 1);
-    }
+
     return result;
 }
 
@@ -2275,17 +2275,17 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
 // by spelling, scanning the single source-of-truth table above.
 BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
 {
-    if (!spelling.length || spelling.pointer[0] != '_')
+    if (spelling.length && spelling.pointer[0] == '_')
     {
-        return C_SYMBOL_BUILTIN_NONE;
-    }
-    for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
-    {
-        if (string_equal(spelling, c_symbol_predefined[index].name))
+        for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
         {
-            return (CSymbolBuiltin)c_symbol_predefined[index].builtin;
+            if (string_equal(spelling, c_symbol_predefined[index].name))
+            {
+                return (CSymbolBuiltin)c_symbol_predefined[index].builtin;
+            }
         }
     }
+
     return C_SYMBOL_BUILTIN_NONE;
 }
 
@@ -2661,29 +2661,29 @@ BUSTER_C_SHARED bool c_token_is_punctuator(const CToken* token, CPunctuator punc
 // interns its name.
 BUSTER_C_INTERNAL CMacro* c_macro_find(CMacro* first, u32 symbol)
 {
-    if (!symbol)
+    if (symbol)
     {
-        return 0;
-    }
-    if (first && first->bucket_count)
-    {
-        u32 bucket = symbol & (first->bucket_count - 1);
-        for (CMacro* macro = first->buckets[bucket]; macro; macro = macro->hash_next)
+        if (first && first->bucket_count)
+        {
+            u32 bucket = symbol & (first->bucket_count - 1);
+            for (CMacro* macro = first->buckets[bucket]; macro; macro = macro->hash_next)
+            {
+                if (macro->symbol == symbol)
+                {
+                    return macro;
+                }
+            }
+            return 0;
+        }
+        for (CMacro* macro = first; macro; macro = macro->next)
         {
             if (macro->symbol == symbol)
             {
                 return macro;
             }
         }
-        return 0;
     }
-    for (CMacro* macro = first; macro; macro = macro->next)
-    {
-        if (macro->symbol == symbol)
-        {
-            return macro;
-        }
-    }
+
     return 0;
 }
 

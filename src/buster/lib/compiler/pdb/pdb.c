@@ -225,63 +225,63 @@ struct PdbTypeRecord
 BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice blob)
 {
     PdbCodeviewSplit result = {0};
-    if (blob.length < 4)
+    if (blob.length >= 4)
     {
-        return result;
+        u8* symbol_bytes = arena_allocate(arena, u8, blob.length);
+        u8* c13_bytes = arena_allocate(arena, u8, blob.length);
+        u64 symbol_count = 0;
+        u64 c13_count = 0;
+        u64 offset = 4;
+        while (offset + 8 <= blob.length)
+        {
+            u32 kind = pdb_read_u32(blob, offset);
+            u32 length = pdb_read_u32(blob, offset + 4);
+            u64 payload = offset + 8;
+            if (length > blob.length - payload)
+            {
+                return result;
+            }
+            if (kind == PDB_DEBUG_S_SYMBOLS)
+            {
+                memcpy(symbol_bytes + symbol_count, blob.pointer + payload, length);
+                symbol_count += length;
+            }
+            else
+            {
+                memcpy(c13_bytes + c13_count, blob.pointer + offset, 8 + (u64)length);
+                c13_count += 8 + (u64)length;
+                while (c13_count & 3)
+                {
+                    c13_bytes[c13_count++] = 0;
+                }
+                if (kind == PDB_DEBUG_S_STRINGTABLE)
+                {
+                    result.string_table = (ByteSlice){
+                        .pointer = blob.pointer + payload,
+                        .length = length,
+                    };
+                }
+                else if (kind == PDB_DEBUG_S_FILECHKSMS)
+                {
+                    result.checksums = (ByteSlice){
+                        .pointer = blob.pointer + payload,
+                        .length = length,
+                    };
+                }
+            }
+            offset = payload + ((length + 3u) & ~3u);
+        }
+        result.symbols = (ByteSlice){
+            .pointer = symbol_bytes,
+            .length = symbol_count,
+        };
+        result.c13 = (ByteSlice){
+            .pointer = c13_bytes,
+            .length = c13_count,
+        };
+        result.valid = true;
     }
-    u8* symbol_bytes = arena_allocate(arena, u8, blob.length);
-    u8* c13_bytes = arena_allocate(arena, u8, blob.length);
-    u64 symbol_count = 0;
-    u64 c13_count = 0;
-    u64 offset = 4;
-    while (offset + 8 <= blob.length)
-    {
-        u32 kind = pdb_read_u32(blob, offset);
-        u32 length = pdb_read_u32(blob, offset + 4);
-        u64 payload = offset + 8;
-        if (length > blob.length - payload)
-        {
-            return result;
-        }
-        if (kind == PDB_DEBUG_S_SYMBOLS)
-        {
-            memcpy(symbol_bytes + symbol_count, blob.pointer + payload, length);
-            symbol_count += length;
-        }
-        else
-        {
-            memcpy(c13_bytes + c13_count, blob.pointer + offset, 8 + (u64)length);
-            c13_count += 8 + (u64)length;
-            while (c13_count & 3)
-            {
-                c13_bytes[c13_count++] = 0;
-            }
-            if (kind == PDB_DEBUG_S_STRINGTABLE)
-            {
-                result.string_table = (ByteSlice){
-                    .pointer = blob.pointer + payload,
-                    .length = length,
-                };
-            }
-            else if (kind == PDB_DEBUG_S_FILECHKSMS)
-            {
-                result.checksums = (ByteSlice){
-                    .pointer = blob.pointer + payload,
-                    .length = length,
-                };
-            }
-        }
-        offset = payload + ((length + 3u) & ~3u);
-    }
-    result.symbols = (ByteSlice){
-        .pointer = symbol_bytes,
-        .length = symbol_count,
-    };
-    result.c13 = (ByteSlice){
-        .pointer = c13_bytes,
-        .length = c13_count,
-    };
-    result.valid = true;
+
     return result;
 }
 
@@ -338,36 +338,36 @@ BUSTER_GLOBAL_LOCAL u32 pdb_codeview_type_record_count(ByteSlice types, bool* va
     {
         *valid = false;
     }
-    if (types.length < 4)
+    if (types.length >= 4)
     {
-        return result;
-    }
-    u64 offset = 4;
-    while (offset < types.length)
-    {
-        if (offset + 2 > types.length)
+        u64 offset = 4;
+        while (offset < types.length)
         {
-            return result;
+            if (offset + 2 > types.length)
+            {
+                return result;
+            }
+            u16 length = 0;
+            memcpy(&length, types.pointer + offset, sizeof(length));
+            if (length < 2 || (u64)length > types.length - offset - 2)
+            {
+                return result;
+            }
+            u64 record_size = 2 + length;
+            u64 aligned = (record_size + 3) & ~3u;
+            if (aligned > types.length - offset || result == UINT32_MAX)
+            {
+                return result;
+            }
+            result += 1;
+            offset += aligned;
         }
-        u16 length = 0;
-        memcpy(&length, types.pointer + offset, sizeof(length));
-        if (length < 2 || (u64)length > types.length - offset - 2)
+        if (valid)
         {
-            return result;
+            *valid = true;
         }
-        u64 record_size = 2 + length;
-        u64 aligned = (record_size + 3) & ~3u;
-        if (aligned > types.length - offset || result == UINT32_MAX)
-        {
-            return result;
-        }
-        result += 1;
-        offset += aligned;
     }
-    if (valid)
-    {
-        *valid = true;
-    }
+
     return result;
 }
 

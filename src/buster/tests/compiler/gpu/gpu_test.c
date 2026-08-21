@@ -8,18 +8,18 @@
 
 BUSTER_GLOBAL_LOCAL bool gpu_test_step_has_argument(GpuPipelinePlan plan, u32 step_index, String8 argument)
 {
-    if (step_index >= plan.step_count || plan.steps[step_index].kind != GPU_PIPELINE_STEP_PROCESS)
+    if (step_index < plan.step_count && plan.steps[step_index].kind == GPU_PIPELINE_STEP_PROCESS)
     {
-        return false;
-    }
-    SliceString8 arguments = plan.steps[step_index].arguments;
-    for (u64 index = 0; index < arguments.length; index += 1)
-    {
-        if (string_equal(arguments.pointer[index], argument))
+        SliceString8 arguments = plan.steps[step_index].arguments;
+        for (u64 index = 0; index < arguments.length; index += 1)
         {
-            return true;
+            if (string_equal(arguments.pointer[index], argument))
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 

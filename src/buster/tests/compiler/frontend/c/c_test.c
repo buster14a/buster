@@ -46,18 +46,18 @@ BUSTER_GLOBAL_LOCAL CEntityId c_test_find_local_entity(CParseResult* parse, Stri
 
 BUSTER_GLOBAL_LOCAL IrFunction* c_test_find_ir_function(IrModule* module, String8 name)
 {
-    if (!module)
+    if (module)
     {
-        return 0;
-    }
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-    {
-        IrFunction* function = module->functions + function_index;
-        if (string_equal(function->name, name))
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
         {
-            return function;
+            IrFunction* function = module->functions + function_index;
+            if (string_equal(function->name, name))
+            {
+                return function;
+            }
         }
     }
+
     return 0;
 }
 
@@ -8498,79 +8498,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_local_transport(UnitTestArg
     String8 target_triple = S8("x86_64-unknown-linux-gnu");
     TargetParseResult parsed_target = target_parse_triple(target_triple);
     BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
-    if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+    if (parsed_target.error == TARGET_PARSE_ERROR_NONE)
     {
-        return result;
-    }
-    TemporalArena temporary = scratch_begin(0, 0);
-    CPreprocessResult preprocess = {0};
-    CParseResult parse = {0};
-    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triple, parsed_target.target, &preprocess, &parse);
-    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
-    BUSTER_TEST(arguments, lowered.program != 0);
-    if (lowered.program)
-    {
-        IrModule* module = lowered.program->modules;
-        BUSTER_TEST(arguments, module->function_count == 5);
-        BUSTER_TEST(arguments, module->rejected_function_count == 0);
-        u32 total_local_count = 0;
-        u32 total_load_count = 0;
-        u32 total_store_count = 0;
-        u32 total_call_count = 0;
-        u32 positive_zero_count = 0;
-        u32 negative_zero_count = 0;
-        u32 located_constant_count = 0;
-        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triple, parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
         {
-            IrFunction* function = module->functions + function_index;
-            BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
-            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            IrModule* module = lowered.program->modules;
+            BUSTER_TEST(arguments, module->function_count == 5);
+            BUSTER_TEST(arguments, module->rejected_function_count == 0);
+            u32 total_local_count = 0;
+            u32 total_load_count = 0;
+            u32 total_store_count = 0;
+            u32 total_call_count = 0;
+            u32 positive_zero_count = 0;
+            u32 negative_zero_count = 0;
+            u32 located_constant_count = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
             {
-                IrInstruction* instruction = function->instructions + instruction_index;
-                total_local_count += instruction->opcode == IR_OPCODE_LOCAL;
-                total_load_count += instruction->opcode == IR_OPCODE_LOAD;
-                total_store_count += instruction->opcode == IR_OPCODE_STORE;
-                total_call_count += instruction->opcode == IR_OPCODE_CALL;
-                if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && instruction->immediate_count == 2 && instruction->immediates)
+                IrFunction* function = module->functions + function_index;
+                BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
                 {
-                    positive_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == 0;
-                    negative_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == UINT64_C(0x8000);
-                    IrSourceRange constant_source = ir_instruction_canonical_source(function, ir_instruction_self_id(function, instruction));
-                    located_constant_count += constant_source.length != 0;
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    total_local_count += instruction->opcode == IR_OPCODE_LOCAL;
+                    total_load_count += instruction->opcode == IR_OPCODE_LOAD;
+                    total_store_count += instruction->opcode == IR_OPCODE_STORE;
+                    total_call_count += instruction->opcode == IR_OPCODE_CALL;
+                    if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && instruction->immediate_count == 2 && instruction->immediates)
+                    {
+                        positive_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == 0;
+                        negative_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == UINT64_C(0x8000);
+                        IrSourceRange constant_source = ir_instruction_canonical_source(function, ir_instruction_self_id(function, instruction));
+                        located_constant_count += constant_source.length != 0;
+                    }
                 }
             }
+            BUSTER_TEST(arguments, total_local_count == 5);
+            BUSTER_TEST(arguments, total_load_count == 5);
+            BUSTER_TEST(arguments, total_store_count == 6);
+            BUSTER_TEST(arguments, total_call_count == 1);
+            BUSTER_TEST(arguments, positive_zero_count == 4);
+            BUSTER_TEST(arguments, negative_zero_count == 2);
+            BUSTER_TEST(arguments, located_constant_count == positive_zero_count + negative_zero_count);
+            BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, c_test_find_ir_function(module, S8("call_identity")), S8("identity")) == 1);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
-        BUSTER_TEST(arguments, total_local_count == 5);
-        BUSTER_TEST(arguments, total_load_count == 5);
-        BUSTER_TEST(arguments, total_store_count == 6);
-        BUSTER_TEST(arguments, total_call_count == 1);
-        BUSTER_TEST(arguments, positive_zero_count == 4);
-        BUSTER_TEST(arguments, negative_zero_count == 2);
-        BUSTER_TEST(arguments, located_constant_count == positive_zero_count + negative_zero_count);
-        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, c_test_find_ir_function(module, S8("call_identity")), S8("identity")) == 1);
-        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        scratch_end(temporary);
     }
-    scratch_end(temporary);
+
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrGlobal* c_test_find_ir_global(IrModule* module, IrProgram* program, String8 name)
 {
-    if (!module || !program)
+    if (module && program)
     {
-        return 0;
-    }
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-    {
-        IrGlobal* global = module->globals + global_index;
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
-        if (symbol && string_equal(symbol->name, name))
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
         {
-            return global;
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+            if (symbol && string_equal(symbol->name, name))
+            {
+                return global;
+            }
         }
     }
+
     return 0;
 }
 

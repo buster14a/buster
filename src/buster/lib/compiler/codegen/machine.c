@@ -1563,211 +1563,211 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
     };
     MachineTargetDescription const* target = function->target;
-    if (!target)
+    if (target)
     {
-        return placement;
-    }
-    // The encoder saves every callee-saved register named by the final
-    // placement mask immediately below RBP.  Discover implicit clobbers
-    // before laying out homes so the first virtual/stack slot starts past
-    // that save area; otherwise a metadata-only clobber such as
-    // CMPXCHG16B's RBX write aliases the saved register and corrupts the
-    // caller when the generated function returns.
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineOpcodeInfo const* info = machine_opcode_info(function->instructions[instruction_index].opcode);
-        if (!info)
+        // The encoder saves every callee-saved register named by the final
+        // placement mask immediately below RBP.  Discover implicit clobbers
+        // before laying out homes so the first virtual/stack slot starts past
+        // that save area; otherwise a metadata-only clobber such as
+        // CMPXCHG16B's RBX write aliases the saved register and corrupts the
+        // caller when the generated function returns.
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            return placement;
-        }
-        placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
-    }
-    u32 push_count = 0;
-    for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)
-    {
-        push_count += (placement.callee_saved_mask >> physical_register) & 1u;
-    }
-    // The callee-saved save area sits below the frame pointer only when the
-    // pushes follow it. Where they precede it — Win64 — the saves are at the
-    // frame pointer's positive offsets and every byte below it is frame, so
-    // reserving and then subtracting a save area would size the allocation
-    // short by exactly that many bytes and leave the deepest slots under the
-    // stack pointer, where the next call's shadow space overwrites them.
-    u32 push_area = function->target && function->target->saves_precede_frame_pointer ? 0u : 8u * push_count;
-    u32 running = push_area;
-    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-    {
-        // Vector values own 64-byte homes; the sixteen-byte offset rounding
-        // mirrors the canonical frame layout's vector clamp, and every
-        // access is the unaligned vmovdqu8 either way.
-        if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
-        {
-            running = ((running + 15u) & ~15u) + 64u;
-        }
-        else
-        {
-            running += 8;
-        }
-        placement.virtual_register_offsets[register_index] = running;
-    }
-    for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
-    {
-        // The outgoing argument area is placed at the bottom of the frame
-        // below, where a call's stack pointer lands on its base.
-        if (function->outgoing_bytes && slot_index == function->outgoing_slot)
-        {
-            continue;
-        }
-        // The frame base is sixteen-aligned, so a slot whose start offset is
-        // a multiple of its alignment is aligned in memory.
-        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
-        placement.stack_slot_offsets[slot_index] = running;
-    }
-    MachineBuilderStream edits;
-    machine_stream_initialize(&edits, sizeof(MachineEdit));
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        if (!info)
-        {
-            return placement;
-        }
-        u8* row_operand_registers = placement.operand_registers + (u64)instruction_index * 4;
-        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
-        {
-            u8* operand_register = row_operand_registers + slot;
-            *operand_register = UINT8_MAX;
-            if (slot >= info->operand_count)
+            MachineOpcodeInfo const* info = machine_opcode_info(function->instructions[instruction_index].opcode);
+            if (!info)
             {
-                continue;
+                return placement;
             }
-            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef ref = instruction->operands[slot];
-            MachineRefKind kind = machine_ref_kind(ref);
-            if (kind == MACHINE_REF_PHYSICAL_REGISTER)
+            placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
+        }
+        u32 push_count = 0;
+        for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)
+        {
+            push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+        }
+        // The callee-saved save area sits below the frame pointer only when the
+        // pushes follow it. Where they precede it — Win64 — the saves are at the
+        // frame pointer's positive offsets and every byte below it is frame, so
+        // reserving and then subtracting a save area would size the allocation
+        // short by exactly that many bytes and leave the deepest slots under the
+        // stack pointer, where the next call's shadow space overwrites them.
+        u32 push_area = function->target && function->target->saves_precede_frame_pointer ? 0u : 8u * push_count;
+        u32 running = push_area;
+        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+        {
+            // Vector values own 64-byte homes; the sixteen-byte offset rounding
+            // mirrors the canonical frame layout's vector clamp, and every
+            // access is the unaligned vmovdqu8 either way.
+            if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
             {
-                *operand_register = (u8)machine_ref_payload(ref);
-                continue;
-            }
-            if (kind != MACHINE_REF_VIRTUAL_REGISTER || role == MACHINE_OPERAND_ROLE_NONE)
-            {
-                continue;
-            }
-            u32 virtual_register = machine_ref_payload(ref);
-            if (instruction->opcode == MACHINE_X64_VA_ARG)
-            {
-                // The encoder's bounded sequence reserves RAX for the
-                // va_list pointer and RCX for a scalar result.
-                *operand_register = (u8)(slot == 0 ? MACHINE_X64_RAX : MACHINE_X64_RCX);
+                running = ((running + 15u) & ~15u) + 64u;
             }
             else
             {
-                u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
-                *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
-                u32 fixed_register = machine_opcode_fixed_register(info, slot);
-                if (fixed_register != UINT32_MAX)
-                {
-                    *operand_register = (u8)fixed_register;
-                }
-                u32 tied_destination = UINT32_MAX;
-                for (u32 destination_slot = 0; destination_slot < info->operand_count; destination_slot += 1)
-                {
-                    if (machine_opcode_operand_is_tied(info, destination_slot, slot))
-                    {
-                        tied_destination = destination_slot;
-                        break;
-                    }
-                }
-                if (tied_destination != UINT32_MAX && row_operand_registers[tied_destination] != UINT8_MAX)
-                {
-                    *operand_register = row_operand_registers[tied_destination];
-                }
+                running += 8;
             }
-            // A copy into a fixed physical register reloads its source
-            // directly into that register: argument sequences would
-            // otherwise clobber already-placed argument registers through
-            // the shared operand scratches. The vector copy stages the same
-            // way, or its reload through the shared ZMM scratch would
-            // destroy an already-staged vector argument register.
-            if ((instruction->opcode == target->copy_opcode || instruction->opcode == target->vector_copy_opcode) && slot == 1 &&
-                machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
-            {
-                *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
-            }
-            if (instruction->opcode == target->indirect_call_opcode)
-            {
-                // The callee pointer's register survives the argument
-                // registers and any variadic setup.
-                *operand_register = target->indirect_call_register;
-            }
-            if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-            {
-                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
-                *edit = (MachineEdit){
-                    .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
-                    .kind = MACHINE_EDIT_RELOAD,
-                    .subject = virtual_register,
-                    .location = *operand_register,
-                };
-                placement.reload_count += 1;
-            }
+            placement.virtual_register_offsets[register_index] = running;
         }
-        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
         {
-            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef ref = instruction->operands[slot];
-            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+            // The outgoing argument area is placed at the bottom of the frame
+            // below, where a call's stack pointer lands on its base.
+            if (function->outgoing_bytes && slot_index == function->outgoing_slot)
             {
                 continue;
             }
-            if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+            // The frame base is sixteen-aligned, so a slot whose start offset is
+            // a multiple of its alignment is aligned in memory.
+            u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
+            running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
+            placement.stack_slot_offsets[slot_index] = running;
+        }
+        MachineBuilderStream edits;
+        machine_stream_initialize(&edits, sizeof(MachineEdit));
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (!info)
             {
-                u8 destination_register = row_operand_registers[slot];
-                if (destination_register == UINT8_MAX)
+                return placement;
+            }
+            u8* row_operand_registers = placement.operand_registers + (u64)instruction_index * 4;
+            for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
+            {
+                u8* operand_register = row_operand_registers + slot;
+                *operand_register = UINT8_MAX;
+                if (slot >= info->operand_count)
                 {
-                    return placement;
+                    continue;
                 }
-                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
-                *edit = (MachineEdit){
-                    .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
-                    .kind = MACHINE_EDIT_SPILL,
-                    .subject = machine_ref_payload(ref),
-                    .location = destination_register,
-                };
-                placement.spill_count += 1;
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                MachineRef ref = instruction->operands[slot];
+                MachineRefKind kind = machine_ref_kind(ref);
+                if (kind == MACHINE_REF_PHYSICAL_REGISTER)
+                {
+                    *operand_register = (u8)machine_ref_payload(ref);
+                    continue;
+                }
+                if (kind != MACHINE_REF_VIRTUAL_REGISTER || role == MACHINE_OPERAND_ROLE_NONE)
+                {
+                    continue;
+                }
+                u32 virtual_register = machine_ref_payload(ref);
+                if (instruction->opcode == MACHINE_X64_VA_ARG)
+                {
+                    // The encoder's bounded sequence reserves RAX for the
+                    // va_list pointer and RCX for a scalar result.
+                    *operand_register = (u8)(slot == 0 ? MACHINE_X64_RAX : MACHINE_X64_RCX);
+                }
+                else
+                {
+                    u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
+                    *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
+                    u32 fixed_register = machine_opcode_fixed_register(info, slot);
+                    if (fixed_register != UINT32_MAX)
+                    {
+                        *operand_register = (u8)fixed_register;
+                    }
+                    u32 tied_destination = UINT32_MAX;
+                    for (u32 destination_slot = 0; destination_slot < info->operand_count; destination_slot += 1)
+                    {
+                        if (machine_opcode_operand_is_tied(info, destination_slot, slot))
+                        {
+                            tied_destination = destination_slot;
+                            break;
+                        }
+                    }
+                    if (tied_destination != UINT32_MAX && row_operand_registers[tied_destination] != UINT8_MAX)
+                    {
+                        *operand_register = row_operand_registers[tied_destination];
+                    }
+                }
+                // A copy into a fixed physical register reloads its source
+                // directly into that register: argument sequences would
+                // otherwise clobber already-placed argument registers through
+                // the shared operand scratches. The vector copy stages the same
+                // way, or its reload through the shared ZMM scratch would
+                // destroy an already-staged vector argument register.
+                if ((instruction->opcode == target->copy_opcode || instruction->opcode == target->vector_copy_opcode) && slot == 1 &&
+                    machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
+                {
+                    *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
+                }
+                if (instruction->opcode == target->indirect_call_opcode)
+                {
+                    // The callee pointer's register survives the argument
+                    // registers and any variadic setup.
+                    *operand_register = target->indirect_call_register;
+                }
+                if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
+                    *edit = (MachineEdit){
+                        .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                        .kind = MACHINE_EDIT_RELOAD,
+                        .subject = virtual_register,
+                        .location = *operand_register,
+                    };
+                    placement.reload_count += 1;
+                }
+            }
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                MachineRef ref = instruction->operands[slot];
+                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    continue;
+                }
+                if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    u8 destination_register = row_operand_registers[slot];
+                    if (destination_register == UINT8_MAX)
+                    {
+                        return placement;
+                    }
+                    MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
+                    *edit = (MachineEdit){
+                        .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
+                        .kind = MACHINE_EDIT_SPILL,
+                        .subject = machine_ref_payload(ref),
+                        .location = destination_register,
+                    };
+                    placement.spill_count += 1;
+                }
             }
         }
+        // The x86 prologue pushes every register named by the final clobber mask
+        // around establishing RBP. Where the pushes follow it, the save area was
+        // included in `running` above and is subtracted back out when sizing the
+        // post-save allocation; where they precede it, `push_area` is zero and
+        // the whole run is frame. Either way, add eight bytes for odd push parity
+        // to restore the call boundary before any nested call.
+        placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
+        if (function->outgoing_bytes)
+        {
+            placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
+        }
+        // Every offset handed out above is a distance below the frame pointer, and
+        // `running` is their maximum by construction. The allocation plus whatever
+        // save area really sits below the frame pointer must cover it, or the
+        // deepest values live under the stack pointer where the next call's shadow
+        // space and return address overwrite them. Refuse the placement instead:
+        // the function falls back to the canonical emitter rather than miscompile.
+        if (running > placement.frame_size + push_area)
+        {
+            return placement;
+        }
+        // Pushes that precede the frame pointer sit between it and the caller's
+        // frame, so every incoming stack argument is that much further up.
+        placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
+        placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
+        placement.edit_count = edits.total_count;
+        machine_stream_flatten(&edits, placement.edits);
+        placement.valid = true;
     }
-    // The x86 prologue pushes every register named by the final clobber mask
-    // around establishing RBP. Where the pushes follow it, the save area was
-    // included in `running` above and is subtracted back out when sizing the
-    // post-save allocation; where they precede it, `push_area` is zero and
-    // the whole run is frame. Either way, add eight bytes for odd push parity
-    // to restore the call boundary before any nested call.
-    placement.frame_size = ((running - push_area + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
-    if (function->outgoing_bytes)
-    {
-        placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
-    }
-    // Every offset handed out above is a distance below the frame pointer, and
-    // `running` is their maximum by construction. The allocation plus whatever
-    // save area really sits below the frame pointer must cover it, or the
-    // deepest values live under the stack pointer where the next call's shadow
-    // space and return address overwrite them. Refuse the placement instead:
-    // the function falls back to the canonical emitter rather than miscompile.
-    if (running > placement.frame_size + push_area)
-    {
-        return placement;
-    }
-    // Pushes that precede the frame pointer sit between it and the caller's
-    // frame, so every incoming stack argument is that much further up.
-    placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
-    placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
-    placement.edit_count = edits.total_count;
-    machine_stream_flatten(&edits, placement.edits);
-    placement.valid = true;
+
     return placement;
 }
 

@@ -313,47 +313,47 @@ static void ebpf_buffer_init(EbpfBuffer* buffer, Arena* arena)
 
 static bool ebpf_buffer_reserve(EbpfBuffer* buffer, u64 additional)
 {
-    if (additional <= buffer->capacity - buffer->length)
+    if (additional > buffer->capacity - buffer->length)
     {
-        return true;
-    }
-    if (additional > ARENA_MAX_RESERVATION - buffer->length)
-    {
-        return false;
-    }
-    u64 required = buffer->length + additional;
-    u64 capacity = buffer->capacity ? buffer->capacity : 256;
-    while (capacity < required)
-    {
-        if (capacity > ARENA_MAX_RESERVATION / 2)
+        if (additional > ARENA_MAX_RESERVATION - buffer->length)
         {
-            capacity = required;
-            break;
+            return false;
         }
-        capacity *= 2;
+        u64 required = buffer->length + additional;
+        u64 capacity = buffer->capacity ? buffer->capacity : 256;
+        while (capacity < required)
+        {
+            if (capacity > ARENA_MAX_RESERVATION / 2)
+            {
+                capacity = required;
+                break;
+            }
+            capacity *= 2;
+        }
+        u8* data = arena_allocate(buffer->arena, u8, capacity);
+        if (buffer->length)
+        {
+            memcpy(data, buffer->data, (size_t)buffer->length);
+        }
+        buffer->data = data;
+        buffer->capacity = capacity;
     }
-    u8* data = arena_allocate(buffer->arena, u8, capacity);
-    if (buffer->length)
-    {
-        memcpy(data, buffer->data, (size_t)buffer->length);
-    }
-    buffer->data = data;
-    buffer->capacity = capacity;
+
     return true;
 }
 
 static bool ebpf_buffer_bytes(EbpfBuffer* buffer, void const* bytes, u64 length)
 {
-    if (!length)
+    if (length)
     {
-        return true;
+        if (!ebpf_buffer_reserve(buffer, length))
+        {
+            return false;
+        }
+        memcpy(buffer->data + buffer->length, bytes, (size_t)length);
+        buffer->length += length;
     }
-    if (!ebpf_buffer_reserve(buffer, length))
-    {
-        return false;
-    }
-    memcpy(buffer->data + buffer->length, bytes, (size_t)length);
-    buffer->length += length;
+
     return true;
 }
 

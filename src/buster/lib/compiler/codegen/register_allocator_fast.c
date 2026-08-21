@@ -611,29 +611,29 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_mapped_owner(MachineFunction* function
 {
     BUSTER_UNUSED(owner);
     BUSTER_UNUSED(register_count);
-    if (!function || !edge || value == UINT32_MAX || !function->edge_copy_sources || !function->block_parameters)
+    if (function && edge && value != UINT32_MAX && function->edge_copy_sources && function->block_parameters)
     {
-        return value;
-    }
-    MachineBlock const* destination = function->blocks + edge->destination_block;
-    u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
-    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
-    {
-        u32 source_index = edge->copy_offset + copy_index;
-        if (source_index >= function->edge_copy_source_count)
+        MachineBlock const* destination = function->blocks + edge->destination_block;
+        u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
+        for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
         {
-            break;
+            u32 source_index = edge->copy_offset + copy_index;
+            if (source_index >= function->edge_copy_source_count)
+            {
+                break;
+            }
+            MachineRef source = function->edge_copy_sources[source_index];
+            if (machine_ref_kind(source) != MACHINE_REF_VIRTUAL_REGISTER || machine_ref_payload(source) != value)
+            {
+                continue;
+            }
+            // Name the parameter even when the source is currently spilled. The
+            // conform resolver then emits a reload into the parameter's contract
+            // register; retaining the source name would lose the SSA assignment.
+            return function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
         }
-        MachineRef source = function->edge_copy_sources[source_index];
-        if (machine_ref_kind(source) != MACHINE_REF_VIRTUAL_REGISTER || machine_ref_payload(source) != value)
-        {
-            continue;
-        }
-        // Name the parameter even when the source is currently spilled. The
-        // conform resolver then emits a reload into the parameter's contract
-        // register; retaining the source name would lose the SSA assignment.
-        return function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
     }
+
     return value;
 }
 

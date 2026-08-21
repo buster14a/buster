@@ -9,49 +9,49 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, 
         ELF_HEADER_SIZE = 64,
         ELF_SECTION_HEADER_SIZE = 64,
     };
-    if (image.length < ELF_HEADER_SIZE || memcmp(image.pointer, "\x7f" "ELF", 4) != 0)
+    if (image.length >= ELF_HEADER_SIZE && memcmp(image.pointer, "\x7f" "ELF", 4) == 0)
     {
-        return false;
-    }
-    u64 section_table;
-    u16 section_count;
-    u16 string_index;
-    memcpy(&section_table, image.pointer + 40, sizeof(section_table));
-    memcpy(&section_count, image.pointer + 60, sizeof(section_count));
-    memcpy(&string_index, image.pointer + 62, sizeof(string_index));
-    if (!section_count || string_index >= section_count || section_table > image.length ||
-        (u64)section_count * ELF_SECTION_HEADER_SIZE > image.length - section_table)
-    {
-        return false;
-    }
-    u64 string_header = section_table + (u64)string_index * ELF_SECTION_HEADER_SIZE;
-    u64 string_offset;
-    u64 string_size;
-    memcpy(&string_offset, image.pointer + string_header + 24, sizeof(string_offset));
-    memcpy(&string_size, image.pointer + string_header + 32, sizeof(string_size));
-    if (string_offset > image.length || string_size > image.length - string_offset)
-    {
-        return false;
-    }
-    for (u16 section_index = 0; section_index < section_count; section_index += 1)
-    {
-        u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
-        u32 name_offset;
-        memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
-        if (name_offset >= string_size || string_size - name_offset <= name.length)
+        u64 section_table;
+        u16 section_count;
+        u16 string_index;
+        memcpy(&section_table, image.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, image.pointer + 60, sizeof(section_count));
+        memcpy(&string_index, image.pointer + 62, sizeof(string_index));
+        if (!section_count || string_index >= section_count || section_table > image.length ||
+            (u64)section_count * ELF_SECTION_HEADER_SIZE > image.length - section_table)
         {
-            continue;
+            return false;
         }
-        if (memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) != 0 ||
-            image.pointer[string_offset + name_offset + name.length] != 0)
+        u64 string_header = section_table + (u64)string_index * ELF_SECTION_HEADER_SIZE;
+        u64 string_offset;
+        u64 string_size;
+        memcpy(&string_offset, image.pointer + string_header + 24, sizeof(string_offset));
+        memcpy(&string_size, image.pointer + string_header + 32, sizeof(string_size));
+        if (string_offset > image.length || string_size > image.length - string_offset)
         {
-            continue;
+            return false;
         }
-        memcpy(offset, image.pointer + header + 24, sizeof(*offset));
-        memcpy(size, image.pointer + header + 32, sizeof(*size));
-        memcpy(address, image.pointer + header + 16, sizeof(*address));
-        return *offset <= image.length && *size <= image.length - *offset;
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+            u32 name_offset;
+            memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
+            if (name_offset >= string_size || string_size - name_offset <= name.length)
+            {
+                continue;
+            }
+            if (memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) != 0 ||
+                image.pointer[string_offset + name_offset + name.length] != 0)
+            {
+                continue;
+            }
+            memcpy(offset, image.pointer + header + 24, sizeof(*offset));
+            memcpy(size, image.pointer + header + 32, sizeof(*size));
+            memcpy(address, image.pointer + header + 16, sizeof(*address));
+            return *offset <= image.length && *size <= image.length - *offset;
+        }
     }
+
     return false;
 }
 
@@ -84,52 +84,52 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 compiler_driver_test_elf_section_addr
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)
 {
-    if (!needle.length || needle.length > bytes.length)
+    if (needle.length && needle.length <= bytes.length)
     {
-        return false;
-    }
-    for (u64 offset = 0; offset + needle.length <= bytes.length; offset += 1)
-    {
-        if (memcmp(bytes.pointer + offset, needle.pointer, needle.length) == 0)
+        for (u64 offset = 0; offset + needle.length <= bytes.length; offset += 1)
         {
-            return true;
-        }
-    }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
-{
-    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || !object->sections || !object->symbols)
-    {
-        return false;
-    }
-    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
-    // Object-reader/disassembly sequence for int numeric_tied_output with an empty asm body:
-    // ldr w9, [x28, #0x20]; str w9, [x28, #0x10].  The adjacent load/store
-    // proves that the tied input reaches the reused output register and is
-    // then published through the output place.
-    static u8 const tied_sequence[] = {
-        0x89, 0x23, 0x40, 0xb9,
-        0x89, 0x13, 0x00, 0xb9,
-    };
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        ObjectSymbol* symbol = object->symbols + symbol_index;
-        if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || !string_equal(symbol->name, S8("numeric_tied_output")) ||
-            symbol->value > text.length || symbol->size > text.length - symbol->value)
-        {
-            continue;
-        }
-        u64 function_end = symbol->value + symbol->size;
-        for (u64 offset = symbol->value; offset + sizeof(tied_sequence) <= function_end; offset += 4)
-        {
-            if (memcmp(text.pointer + offset, tied_sequence, sizeof(tied_sequence)) == 0)
+            if (memcmp(bytes.pointer + offset, needle.pointer, needle.length) == 0)
             {
                 return true;
             }
         }
     }
+
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
+{
+    if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
+    {
+        ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+        // Object-reader/disassembly sequence for int numeric_tied_output with an empty asm body:
+        // ldr w9, [x28, #0x20]; str w9, [x28, #0x10].  The adjacent load/store
+        // proves that the tied input reaches the reused output register and is
+        // then published through the output place.
+        static u8 const tied_sequence[] = {
+            0x89, 0x23, 0x40, 0xb9,
+            0x89, 0x13, 0x00, 0xb9,
+        };
+        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = object->symbols + symbol_index;
+            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || !string_equal(symbol->name, S8("numeric_tied_output")) ||
+                symbol->value > text.length || symbol->size > text.length - symbol->value)
+            {
+                continue;
+            }
+            u64 function_end = symbol->value + symbol->size;
+            for (u64 offset = symbol->value; offset + sizeof(tied_sequence) <= function_end; offset += 4)
+            {
+                if (memcmp(text.pointer + offset, tied_sequence, sizeof(tied_sequence)) == 0)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
     return false;
 }
 
@@ -424,22 +424,22 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_fallthrough
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 compiler_driver_test_x64_restore_rbx_size(ByteSlice text, u64 offset, u64 function_end)
 {
-    if (!text.pointer || offset > function_end)
+    if (text.pointer && offset <= function_end)
     {
-        return 0;
+        u64 remaining = function_end - offset;
+        // MOV rbx, [rbp+disp8] is the canonical compact form; a large frame
+        // uses the equivalent disp32 form.  Both restore the same callee-saved
+        // register and must be recognized by the semantic edge scan.
+        if (remaining >= 4 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x5d)
+        {
+            return 4;
+        }
+        if (remaining >= 7 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
+        {
+            return 7;
+        }
     }
-    u64 remaining = function_end - offset;
-    // MOV rbx, [rbp+disp8] is the canonical compact form; a large frame
-    // uses the equivalent disp32 form.  Both restore the same callee-saved
-    // register and must be recognized by the semantic edge scan.
-    if (remaining >= 4 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x5d)
-    {
-        return 4;
-    }
-    if (remaining >= 7 && text.pointer[offset] == 0x48 && text.pointer[offset + 1] == 0x8b && text.pointer[offset + 2] == 0x9d)
-    {
-        return 7;
-    }
+
     return 0;
 }
 

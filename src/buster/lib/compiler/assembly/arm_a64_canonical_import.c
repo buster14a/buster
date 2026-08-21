@@ -797,22 +797,25 @@ static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_c
 static bool arm_a64_page_metadata(Arena* arena, Arena* scratch, String8 path, ArmA64Page* result)
 {
     ByteSlice bytes = file_read(scratch, path, (FileReadOptions){.end_padding = 1});
-    if (!bytes.pointer || !bytes.length) return false;
-    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
-    ArmA64XmlCursor cursor = {.text = text};
-    ArmA64XmlTag tag = {0};
-    while (arm_a64_xml_next(&cursor, &tag))
+    if (bytes.pointer && bytes.length)
     {
-        if (tag.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(tag, "instructionsection"))
+        String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+        ArmA64XmlCursor cursor = {.text = text};
+        ArmA64XmlTag tag = {0};
+        while (arm_a64_xml_next(&cursor, &tag))
         {
-            String8 id = arm_a64_tag_attr(tag, S8("id"));
-            String8 type = arm_a64_tag_attr(tag, S8("type"));
-            if (!id.length || !type.length) return false;
-            result->id = string_duplicate_arena(arena, id, true);
-            result->type = string_duplicate_arena(arena, type, true);
-            return true;
+            if (tag.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(tag, "instructionsection"))
+            {
+                String8 id = arm_a64_tag_attr(tag, S8("id"));
+                String8 type = arm_a64_tag_attr(tag, S8("type"));
+                if (!id.length || !type.length) return false;
+                result->id = string_duplicate_arena(arena, id, true);
+                result->type = string_duplicate_arena(arena, type, true);
+                return true;
+            }
         }
     }
+
     return false;
 }
 

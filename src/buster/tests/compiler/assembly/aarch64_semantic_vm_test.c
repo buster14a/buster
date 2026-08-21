@@ -26,66 +26,75 @@ static bool a64_vm_string_is(BusterA64SemanticString actual, String8 expected)
 static bool a64_vm_find_transform(u32 form_id, u8 kind, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
-    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
-    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    if (transform_id && buster_a64_semantic_form(form_id, &form))
     {
-        BusterA64SemanticTransform transform = {0};
-        if (buster_a64_semantic_transform(form.transform_first + ordinal, &transform) && transform.kind == kind)
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
         {
-            *transform_id = transform.id;
-            return true;
+            BusterA64SemanticTransform transform = {0};
+            if (buster_a64_semantic_transform(form.transform_first + ordinal, &transform) && transform.kind == kind)
+            {
+                *transform_id = transform.id;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
 static bool a64_vm_find_table_by_headers(u32 form_id, String8 first_name, String8 second_name, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
-    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
-    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    if (transform_id && buster_a64_semantic_form(form_id, &form))
     {
-        BusterA64SemanticTransform transform = {0};
-        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
-            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
-        u32 table_id = UINT32_MAX;
-        BusterA64SemanticTableHeader table = {0};
-        BusterA64SemanticString first = {0};
-        BusterA64SemanticString second = {0};
-        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
-            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 2 ||
-            !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
-            !buster_a64_semantic_table_key_header(table_id, 1, &second)) continue;
-        if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name))
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
         {
-            *transform_id = transform.id;
-            return true;
+            BusterA64SemanticTransform transform = {0};
+            if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+                transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+            u32 table_id = UINT32_MAX;
+            BusterA64SemanticTableHeader table = {0};
+            BusterA64SemanticString first = {0};
+            BusterA64SemanticString second = {0};
+            if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+                !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 2 ||
+                !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
+                !buster_a64_semantic_table_key_header(table_id, 1, &second)) continue;
+            if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name))
+            {
+                *transform_id = transform.id;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
 static bool a64_vm_find_table_by_header(u32 form_id, String8 name, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
-    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
-    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    if (transform_id && buster_a64_semantic_form(form_id, &form))
     {
-        BusterA64SemanticTransform transform = {0};
-        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
-            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
-        u32 table_id = UINT32_MAX;
-        BusterA64SemanticTableHeader table = {0};
-        BusterA64SemanticString header = {0};
-        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
-            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 1 ||
-            !buster_a64_semantic_table_key_header(table_id, 0, &header)) continue;
-        if (a64_vm_string_is(header, name))
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
         {
-            *transform_id = transform.id;
-            return true;
+            BusterA64SemanticTransform transform = {0};
+            if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+                transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+            u32 table_id = UINT32_MAX;
+            BusterA64SemanticTableHeader table = {0};
+            BusterA64SemanticString header = {0};
+            if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+                !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 1 ||
+                !buster_a64_semantic_table_key_header(table_id, 0, &header)) continue;
+            if (a64_vm_string_is(header, name))
+            {
+                *transform_id = transform.id;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -93,73 +102,82 @@ static bool a64_vm_find_table_by_three_headers(u32 form_id, String8 first_name, 
                                                 String8 third_name, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
-    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
-    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    if (transform_id && buster_a64_semantic_form(form_id, &form))
     {
-        BusterA64SemanticTransform transform = {0};
-        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
-            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
-        u32 table_id = UINT32_MAX;
-        BusterA64SemanticTableHeader table = {0};
-        BusterA64SemanticString first = {0};
-        BusterA64SemanticString second = {0};
-        BusterA64SemanticString third = {0};
-        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
-            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 3 ||
-            !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
-            !buster_a64_semantic_table_key_header(table_id, 1, &second) ||
-            !buster_a64_semantic_table_key_header(table_id, 2, &third)) continue;
-        if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name) && a64_vm_string_is(third, third_name))
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
         {
-            *transform_id = transform.id;
-            return true;
+            BusterA64SemanticTransform transform = {0};
+            if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+                transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+            u32 table_id = UINT32_MAX;
+            BusterA64SemanticTableHeader table = {0};
+            BusterA64SemanticString first = {0};
+            BusterA64SemanticString second = {0};
+            BusterA64SemanticString third = {0};
+            if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+                !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 3 ||
+                !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
+                !buster_a64_semantic_table_key_header(table_id, 1, &second) ||
+                !buster_a64_semantic_table_key_header(table_id, 2, &third)) continue;
+            if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name) && a64_vm_string_is(third, third_name))
+            {
+                *transform_id = transform.id;
+                return true;
+            }
         }
     }
+
     return false;
 }
 
 static bool a64_vm_find_program_table_transform(u32 form_id, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
-    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
-    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    if (transform_id && buster_a64_semantic_form(form_id, &form))
     {
-        BusterA64SemanticTransform transform = {0};
-        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) || transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE)
-            continue;
-        for (u32 value_ordinal = 0; value_ordinal < transform.value_count; value_ordinal += 1)
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
         {
-            BusterA64SemanticValue value = {0};
-            if (!buster_a64_semantic_transform_value(transform.id, value_ordinal, &value)) return false;
-            for (u32 result_ordinal = 0; result_ordinal < value.result_count; result_ordinal += 1)
+            BusterA64SemanticTransform transform = {0};
+            if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) || transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE)
+                continue;
+            for (u32 value_ordinal = 0; value_ordinal < transform.value_count; value_ordinal += 1)
             {
-                BusterA64SemanticValueAtom atom = {0};
-                if (!buster_a64_semantic_value_atom(value.result_first + result_ordinal, &atom)) return false;
-                if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_PROGRAM)
+                BusterA64SemanticValue value = {0};
+                if (!buster_a64_semantic_transform_value(transform.id, value_ordinal, &value)) return false;
+                for (u32 result_ordinal = 0; result_ordinal < value.result_count; result_ordinal += 1)
                 {
-                    *transform_id = transform.id;
-                    return true;
+                    BusterA64SemanticValueAtom atom = {0};
+                    if (!buster_a64_semantic_value_atom(value.result_first + result_ordinal, &atom)) return false;
+                    if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_PROGRAM)
+                    {
+                        *transform_id = transform.id;
+                        return true;
+                    }
                 }
             }
         }
     }
+
     return false;
 }
 
 static bool a64_vm_set_field(u32 form_id, BusterA64SemanticVMFields* fields, String8 name, u32 value)
 {
     BusterA64SemanticForm form = {0};
-    if (!fields || !buster_a64_semantic_form(form_id, &form) || fields->count != form.field_count) return false;
-    for (u32 ordinal = 0; ordinal < form.field_count; ordinal += 1)
+    if (fields && buster_a64_semantic_form(form_id, &form) && fields->count == form.field_count)
     {
-        BusterA64SemanticField field = {0};
-        if (!buster_a64_semantic_field(form.field_first + ordinal, &field)) return false;
-        if (a64_vm_string_is(field.name, name))
+        for (u32 ordinal = 0; ordinal < form.field_count; ordinal += 1)
         {
-            fields->values[ordinal] = value;
-            return true;
+            BusterA64SemanticField field = {0};
+            if (!buster_a64_semantic_field(form.field_first + ordinal, &field)) return false;
+            if (a64_vm_string_is(field.name, name))
+            {
+                fields->values[ordinal] = value;
+                return true;
+            }
         }
     }
+
     return false;
 }
 

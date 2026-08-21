@@ -7225,21 +7225,21 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
 
 BUSTER_GLOBAL_LOCAL u8 machine_x64_metadata_shape_mnemonic_id(String8 mnemonic)
 {
-    if (mnemonic.length < MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH || mnemonic.length > MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH)
+    if (mnemonic.length >= MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH && mnemonic.length <= MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH)
     {
-        return 0;
-    }
-    u32 span = (u32)mnemonic.length - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH;
-    // The first byte rejects all but a couple of rows in the widest span, so
-    // the full compare runs about once per lookup rather than once per row.
-    for (u32 row = machine_x64_shape_mnemonic_spans[span]; row < machine_x64_shape_mnemonic_spans[span + 1]; row += 1)
-    {
-        if (machine_x64_shape_mnemonics[row].name.pointer[0] == mnemonic.pointer[0] &&
-            string_equal(machine_x64_shape_mnemonics[row].name, mnemonic))
+        u32 span = (u32)mnemonic.length - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH;
+        // The first byte rejects all but a couple of rows in the widest span, so
+        // the full compare runs about once per lookup rather than once per row.
+        for (u32 row = machine_x64_shape_mnemonic_spans[span]; row < machine_x64_shape_mnemonic_spans[span + 1]; row += 1)
         {
-            return machine_x64_shape_mnemonics[row].id;
+            if (machine_x64_shape_mnemonics[row].name.pointer[0] == mnemonic.pointer[0] &&
+                string_equal(machine_x64_shape_mnemonics[row].name, mnemonic))
+            {
+                return machine_x64_shape_mnemonics[row].id;
+            }
         }
     }
+
     return 0;
 }
 

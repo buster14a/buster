@@ -721,35 +721,41 @@ static bool buster_a64_semantic_string_equals(BusterA64SemanticString actual, St
 
 bool buster_a64_semantic_find_form(String8 name, u32 ordinal, u32* id)
 {
-    if (!id || (!name.pointer && name.length)) return false;
-    u32 found = 0;
-    for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_FORM_COUNT; index += 1)
+    if (id && (name.pointer || !name.length))
     {
-        BusterA64SemanticString candidate;
-        if (buster_a64_semantic_string_offset(buster_a64_semantic_forms[index].name_offset, &candidate) &&
-            buster_a64_semantic_string_equals(candidate, name))
+        u32 found = 0;
+        for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_FORM_COUNT; index += 1)
         {
-            if (found == ordinal) { *id = index; return true; }
-            found += 1;
+            BusterA64SemanticString candidate;
+            if (buster_a64_semantic_string_offset(buster_a64_semantic_forms[index].name_offset, &candidate) &&
+                buster_a64_semantic_string_equals(candidate, name))
+            {
+                if (found == ordinal) { *id = index; return true; }
+                found += 1;
+            }
         }
     }
+
     return false;
 }
 
 bool buster_a64_semantic_find_mnemonic(String8 value, u32 ordinal, u32* id)
 {
-    if (!id || (!value.pointer && value.length)) return false;
-    u32 found = 0;
-    for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_FORM_COUNT; index += 1)
+    if (id && (value.pointer || !value.length))
     {
-        BusterA64SemanticString candidate;
-        if (buster_a64_semantic_string_offset(buster_a64_semantic_forms[index].mnemonic_offset, &candidate) &&
-            buster_a64_semantic_string_equals(candidate, value))
+        u32 found = 0;
+        for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_FORM_COUNT; index += 1)
         {
-            if (found == ordinal) { *id = index; return true; }
-            found += 1;
+            BusterA64SemanticString candidate;
+            if (buster_a64_semantic_string_offset(buster_a64_semantic_forms[index].mnemonic_offset, &candidate) &&
+                buster_a64_semantic_string_equals(candidate, value))
+            {
+                if (found == ordinal) { *id = index; return true; }
+                found += 1;
+            }
         }
     }
+
     return false;
 }
 

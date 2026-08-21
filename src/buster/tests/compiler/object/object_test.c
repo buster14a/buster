@@ -4,17 +4,17 @@
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
 {
-    if (value.length > bytes.length)
+    if (value.length <= bytes.length)
     {
-        return false;
-    }
-    for (u64 index = 0; index + value.length <= bytes.length; index += 1)
-    {
-        if (memcmp(bytes.pointer + index, value.pointer, value.length) == 0)
+        for (u64 index = 0; index + value.length <= bytes.length; index += 1)
         {
-            return true;
+            if (memcmp(bytes.pointer + index, value.pointer, value.length) == 0)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -66,76 +66,76 @@ BUSTER_GLOBAL_LOCAL void object_test_write_u64(ByteSlice bytes, u64 offset, u64 
 
 BUSTER_GLOBAL_LOCAL u64 object_test_elf_symbol_offset(ByteSlice bytes, u32 symbol_index)
 {
-    if (!bytes.pointer || bytes.length < 64)
+    if (bytes.pointer && bytes.length >= 64)
     {
-        return UINT64_MAX;
-    }
-    u64 section_table = 0;
-    u16 section_count = 0;
-    memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
-    memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
-    if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
-    {
-        return UINT64_MAX;
-    }
-    for (u16 section_index = 0; section_index < section_count; section_index += 1)
-    {
-        u64 section = section_table + (u64)section_index * 64;
-        u32 section_type = 0;
-        u64 symbol_offset = 0;
-        u64 symbol_size = 0;
-        memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
-        memcpy(&symbol_offset, bytes.pointer + section + 24, sizeof(symbol_offset));
-        memcpy(&symbol_size, bytes.pointer + section + 32, sizeof(symbol_size));
-        if (section_type != 2 || symbol_size % 24 || symbol_index >= symbol_size / 24 || symbol_offset > bytes.length ||
-            symbol_size > bytes.length - symbol_offset)
-        {
-            continue;
-        }
-        u64 symbol = symbol_offset + (u64)symbol_index * 24;
-        if (symbol > bytes.length || 24 > bytes.length - symbol)
+        u64 section_table = 0;
+        u16 section_count = 0;
+        memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
+        if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
         {
             return UINT64_MAX;
         }
-        return symbol;
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            u64 symbol_offset = 0;
+            u64 symbol_size = 0;
+            memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
+            memcpy(&symbol_offset, bytes.pointer + section + 24, sizeof(symbol_offset));
+            memcpy(&symbol_size, bytes.pointer + section + 32, sizeof(symbol_size));
+            if (section_type != 2 || symbol_size % 24 || symbol_index >= symbol_size / 24 || symbol_offset > bytes.length ||
+                symbol_size > bytes.length - symbol_offset)
+            {
+                continue;
+            }
+            u64 symbol = symbol_offset + (u64)symbol_index * 24;
+            if (symbol > bytes.length || 24 > bytes.length - symbol)
+            {
+                return UINT64_MAX;
+            }
+            return symbol;
+        }
     }
+
     return UINT64_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_test_elf_relocation_offsets(ByteSlice bytes, u64* relocation_section, u64* target_data)
 {
-    if (!bytes.pointer || !relocation_section || !target_data || bytes.length < 64)
+    if (bytes.pointer && relocation_section && target_data && bytes.length >= 64)
     {
-        return false;
-    }
-    u64 section_table = 0;
-    u16 section_count = 0;
-    memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
-    memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
-    if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
-    {
-        return false;
-    }
-    for (u16 section_index = 0; section_index < section_count; section_index += 1)
-    {
-        u64 section = section_table + (u64)section_index * 64;
-        u32 section_type = 0;
-        u32 target_index = 0;
-        memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
-        memcpy(&target_index, bytes.pointer + section + 44, sizeof(target_index));
-        if (section_type != 4 || target_index >= section_count)
-        {
-            continue;
-        }
-        u64 target_section = section_table + (u64)target_index * 64;
-        memcpy(target_data, bytes.pointer + target_section + 24, sizeof(*target_data));
-        if (*target_data > bytes.length)
+        u64 section_table = 0;
+        u16 section_count = 0;
+        memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
+        memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
+        if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
         {
             return false;
         }
-        *relocation_section = section;
-        return true;
+        for (u16 section_index = 0; section_index < section_count; section_index += 1)
+        {
+            u64 section = section_table + (u64)section_index * 64;
+            u32 section_type = 0;
+            u32 target_index = 0;
+            memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
+            memcpy(&target_index, bytes.pointer + section + 44, sizeof(target_index));
+            if (section_type != 4 || target_index >= section_count)
+            {
+                continue;
+            }
+            u64 target_section = section_table + (u64)target_index * 64;
+            memcpy(target_data, bytes.pointer + target_section + 24, sizeof(*target_data));
+            if (*target_data > bytes.length)
+            {
+                return false;
+            }
+            *relocation_section = section;
+            return true;
+        }
     }
+
     return false;
 }
 
@@ -186,49 +186,49 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_section_offsets(ByteSlice bytes, u32 s
 
 BUSTER_GLOBAL_LOCAL u64 object_test_mach_symbol_offset(ByteSlice bytes, u32 symbol_index)
 {
-    if (!bytes.pointer || bytes.length < 32)
+    if (bytes.pointer && bytes.length >= 32)
     {
-        return UINT64_MAX;
-    }
-    u32 command_count = 0;
-    u32 commands_size = 0;
-    memcpy(&command_count, bytes.pointer + 16, sizeof(command_count));
-    memcpy(&commands_size, bytes.pointer + 20, sizeof(commands_size));
-    u64 command = 32;
-    u64 command_end = command + commands_size;
-    if (command_end < command || command_end > bytes.length)
-    {
-        return UINT64_MAX;
-    }
-    for (u32 command_index = 0; command_index < command_count && command < command_end; command_index += 1)
-    {
-        u32 kind = 0;
-        u32 size = 0;
-        if (command_end - command < 8)
+        u32 command_count = 0;
+        u32 commands_size = 0;
+        memcpy(&command_count, bytes.pointer + 16, sizeof(command_count));
+        memcpy(&commands_size, bytes.pointer + 20, sizeof(commands_size));
+        u64 command = 32;
+        u64 command_end = command + commands_size;
+        if (command_end < command || command_end > bytes.length)
         {
             return UINT64_MAX;
         }
-        memcpy(&kind, bytes.pointer + command, sizeof(kind));
-        memcpy(&size, bytes.pointer + command + 4, sizeof(size));
-        if (size < 8 || size > command_end - command)
+        for (u32 command_index = 0; command_index < command_count && command < command_end; command_index += 1)
         {
-            return UINT64_MAX;
-        }
-        if (kind == 2 && size >= 24)
-        {
-            u32 symbol_offset = 0;
-            u32 symbol_count = 0;
-            memcpy(&symbol_offset, bytes.pointer + command + 8, sizeof(symbol_offset));
-            memcpy(&symbol_count, bytes.pointer + command + 12, sizeof(symbol_count));
-            u64 record = symbol_offset + (u64)symbol_index * 16;
-            if (symbol_index < symbol_count && record >= symbol_offset && record <= bytes.length && 16 <= bytes.length - record)
+            u32 kind = 0;
+            u32 size = 0;
+            if (command_end - command < 8)
             {
-                return record;
+                return UINT64_MAX;
             }
-            return UINT64_MAX;
+            memcpy(&kind, bytes.pointer + command, sizeof(kind));
+            memcpy(&size, bytes.pointer + command + 4, sizeof(size));
+            if (size < 8 || size > command_end - command)
+            {
+                return UINT64_MAX;
+            }
+            if (kind == 2 && size >= 24)
+            {
+                u32 symbol_offset = 0;
+                u32 symbol_count = 0;
+                memcpy(&symbol_offset, bytes.pointer + command + 8, sizeof(symbol_offset));
+                memcpy(&symbol_count, bytes.pointer + command + 12, sizeof(symbol_count));
+                u64 record = symbol_offset + (u64)symbol_index * 16;
+                if (symbol_index < symbol_count && record >= symbol_offset && record <= bytes.length && 16 <= bytes.length - record)
+                {
+                    return record;
+                }
+                return UINT64_MAX;
+            }
+            command += size;
         }
-        command += size;
     }
+
     return UINT64_MAX;
 }
 

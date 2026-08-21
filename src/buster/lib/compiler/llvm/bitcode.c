@@ -530,198 +530,198 @@ static IrSymbol* llvm_bc_ir_symbol(LlvmBcContext* context, IrSymbolId id)
 
 static bool llvm_bc_type_dependencies_ready(LlvmBcContext* context, IrType* type)
 {
-    if (!type)
+    if (type)
     {
-        return false;
-    }
-    switch (type->kind)
-    {
-    case IR_TYPE_ARRAY:
-    case IR_TYPE_VECTOR:
-        return type->element_type.value < context->program->types.count && context->ir_type_ids[type->element_type.value] != LLVM_BC_INVALID_ID;
-    case IR_TYPE_FUNCTION:
-    {
-        if (type->return_type.value >= context->program->types.count || context->ir_type_ids[type->return_type.value] == LLVM_BC_INVALID_ID)
+        switch (type->kind)
         {
-            return false;
-        }
-        for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
+        case IR_TYPE_ARRAY:
+        case IR_TYPE_VECTOR:
+            return type->element_type.value < context->program->types.count && context->ir_type_ids[type->element_type.value] != LLVM_BC_INVALID_ID;
+        case IR_TYPE_FUNCTION:
         {
-            if (type->parameter_types[parameter_index].value >= context->program->types.count ||
-                context->ir_type_ids[type->parameter_types[parameter_index].value] == LLVM_BC_INVALID_ID)
+            if (type->return_type.value >= context->program->types.count || context->ir_type_ids[type->return_type.value] == LLVM_BC_INVALID_ID)
             {
                 return false;
             }
-        }
-        return true;
-    }
-    case IR_TYPE_STRUCT:
-    {
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            if (type->fields[field_index].type.value >= context->program->types.count ||
-                context->ir_type_ids[type->fields[field_index].type.value] == LLVM_BC_INVALID_ID)
+            for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
             {
-                return false;
+                if (type->parameter_types[parameter_index].value >= context->program->types.count ||
+                    context->ir_type_ids[type->parameter_types[parameter_index].value] == LLVM_BC_INVALID_ID)
+                {
+                    return false;
+                }
             }
+            return true;
         }
-        return true;
+        case IR_TYPE_STRUCT:
+        {
+            for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+            {
+                if (type->fields[field_index].type.value >= context->program->types.count ||
+                    context->ir_type_ids[type->fields[field_index].type.value] == LLVM_BC_INVALID_ID)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case IR_TYPE_ENUM:
+            return type->unqualified_type.value == IR_ID_UNDERLYING_INVALID ||
+                   (type->unqualified_type.value < context->program->types.count &&
+                    context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID);
+        case IR_TYPE_VOID:
+        case IR_TYPE_BOOLEAN:
+        case IR_TYPE_INTEGER:
+        case IR_TYPE_FLOAT:
+        case IR_TYPE_VA_LIST:
+        case IR_TYPE_POINTER:
+        case IR_TYPE_SLICE:
+        case IR_TYPE_RANGE:
+        case IR_TYPE_UNION:
+        case IR_TYPE_COUNT:
+            return true;
+        }
     }
-    case IR_TYPE_ENUM:
-        return type->unqualified_type.value == IR_ID_UNDERLYING_INVALID ||
-               (type->unqualified_type.value < context->program->types.count &&
-                context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID);
-    case IR_TYPE_VOID:
-    case IR_TYPE_BOOLEAN:
-    case IR_TYPE_INTEGER:
-    case IR_TYPE_FLOAT:
-    case IR_TYPE_VA_LIST:
-    case IR_TYPE_POINTER:
-    case IR_TYPE_SLICE:
-    case IR_TYPE_RANGE:
-    case IR_TYPE_UNION:
-    case IR_TYPE_COUNT:
-        return true;
-    }
+
     return false;
 }
 
 static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
 {
     IrType* type = context->program->types.types + type_index;
-    if (context->ir_type_ids[type_index] != LLVM_BC_INVALID_ID)
+    if (context->ir_type_ids[type_index] == LLVM_BC_INVALID_ID)
     {
-        return true;
-    }
-    if (type->is_atomic && type->unqualified_type.value < context->program->types.count &&
-        context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID)
-    {
-        context->ir_type_ids[type_index] = context->ir_type_ids[type->unqualified_type.value];
-        return true;
-    }
-    if (!llvm_bc_type_dependencies_ready(context, type))
-    {
-        return false;
-    }
-    u32 result = LLVM_BC_INVALID_ID;
-    switch (type->kind)
-    {
-    case IR_TYPE_VOID:
-        result = context->void_type_id;
-        break;
-    case IR_TYPE_BOOLEAN:
-        result = context->i1_type_id;
-        break;
-    case IR_TYPE_INTEGER:
-        if (!type->bit_width || type->bit_width > (1u << 23))
+        if (type->is_atomic && type->unqualified_type.value < context->program->types.count &&
+            context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID)
         {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid LLVM integer width"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+            context->ir_type_ids[type_index] = context->ir_type_ids[type->unqualified_type.value];
+            return true;
+        }
+        if (!llvm_bc_type_dependencies_ready(context, type))
+        {
             return false;
         }
-        result = llvm_bc_integer_type(context, type->bit_width);
-        break;
-    case IR_TYPE_FLOAT:
-        switch (type->bit_width)
+        u32 result = LLVM_BC_INVALID_ID;
+        switch (type->kind)
         {
-        case 16:
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_HALF, 0, 0);
+        case IR_TYPE_VOID:
+            result = context->void_type_id;
             break;
-        case 32:
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FLOAT, 0, 0);
+        case IR_TYPE_BOOLEAN:
+            result = context->i1_type_id;
             break;
-        case 64:
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_DOUBLE, 0, 0);
+        case IR_TYPE_INTEGER:
+            if (!type->bit_width || type->bit_width > (1u << 23))
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid LLVM integer width"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+                return false;
+            }
+            result = llvm_bc_integer_type(context, type->bit_width);
             break;
-        case 80:
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_X86_FP80, 0, 0);
+        case IR_TYPE_FLOAT:
+            switch (type->bit_width)
+            {
+            case 16:
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_HALF, 0, 0);
+                break;
+            case 32:
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FLOAT, 0, 0);
+                break;
+            case 64:
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_DOUBLE, 0, 0);
+                break;
+            case 80:
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_X86_FP80, 0, 0);
+                break;
+            case 128:
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FP128, 0, 0);
+                break;
+            default:
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM floating-point width"), 0, 0, 0,
+                             IR_SYMBOL_ID_INVALID);
+                return false;
+            }
             break;
-        case 128:
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FP128, 0, 0);
+        case IR_TYPE_POINTER:
+            result = context->pointer_type_id;
             break;
-        default:
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM floating-point width"), 0, 0, 0,
+        case IR_TYPE_ARRAY:
+        {
+            u64 operands[2] = {type->element_count, context->ir_type_ids[type->element_type.value]};
+            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_ARRAY, operands, 2);
+            break;
+        }
+        case IR_TYPE_VECTOR:
+        {
+            u64 operands[2] = {type->element_count, context->ir_type_ids[type->element_type.value]};
+            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_VECTOR, operands, 2);
+            break;
+        }
+        case IR_TYPE_FUNCTION:
+        {
+            u32 count = type->parameter_count + 2;
+            u64* operands = arena_allocate(context->arena, u64, count);
+            operands[0] = type->is_variadic;
+            operands[1] = context->ir_type_ids[type->return_type.value];
+            for (u32 index = 0; index < type->parameter_count; index += 1)
+            {
+                operands[index + 2] = context->ir_type_ids[type->parameter_types[index].value];
+            }
+            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, count);
+            break;
+        }
+        case IR_TYPE_STRUCT:
+        {
+            bool bit_fields = false;
+            for (u32 index = 0; index < type->field_count; index += 1)
+            {
+                bit_fields |= type->fields[index].is_bit_field;
+            }
+            if (bit_fields)
+            {
+                result = llvm_bc_array_type(context, type->layout.size, context->i8_type_id);
+            }
+            else
+            {
+                u64* operands = arena_allocate(context->arena, u64, type->field_count + 1);
+                operands[0] = 0;
+                for (u32 index = 0; index < type->field_count; index += 1)
+                {
+                    operands[index + 1] = context->ir_type_ids[type->fields[index].type.value];
+                }
+                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, type->field_count + 1);
+            }
+            break;
+        }
+        case IR_TYPE_UNION:
+        case IR_TYPE_VA_LIST:
+        case IR_TYPE_SLICE:
+        case IR_TYPE_RANGE:
+            result = llvm_bc_array_type(context, type->layout.size, context->i8_type_id);
+            break;
+        case IR_TYPE_ENUM:
+            if (type->unqualified_type.value < context->program->types.count)
+            {
+                result = context->ir_type_ids[type->unqualified_type.value];
+            }
+            else
+            {
+                u32 width = type->bit_width ? type->bit_width : (u32)(type->layout.size * 8);
+                result = llvm_bc_integer_type(context, width ? width : 32);
+            }
+            break;
+        case IR_TYPE_COUNT:
+            break;
+        }
+        if (result == LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported canonical type in LLVM bitcode"), 0, 0, 0,
                          IR_SYMBOL_ID_INVALID);
             return false;
         }
-        break;
-    case IR_TYPE_POINTER:
-        result = context->pointer_type_id;
-        break;
-    case IR_TYPE_ARRAY:
-    {
-        u64 operands[2] = {type->element_count, context->ir_type_ids[type->element_type.value]};
-        result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_ARRAY, operands, 2);
-        break;
+        context->ir_type_ids[type_index] = result;
     }
-    case IR_TYPE_VECTOR:
-    {
-        u64 operands[2] = {type->element_count, context->ir_type_ids[type->element_type.value]};
-        result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_VECTOR, operands, 2);
-        break;
-    }
-    case IR_TYPE_FUNCTION:
-    {
-        u32 count = type->parameter_count + 2;
-        u64* operands = arena_allocate(context->arena, u64, count);
-        operands[0] = type->is_variadic;
-        operands[1] = context->ir_type_ids[type->return_type.value];
-        for (u32 index = 0; index < type->parameter_count; index += 1)
-        {
-            operands[index + 2] = context->ir_type_ids[type->parameter_types[index].value];
-        }
-        result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, count);
-        break;
-    }
-    case IR_TYPE_STRUCT:
-    {
-        bool bit_fields = false;
-        for (u32 index = 0; index < type->field_count; index += 1)
-        {
-            bit_fields |= type->fields[index].is_bit_field;
-        }
-        if (bit_fields)
-        {
-            result = llvm_bc_array_type(context, type->layout.size, context->i8_type_id);
-        }
-        else
-        {
-            u64* operands = arena_allocate(context->arena, u64, type->field_count + 1);
-            operands[0] = 0;
-            for (u32 index = 0; index < type->field_count; index += 1)
-            {
-                operands[index + 1] = context->ir_type_ids[type->fields[index].type.value];
-            }
-            result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, type->field_count + 1);
-        }
-        break;
-    }
-    case IR_TYPE_UNION:
-    case IR_TYPE_VA_LIST:
-    case IR_TYPE_SLICE:
-    case IR_TYPE_RANGE:
-        result = llvm_bc_array_type(context, type->layout.size, context->i8_type_id);
-        break;
-    case IR_TYPE_ENUM:
-        if (type->unqualified_type.value < context->program->types.count)
-        {
-            result = context->ir_type_ids[type->unqualified_type.value];
-        }
-        else
-        {
-            u32 width = type->bit_width ? type->bit_width : (u32)(type->layout.size * 8);
-            result = llvm_bc_integer_type(context, width ? width : 32);
-        }
-        break;
-    case IR_TYPE_COUNT:
-        break;
-    }
-    if (result == LLVM_BC_INVALID_ID)
-    {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported canonical type in LLVM bitcode"), 0, 0, 0,
-                     IR_SYMBOL_ID_INVALID);
-        return false;
-    }
-    context->ir_type_ids[type_index] = result;
+
     return true;
 }
 
@@ -867,26 +867,26 @@ static u32 llvm_bc_calling_convention(IrCallingConvention convention)
 
 static bool llvm_bc_name_available(LlvmBcContext* context, String8 name, IrSymbol* symbol)
 {
-    if (!name.length)
+    if (name.length)
     {
-        return true;
-    }
-    for (u32 index = 0; index < context->global_count; index += 1)
-    {
-        LlvmBcGlobal* global = context->globals + index;
-        if (llvm_bc_string_equal(global->name, name) && global->symbol != symbol)
+        for (u32 index = 0; index < context->global_count; index += 1)
         {
-            return false;
+            LlvmBcGlobal* global = context->globals + index;
+            if (llvm_bc_string_equal(global->name, name) && global->symbol != symbol)
+            {
+                return false;
+            }
+        }
+        for (u32 index = 0; index < context->function_count; index += 1)
+        {
+            LlvmBcFunction* function = context->functions + index;
+            if (llvm_bc_string_equal(function->name, name) && function->symbol != symbol)
+            {
+                return false;
+            }
         }
     }
-    for (u32 index = 0; index < context->function_count; index += 1)
-    {
-        LlvmBcFunction* function = context->functions + index;
-        if (llvm_bc_string_equal(function->name, name) && function->symbol != symbol)
-        {
-            return false;
-        }
-    }
+
     return true;
 }
 
@@ -1895,199 +1895,199 @@ static bool llvm_bc_assign_alias(LlvmBcContext* context, LlvmBcFunction* record,
 static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record)
 {
     IrFunction* function = record->function;
-    if (!function || record->declaration)
+    if (function && !record->declaration)
     {
-        return true;
-    }
-    IrType* signature = llvm_bc_ir_type(context, record->canonical_type);
-    if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
-    {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid function shape for LLVM bitcode"), function, 0, 0,
-                     function->symbol);
-        return false;
-    }
-
-    u32 block_count = function->block_count;
-    record->block_order = arena_allocate(context->arena, IrBlock*, block_count ? block_count : 1);
-    record->block_indices = arena_allocate(context->arena, u32, block_count ? block_count : 1);
-    for (u32 index = 0; index < block_count; index += 1)
-    {
-        record->block_indices[index] = LLVM_BC_INVALID_ID;
-    }
-    u32 order_count = 0;
-    IrBlock* entry = function->blocks + function->entry.value;
-    record->block_order[order_count++] = entry;
-    for (u32 index = 0; index < block_count; index += 1)
-    {
-        IrBlock* block = function->blocks + index;
-        if (block != entry)
+        IrType* signature = llvm_bc_ir_type(context, record->canonical_type);
+        if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
         {
-            record->block_order[order_count++] = block;
-        }
-    }
-    for (u32 index = 0; index < block_count; index += 1)
-    {
-        IrBlock* block = record->block_order[index];
-        if (block->id.value >= block_count || record->block_indices[block->id.value] != LLVM_BC_INVALID_ID)
-        {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid or duplicate canonical basic block id"), function, block, 0,
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid function shape for LLVM bitcode"), function, 0, 0,
                          function->symbol);
             return false;
         }
-        record->block_indices[block->id.value] = index;
-    }
 
-    u32 value_count = function->value_count;
-    record->value_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
-    record->value_type_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
-    for (u32 index = 0; index < value_count; index += 1)
-    {
-        record->value_ids[index] = LLVM_BC_INVALID_ID;
-        record->value_type_ids[index] = llvm_bc_value_type_id(context, function, (IrValueId){.value = index});
-        if (record->value_type_ids[index] == LLVM_BC_INVALID_ID)
+        u32 block_count = function->block_count;
+        record->block_order = arena_allocate(context->arena, IrBlock*, block_count ? block_count : 1);
+        record->block_indices = arena_allocate(context->arena, u32, block_count ? block_count : 1);
+        for (u32 index = 0; index < block_count; index += 1)
         {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("canonical value has no LLVM type"), function, 0, 0,
-                         function->symbol);
-            return false;
+            record->block_indices[index] = LLVM_BC_INVALID_ID;
         }
-    }
-    record->emitted_counts = arena_allocate(context->arena, u32, function->instruction_count ? function->instruction_count : 1);
-    memset(record->emitted_counts, 0, (size_t)function->instruction_count * sizeof(*record->emitted_counts));
-
-    record->first_local_value_id = context->module_value_count + context->constant_count;
-    u8* argument_seen = arena_allocate(context->arena, u8, signature->parameter_count ? signature->parameter_count : 1);
-    memset(argument_seen, 0, signature->parameter_count);
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        IrBlock* block = record->block_order[block_index];
-        IrInstructionId instruction_id = block->first_instruction;
-        u32 walked = 0;
-        while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
+        u32 order_count = 0;
+        IrBlock* entry = function->blocks + function->entry.value;
+        record->block_order[order_count++] = entry;
+        for (u32 index = 0; index < block_count; index += 1)
         {
-            if (instruction_id.value >= function->instruction_count || walked++ >= function->instruction_count)
+            IrBlock* block = function->blocks + index;
+            if (block != entry)
             {
-                llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid canonical instruction chain"), function, block, 0,
+                record->block_order[order_count++] = block;
+            }
+        }
+        for (u32 index = 0; index < block_count; index += 1)
+        {
+            IrBlock* block = record->block_order[index];
+            if (block->id.value >= block_count || record->block_indices[block->id.value] != LLVM_BC_INVALID_ID)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid or duplicate canonical basic block id"), function, block, 0,
                              function->symbol);
                 return false;
             }
-            IrInstruction* instruction = function->instructions + instruction_id.value;
-            if (instruction->opcode == IR_OPCODE_ARGUMENT)
+            record->block_indices[block->id.value] = index;
+        }
+
+        u32 value_count = function->value_count;
+        record->value_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
+        record->value_type_ids = arena_allocate(context->arena, u32, value_count ? value_count : 1);
+        for (u32 index = 0; index < value_count; index += 1)
+        {
+            record->value_ids[index] = LLVM_BC_INVALID_ID;
+            record->value_type_ids[index] = llvm_bc_value_type_id(context, function, (IrValueId){.value = index});
+            if (record->value_type_ids[index] == LLVM_BC_INVALID_ID)
             {
-                if (instruction->immediate_count != 1 || instruction->immediates[0] >= signature->parameter_count ||
-                    instruction->result.value >= value_count || argument_seen[instruction->immediates[0]])
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("canonical value has no LLVM type"), function, 0, 0,
+                             function->symbol);
+                return false;
+            }
+        }
+        record->emitted_counts = arena_allocate(context->arena, u32, function->instruction_count ? function->instruction_count : 1);
+        memset(record->emitted_counts, 0, (size_t)function->instruction_count * sizeof(*record->emitted_counts));
+
+        record->first_local_value_id = context->module_value_count + context->constant_count;
+        u8* argument_seen = arena_allocate(context->arena, u8, signature->parameter_count ? signature->parameter_count : 1);
+        memset(argument_seen, 0, signature->parameter_count);
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
+        {
+            IrBlock* block = record->block_order[block_index];
+            IrInstructionId instruction_id = block->first_instruction;
+            u32 walked = 0;
+            while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
+            {
+                if (instruction_id.value >= function->instruction_count || walked++ >= function->instruction_count)
                 {
-                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid or duplicate LLVM function argument"), function,
-                                 block, instruction, function->symbol);
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid canonical instruction chain"), function, block, 0,
+                                 function->symbol);
                     return false;
                 }
-                u32 argument = (u32)instruction->immediates[0];
-                argument_seen[argument] = 1;
-                record->value_ids[instruction->result.value] = record->first_local_value_id + argument;
+                IrInstruction* instruction = function->instructions + instruction_id.value;
+                if (instruction->opcode == IR_OPCODE_ARGUMENT)
+                {
+                    if (instruction->immediate_count != 1 || instruction->immediates[0] >= signature->parameter_count ||
+                        instruction->result.value >= value_count || argument_seen[instruction->immediates[0]])
+                    {
+                        llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid or duplicate LLVM function argument"), function,
+                                     block, instruction, function->symbol);
+                        return false;
+                    }
+                    u32 argument = (u32)instruction->immediates[0];
+                    argument_seen[argument] = 1;
+                    record->value_ids[instruction->result.value] = record->first_local_value_id + argument;
+                }
+                if (instruction_id.value == block->last_instruction.value)
+                {
+                    break;
+                }
+                instruction_id = instruction->next;
             }
-            if (instruction_id.value == block->last_instruction.value)
+        }
+        for (u32 argument = 0; argument < signature->parameter_count; argument += 1)
+        {
+            if (!argument_seen[argument])
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("missing canonical LLVM function argument"), function, entry, 0,
+                             function->symbol);
+                return false;
+            }
+        }
+
+        u32 next_value_id = record->first_local_value_id + signature->parameter_count;
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
+        {
+            IrBlock* block = record->block_order[block_index];
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            {
+                if (parameter->value.value >= value_count || record->value_ids[parameter->value.value] != LLVM_BC_INVALID_ID)
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM phi result value"), function, block, 0,
+                                 function->symbol);
+                    return false;
+                }
+                record->value_ids[parameter->value.value] = next_value_id++;
+            }
+            IrInstructionId instruction_id = block->first_instruction;
+            u32 walked = 0;
+            while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
+            {
+                if (instruction_id.value >= function->instruction_count || walked++ >= function->instruction_count)
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid canonical instruction chain"), function, block, 0,
+                                 function->symbol);
+                    return false;
+                }
+                IrInstruction* instruction = function->instructions + instruction_id.value;
+                u32 emitted = llvm_bc_instruction_emitted_count(context, function, block, instruction);
+                if (emitted == LLVM_BC_INVALID_ID || llvm_bc_failed(context))
+                {
+                    return false;
+                }
+                record->emitted_counts[instruction_id.value] = emitted;
+                if (emitted)
+                {
+                    if (instruction->result.value >= value_count || record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID ||
+                        next_value_id > UINT32_MAX - emitted)
+                    {
+                        llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM instruction result numbering"), function,
+                                     block, instruction, function->symbol);
+                        return false;
+                    }
+                    record->value_ids[instruction->result.value] = next_value_id + emitted - 1;
+                    next_value_id += emitted;
+                }
+                if (instruction_id.value == block->last_instruction.value)
+                {
+                    break;
+                }
+                instruction_id = instruction->next;
+            }
+        }
+
+        for (u32 pass = 0; pass <= function->instruction_count; pass += 1)
+        {
+            bool progress = false;
+            bool unresolved = false;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                if (instruction->result.value == IR_ID_UNDERLYING_INVALID || record->emitted_counts[index] ||
+                    record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
+                {
+                    continue;
+                }
+                unresolved = true;
+                if (llvm_bc_assign_alias(context, record, instruction))
+                {
+                    progress = true;
+                }
+                if (llvm_bc_failed(context))
+                {
+                    return false;
+                }
+            }
+            if (!unresolved)
             {
                 break;
             }
-            instruction_id = instruction->next;
-        }
-    }
-    for (u32 argument = 0; argument < signature->parameter_count; argument += 1)
-    {
-        if (!argument_seen[argument])
-        {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("missing canonical LLVM function argument"), function, entry, 0,
-                         function->symbol);
-            return false;
-        }
-    }
-
-    u32 next_value_id = record->first_local_value_id + signature->parameter_count;
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        IrBlock* block = record->block_order[block_index];
-        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
-        {
-            if (parameter->value.value >= value_count || record->value_ids[parameter->value.value] != LLVM_BC_INVALID_ID)
+            if (!progress)
             {
-                llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM phi result value"), function, block, 0,
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("unresolved LLVM alias value"), function, 0, 0,
                              function->symbol);
                 return false;
             }
-            record->value_ids[parameter->value.value] = next_value_id++;
         }
-        IrInstructionId instruction_id = block->first_instruction;
-        u32 walked = 0;
-        while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
-        {
-            if (instruction_id.value >= function->instruction_count || walked++ >= function->instruction_count)
-            {
-                llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid canonical instruction chain"), function, block, 0,
-                             function->symbol);
-                return false;
-            }
-            IrInstruction* instruction = function->instructions + instruction_id.value;
-            u32 emitted = llvm_bc_instruction_emitted_count(context, function, block, instruction);
-            if (emitted == LLVM_BC_INVALID_ID || llvm_bc_failed(context))
-            {
-                return false;
-            }
-            record->emitted_counts[instruction_id.value] = emitted;
-            if (emitted)
-            {
-                if (instruction->result.value >= value_count || record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID ||
-                    next_value_id > UINT32_MAX - emitted)
-                {
-                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM instruction result numbering"), function,
-                                 block, instruction, function->symbol);
-                    return false;
-                }
-                record->value_ids[instruction->result.value] = next_value_id + emitted - 1;
-                next_value_id += emitted;
-            }
-            if (instruction_id.value == block->last_instruction.value)
-            {
-                break;
-            }
-            instruction_id = instruction->next;
-        }
+        record->final_value_id = next_value_id;
+        context->stats.block_count += function->block_count;
+        context->stats.instruction_count += function->instruction_count;
     }
 
-    for (u32 pass = 0; pass <= function->instruction_count; pass += 1)
-    {
-        bool progress = false;
-        bool unresolved = false;
-        for (u32 index = 0; index < function->instruction_count; index += 1)
-        {
-            IrInstruction* instruction = function->instructions + index;
-            if (instruction->result.value == IR_ID_UNDERLYING_INVALID || record->emitted_counts[index] ||
-                record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)
-            {
-                continue;
-            }
-            unresolved = true;
-            if (llvm_bc_assign_alias(context, record, instruction))
-            {
-                progress = true;
-            }
-            if (llvm_bc_failed(context))
-            {
-                return false;
-            }
-        }
-        if (!unresolved)
-        {
-            break;
-        }
-        if (!progress)
-        {
-            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("unresolved LLVM alias value"), function, 0, 0,
-                         function->symbol);
-            return false;
-        }
-    }
-    record->final_value_id = next_value_id;
-    context->stats.block_count += function->block_count;
-    context->stats.instruction_count += function->instruction_count;
     return true;
 }
 

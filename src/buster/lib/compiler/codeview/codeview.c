@@ -575,268 +575,268 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
 CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
 {
     CodeviewResult result = {0};
-    if (!arena || !input.file_count || !input.file_paths || (input.function_count && !input.functions) || (input.line_count && !input.lines))
+    if (arena && input.file_count && input.file_paths && (!input.function_count || input.functions) && (!input.line_count || input.lines))
     {
-        return result;
-    }
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        if (input.functions[function_index].file >= input.file_count)
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
-            return result;
-        }
-    }
-    u32 previous_offset = 0;
-    for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
-    {
-        DwarfLineEntry* entry = input.lines + line_index;
-        if (entry->file >= input.file_count || entry->code_offset < previous_offset)
-        {
-            return result;
-        }
-        previous_offset = entry->code_offset;
-    }
-    u64 path_bytes = 0;
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        path_bytes += input.file_paths[file_index].length + 1;
-    }
-    u64 name_bytes = 0;
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        name_bytes += input.functions[function_index].name.length + 1;
-    }
-    u64 symbol_capacity = 256 + input.producer.length * 2 + name_bytes + (u64)input.function_count * 96 + (u64)input.line_count * 24 +
-                          (u64)input.file_count * 24 + path_bytes;
-    if (input.model && input.model->valid)
-    {
-        symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
-                           (u64)input.model->inline_site_count * 64 + 256;
-    }
-    CodeviewBuffer symbols = {
-        .bytes = arena_allocate(arena, u8, symbol_capacity),
-        .capacity = symbol_capacity,
-    };
-    u64 relocation_capacity = (u64)input.function_count * 4;
-    if (input.model && input.model->valid)
-    {
-        relocation_capacity += (u64)input.model->variable_count * 2;
-    }
-    result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity);
-    codeview_emit_u32(&symbols, CV_SIGNATURE_C13);
-
-    // Translation-unit records: object name and compiler description.
-    u64 unit_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-    u64 objname = codeview_record_begin(&symbols, S_OBJNAME);
-    codeview_emit_u32(&symbols, 0);
-    codeview_emit_bytes(&symbols, input.file_paths[0].pointer, input.file_paths[0].length);
-    codeview_emit_u8(&symbols, 0);
-    codeview_record_end(&symbols, objname);
-    u64 compile3 = codeview_record_begin(&symbols, S_COMPILE3);
-    codeview_emit_u32(&symbols, 0);
-    codeview_emit_u16(&symbols, input.machine);
-    for (u32 version_index = 0; version_index < 8; version_index += 1)
-    {
-        codeview_emit_u16(&symbols, 0);
-    }
-    codeview_emit_bytes(&symbols, input.producer.pointer, input.producer.length);
-    codeview_emit_u8(&symbols, 0);
-    codeview_record_end(&symbols, compile3);
-    codeview_subsection_end(&symbols, unit_symbols);
-
-    if (input.model && input.model->valid)
-    {
-        u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-        for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
-        {
-            DebugVariable* variable = input.model->variables + variable_index;
-            if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+            if (input.functions[function_index].file >= input.file_count)
             {
-                codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
+                return result;
             }
         }
-        codeview_subsection_end(&symbols, globals);
-    }
-
-    // One symbols subsection and one lines subsection per function.
-    u32 line_cursor = 0;
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        DwarfFunction* function = input.functions + function_index;
-        u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-        u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
-        codeview_emit_u32(&symbols, 0);
-        u64 end_pointer_offset = symbols.count;
-        codeview_emit_u32(&symbols, 0);
-        codeview_emit_u32(&symbols, 0);
-        codeview_emit_u32(&symbols, function->code_size);
-        codeview_emit_u32(&symbols, 0);
-        codeview_emit_u32(&symbols, function->code_size);
-        u32 function_type = 0;
-        if (input.model && input.model->valid && function_index < input.model->function_count)
+        u32 previous_offset = 0;
+        for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
         {
-            function_type = codeview_model_type_index(input.model, input.model->functions[function_index].type);
-        }
-        codeview_emit_u32(&symbols, function_type);
-        result.relocations[result.relocation_count++] = (CodeviewRelocation){
-            .offset = symbols.count,
-            .function = function_index,
-            .kind = CODEVIEW_RELOCATION_SECREL32,
-        };
-        codeview_emit_u32(&symbols, 0);
-        result.relocations[result.relocation_count++] = (CodeviewRelocation){
-            .offset = symbols.count,
-            .function = function_index,
-            .kind = CODEVIEW_RELOCATION_SECTION16,
-        };
-        codeview_emit_u16(&symbols, 0);
-        codeview_emit_u8(&symbols, 0);
-        codeview_emit_bytes(&symbols, function->name.pointer, function->name.length);
-        codeview_emit_u8(&symbols, 0);
-        codeview_record_end(&symbols, procedure);
-
-        if (input.model && input.model->valid && function_index < input.model->function_count)
-        {
-            DebugFunction* debug_function = input.model->functions + function_index;
-            if (debug_function->scope < input.model->scope_count)
+            DwarfLineEntry* entry = input.lines + line_index;
+            if (entry->file >= input.file_count || entry->code_offset < previous_offset)
             {
-                codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset, input.machine);
-                codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, arena);
+                return result;
             }
-            for (u32 inline_index = 0; inline_index < input.model->inline_site_count; inline_index += 1)
+            previous_offset = entry->code_offset;
+        }
+        u64 path_bytes = 0;
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
+        {
+            path_bytes += input.file_paths[file_index].length + 1;
+        }
+        u64 name_bytes = 0;
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
+        {
+            name_bytes += input.functions[function_index].name.length + 1;
+        }
+        u64 symbol_capacity = 256 + input.producer.length * 2 + name_bytes + (u64)input.function_count * 96 + (u64)input.line_count * 24 +
+                              (u64)input.file_count * 24 + path_bytes;
+        if (input.model && input.model->valid)
+        {
+            symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
+                               (u64)input.model->inline_site_count * 64 + 256;
+        }
+        CodeviewBuffer symbols = {
+            .bytes = arena_allocate(arena, u8, symbol_capacity),
+            .capacity = symbol_capacity,
+        };
+        u64 relocation_capacity = (u64)input.function_count * 4;
+        if (input.model && input.model->valid)
+        {
+            relocation_capacity += (u64)input.model->variable_count * 2;
+        }
+        result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity);
+        codeview_emit_u32(&symbols, CV_SIGNATURE_C13);
+
+        // Translation-unit records: object name and compiler description.
+        u64 unit_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+        u64 objname = codeview_record_begin(&symbols, S_OBJNAME);
+        codeview_emit_u32(&symbols, 0);
+        codeview_emit_bytes(&symbols, input.file_paths[0].pointer, input.file_paths[0].length);
+        codeview_emit_u8(&symbols, 0);
+        codeview_record_end(&symbols, objname);
+        u64 compile3 = codeview_record_begin(&symbols, S_COMPILE3);
+        codeview_emit_u32(&symbols, 0);
+        codeview_emit_u16(&symbols, input.machine);
+        for (u32 version_index = 0; version_index < 8; version_index += 1)
+        {
+            codeview_emit_u16(&symbols, 0);
+        }
+        codeview_emit_bytes(&symbols, input.producer.pointer, input.producer.length);
+        codeview_emit_u8(&symbols, 0);
+        codeview_record_end(&symbols, compile3);
+        codeview_subsection_end(&symbols, unit_symbols);
+
+        if (input.model && input.model->valid)
+        {
+            u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+            for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
             {
-                DebugInlineSite* site = input.model->inline_sites + inline_index;
-                if (site->function != debug_function)
+                DebugVariable* variable = input.model->variables + variable_index;
+                if (variable->kind == DEBUG_VARIABLE_GLOBAL)
                 {
-                    continue;
+                    codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
                 }
-                u64 inline_record = codeview_record_begin(&symbols, S_INLINESITE);
-                codeview_emit_u32(&symbols, 0);
-                codeview_emit_u32(&symbols, 0);
-                codeview_emit_u32(&symbols, 0x1000u + (u32)(debug_function - input.model->functions));
-                codeview_record_end(&symbols, inline_record);
-                u64 inline_end = codeview_record_begin(&symbols, S_INLINESITE_END);
-                codeview_record_end(&symbols, inline_end);
             }
+            codeview_subsection_end(&symbols, globals);
         }
-        u64 end_record = symbols.count;
-        u64 end_marker = codeview_record_begin(&symbols, S_END);
-        codeview_record_end(&symbols, end_marker);
-        if (end_record <= UINT32_MAX)
-        {
-            codeview_write_u32_at(&symbols, end_pointer_offset, (u32)end_record);
-        }
-        codeview_subsection_end(&symbols, function_symbols);
 
-        u64 function_lines = codeview_subsection_begin(&symbols, DEBUG_S_LINES);
-        result.relocations[result.relocation_count++] = (CodeviewRelocation){
-            .offset = symbols.count,
-            .function = function_index,
-            .kind = CODEVIEW_RELOCATION_SECREL32,
-        };
-        codeview_emit_u32(&symbols, 0);
-        result.relocations[result.relocation_count++] = (CodeviewRelocation){
-            .offset = symbols.count,
-            .function = function_index,
-            .kind = CODEVIEW_RELOCATION_SECTION16,
-        };
-        codeview_emit_u16(&symbols, 0);
-        codeview_emit_u16(&symbols, 0);
-        codeview_emit_u32(&symbols, function->code_size);
-        u32 function_end = function->code_offset + function->code_size;
-        while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function->code_offset)
+        // One symbols subsection and one lines subsection per function.
+        u32 line_cursor = 0;
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
-            line_cursor += 1;
-        }
-        while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end)
-        {
-            u32 run_file = input.lines[line_cursor].file;
-            u64 block_start = symbols.count;
-            codeview_emit_u32(&symbols, run_file * 8);
-            u64 count_offset = symbols.count;
+            DwarfFunction* function = input.functions + function_index;
+            u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+            u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
+            codeview_emit_u32(&symbols, 0);
+            u64 end_pointer_offset = symbols.count;
             codeview_emit_u32(&symbols, 0);
             codeview_emit_u32(&symbols, 0);
-            u32 run_lines = 0;
-            while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end && input.lines[line_cursor].file == run_file)
+            codeview_emit_u32(&symbols, function->code_size);
+            codeview_emit_u32(&symbols, 0);
+            codeview_emit_u32(&symbols, function->code_size);
+            u32 function_type = 0;
+            if (input.model && input.model->valid && function_index < input.model->function_count)
             {
-                DwarfLineEntry* entry = input.lines + line_cursor;
+                function_type = codeview_model_type_index(input.model, input.model->functions[function_index].type);
+            }
+            codeview_emit_u32(&symbols, function_type);
+            result.relocations[result.relocation_count++] = (CodeviewRelocation){
+                .offset = symbols.count,
+                .function = function_index,
+                .kind = CODEVIEW_RELOCATION_SECREL32,
+            };
+            codeview_emit_u32(&symbols, 0);
+            result.relocations[result.relocation_count++] = (CodeviewRelocation){
+                .offset = symbols.count,
+                .function = function_index,
+                .kind = CODEVIEW_RELOCATION_SECTION16,
+            };
+            codeview_emit_u16(&symbols, 0);
+            codeview_emit_u8(&symbols, 0);
+            codeview_emit_bytes(&symbols, function->name.pointer, function->name.length);
+            codeview_emit_u8(&symbols, 0);
+            codeview_record_end(&symbols, procedure);
+
+            if (input.model && input.model->valid && function_index < input.model->function_count)
+            {
+                DebugFunction* debug_function = input.model->functions + function_index;
+                if (debug_function->scope < input.model->scope_count)
+                {
+                    codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset, input.machine);
+                    codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, arena);
+                }
+                for (u32 inline_index = 0; inline_index < input.model->inline_site_count; inline_index += 1)
+                {
+                    DebugInlineSite* site = input.model->inline_sites + inline_index;
+                    if (site->function != debug_function)
+                    {
+                        continue;
+                    }
+                    u64 inline_record = codeview_record_begin(&symbols, S_INLINESITE);
+                    codeview_emit_u32(&symbols, 0);
+                    codeview_emit_u32(&symbols, 0);
+                    codeview_emit_u32(&symbols, 0x1000u + (u32)(debug_function - input.model->functions));
+                    codeview_record_end(&symbols, inline_record);
+                    u64 inline_end = codeview_record_begin(&symbols, S_INLINESITE_END);
+                    codeview_record_end(&symbols, inline_end);
+                }
+            }
+            u64 end_record = symbols.count;
+            u64 end_marker = codeview_record_begin(&symbols, S_END);
+            codeview_record_end(&symbols, end_marker);
+            if (end_record <= UINT32_MAX)
+            {
+                codeview_write_u32_at(&symbols, end_pointer_offset, (u32)end_record);
+            }
+            codeview_subsection_end(&symbols, function_symbols);
+
+            u64 function_lines = codeview_subsection_begin(&symbols, DEBUG_S_LINES);
+            result.relocations[result.relocation_count++] = (CodeviewRelocation){
+                .offset = symbols.count,
+                .function = function_index,
+                .kind = CODEVIEW_RELOCATION_SECREL32,
+            };
+            codeview_emit_u32(&symbols, 0);
+            result.relocations[result.relocation_count++] = (CodeviewRelocation){
+                .offset = symbols.count,
+                .function = function_index,
+                .kind = CODEVIEW_RELOCATION_SECTION16,
+            };
+            codeview_emit_u16(&symbols, 0);
+            codeview_emit_u16(&symbols, 0);
+            codeview_emit_u32(&symbols, function->code_size);
+            u32 function_end = function->code_offset + function->code_size;
+            while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function->code_offset)
+            {
                 line_cursor += 1;
-                if (!entry->line)
-                {
-                    continue;
-                }
-                codeview_emit_u32(&symbols, entry->code_offset - function->code_offset);
-                codeview_emit_u32(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
-                run_lines += 1;
             }
-            codeview_write_u32_at(&symbols, count_offset, run_lines);
-            codeview_write_u32_at(&symbols, count_offset + 4, (u32)(symbols.count - block_start));
+            while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end)
+            {
+                u32 run_file = input.lines[line_cursor].file;
+                u64 block_start = symbols.count;
+                codeview_emit_u32(&symbols, run_file * 8);
+                u64 count_offset = symbols.count;
+                codeview_emit_u32(&symbols, 0);
+                codeview_emit_u32(&symbols, 0);
+                u32 run_lines = 0;
+                while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end && input.lines[line_cursor].file == run_file)
+                {
+                    DwarfLineEntry* entry = input.lines + line_cursor;
+                    line_cursor += 1;
+                    if (!entry->line)
+                    {
+                        continue;
+                    }
+                    codeview_emit_u32(&symbols, entry->code_offset - function->code_offset);
+                    codeview_emit_u32(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
+                    run_lines += 1;
+                }
+                codeview_write_u32_at(&symbols, count_offset, run_lines);
+                codeview_write_u32_at(&symbols, count_offset + 4, (u32)(symbols.count - block_start));
+            }
+            codeview_subsection_end(&symbols, function_lines);
         }
-        codeview_subsection_end(&symbols, function_lines);
-    }
 
-    // File checksum table (checksum kind "none") and the string table it
-    // references; line blocks index checksums by byte offset (8 per file).
-    u64 checksums = codeview_subsection_begin(&symbols, DEBUG_S_FILECHKSMS);
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        codeview_emit_u32(&symbols, 1 + (u32)file_index);
-        codeview_emit_u8(&symbols, 0);
-        codeview_emit_u8(&symbols, 0);
-        codeview_emit_u16(&symbols, 0);
-    }
-    codeview_subsection_end(&symbols, checksums);
-    u64 string_table = codeview_subsection_begin(&symbols, DEBUG_S_STRINGTABLE);
-    u64 string_base = symbols.count;
-    codeview_emit_u8(&symbols, 0);
-    u32* string_offsets = arena_allocate(arena, u32, input.file_count);
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        string_offsets[file_index] = (u32)(symbols.count - string_base);
-        codeview_emit_bytes(&symbols, input.file_paths[file_index].pointer, input.file_paths[file_index].length);
-        codeview_emit_u8(&symbols, 0);
-    }
-    codeview_subsection_end(&symbols, string_table);
-    // Patch the checksum entries now that string offsets are known.
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        codeview_write_u32_at(&symbols, checksums + 4 + (u64)file_index * 8, string_offsets[file_index]);
-    }
-
-    u64 type_capacity = 4;
-    if (input.model && input.model->valid)
-    {
-        type_capacity += 128 + (u64)input.model->type_count * 96 + (u64)input.model->variable_count * 32;
-        for (u32 type_index = 0; type_index < input.model->type_count; type_index += 1)
+        // File checksum table (checksum kind "none") and the string table it
+        // references; line blocks index checksums by byte offset (8 per file).
+        u64 checksums = codeview_subsection_begin(&symbols, DEBUG_S_FILECHKSMS);
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
         {
-            DebugType* type = input.model->types + type_index;
-            type_capacity += (u64)type->field_count * 48 + (u64)type->enum_member_count * 32 + (u64)type->parameter_count * 8;
+            codeview_emit_u32(&symbols, 1 + (u32)file_index);
+            codeview_emit_u8(&symbols, 0);
+            codeview_emit_u8(&symbols, 0);
+            codeview_emit_u16(&symbols, 0);
         }
+        codeview_subsection_end(&symbols, checksums);
+        u64 string_table = codeview_subsection_begin(&symbols, DEBUG_S_STRINGTABLE);
+        u64 string_base = symbols.count;
+        codeview_emit_u8(&symbols, 0);
+        u32* string_offsets = arena_allocate(arena, u32, input.file_count);
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
+        {
+            string_offsets[file_index] = (u32)(symbols.count - string_base);
+            codeview_emit_bytes(&symbols, input.file_paths[file_index].pointer, input.file_paths[file_index].length);
+            codeview_emit_u8(&symbols, 0);
+        }
+        codeview_subsection_end(&symbols, string_table);
+        // Patch the checksum entries now that string offsets are known.
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
+        {
+            codeview_write_u32_at(&symbols, checksums + 4 + (u64)file_index * 8, string_offsets[file_index]);
+        }
+
+        u64 type_capacity = 4;
+        if (input.model && input.model->valid)
+        {
+            type_capacity += 128 + (u64)input.model->type_count * 96 + (u64)input.model->variable_count * 32;
+            for (u32 type_index = 0; type_index < input.model->type_count; type_index += 1)
+            {
+                DebugType* type = input.model->types + type_index;
+                type_capacity += (u64)type->field_count * 48 + (u64)type->enum_member_count * 32 + (u64)type->parameter_count * 8;
+            }
+        }
+        CodeviewBuffer types = {
+            .bytes = arena_allocate(arena, u8, type_capacity),
+            .capacity = type_capacity,
+        };
+        codeview_emit_u32(&types, CV_SIGNATURE_C13);
+        if (input.model && input.model->valid)
+        {
+            u32* field_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
+            u32* argument_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
+            codeview_emit_model_types(&types, input.model, field_indices, argument_indices);
+        }
+        if (symbols.overflow || types.overflow || symbols.count > UINT32_MAX)
+        {
+            return result;
+        }
+        result.symbols = (ByteSlice){
+            .pointer = symbols.bytes,
+            .length = symbols.count,
+        };
+        result.types = (ByteSlice){
+            .pointer = types.bytes,
+            .length = types.count,
+        };
+        result.valid = true;
     }
-    CodeviewBuffer types = {
-        .bytes = arena_allocate(arena, u8, type_capacity),
-        .capacity = type_capacity,
-    };
-    codeview_emit_u32(&types, CV_SIGNATURE_C13);
-    if (input.model && input.model->valid)
-    {
-        u32* field_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
-        u32* argument_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
-        codeview_emit_model_types(&types, input.model, field_indices, argument_indices);
-    }
-    if (symbols.overflow || types.overflow || symbols.count > UINT32_MAX)
-    {
-        return result;
-    }
-    result.symbols = (ByteSlice){
-        .pointer = symbols.bytes,
-        .length = symbols.count,
-    };
-    result.types = (ByteSlice){
-        .pointer = types.bytes,
-        .length = types.count,
-    };
-    result.valid = true;
+
     return result;
 }
 

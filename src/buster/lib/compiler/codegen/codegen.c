@@ -226,17 +226,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
 // while the latter is just a source-level substitution.
 BUSTER_GLOBAL_LOCAL String8 codegen_x64_asm_register_name(X64Register register_index, u32 width)
 {
-    if ((u32)register_index >= BUSTER_ARRAY_LENGTH(codegen_x64_asm_names64))
+    if ((u32)register_index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_names64))
     {
-        return (String8){0};
+        switch (width)
+        {
+        case 1: return codegen_x64_asm_names8[register_index];
+        case 2: return codegen_x64_asm_names16[register_index];
+        case 4: return codegen_x64_asm_names32[register_index];
+        case 8: return codegen_x64_asm_names64[register_index];
+        }
     }
-    switch (width)
-    {
-    case 1: return codegen_x64_asm_names8[register_index];
-    case 2: return codegen_x64_asm_names16[register_index];
-    case 4: return codegen_x64_asm_names32[register_index];
-    case 8: return codegen_x64_asm_names64[register_index];
-    }
+
     return (String8){0};
 }
 
@@ -250,21 +250,21 @@ BUSTER_GLOBAL_LOCAL AssemblySyntax codegen_inline_assembly_syntax(CodegenModuleO
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_operand_name_index(IrInstructionExtra extra, String8 name, u32* index_out)
 {
-    if (!extra.operand_names)
+    if (extra.operand_names)
     {
-        return false;
-    }
-    for (u32 index = 0; index < extra.operand_name_count; index += 1)
-    {
-        if (string_equal(extra.operand_names[index], name))
+        for (u32 index = 0; index < extra.operand_name_count; index += 1)
         {
-            if (index_out)
+            if (string_equal(extra.operand_names[index], name))
             {
-                *index_out = index;
+                if (index_out)
+                {
+                    *index_out = index;
+                }
+                return true;
             }
-            return true;
         }
     }
+
     return false;
 }
 
@@ -693,31 +693,31 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constra
 
 BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type)
 {
-    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > 8)
+    if (type && type->layout.resolved && type->layout.size && type->layout.size <= 8)
     {
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+        switch (type->kind)
+        {
+        case IR_TYPE_BOOLEAN:
+        case IR_TYPE_INTEGER:
+        case IR_TYPE_ENUM:
+            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+        case IR_TYPE_POINTER:
+            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+        case IR_TYPE_VOID:
+        case IR_TYPE_FLOAT:
+        case IR_TYPE_VA_LIST:
+        case IR_TYPE_SLICE:
+        case IR_TYPE_ARRAY:
+        case IR_TYPE_VECTOR:
+        case IR_TYPE_FUNCTION:
+        case IR_TYPE_RANGE:
+        case IR_TYPE_STRUCT:
+        case IR_TYPE_UNION:
+        case IR_TYPE_COUNT:
+            break;
+        }
     }
-    switch (type->kind)
-    {
-    case IR_TYPE_BOOLEAN:
-    case IR_TYPE_INTEGER:
-    case IR_TYPE_ENUM:
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
-    case IR_TYPE_POINTER:
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
-    case IR_TYPE_VOID:
-    case IR_TYPE_FLOAT:
-    case IR_TYPE_VA_LIST:
-    case IR_TYPE_SLICE:
-    case IR_TYPE_ARRAY:
-    case IR_TYPE_VECTOR:
-    case IR_TYPE_FUNCTION:
-    case IR_TYPE_RANGE:
-    case IR_TYPE_STRUCT:
-    case IR_TYPE_UNION:
-    case IR_TYPE_COUNT:
-        break;
-    }
+
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
@@ -761,45 +761,45 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_shape_valid(u64 cons
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_shape(IrFunction* function, bool* saves_rbx)
 {
     *saves_rbx = false;
-    if (!function)
+    if (function)
     {
-        return true;
-    }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_STORE ||
-            instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            *saves_rbx = true;
-            return true;
-        }
-        if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
-        {
-            continue;
-        }
-        IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
-        if ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers))
-        {
-            return false;
-        }
-        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-        {
-            if ((instruction->immediates[operand_index] & 0xff) == IR_INLINE_ASSEMBLY_CONSTRAINT_B)
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_STORE ||
+                instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
             {
                 *saves_rbx = true;
                 return true;
             }
-        }
-        for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
-        {
-            if (codegen_inline_assembly_clobber_is_rbx(extra.clobbers[clobber_index]))
+            if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
             {
-                *saves_rbx = true;
-                return true;
+                continue;
+            }
+            IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+            if ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers))
+            {
+                return false;
+            }
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                if ((instruction->immediates[operand_index] & 0xff) == IR_INLINE_ASSEMBLY_CONSTRAINT_B)
+                {
+                    *saves_rbx = true;
+                    return true;
+                }
+            }
+            for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
+            {
+                if (codegen_inline_assembly_clobber_is_rbx(extra.clobbers[clobber_index]))
+                {
+                    *saves_rbx = true;
+                    return true;
+                }
             }
         }
     }
+
     return true;
 }
 
@@ -1215,21 +1215,24 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_metadata_key_hashes(u64 const* wo
 BUSTER_GLOBAL_LOCAL CodegenX64MetadataCacheEntry* codegen_canonical_x64_metadata_cache_entry(
     CodegenX64MetadataCache* cache, u64 signature, u64 guard, bool insertion)
 {
-    if (!cache) return 0;
-    u32 slot = (u32)signature & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
-    for (u32 probe = 0; probe < CODEGEN_X64_METADATA_CACHE_CAPACITY; probe += 1)
+    if (cache)
     {
-        CodegenX64MetadataCacheEntry* entry = cache->entries + slot;
-        if (!entry->form_id)
+        u32 slot = (u32)signature & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
+        for (u32 probe = 0; probe < CODEGEN_X64_METADATA_CACHE_CAPACITY; probe += 1)
         {
-            if (!insertion) return 0;
-            entry->signature = signature;
-            entry->guard = guard;
-            return entry;
+            CodegenX64MetadataCacheEntry* entry = cache->entries + slot;
+            if (!entry->form_id)
+            {
+                if (!insertion) return 0;
+                entry->signature = signature;
+                entry->guard = guard;
+                return entry;
+            }
+            if (entry->signature == signature && entry->guard == guard) return entry;
+            slot = (slot + 1u) & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
         }
-        if (entry->signature == signature && entry->guard == guard) return entry;
-        slot = (slot + 1u) & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u);
     }
+
     return 0;
 }
 
@@ -2033,57 +2036,57 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, 
         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
         codegen_canonical_x64_metadata_immediate(size, 32),
     };
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), move_r10_operands, BUSTER_ARRAY_LENGTH(move_r10_operands)) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_r10_operands, BUSTER_ARRAY_LENGTH(sub_r10_operands)) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), move_r11_operands, BUSTER_ARRAY_LENGTH(move_r11_operands)))
+    if (codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), move_r10_operands, BUSTER_ARRAY_LENGTH(move_r10_operands)) &&
+        codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_r10_operands, BUSTER_ARRAY_LENGTH(sub_r10_operands)) &&
+        codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), move_r11_operands, BUSTER_ARRAY_LENGTH(move_r11_operands)))
     {
-        return true;
+        u64 loop_offset = buffer->count;
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_r11_operands, BUSTER_ARRAY_LENGTH(sub_r11_operands)) ||
+            !codegen_canonical_x64_metadata_emit(buffer, S8("CMP"), cmp_operands, BUSTER_ARRAY_LENGTH(cmp_operands)))
+        {
+            return true;
+        }
+        BusterX86MetadataPhysicalOperand final_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
+        u64 final_patch = buffer->count;
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("JBE"), &final_branch_operand, 1) ||
+            !codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r11_operands, BUSTER_ARRAY_LENGTH(test_r11_operands)))
+        {
+            return true;
+        }
+        u64 loop_patch = buffer->count;
+        BusterX86MetadataPhysicalOperand loop_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1))
+        {
+            return true;
+        }
+        u64 final_offset = buffer->count;
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
+            !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_rsp_operands, BUSTER_ARRAY_LENGTH(sub_rsp_operands)))
+        {
+            return true;
+        }
+        s64 final_displacement = (s64)final_offset - (s64)(final_patch + 2);
+        s64 loop_displacement = (s64)loop_offset - (s64)(loop_patch + 2);
+        if (buffer->error != CODEGEN_ERROR_NONE || final_displacement < INT8_MIN || final_displacement > INT8_MAX || loop_displacement < INT8_MIN ||
+            loop_displacement > INT8_MAX || buffer->count - function_offset > UINT32_MAX)
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+            return true;
+        }
+        if (final_patch + 2 > buffer->count || loop_patch + 2 > buffer->count)
+        {
+            buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            return true;
+        }
+        buffer->bytes[final_patch + 1] = (u8)(s8)final_displacement;
+        buffer->bytes[loop_patch + 1] = (u8)(s8)loop_displacement;
+        if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)(buffer->count - function_offset),
+                                                        CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+        }
     }
-    u64 loop_offset = buffer->count;
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_r11_operands, BUSTER_ARRAY_LENGTH(sub_r11_operands)) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("CMP"), cmp_operands, BUSTER_ARRAY_LENGTH(cmp_operands)))
-    {
-        return true;
-    }
-    BusterX86MetadataPhysicalOperand final_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
-    u64 final_patch = buffer->count;
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("JBE"), &final_branch_operand, 1) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r11_operands, BUSTER_ARRAY_LENGTH(test_r11_operands)))
-    {
-        return true;
-    }
-    u64 loop_patch = buffer->count;
-    BusterX86MetadataPhysicalOperand loop_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1))
-    {
-        return true;
-    }
-    u64 final_offset = buffer->count;
-    if (!codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
-        !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_rsp_operands, BUSTER_ARRAY_LENGTH(sub_rsp_operands)))
-    {
-        return true;
-    }
-    s64 final_displacement = (s64)final_offset - (s64)(final_patch + 2);
-    s64 loop_displacement = (s64)loop_offset - (s64)(loop_patch + 2);
-    if (buffer->error != CODEGEN_ERROR_NONE || final_displacement < INT8_MIN || final_displacement > INT8_MAX || loop_displacement < INT8_MIN ||
-        loop_displacement > INT8_MAX || buffer->count - function_offset > UINT32_MAX)
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-        return true;
-    }
-    if (final_patch + 2 > buffer->count || loop_patch + 2 > buffer->count)
-    {
-        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-        return true;
-    }
-    buffer->bytes[final_patch + 1] = (u8)(s8)final_displacement;
-    buffer->bytes[loop_patch + 1] = (u8)(s8)loop_displacement;
-    if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)(buffer->count - function_offset),
-                                                    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-    }
+
     return true;
 }
 
@@ -2268,18 +2271,18 @@ bool x64_target_supports_native_vector(Target target, u64 size, u32 element_widt
     {
         return false;
     }
-    if (!integer_operation)
+    if (integer_operation)
     {
-        return true;
+        if (size == 32)
+        {
+            return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2);
+        }
+        if (size == 64 && element_width < 32)
+        {
+            return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
+        }
     }
-    if (size == 32)
-    {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2);
-    }
-    if (size == 64 && element_width < 32)
-    {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
-    }
+
     return true;
 }
 
@@ -2974,107 +2977,107 @@ BUSTER_GLOBAL_LOCAL CodegenCanonicalX64F80Cache codegen_canonical_x64_f80_cache_
         result.allocation_failed = true;
         return result;
     }
-    if (!result.capacity)
+    if (result.capacity)
     {
-        return result;
-    }
-    if (!codegen_canonical_x64_f80_cache_arena_capacity(arena, result.capacity))
-    {
-        result.allocation_failed = true;
-        return result;
-    }
-    result.state = arena_allocate(arena, u8, result.capacity);
-    result.work = arena_allocate(arena, CodegenCanonicalX64F80Work, result.capacity);
-    if (!result.state || !result.work)
-    {
-        result.allocation_failed = true;
-        return result;
-    }
-    memset(result.state, CODEGEN_CANONICAL_X64_F80_UNKNOWN, result.capacity * sizeof(*result.state));
-    for (u32 root_index = 0; root_index < result.capacity; root_index += 1)
-    {
-        if (result.state[root_index] != CODEGEN_CANONICAL_X64_F80_UNKNOWN)
+        if (!codegen_canonical_x64_f80_cache_arena_capacity(arena, result.capacity))
         {
-            continue;
+            result.allocation_failed = true;
+            return result;
         }
-        u32 work_count = 1;
-        result.state[root_index] = CODEGEN_CANONICAL_X64_F80_VISITING;
-        result.work[0] = (CodegenCanonicalX64F80Work){.type = (IrTypeId){.value = root_index}};
-        while (work_count)
+        result.state = arena_allocate(arena, u8, result.capacity);
+        result.work = arena_allocate(arena, CodegenCanonicalX64F80Work, result.capacity);
+        if (!result.state || !result.work)
         {
-            CodegenCanonicalX64F80Work* frame = result.work + work_count - 1;
-            IrTypeId type_id = frame->type;
-            IrType* type = ir_type_from_id(&program->types, type_id);
-            if (!type)
+            result.allocation_failed = true;
+            return result;
+        }
+        memset(result.state, CODEGEN_CANONICAL_X64_F80_UNKNOWN, result.capacity * sizeof(*result.state));
+        for (u32 root_index = 0; root_index < result.capacity; root_index += 1)
+        {
+            if (result.state[root_index] != CODEGEN_CANONICAL_X64_F80_UNKNOWN)
             {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
                 continue;
             }
-            // Treat every f80 spelling as a wide value here.  The stricter
-            // type_is_f80 predicate below then rejects an unresolved,
-            // mis-sized, or misaligned spelling instead of silently lowering
-            // it as an ordinary scalar.
-            if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
+            u32 work_count = 1;
+            result.state[root_index] = CODEGEN_CANONICAL_X64_F80_VISITING;
+            result.work[0] = (CodegenCanonicalX64F80Work){.type = (IrTypeId){.value = root_index}};
+            while (work_count)
             {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
-                continue;
-            }
-            u32 child_count = 0;
-            if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
-            {
-                child_count = 1;
-            }
-            else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
-            {
-                child_count = type->field_count;
-            }
-            if (frame->next_child >= child_count)
-            {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_SAFE;
-                work_count -= 1;
-                continue;
-            }
-            IrTypeId child = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
-                                 ? type->element_type
-                                 : (type->fields ? type->fields[frame->next_child].type : IR_TYPE_ID_INVALID);
-            if (child.value >= result.capacity)
-            {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
-                continue;
-            }
-            u8 child_state = result.state[child.value];
-            if (child_state == CODEGEN_CANONICAL_X64_F80_CONTAINS)
-            {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
-            }
-            else if (child_state == CODEGEN_CANONICAL_X64_F80_SAFE)
-            {
-                frame->next_child += 1;
-            }
-            else if (child_state == CODEGEN_CANONICAL_X64_F80_VISITING)
-            {
-                // Direct recursive value graphs are invalid IR.  Mark the
-                // cycle wide so a caller cannot accidentally lower it.
-                result.state[child.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
-            }
-            else if (work_count >= result.capacity)
-            {
-                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
-                work_count -= 1;
-            }
-            else
-            {
-                result.state[child.value] = CODEGEN_CANONICAL_X64_F80_VISITING;
-                result.work[work_count++] = (CodegenCanonicalX64F80Work){.type = child};
+                CodegenCanonicalX64F80Work* frame = result.work + work_count - 1;
+                IrTypeId type_id = frame->type;
+                IrType* type = ir_type_from_id(&program->types, type_id);
+                if (!type)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                    continue;
+                }
+                // Treat every f80 spelling as a wide value here.  The stricter
+                // type_is_f80 predicate below then rejects an unresolved,
+                // mis-sized, or misaligned spelling instead of silently lowering
+                // it as an ordinary scalar.
+                if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                    continue;
+                }
+                u32 child_count = 0;
+                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                {
+                    child_count = 1;
+                }
+                else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+                {
+                    child_count = type->field_count;
+                }
+                if (frame->next_child >= child_count)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_SAFE;
+                    work_count -= 1;
+                    continue;
+                }
+                IrTypeId child = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                                     ? type->element_type
+                                     : (type->fields ? type->fields[frame->next_child].type : IR_TYPE_ID_INVALID);
+                if (child.value >= result.capacity)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                    continue;
+                }
+                u8 child_state = result.state[child.value];
+                if (child_state == CODEGEN_CANONICAL_X64_F80_CONTAINS)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                }
+                else if (child_state == CODEGEN_CANONICAL_X64_F80_SAFE)
+                {
+                    frame->next_child += 1;
+                }
+                else if (child_state == CODEGEN_CANONICAL_X64_F80_VISITING)
+                {
+                    // Direct recursive value graphs are invalid IR.  Mark the
+                    // cycle wide so a caller cannot accidentally lower it.
+                    result.state[child.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                }
+                else if (work_count >= result.capacity)
+                {
+                    result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                    work_count -= 1;
+                }
+                else
+                {
+                    result.state[child.value] = CODEGEN_CANONICAL_X64_F80_VISITING;
+                    result.work[work_count++] = (CodegenCanonicalX64F80Work){.type = child};
+                }
             }
         }
     }
+
     return result;
 }
 

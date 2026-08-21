@@ -287,20 +287,19 @@ RenderingClipRect rendering_clip_rect_from_f32(F32Interval2 rect, RenderingScale
     f64 x1 = (f64)rect.x1 * (f64)scale.x;
     f64 y0 = (f64)rect.y0 * (f64)scale.y;
     f64 y1 = (f64)rect.y1 * (f64)scale.y;
-    if (x0 != x0 || x1 != x1 || y0 != y0 || y1 != y1 || rect.x1 <= rect.x0 || rect.y1 <= rect.y0)
+    if (x0 == x0 && x1 == x1 && y0 == y0 && y1 == y1 && rect.x1 > rect.x0 && rect.y1 > rect.y0)
     {
-        return result;
+        f64 min_x = x0 < x1 ? x0 : x1;
+        f64 max_x = x0 < x1 ? x1 : x0;
+        f64 min_y = y0 < y1 ? y0 : y1;
+        f64 max_y = y0 < y1 ? y1 : y0;
+        result.x0 = rendering_clip_coordinate(min_x, false);
+        result.y0 = rendering_clip_coordinate(min_y, false);
+        result.x1 = rendering_clip_coordinate(max_x, true);
+        result.y1 = rendering_clip_coordinate(max_y, true);
+        result = rendering_clip_rect_intersect(result, rendering_clip_rect_target(target_size));
     }
 
-    f64 min_x = x0 < x1 ? x0 : x1;
-    f64 max_x = x0 < x1 ? x1 : x0;
-    f64 min_y = y0 < y1 ? y0 : y1;
-    f64 max_y = y0 < y1 ? y1 : y0;
-    result.x0 = rendering_clip_coordinate(min_x, false);
-    result.y0 = rendering_clip_coordinate(min_y, false);
-    result.x1 = rendering_clip_coordinate(max_x, true);
-    result.y1 = rendering_clip_coordinate(max_y, true);
-    result = rendering_clip_rect_intersect(result, rendering_clip_rect_target(target_size));
     return result;
 }
 
@@ -903,30 +902,30 @@ bool rendering_command_stream_record_background_blur_rounded(RenderingCommandStr
     rendering_command_stream_ensure_clip_root(stream);
     RenderingClipRect requested = rendering_clip_rect_from_f32(rect, stream->scale, stream->target_size);
     RenderingClipRect blur_rect = rendering_clip_rect_intersect(stream->clip_stack[stream->clip_depth - 1], requested);
-    if (rendering_clip_rect_is_empty(blur_rect))
+    if (!rendering_clip_rect_is_empty(blur_rect))
     {
-        return true;
+        if (radius > RENDERING_MAX_BLUR_RADIUS)
+        {
+            radius = RENDERING_MAX_BLUR_RADIUS;
+        }
+        RenderingCommand command = {
+            .kind = RENDERING_COMMAND_BACKGROUND_BLUR,
+            .pipeline = BUSTER_PIPELINE_RECT,
+            .clip = stream->clip_stack[stream->clip_depth - 1],
+            .blur_rect = blur_rect,
+            .blur_corner_radii = rendering_blur_corner_radii_to_device(stream->scale, corner_radii),
+            .blur_radius = radius,
+            .resources = stream->resources,
+            .target = stream->target,
+            .batch_index = UINT32_MAX,
+        };
+        if (!rendering_command_stream_push_command(stream, command))
+        {
+            return false;
+        }
+        stream->force_new_batch = true;
     }
-    if (radius > RENDERING_MAX_BLUR_RADIUS)
-    {
-        radius = RENDERING_MAX_BLUR_RADIUS;
-    }
-    RenderingCommand command = {
-        .kind = RENDERING_COMMAND_BACKGROUND_BLUR,
-        .pipeline = BUSTER_PIPELINE_RECT,
-        .clip = stream->clip_stack[stream->clip_depth - 1],
-        .blur_rect = blur_rect,
-        .blur_corner_radii = rendering_blur_corner_radii_to_device(stream->scale, corner_radii),
-        .blur_radius = radius,
-        .resources = stream->resources,
-        .target = stream->target,
-        .batch_index = UINT32_MAX,
-    };
-    if (!rendering_command_stream_push_command(stream, command))
-    {
-        return false;
-    }
-    stream->force_new_batch = true;
+
     return true;
 }
 
@@ -939,41 +938,40 @@ RenderingBlurDimensions rendering_blur_dimensions_make(RenderingWindowSize targe
         .half_height = target_size.height / 2 + target_size.height % 2,
         .valid = false,
     };
-    if (!result.source_width || !result.source_height || result.source_width > (u32)INT32_MAX || result.source_height > (u32)INT32_MAX || !result.half_width ||
-        !result.half_height || result.half_width > UINT32_MAX / result.half_height)
+    if (result.source_width && result.source_height && result.source_width <= (u32)INT32_MAX && result.source_height <= (u32)INT32_MAX && result.half_width &&
+        result.half_height && result.half_width <= UINT32_MAX / result.half_height)
     {
-        return result;
+        result.valid = true;
     }
-    result.valid = true;
+
     return result;
 }
 
 RenderingBlurDescriptorBindings rendering_blur_descriptor_bindings(u32 occurrence)
 {
     RenderingBlurDescriptorBindings result = {0};
-    if (occurrence >= RENDERING_MAX_DRAW_COUNT || RENDERING_MAX_BLUR_PASS_SET_COUNT < 2)
+    if (occurrence < RENDERING_MAX_DRAW_COUNT && RENDERING_MAX_BLUR_PASS_SET_COUNT >= 2)
     {
-        return result;
+        result.horizontal = occurrence * 3;
+        result.vertical = result.horizontal + 1;
+        result.downsample = result.horizontal + 2;
+        result.valid = true;
+        result.stable = true;
     }
-    result.horizontal = occurrence * 3;
-    result.vertical = result.horizontal + 1;
-    result.downsample = result.horizontal + 2;
-    result.valid = true;
-    result.stable = true;
+
     return result;
 }
 
 RenderingDescriptorRange rendering_descriptor_range_make(u32 descriptor_base, u32 window_slot, u32 window_count, u32 window_length)
 {
     RenderingDescriptorRange result = {0};
-    if (window_slot >= window_count || window_length > UINT32_MAX - descriptor_base ||
-        window_slot > (UINT32_MAX - descriptor_base) / window_length)
+    if (window_slot < window_count && window_length <= UINT32_MAX - descriptor_base && window_slot <= (UINT32_MAX - descriptor_base) / window_length)
     {
-        return result;
+        result.base = descriptor_base + window_slot * window_length;
+        result.length = window_length;
+        result.valid = true;
     }
-    result.base = descriptor_base + window_slot * window_length;
-    result.length = window_length;
-    result.valid = true;
+
     return result;
 }
 
@@ -1019,13 +1017,13 @@ RenderingBlurPlan rendering_blur_plan_make(RenderingWindowSize target_size, Rend
         .captures_current_target = false,
         .valid = false,
     };
-    if (rendering_clip_rect_is_empty(rect) || !dimensions.valid)
+    if (!rendering_clip_rect_is_empty(rect) && dimensions.valid)
     {
-        return result;
+        result.captures_current_target = true;
+        result.pass_count = result.radius ? 2 : 0;
+        result.valid = true;
     }
-    result.captures_current_target = true;
-    result.pass_count = result.radius ? 2 : 0;
-    result.valid = true;
+
     return result;
 }
 
@@ -1152,73 +1150,73 @@ RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStr
     case RENDERING_BACKEND_KIND_COUNT:
         return result;
     }
-    if (!rendering_command_stream_is_valid(stream) || !events)
+    if (rendering_command_stream_is_valid(stream) && events)
     {
-        return result;
-    }
-    u32 event_count = rendering_command_stream_replay(stream, events, capacity);
-    if (event_count > capacity)
-    {
-        return result;
-    }
-    result.valid = true;
-    result.event_count = event_count;
-    result.order_preserved = true;
-    result.resources_snapshot = true;
-    result.target_boundaries = true;
-    result.state_restored = true;
-    bool saw_blur = false;
-    bool blur_followed_by_draw = false;
-    u32 previous_command_index = 0;
-    for (u32 event_index = 0; event_index < event_count; event_index += 1)
-    {
-        RenderingReplayEvent event = events[event_index];
-        if (event_index && event.command_index <= previous_command_index)
+        u32 event_count = rendering_command_stream_replay(stream, events, capacity);
+        if (event_count > capacity)
         {
-            result.order_preserved = false;
+            return result;
         }
-        previous_command_index = event.command_index;
-        switch (event.kind)
+        result.valid = true;
+        result.event_count = event_count;
+        result.order_preserved = true;
+        result.resources_snapshot = true;
+        result.target_boundaries = true;
+        result.state_restored = true;
+        bool saw_blur = false;
+        bool blur_followed_by_draw = false;
+        u32 previous_command_index = 0;
+        for (u32 event_index = 0; event_index < event_count; event_index += 1)
         {
-        case RENDERING_REPLAY_DRAW:
-            result.draw_count += 1;
-            if (event.batch_index >= stream->batch_count ||
-                memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
-                event.target != stream->batches[event.batch_index].target)
+            RenderingReplayEvent event = events[event_index];
+            if (event_index && event.command_index <= previous_command_index)
             {
-                result.resources_snapshot = false;
+                result.order_preserved = false;
             }
-            if (saw_blur)
+            previous_command_index = event.command_index;
+            switch (event.kind)
             {
-                blur_followed_by_draw = true;
-                saw_blur = false;
+            case RENDERING_REPLAY_DRAW:
+                result.draw_count += 1;
+                if (event.batch_index >= stream->batch_count ||
+                    memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
+                    event.target != stream->batches[event.batch_index].target)
+                {
+                    result.resources_snapshot = false;
+                }
+                if (saw_blur)
+                {
+                    blur_followed_by_draw = true;
+                    saw_blur = false;
+                }
+                break;
+            case RENDERING_REPLAY_BACKGROUND_BLUR:
+                result.blur_pass_count += 3;
+                saw_blur = true;
+                break;
+            case RENDERING_REPLAY_TARGET:
+                if (event.target != RENDERING_TARGET_BACKBUFFER)
+                {
+                    result.target_boundaries = false;
+                }
+                break;
+            case RENDERING_REPLAY_CLIP_PUSH:
+            case RENDERING_REPLAY_CLIP_POP:
+            case RENDERING_REPLAY_FLUSH:
+            case RENDERING_REPLAY_RESOURCE:
+                break;
+            case RENDERING_REPLAY_EVENT_KIND_COUNT:
+                result.valid = false;
+                break;
             }
-            break;
-        case RENDERING_REPLAY_BACKGROUND_BLUR:
-            result.blur_pass_count += 3;
-            saw_blur = true;
-            break;
-        case RENDERING_REPLAY_TARGET:
-            if (event.target != RENDERING_TARGET_BACKBUFFER)
-            {
-                result.target_boundaries = false;
-            }
-            break;
-        case RENDERING_REPLAY_CLIP_PUSH:
-        case RENDERING_REPLAY_CLIP_POP:
-        case RENDERING_REPLAY_FLUSH:
-        case RENDERING_REPLAY_RESOURCE:
-            break;
-        case RENDERING_REPLAY_EVENT_KIND_COUNT:
-            result.valid = false;
-            break;
         }
+        if (saw_blur)
+        {
+            blur_followed_by_draw = true;
+        }
+        result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
     }
-    if (saw_blur)
-    {
-        blur_followed_by_draw = true;
-    }
-    result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
+
     return result;
 }
 
@@ -1680,14 +1678,14 @@ RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_ver
         {-1.0f, 1.0f},
         {1.0f, 1.0f},
     };
-    if (quad_vertex_index >= BUSTER_ARRAY_LENGTH(quad_coordinates))
+    if (quad_vertex_index < BUSTER_ARRAY_LENGTH(quad_coordinates))
     {
-        return result;
+        f32 u = quad_coordinates[quad_vertex_index][0] * 0.5f + 0.5f;
+        f32 v = quad_coordinates[quad_vertex_index][1] * 0.5f + 0.5f;
+        result.x = float2_element(vertex.uv0, 0) + float2_element(vertex.uv_extent, 0) * u;
+        result.y = float2_element(vertex.uv0, 1) + float2_element(vertex.uv_extent, 1) * v;
     }
-    f32 u = quad_coordinates[quad_vertex_index][0] * 0.5f + 0.5f;
-    f32 v = quad_coordinates[quad_vertex_index][1] * 0.5f + 0.5f;
-    result.x = float2_element(vertex.uv0, 0) + float2_element(vertex.uv_extent, 0) * u;
-    result.y = float2_element(vertex.uv0, 1) + float2_element(vertex.uv_extent, 1) * v;
+
     return result;
 }
 
@@ -1794,93 +1792,93 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
     {
         return false;
     }
-    if (radius == 0)
+    if (radius != 0)
     {
-        return true;
-    }
-    if (radius > RENDERING_MAX_BLUR_RADIUS)
-    {
-        radius = RENDERING_MAX_BLUR_RADIUS;
-    }
-
-    f32 kernel_weights[RENDERING_MAX_BLUR_RADIUS * 2 + 1] = {0};
-    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
-    {
-        if (offset < -(s32)radius || offset > (s32)radius)
+        if (radius > RENDERING_MAX_BLUR_RADIUS)
         {
-            continue;
+            radius = RENDERING_MAX_BLUR_RADIUS;
         }
-        kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS] = rendering_blur_kernel_weight(radius, offset);
-    }
-    u64 pixel_count = (u64)width * height;
-    u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
-    for (u32 y = 0; y < height; y += 1)
-    {
-        for (u32 x = 0; x < width; x += 1)
+
+        f32 kernel_weights[RENDERING_MAX_BLUR_RADIUS * 2 + 1] = {0};
+        for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
         {
-            for (u32 channel = 0; channel < channels; channel += 1)
+            if (offset < -(s32)radius || offset > (s32)radius)
             {
-                f32 sum = 0.0f;
-                f32 weight_sum = 0.0f;
-                for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
+                continue;
+            }
+            kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS] = rendering_blur_kernel_weight(radius, offset);
+        }
+        u64 pixel_count = (u64)width * height;
+        u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
+        for (u32 y = 0; y < height; y += 1)
+        {
+            for (u32 x = 0; x < width; x += 1)
+            {
+                for (u32 channel = 0; channel < channels; channel += 1)
                 {
-                    if (offset < -(s32)radius || offset > (s32)radius)
+                    f32 sum = 0.0f;
+                    f32 weight_sum = 0.0f;
+                    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
                     {
-                        continue;
+                        if (offset < -(s32)radius || offset > (s32)radius)
+                        {
+                            continue;
+                        }
+                        s32 sample_x = (s32)x + offset;
+                        if (sample_x < 0)
+                        {
+                            sample_x = 0;
+                        }
+                        if (sample_x >= (s32)width)
+                        {
+                            sample_x = (s32)width - 1;
+                        }
+                        f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                        sum += (f32)pixels[(u64)y * stride + (u64)sample_x * channels + channel] * weight;
+                        weight_sum += weight;
                     }
-                    s32 sample_x = (s32)x + offset;
-                    if (sample_x < 0)
-                    {
-                        sample_x = 0;
-                    }
-                    if (sample_x >= (s32)width)
-                    {
-                        sample_x = (s32)width - 1;
-                    }
-                    f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
-                    sum += (f32)pixels[(u64)y * stride + (u64)sample_x * channels + channel] * weight;
-                    weight_sum += weight;
+                    f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                    value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                    horizontal[((u64)y * width + x) * channels + channel] = (u8)round_f32(value);
                 }
-                f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
-                value = BUSTER_CLAMP(0.0f, value, 255.0f);
-                horizontal[((u64)y * width + x) * channels + channel] = (u8)round_f32(value);
+            }
+        }
+
+        for (u32 y = 0; y < height; y += 1)
+        {
+            for (u32 x = 0; x < width; x += 1)
+            {
+                for (u32 channel = 0; channel < channels; channel += 1)
+                {
+                    f32 sum = 0.0f;
+                    f32 weight_sum = 0.0f;
+                    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
+                    {
+                        if (offset < -(s32)radius || offset > (s32)radius)
+                        {
+                            continue;
+                        }
+                        s32 sample_y = (s32)y + offset;
+                        if (sample_y < 0)
+                        {
+                            sample_y = 0;
+                        }
+                        if (sample_y >= (s32)height)
+                        {
+                            sample_y = (s32)height - 1;
+                        }
+                        f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                        sum += (f32)horizontal[((u64)sample_y * width + x) * channels + channel] * weight;
+                        weight_sum += weight;
+                    }
+                    f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                    value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                    pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)round_f32(value);
+                }
             }
         }
     }
 
-    for (u32 y = 0; y < height; y += 1)
-    {
-        for (u32 x = 0; x < width; x += 1)
-        {
-            for (u32 channel = 0; channel < channels; channel += 1)
-            {
-                f32 sum = 0.0f;
-                f32 weight_sum = 0.0f;
-                for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
-                {
-                    if (offset < -(s32)radius || offset > (s32)radius)
-                    {
-                        continue;
-                    }
-                    s32 sample_y = (s32)y + offset;
-                    if (sample_y < 0)
-                    {
-                        sample_y = 0;
-                    }
-                    if (sample_y >= (s32)height)
-                    {
-                        sample_y = (s32)height - 1;
-                    }
-                    f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
-                    sum += (f32)horizontal[((u64)sample_y * width + x) * channels + channel] * weight;
-                    weight_sum += weight;
-                }
-                f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
-                value = BUSTER_CLAMP(0.0f, value, 255.0f);
-                pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)round_f32(value);
-            }
-        }
-    }
     return true;
 }
 
@@ -1906,28 +1904,28 @@ TextureIndex rendering_texture_create_blurred(Arena* arena, RenderingHandle* ren
     {
         return (TextureIndex){.value = UINT32_MAX};
     }
-    if (radius == 0)
+    if (radius != 0)
     {
-        return rendering_texture_create(rendering, source);
+        u64 byte_count = (u64)source.width * source.height * channels;
+        if (!rendering_arena_allocation_fits(arena, byte_count, 16))
+        {
+            return (TextureIndex){.value = UINT32_MAX};
+        }
+        u64 arena_position = arena->position;
+        u8* copy = (u8*)arena_allocate_bytes(arena, byte_count, 16);
+        memcpy(copy, source.pointer, byte_count);
+        Arena* conflicts[] = {arena};
+        TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        bool success = channels == 4 ? rendering_blur_rgba8(scratch.arena, copy, source.width, source.height, source.width * channels, radius)
+                                     : rendering_blur_r8(scratch.arena, copy, source.width, source.height, source.width, radius);
+        scratch_end(scratch);
+        if (!success)
+        {
+            arena_set_position(arena, arena_position);
+            return (TextureIndex){.value = UINT32_MAX};
+        }
+        source.pointer = copy;
     }
-    u64 byte_count = (u64)source.width * source.height * channels;
-    if (!rendering_arena_allocation_fits(arena, byte_count, 16))
-    {
-        return (TextureIndex){.value = UINT32_MAX};
-    }
-    u64 arena_position = arena->position;
-    u8* copy = (u8*)arena_allocate_bytes(arena, byte_count, 16);
-    memcpy(copy, source.pointer, byte_count);
-    Arena* conflicts[] = {arena};
-    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    bool success = channels == 4 ? rendering_blur_rgba8(scratch.arena, copy, source.width, source.height, source.width * channels, radius)
-                                 : rendering_blur_r8(scratch.arena, copy, source.width, source.height, source.width, radius);
-    scratch_end(scratch);
-    if (!success)
-    {
-        arena_set_position(arena, arena_position);
-        return (TextureIndex){.value = UINT32_MAX};
-    }
-    source.pointer = copy;
+
     return rendering_texture_create(rendering, source);
 }

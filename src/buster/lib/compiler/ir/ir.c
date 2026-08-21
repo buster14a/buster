@@ -277,31 +277,31 @@ IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, I
 
 BUSTER_GLOBAL_LOCAL u32 ir_canonical_inline_assembly_type_class(IrType* type)
 {
-    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > 8)
+    if (type && type->layout.resolved && type->layout.size && type->layout.size <= 8)
     {
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+        switch (type->kind)
+        {
+        case IR_TYPE_BOOLEAN:
+        case IR_TYPE_INTEGER:
+        case IR_TYPE_ENUM:
+            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+        case IR_TYPE_POINTER:
+            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+        case IR_TYPE_VOID:
+        case IR_TYPE_FLOAT:
+        case IR_TYPE_VA_LIST:
+        case IR_TYPE_SLICE:
+        case IR_TYPE_ARRAY:
+        case IR_TYPE_VECTOR:
+        case IR_TYPE_FUNCTION:
+        case IR_TYPE_RANGE:
+        case IR_TYPE_STRUCT:
+        case IR_TYPE_UNION:
+        case IR_TYPE_COUNT:
+            break;
+        }
     }
-    switch (type->kind)
-    {
-    case IR_TYPE_BOOLEAN:
-    case IR_TYPE_INTEGER:
-    case IR_TYPE_ENUM:
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
-    case IR_TYPE_POINTER:
-        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
-    case IR_TYPE_VOID:
-    case IR_TYPE_FLOAT:
-    case IR_TYPE_VA_LIST:
-    case IR_TYPE_SLICE:
-    case IR_TYPE_ARRAY:
-    case IR_TYPE_VECTOR:
-    case IR_TYPE_FUNCTION:
-    case IR_TYPE_RANGE:
-    case IR_TYPE_STRUCT:
-    case IR_TYPE_UNION:
-    case IR_TYPE_COUNT:
-        break;
-    }
+
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
@@ -454,70 +454,70 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
 {
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    if (operation >= IR_SIMD_COUNT || instruction->operand_count != shape.operand_count || instruction->target_count != 0 ||
-        instruction->immediate_count != shape.immediate_count || (shape.has_result != (instruction->result.value != IR_ID_UNDERLYING_INVALID)))
+    if (operation < IR_SIMD_COUNT && instruction->operand_count == shape.operand_count && instruction->target_count == 0 &&
+        instruction->immediate_count == shape.immediate_count && shape.has_result == (instruction->result.value != IR_ID_UNDERLYING_INVALID))
     {
-        return false;
-    }
-    // Four is the widest shape in the table (vpermt2b's mask plus three
-    // vectors); a fifth would have to widen this and every switch arm below.
-    IrTypeId operands[4] = {0};
-    if (instruction->operand_count > BUSTER_ARRAY_LENGTH(operands))
-    {
-        return false;
-    }
-    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-    {
-        IrValueId operand = instruction->operands[operand_index];
-        if (operand.value >= function->value_count || function->values[operand.value].category != IR_VALUE_VALUE)
+        // Four is the widest shape in the table (vpermt2b's mask plus three
+        // vectors); a fifth would have to widen this and every switch arm below.
+        IrTypeId operands[4] = {0};
+        if (instruction->operand_count > BUSTER_ARRAY_LENGTH(operands))
         {
             return false;
         }
-        operands[operand_index] = function->values[operand.value].canonical_type;
+        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+        {
+            IrValueId operand = instruction->operands[operand_index];
+            if (operand.value >= function->value_count || function->values[operand.value].category != IR_VALUE_VALUE)
+            {
+                return false;
+            }
+            operands[operand_index] = function->values[operand.value].canonical_type;
+        }
+        IrTypeId result_type = instruction->canonical_type;
+        IrType* result = ir_type_from_id(&program->types, result_type);
+        if (!result || (shape.has_result && function->values[instruction->result.value].canonical_type.value != result_type.value))
+        {
+            return false;
+        }
+        u64 immediate = instruction->immediate_count ? instruction->immediates[0] : 0;
+        switch (operation)
+        {
+        case IR_SIMD_LOAD:
+            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_LOAD_MASKED:
+            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_STORE:
+            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
+        case IR_SIMD_STORE_MASKED:
+        case IR_SIMD_COMPRESS_STORE_BYTE:
+            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) &&
+                   ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
+        case IR_SIMD_SPLAT_BYTE:
+            return ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_COMPARE_EQUAL_BYTE:
+        case IR_SIMD_COMPARE_LESS_BYTE:
+        case IR_SIMD_TEST_MASK_BYTE:
+        case IR_SIMD_COMPARE_EQUAL_WORD:
+            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
+        case IR_SIMD_SIGN_MASK_BYTE:
+            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);
+        case IR_SIMD_PERMUTE2_BYTE:
+            return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+                   ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_COMPRESS_BYTE:
+            return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
+        case IR_SIMD_SHIFT_LEFT_WORD:
+            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
+        case IR_SIMD_TERNARY_WORD:
+            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+                   ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
+        case IR_SIMD_COUNT:
+            break;
+        }
     }
-    IrTypeId result_type = instruction->canonical_type;
-    IrType* result = ir_type_from_id(&program->types, result_type);
-    if (!result || (shape.has_result && function->values[instruction->result.value].canonical_type.value != result_type.value))
-    {
-        return false;
-    }
-    u64 immediate = instruction->immediate_count ? instruction->immediates[0] : 0;
-    switch (operation)
-    {
-    case IR_SIMD_LOAD:
-        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
-    case IR_SIMD_LOAD_MASKED:
-        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
-    case IR_SIMD_STORE:
-        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
-    case IR_SIMD_STORE_MASKED:
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) &&
-               ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
-    case IR_SIMD_SPLAT_BYTE:
-        return ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-    case IR_SIMD_COMPARE_LESS_BYTE:
-    case IR_SIMD_TEST_MASK_BYTE:
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
-    case IR_SIMD_SIGN_MASK_BYTE:
-        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);
-    case IR_SIMD_PERMUTE2_BYTE:
-        return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
-               ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
-    case IR_SIMD_COMPRESS_BYTE:
-        return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
-    case IR_SIMD_SHIFT_LEFT_WORD:
-        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
-    case IR_SIMD_TERNARY_WORD:
-        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
-               ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
-    case IR_SIMD_COUNT:
-        break;
-    }
+
     return false;
 }
 
@@ -579,28 +579,28 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, 
 
 IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value)
 {
-    if (!function || !function->label_metadata_count)
+    if (function && function->label_metadata_count)
     {
-        return 0;
-    }
-    u32 low = 0;
-    u32 high = function->label_metadata_count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (function->label_metadata_values[middle].value < value.value)
+        u32 low = 0;
+        u32 high = function->label_metadata_count;
+        while (low < high)
         {
-            low = middle + 1;
+            u32 middle = low + (high - low) / 2;
+            if (function->label_metadata_values[middle].value < value.value)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
         }
-        else
+        if (low < function->label_metadata_count && function->label_metadata_values[low].value == value.value)
         {
-            high = middle;
+            return function->label_metadata + low;
         }
     }
-    if (low < function->label_metadata_count && function->label_metadata_values[low].value == value.value)
-    {
-        return function->label_metadata + low;
-    }
+
     return 0;
 }
 
@@ -613,28 +613,28 @@ IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId val
 
 IrInstructionExtra* ir_instruction_extra_find(IrFunction* function, IrInstructionId instruction)
 {
-    if (!function || !function->extra_count)
+    if (function && function->extra_count)
     {
-        return 0;
-    }
-    u32 low = 0;
-    u32 high = function->extra_count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (function->extra_instructions[middle].value < instruction.value)
+        u32 low = 0;
+        u32 high = function->extra_count;
+        while (low < high)
         {
-            low = middle + 1;
+            u32 middle = low + (high - low) / 2;
+            if (function->extra_instructions[middle].value < instruction.value)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
         }
-        else
+        if (low < function->extra_count && function->extra_instructions[low].value == instruction.value)
         {
-            high = middle;
+            return function->extras + low;
         }
     }
-    if (low < function->extra_count && function->extra_instructions[low].value == instruction.value)
-    {
-        return function->extras + low;
-    }
+
     return 0;
 }
 
@@ -665,32 +665,32 @@ IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFunction* functi
             high = middle;
         }
     }
-    if (low < function->extra_count && function->extra_instructions[low].value == instruction.value)
+    if (low >= function->extra_count || function->extra_instructions[low].value != instruction.value)
     {
-        return function->extras + low;
-    }
-    if (function->extra_count == function->extra_capacity)
-    {
-        u32 capacity = function->extra_capacity ? function->extra_capacity * 2 : 8;
-        IrInstructionId* instructions = arena_allocate(arena, IrInstructionId, capacity);
-        IrInstructionExtra* extras = arena_allocate(arena, IrInstructionExtra, capacity);
-        if (function->extra_count)
+        if (function->extra_count == function->extra_capacity)
         {
-            memcpy(instructions, function->extra_instructions, sizeof(*instructions) * function->extra_count);
-            memcpy(extras, function->extras, sizeof(*extras) * function->extra_count);
+            u32 capacity = function->extra_capacity ? function->extra_capacity * 2 : 8;
+            IrInstructionId* instructions = arena_allocate(arena, IrInstructionId, capacity);
+            IrInstructionExtra* extras = arena_allocate(arena, IrInstructionExtra, capacity);
+            if (function->extra_count)
+            {
+                memcpy(instructions, function->extra_instructions, sizeof(*instructions) * function->extra_count);
+                memcpy(extras, function->extras, sizeof(*extras) * function->extra_count);
+            }
+            function->extra_instructions = instructions;
+            function->extras = extras;
+            function->extra_capacity = capacity;
         }
-        function->extra_instructions = instructions;
-        function->extras = extras;
-        function->extra_capacity = capacity;
+        for (u32 move = function->extra_count; move > low; move -= 1)
+        {
+            function->extra_instructions[move] = function->extra_instructions[move - 1];
+            function->extras[move] = function->extras[move - 1];
+        }
+        function->extra_instructions[low] = instruction;
+        function->extras[low] = (IrInstructionExtra){0};
+        function->extra_count += 1;
     }
-    for (u32 move = function->extra_count; move > low; move -= 1)
-    {
-        function->extra_instructions[move] = function->extra_instructions[move - 1];
-        function->extras[move] = function->extras[move - 1];
-    }
-    function->extra_instructions[low] = instruction;
-    function->extras[low] = (IrInstructionExtra){0};
-    function->extra_count += 1;
+
     return function->extras + low;
 }
 
@@ -741,33 +741,33 @@ IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* f
             high = middle;
         }
     }
-    if (low < function->label_metadata_count && function->label_metadata_values[low].value == value.value)
+    if (low >= function->label_metadata_count || function->label_metadata_values[low].value != value.value)
     {
-        return function->label_metadata + low;
-    }
-    if (function->label_metadata_count == function->label_metadata_capacity)
-    {
-        u32 new_capacity = function->label_metadata_capacity ? function->label_metadata_capacity * 2 : 8;
-        IrValueId* new_values = arena_allocate(arena, IrValueId, new_capacity);
-        IrValueLabelMetadata* new_entries = arena_allocate(arena, IrValueLabelMetadata, new_capacity);
-        if (function->label_metadata_count)
+        if (function->label_metadata_count == function->label_metadata_capacity)
         {
-            memcpy(new_values, function->label_metadata_values, sizeof(*new_values) * function->label_metadata_count);
-            memcpy(new_entries, function->label_metadata, sizeof(*new_entries) * function->label_metadata_count);
+            u32 new_capacity = function->label_metadata_capacity ? function->label_metadata_capacity * 2 : 8;
+            IrValueId* new_values = arena_allocate(arena, IrValueId, new_capacity);
+            IrValueLabelMetadata* new_entries = arena_allocate(arena, IrValueLabelMetadata, new_capacity);
+            if (function->label_metadata_count)
+            {
+                memcpy(new_values, function->label_metadata_values, sizeof(*new_values) * function->label_metadata_count);
+                memcpy(new_entries, function->label_metadata, sizeof(*new_entries) * function->label_metadata_count);
+            }
+            function->label_metadata_values = new_values;
+            function->label_metadata = new_entries;
+            function->label_metadata_capacity = new_capacity;
         }
-        function->label_metadata_values = new_values;
-        function->label_metadata = new_entries;
-        function->label_metadata_capacity = new_capacity;
+        u32 tail = function->label_metadata_count - low;
+        if (tail)
+        {
+            memmove(function->label_metadata_values + low + 1, function->label_metadata_values + low, sizeof(*function->label_metadata_values) * tail);
+            memmove(function->label_metadata + low + 1, function->label_metadata + low, sizeof(*function->label_metadata) * tail);
+        }
+        function->label_metadata_values[low] = value;
+        function->label_metadata[low] = (IrValueLabelMetadata){0};
+        function->label_metadata_count += 1;
     }
-    u32 tail = function->label_metadata_count - low;
-    if (tail)
-    {
-        memmove(function->label_metadata_values + low + 1, function->label_metadata_values + low, sizeof(*function->label_metadata_values) * tail);
-        memmove(function->label_metadata + low + 1, function->label_metadata + low, sizeof(*function->label_metadata) * tail);
-    }
-    function->label_metadata_values[low] = value;
-    function->label_metadata[low] = (IrValueLabelMetadata){0};
-    function->label_metadata_count += 1;
+
     return function->label_metadata + low;
 }
 
@@ -837,50 +837,50 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_void_pointer_type(IrProgram* program, IrTy
 
 BUSTER_GLOBAL_LOCAL IrFunction* ir_module_function_for_symbol(IrModule* module, IrSymbolId symbol)
 {
-    if (!module || !module->functions)
+    if (module && module->functions)
     {
-        return 0;
-    }
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
-    {
-        IrFunction* function = module->functions + function_index;
-        if (function->symbol.value == symbol.value)
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
         {
-            return function;
+            IrFunction* function = module->functions + function_index;
+            if (function->symbol.value == symbol.value)
+            {
+                return function;
+            }
         }
     }
+
     return 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_label_block_set_contains(IrValueLabelMetadata* value, IrBlockId block)
 {
-    if (!value || !value->label_blocks)
+    if (value && value->label_blocks)
     {
-        return false;
-    }
-    for (u32 index = 0; index < value->label_block_count; index += 1)
-    {
-        if (value->label_blocks[index].value == block.value)
+        for (u32 index = 0; index < value->label_block_count; index += 1)
         {
-            return true;
+            if (value->label_blocks[index].value == block.value)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_label_path_contains_block(IrLabelProvenancePath* path, IrBlockId block)
 {
-    if (!path || !path->label_blocks)
+    if (path && path->label_blocks)
     {
-        return false;
-    }
-    for (u32 index = 0; index < path->label_block_count; index += 1)
-    {
-        if (path->label_blocks[index].value == block.value)
+        for (u32 index = 0; index < path->label_block_count; index += 1)
         {
-            return true;
+            if (path->label_blocks[index].value == block.value)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -1119,21 +1119,21 @@ BUSTER_GLOBAL_LOCAL bool ir_constant_index_value(IrFunction* function, IrValueId
 
 BUSTER_GLOBAL_LOCAL bool ir_label_metadata_has_label(IrValueLabelMetadata* value)
 {
-    if (!value)
+    if (value)
     {
-        return false;
-    }
-    if (value->is_label_value || value->has_label_provenance)
-    {
-        return true;
-    }
-    for (u32 path_index = 0; path_index < value->label_path_count; path_index += 1)
-    {
-        if (!value->label_paths[path_index].is_non_label && value->label_paths[path_index].label_block_count)
+        if (value->is_label_value || value->has_label_provenance)
         {
             return true;
         }
+        for (u32 path_index = 0; path_index < value->label_path_count; path_index += 1)
+        {
+            if (!value->label_paths[path_index].is_non_label && value->label_paths[path_index].label_block_count)
+            {
+                return true;
+            }
+        }
     }
+
     return false;
 }
 
@@ -1144,22 +1144,22 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_storage_transfer_valid(IrProgram* pro
     {
         return false;
     }
-    if (!ir_label_metadata_has_label(result) && !ir_label_metadata_has_label(source))
+    if (ir_label_metadata_has_label(result) || ir_label_metadata_has_label(source))
     {
-        return true;
+        if (ir_label_metadata_has_label(result) && !ir_label_metadata_has_label(source))
+        {
+            return false;
+        }
+        if (result->has_label_provenance && !ir_label_block_set_subset(result, source))
+        {
+            return false;
+        }
+        if (result->label_path_count && !source->label_path_count)
+        {
+            return false;
+        }
     }
-    if (ir_label_metadata_has_label(result) && !ir_label_metadata_has_label(source))
-    {
-        return false;
-    }
-    if (result->has_label_provenance && !ir_label_block_set_subset(result, source))
-    {
-        return false;
-    }
-    if (result->label_path_count && !source->label_path_count)
-    {
-        return false;
-    }
+
     return true;
 }
 
@@ -1169,100 +1169,100 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_dynamic_index_transfer_valid(IrValueL
     {
         return false;
     }
-    if (!ir_label_metadata_has_label(result) && !ir_label_metadata_has_label(source))
+    if (ir_label_metadata_has_label(result) || ir_label_metadata_has_label(source))
     {
-        return true;
-    }
-    if (!element_size || array_size < element_size || !source->label_path_count)
-    {
-        return !ir_label_metadata_has_label(result);
-    }
-    bool source_non_label = source->has_non_label_provenance;
-    bool source_label = false;
-    for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
-    {
-        IrLabelProvenancePath* source_path = source->label_paths + source_index;
-        if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > array_size)
+        if (!element_size || array_size < element_size || !source->label_path_count)
         {
-            return false;
+            return !ir_label_metadata_has_label(result);
         }
-        source_non_label |= source_path->is_non_label;
-        source_label |= !source_path->is_non_label;
-        bool found = false;
+        bool source_non_label = source->has_non_label_provenance;
+        bool source_label = false;
+        for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
+        {
+            IrLabelProvenancePath* source_path = source->label_paths + source_index;
+            if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > array_size)
+            {
+                return false;
+            }
+            source_non_label |= source_path->is_non_label;
+            source_label |= !source_path->is_non_label;
+            bool found = false;
+            for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
+            {
+                IrLabelProvenancePath* result_path = result->label_paths + result_index;
+                if (result_path->offset != 0 || result_path->size != element_size)
+                {
+                    continue;
+                }
+                if (source_path->is_non_label)
+                {
+                    found |= result_path->is_non_label || result->has_non_label_provenance;
+                }
+                else
+                {
+                    bool blocks_match = !result_path->is_non_label;
+                    for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
+                    {
+                        blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
+                    }
+                    found |= blocks_match;
+                }
+            }
+            if (!found)
+            {
+                return false;
+            }
+        }
         for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
         {
             IrLabelProvenancePath* result_path = result->label_paths + result_index;
             if (result_path->offset != 0 || result_path->size != element_size)
             {
-                continue;
-            }
-            if (source_path->is_non_label)
-            {
-                found |= result_path->is_non_label || result->has_non_label_provenance;
-            }
-            else
-            {
-                bool blocks_match = !result_path->is_non_label;
-                for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
-                {
-                    blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
-                }
-                found |= blocks_match;
-            }
-        }
-        if (!found)
-        {
-            return false;
-        }
-    }
-    for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-    {
-        IrLabelProvenancePath* result_path = result->label_paths + result_index;
-        if (result_path->offset != 0 || result_path->size != element_size)
-        {
-            return false;
-        }
-        if (result_path->is_non_label)
-        {
-            if (!source_non_label)
-            {
                 return false;
             }
-        }
-        else
-        {
-            for (u32 block_index = 0; block_index < result_path->label_block_count; block_index += 1)
+            if (result_path->is_non_label)
             {
-                bool found = false;
-                for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
-                {
-                    IrLabelProvenancePath* source_path = source->label_paths + source_index;
-                    found |= !source_path->is_non_label && source_path->offset <= UINT64_MAX - source_path->size &&
-                             source_path->offset + source_path->size <= array_size &&
-                             ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
-                }
-                if (!found)
+                if (!source_non_label)
                 {
                     return false;
                 }
             }
+            else
+            {
+                for (u32 block_index = 0; block_index < result_path->label_block_count; block_index += 1)
+                {
+                    bool found = false;
+                    for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
+                    {
+                        IrLabelProvenancePath* source_path = source->label_paths + source_index;
+                        found |= !source_path->is_non_label && source_path->offset <= UINT64_MAX - source_path->size &&
+                                 source_path->offset + source_path->size <= array_size &&
+                                 ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
+                    }
+                    if (!found)
+                    {
+                        return false;
+                    }
+                }
+            }
         }
-    }
-    if (source_non_label && !result->has_non_label_provenance)
-    {
-        return false;
-    }
-    if (source_label && !ir_label_metadata_has_label(result))
-    {
-        return false;
-    }
-    for (u32 source_index = 0; source_index < source->label_block_count; source_index += 1)
-    {
-        if (!ir_label_block_set_contains(result, source->label_blocks[source_index]))
+        if (source_non_label && !result->has_non_label_provenance)
         {
             return false;
         }
+        if (source_label && !ir_label_metadata_has_label(result))
+        {
+            return false;
+        }
+        for (u32 source_index = 0; source_index < source->label_block_count; source_index += 1)
+        {
+            if (!ir_label_block_set_contains(result, source->label_blocks[source_index]))
+            {
+                return false;
+            }
+        }
     }
+
     return true;
 }
 
@@ -1892,17 +1892,17 @@ bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockPara
 
 bool ir_label_provenance_contains(IrValueLabelMetadata* value, IrBlockId block)
 {
-    if (!ir_label_provenance_valid(value))
+    if (ir_label_provenance_valid(value))
     {
-        return false;
-    }
-    for (u32 index = 0; index < value->label_block_count; index += 1)
-    {
-        if (value->label_blocks[index].value == block.value)
+        for (u32 index = 0; index < value->label_block_count; index += 1)
         {
-            return true;
+            if (value->label_blocks[index].value == block.value)
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -2297,30 +2297,30 @@ IrAbiConvention ir_abi_convention_for_target(Target target)
 IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity)
 {
     IrProgram program = {0};
-    if (!arena)
+    if (arena)
     {
-        return program;
+        program.arena = arena;
+        program.data_layout = target_data_layout(target_native);
+        program.modules = arena_allocate(arena, IrModule, module_count);
+        program.module_count = module_count;
+        program.types = (IrTypeTable){
+            .types = arena_allocate(arena, IrType, type_capacity),
+            .capacity = type_capacity,
+        };
+        program.symbols = (IrSymbolTable){
+            .symbols = arena_allocate(arena, IrSymbol, symbol_capacity),
+            .capacity = symbol_capacity,
+        };
+        program.sources = (IrSourceTable){
+            .sources = arena_allocate(arena, IrSource, source_capacity),
+            .capacity = source_capacity,
+        };
+        for (u32 index = 0; index < module_count; index += 1)
+        {
+            program.modules[index] = (IrModule){0};
+        }
     }
-    program.arena = arena;
-    program.data_layout = target_data_layout(target_native);
-    program.modules = arena_allocate(arena, IrModule, module_count);
-    program.module_count = module_count;
-    program.types = (IrTypeTable){
-        .types = arena_allocate(arena, IrType, type_capacity),
-        .capacity = type_capacity,
-    };
-    program.symbols = (IrSymbolTable){
-        .symbols = arena_allocate(arena, IrSymbol, symbol_capacity),
-        .capacity = symbol_capacity,
-    };
-    program.sources = (IrSourceTable){
-        .sources = arena_allocate(arena, IrSource, source_capacity),
-        .capacity = source_capacity,
-    };
-    for (u32 index = 0; index < module_count; index += 1)
-    {
-        program.modules[index] = (IrModule){0};
-    }
+
     return program;
 }
 
@@ -2538,55 +2538,136 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
 {
     IrAbiValue value = {0};
     IrType* type = ir_type_from_id(&program->types, type_id);
-    if (!type || !type->layout.resolved || convention >= IR_ABI_CONVENTION_COUNT)
+    if (type && type->layout.resolved && convention < IR_ABI_CONVENTION_COUNT)
     {
-        return value;
-    }
-    u64 size = type->layout.size;
-    bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
-    if (type->kind == IR_TYPE_VOID)
-    {
-        return value;
-    }
-    if (!aggregate && type->kind != IR_TYPE_VECTOR)
-    {
-        if (type->kind == IR_TYPE_FLOAT)
+        u64 size = type->layout.size;
+        bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
+        if (type->kind == IR_TYPE_VOID)
         {
-            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
+            return value;
+        }
+        if (!aggregate && type->kind != IR_TYPE_VECTOR)
+        {
+            if (type->kind == IR_TYPE_FLOAT)
             {
-                if (is_result)
+                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
                 {
-                    // A scalar long double returns directly in ST0.  Keep
-                    // both eightbyte classes in the neutral ABI model so a
-                    // consumer can validate the x87 result shape without
-                    // inventing a hidden result pointer.
-                    value.part_count = 2;
+                    if (is_result)
+                    {
+                        // A scalar long double returns directly in ST0.  Keep
+                        // both eightbyte classes in the neutral ABI model so a
+                        // consumer can validate the x87 result shape without
+                        // inventing a hidden result pointer.
+                        value.part_count = 2;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_X87,
+                            .value_offset = 0,
+                            .size = 8,
+                        };
+                        value.parts[1] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_X87_UP,
+                            .value_offset = 8,
+                            .size = 8,
+                        };
+                    }
+                    else
+                    {
+                        // SysV arguments (including variadic arguments) carry
+                        // long double by value in a 16-byte-aligned memory slot;
+                        // this is not an indirect/sret pointer argument.
+                        value.part_count = 1;
+                        value.memory = true;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_MEMORY,
+                            .size = (u32)size,
+                        };
+                    }
+                    return value;
+                }
+                if (type->bit_width > 64)
+                {
+                    value.part_count = 1;
+                    value.indirect = is_result;
+                    value.memory = !is_result;
                     value.parts[0] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_X87,
-                        .value_offset = 0,
-                        .size = 8,
-                    };
-                    value.parts[1] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_X87_UP,
-                        .value_offset = 8,
-                        .size = 8,
+                        .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                        .size = is_result ? 8 : (u32)size,
                     };
                 }
                 else
                 {
-                    // SysV arguments (including variadic arguments) carry
-                    // long double by value in a 16-byte-aligned memory slot;
-                    // this is not an indirect/sret pointer argument.
                     value.part_count = 1;
-                    value.memory = true;
                     value.parts[0] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_MEMORY,
+                        .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
                         .size = (u32)size,
                     };
                 }
                 return value;
             }
-            if (type->bit_width > 64)
+            if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
+                return value;
+            }
+            if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
+            {
+                if (size <= 8)
+                {
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                    return value;
+                }
+                if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
+                {
+                    value.part_count = (u32)((size + 7) / 8);
+                    for (u32 part = 0; part < value.part_count; part += 1)
+                    {
+                        value.parts[part] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_INTEGER,
+                            .value_offset = part * 8,
+                            .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                        };
+                    }
+                    return value;
+                }
+                value.part_count = 1;
+                value.indirect = true;
+                value.memory = !is_result;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
+                };
+                return value;
+            }
+            return value;
+        }
+        if (type->kind == IR_TYPE_VECTOR)
+        {
+            bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                           convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+            if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+            {
+                if (!is_result || (size != 8 && size != 16))
+                {
+                    value.part_count = 1;
+                    value.indirect = true;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_POINTER,
+                        .size = 8,
+                    };
+                }
+                else
+                {
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_VECTOR,
+                        .size = (u32)size,
+                    };
+                }
+                return value;
+            }
+            if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
             {
                 value.part_count = 1;
                 value.indirect = is_result;
@@ -2595,32 +2676,9 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
                     .size = is_result ? 8 : (u32)size,
                 };
-            }
-            else
-            {
-                value.part_count = 1;
-                value.parts[0] = (IrAbiPart){
-                    .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
-                    .size = (u32)size,
-                };
-            }
-            return value;
-        }
-        if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
-        {
-            value.part_count = 1;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
-            return value;
-        }
-        if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
-        {
-            if (size <= 8)
-            {
-                value.part_count = 1;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
                 return value;
             }
-            if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
+            if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
             {
                 value.part_count = (u32)((size + 7) / 8);
                 for (u32 part = 0; part < value.part_count; part += 1)
@@ -2633,43 +2691,74 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 }
                 return value;
             }
-            value.part_count = 1;
-            value.indirect = true;
-            value.memory = !is_result;
-            value.parts[0] = (IrAbiPart){
-                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                .size = is_result ? 8 : (u32)size,
-            };
-            return value;
-        }
-        return value;
-    }
-    if (type->kind == IR_TYPE_VECTOR)
-    {
-        bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                       convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-        if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-        {
-            if (!is_result || (size != 8 && size != 16))
+            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
             {
                 value.part_count = 1;
-                value.indirect = true;
+                value.memory = true;
                 value.parts[0] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_POINTER,
-                    .size = 8,
+                    .abi_class = IR_ABI_CLASS_MEMORY,
+                    .size = (u32)size,
                 };
+                return value;
+            }
+            value.part_count = 1;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
+            return value;
+        }
+        if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+        {
+            value.part_count = 1;
+            if (size == 1 || size == 2 || size == 4 || size == 8)
+            {
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+            }
+            else
+            {
+                value.indirect = true;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+            }
+            return value;
+        }
+        bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                       convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+        if (aarch64)
+        {
+            IrTypeId element = IR_TYPE_ID_INVALID;
+            u32 count = 0;
+            if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
+            {
+                IrType* element_type = ir_type_from_id(&program->types, element);
+                value.part_count = count;
+                for (u32 part = 0; part < count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_FLOAT,
+                        .value_offset = part * (u32)element_type->layout.size,
+                        .size = (u32)element_type->layout.size,
+                    };
+                }
+            }
+            else if (size <= 16)
+            {
+                value.part_count = (u32)((size + 7) / 8);
+                for (u32 part = 0; part < value.part_count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_INTEGER,
+                        .value_offset = part * 8,
+                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                    };
+                }
             }
             else
             {
                 value.part_count = 1;
-                value.parts[0] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_VECTOR,
-                    .size = (u32)size,
-                };
+                value.indirect = true;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
             }
             return value;
         }
-        if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
+        if (size > 16)
         {
             value.part_count = 1;
             value.indirect = is_result;
@@ -2680,155 +2769,66 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
             };
             return value;
         }
-        if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
-        {
-            value.part_count = (u32)((size + 7) / 8);
-            for (u32 part = 0; part < value.part_count; part += 1)
-            {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_INTEGER,
-                    .value_offset = part * 8,
-                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                };
-            }
-            return value;
-        }
-        if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
+        IrAbiClass classes[2] = {0};
+        if (!ir_system_v_abi_classes(program, type_id, classes))
         {
             value.part_count = 1;
-            value.memory = true;
+            value.indirect = is_result;
+            value.memory = !is_result;
             value.parts[0] = (IrAbiPart){
-                .abi_class = IR_ABI_CLASS_MEMORY,
-                .size = (u32)size,
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
             };
             return value;
         }
-        value.part_count = 1;
-        value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
-        return value;
-    }
-    if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-    {
-        value.part_count = 1;
-        if (size == 1 || size == 2 || size == 4 || size == 8)
+        bool has_x87 = false;
+        bool has_memory = false;
+        for (u32 part = 0; part < 2; part += 1)
         {
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+            has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
+            has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
         }
-        else
+        if (has_memory || (has_x87 && !is_result))
         {
-            value.indirect = true;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
-        }
-        return value;
-    }
-    bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                   convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-    if (aarch64)
-    {
-        IrTypeId element = IR_TYPE_ID_INVALID;
-        u32 count = 0;
-        if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
-        {
-            IrType* element_type = ir_type_from_id(&program->types, element);
-            value.part_count = count;
-            for (u32 part = 0; part < count; part += 1)
-            {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_FLOAT,
-                    .value_offset = part * (u32)element_type->layout.size,
-                    .size = (u32)element_type->layout.size,
-                };
-            }
-        }
-        else if (size <= 16)
-        {
-            value.part_count = (u32)((size + 7) / 8);
-            for (u32 part = 0; part < value.part_count; part += 1)
-            {
-                value.parts[part] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_INTEGER,
-                    .value_offset = part * 8,
-                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                };
-            }
-        }
-        else
-        {
+            // X87/X87_UP arguments are memory-class values in SysV, as are
+            // aggregates whose fields merged incompatibly with an x87 class.
+            // Keep `indirect` clear for arguments: only a result uses a hidden
+            // pointer when the aggregate cannot be returned directly.
             value.part_count = 1;
-            value.indirect = true;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
         }
-        return value;
+        if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
+        {
+            // X87_UP is meaningful only as the second half of the canonical
+            // long-double pair.  A malformed/incompatible aggregate is therefore
+            // returned indirectly rather than exposing a register shape that no
+            // SysV caller can consume.
+            value.part_count = 1;
+            value.indirect = is_result;
+            value.memory = !is_result;
+            value.parts[0] = (IrAbiPart){
+                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                .size = is_result ? 8 : (u32)size,
+            };
+            return value;
+        }
+        value.part_count = (u32)((size + 7) / 8);
+        for (u32 part = 0; part < value.part_count; part += 1)
+        {
+            value.parts[part] = (IrAbiPart){
+                .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
+                .value_offset = part * 8,
+                .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+            };
+        }
     }
-    if (size > 16)
-    {
-        value.part_count = 1;
-        value.indirect = is_result;
-        value.memory = !is_result;
-        value.parts[0] = (IrAbiPart){
-            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-            .size = is_result ? 8 : (u32)size,
-        };
-        return value;
-    }
-    IrAbiClass classes[2] = {0};
-    if (!ir_system_v_abi_classes(program, type_id, classes))
-    {
-        value.part_count = 1;
-        value.indirect = is_result;
-        value.memory = !is_result;
-        value.parts[0] = (IrAbiPart){
-            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-            .size = is_result ? 8 : (u32)size,
-        };
-        return value;
-    }
-    bool has_x87 = false;
-    bool has_memory = false;
-    for (u32 part = 0; part < 2; part += 1)
-    {
-        has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
-        has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
-    }
-    if (has_memory || (has_x87 && !is_result))
-    {
-        // X87/X87_UP arguments are memory-class values in SysV, as are
-        // aggregates whose fields merged incompatibly with an x87 class.
-        // Keep `indirect` clear for arguments: only a result uses a hidden
-        // pointer when the aggregate cannot be returned directly.
-        value.part_count = 1;
-        value.indirect = is_result;
-        value.memory = !is_result;
-        value.parts[0] = (IrAbiPart){
-            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-            .size = is_result ? 8 : (u32)size,
-        };
-        return value;
-    }
-    if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
-    {
-        // X87_UP is meaningful only as the second half of the canonical
-        // long-double pair.  A malformed/incompatible aggregate is therefore
-        // returned indirectly rather than exposing a register shape that no
-        // SysV caller can consume.
-        value.part_count = 1;
-        value.indirect = is_result;
-        value.memory = !is_result;
-        value.parts[0] = (IrAbiPart){
-            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-            .size = is_result ? 8 : (u32)size,
-        };
-        return value;
-    }
-    value.part_count = (u32)((size + 7) / 8);
-    for (u32 part = 0; part < value.part_count; part += 1)
-    {
-        value.parts[part] = (IrAbiPart){
-            .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
-            .value_offset = part * 8,
-            .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-        };
-    }
+
     return value;
 }
 
@@ -3193,52 +3193,52 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
 
 BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* destination, IrConversionOperation operation)
 {
-    if (!source || !destination)
+    if (source && destination)
     {
-        return false;
+        if (source->id.value == destination->id.value)
+        {
+            return operation == IR_CONVERSION_IDENTITY;
+        }
+        if (source->kind == IR_TYPE_BOOLEAN && destination->kind == IR_TYPE_INTEGER)
+        {
+            return operation == IR_CONVERSION_INTEGER_ZERO_EXTEND;
+        }
+        if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_INTEGER)
+        {
+            IrConversionOperation expected = source->bit_width < destination->bit_width
+                                                 ? (source->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND)
+                                             : source->bit_width > destination->bit_width ? IR_CONVERSION_INTEGER_TRUNCATE
+                                                                                          : IR_CONVERSION_INTEGER_REINTERPRET;
+            return operation == expected;
+        }
+        if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_FLOAT)
+        {
+            return operation == (source->bit_width < destination->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
+                                 : source->bit_width > destination->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
+                                                                              : IR_CONVERSION_IDENTITY);
+        }
+        if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_FLOAT)
+        {
+            return operation == (source->is_signed ? IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT : IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+        }
+        if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_INTEGER)
+        {
+            return operation == (destination->is_signed ? IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER : IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
+        }
+        if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_POINTER)
+        {
+            return operation == IR_CONVERSION_POINTER_REINTERPRET;
+        }
+        if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_INTEGER)
+        {
+            return operation == IR_CONVERSION_POINTER_TO_INTEGER;
+        }
+        if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_POINTER)
+        {
+            return operation == IR_CONVERSION_INTEGER_TO_POINTER;
+        }
     }
-    if (source->id.value == destination->id.value)
-    {
-        return operation == IR_CONVERSION_IDENTITY;
-    }
-    if (source->kind == IR_TYPE_BOOLEAN && destination->kind == IR_TYPE_INTEGER)
-    {
-        return operation == IR_CONVERSION_INTEGER_ZERO_EXTEND;
-    }
-    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_INTEGER)
-    {
-        IrConversionOperation expected = source->bit_width < destination->bit_width
-                                             ? (source->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND)
-                                         : source->bit_width > destination->bit_width ? IR_CONVERSION_INTEGER_TRUNCATE
-                                                                                      : IR_CONVERSION_INTEGER_REINTERPRET;
-        return operation == expected;
-    }
-    if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_FLOAT)
-    {
-        return operation == (source->bit_width < destination->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
-                             : source->bit_width > destination->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
-                                                                          : IR_CONVERSION_IDENTITY);
-    }
-    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_FLOAT)
-    {
-        return operation == (source->is_signed ? IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT : IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
-    }
-    if (source->kind == IR_TYPE_FLOAT && destination->kind == IR_TYPE_INTEGER)
-    {
-        return operation == (destination->is_signed ? IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER : IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER);
-    }
-    if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_POINTER)
-    {
-        return operation == IR_CONVERSION_POINTER_REINTERPRET;
-    }
-    if (source->kind == IR_TYPE_POINTER && destination->kind == IR_TYPE_INTEGER)
-    {
-        return operation == IR_CONVERSION_POINTER_TO_INTEGER;
-    }
-    if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_POINTER)
-    {
-        return operation == IR_CONVERSION_INTEGER_TO_POINTER;
-    }
+
     return false;
 }
 

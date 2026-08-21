@@ -395,102 +395,101 @@ BUSTER_GLOBAL_LOCAL bool dwarf_cfi_emit_fde_actions(DwarfBuffer* buffer, Target 
 DwarfCfiResult dwarf_cfi_build(Arena* arena, DwarfCfiInput input)
 {
     DwarfCfiResult result = {0};
-    if (!arena || (input.function_count && !input.functions) ||
-        (input.target.cpu_arch != CPU_ARCH_X86_64 && input.target.cpu_arch != CPU_ARCH_AARCH64))
+    if (arena && (!input.function_count || input.functions) && (input.target.cpu_arch == CPU_ARCH_X86_64 || input.target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return result;
-    }
-    u64 capacity = 64;
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        CodegenFunctionDescriptor* function = input.functions + function_index;
-        u64 action_bytes = (u64)function->unwind_action_count * 24;
-        if (function->code_size > INT32_MAX || action_bytes > UINT64_MAX - 64 || capacity > UINT64_MAX - 64 - action_bytes ||
-            !dwarf_cfi_function_valid(function))
+        u64 capacity = 64;
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
-            return result;
+            CodegenFunctionDescriptor* function = input.functions + function_index;
+            u64 action_bytes = (u64)function->unwind_action_count * 24;
+            if (function->code_size > INT32_MAX || action_bytes > UINT64_MAX - 64 || capacity > UINT64_MAX - 64 - action_bytes ||
+                !dwarf_cfi_function_valid(function))
+            {
+                return result;
+            }
+            capacity += 64 + action_bytes;
         }
-        capacity += 64 + action_bytes;
-    }
-    DwarfBuffer buffer = {
-        .bytes = arena_allocate(arena, u8, capacity),
-        .capacity = capacity,
-    };
-    result.relocations = arena_allocate(arena, DwarfCfiRelocation, input.function_count);
-
-    u64 cie_start = buffer.count;
-    dwarf_emit_u32(&buffer, 0);
-    dwarf_emit_u32(&buffer, 0);
-    dwarf_emit_u8(&buffer, 1);
-    dwarf_emit_u8(&buffer, 'z');
-    dwarf_emit_u8(&buffer, 'R');
-    dwarf_emit_u8(&buffer, 0);
-    dwarf_emit_uleb128(&buffer, 1);
-    dwarf_emit_sleb128(&buffer, -8);
-    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 16 : 30);
-    dwarf_emit_uleb128(&buffer, 1);
-    dwarf_emit_u8(&buffer, 0x1b);
-    dwarf_emit_u8(&buffer, 0x0c);
-    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 7 : 31);
-    dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 8 : 0);
-    if (input.target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        dwarf_cfi_emit_register_offset(&buffer, 16, 1);
-    }
-    while (buffer.count % 8)
-    {
-        dwarf_emit_u8(&buffer, 0);
-    }
-    if (buffer.count - cie_start - 4 > UINT32_MAX)
-    {
-        buffer.error = true;
-    }
-    else
-    {
-        dwarf_write_u32_at(&buffer, cie_start, (u32)(buffer.count - cie_start - 4));
-    }
-
-    for (u32 function_index = 0; function_index < input.function_count && !buffer.error; function_index += 1)
-    {
-        CodegenFunctionDescriptor* function = input.functions + function_index;
-        u64 fde_start = buffer.count;
-        dwarf_emit_u32(&buffer, 0);
-        u64 cie_pointer_offset = buffer.count;
-        u64 cie_distance = cie_pointer_offset - cie_start;
-        if (cie_distance > UINT32_MAX)
-        {
-            buffer.error = true;
-            break;
-        }
-        dwarf_emit_u32(&buffer, (u32)cie_distance);
-        result.relocations[result.relocation_count++] = (DwarfCfiRelocation){
-            .offset = buffer.count,
-            .function = function_index,
+        DwarfBuffer buffer = {
+            .bytes = arena_allocate(arena, u8, capacity),
+            .capacity = capacity,
         };
+        result.relocations = arena_allocate(arena, DwarfCfiRelocation, input.function_count);
+
+        u64 cie_start = buffer.count;
         dwarf_emit_u32(&buffer, 0);
-        dwarf_emit_u32(&buffer, function->code_size);
-        dwarf_emit_uleb128(&buffer, 0);
-        if (!dwarf_cfi_emit_fde_actions(&buffer, input.target, function))
+        dwarf_emit_u32(&buffer, 0);
+        dwarf_emit_u8(&buffer, 1);
+        dwarf_emit_u8(&buffer, 'z');
+        dwarf_emit_u8(&buffer, 'R');
+        dwarf_emit_u8(&buffer, 0);
+        dwarf_emit_uleb128(&buffer, 1);
+        dwarf_emit_sleb128(&buffer, -8);
+        dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 16 : 30);
+        dwarf_emit_uleb128(&buffer, 1);
+        dwarf_emit_u8(&buffer, 0x1b);
+        dwarf_emit_u8(&buffer, 0x0c);
+        dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 7 : 31);
+        dwarf_emit_uleb128(&buffer, input.target.cpu_arch == CPU_ARCH_X86_64 ? 8 : 0);
+        if (input.target.cpu_arch == CPU_ARCH_X86_64)
         {
-            buffer.error = true;
-            break;
+            dwarf_cfi_emit_register_offset(&buffer, 16, 1);
         }
         while (buffer.count % 8)
         {
             dwarf_emit_u8(&buffer, 0);
         }
-        if (buffer.count - fde_start - 4 > UINT32_MAX)
+        if (buffer.count - cie_start - 4 > UINT32_MAX)
         {
             buffer.error = true;
-            break;
         }
-        dwarf_write_u32_at(&buffer, fde_start, (u32)(buffer.count - fde_start - 4));
+        else
+        {
+            dwarf_write_u32_at(&buffer, cie_start, (u32)(buffer.count - cie_start - 4));
+        }
+
+        for (u32 function_index = 0; function_index < input.function_count && !buffer.error; function_index += 1)
+        {
+            CodegenFunctionDescriptor* function = input.functions + function_index;
+            u64 fde_start = buffer.count;
+            dwarf_emit_u32(&buffer, 0);
+            u64 cie_pointer_offset = buffer.count;
+            u64 cie_distance = cie_pointer_offset - cie_start;
+            if (cie_distance > UINT32_MAX)
+            {
+                buffer.error = true;
+                break;
+            }
+            dwarf_emit_u32(&buffer, (u32)cie_distance);
+            result.relocations[result.relocation_count++] = (DwarfCfiRelocation){
+                .offset = buffer.count,
+                .function = function_index,
+            };
+            dwarf_emit_u32(&buffer, 0);
+            dwarf_emit_u32(&buffer, function->code_size);
+            dwarf_emit_uleb128(&buffer, 0);
+            if (!dwarf_cfi_emit_fde_actions(&buffer, input.target, function))
+            {
+                buffer.error = true;
+                break;
+            }
+            while (buffer.count % 8)
+            {
+                dwarf_emit_u8(&buffer, 0);
+            }
+            if (buffer.count - fde_start - 4 > UINT32_MAX)
+            {
+                buffer.error = true;
+                break;
+            }
+            dwarf_write_u32_at(&buffer, fde_start, (u32)(buffer.count - fde_start - 4));
+        }
+        result.bytes = (ByteSlice){
+            .pointer = buffer.bytes,
+            .length = buffer.count,
+        };
+        result.valid = !buffer.error;
     }
-    result.bytes = (ByteSlice){
-        .pointer = buffer.bytes,
-        .length = buffer.count,
-    };
-    result.valid = !buffer.error;
+
     return result;
 }
 
@@ -579,295 +578,295 @@ BUSTER_GLOBAL_LOCAL void dwarf_abbrev_pair(DwarfBuffer* buffer, u32 attribute, u
 DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
 {
     DwarfResult result = {0};
-    if (!arena || !input.file_count || !input.file_paths || (input.function_count && !input.functions) || (input.line_count && !input.lines))
+    if (arena && input.file_count && input.file_paths && (!input.function_count || input.functions) && (!input.line_count || input.lines))
     {
-        return result;
-    }
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        DwarfFunction* function = input.functions + function_index;
-        if (function->file >= input.file_count || function->code_offset > input.code_size || function->code_size > input.code_size - function->code_offset)
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
-            return result;
+            DwarfFunction* function = input.functions + function_index;
+            if (function->file >= input.file_count || function->code_offset > input.code_size || function->code_size > input.code_size - function->code_offset)
+            {
+                return result;
+            }
         }
-    }
-    u32 previous_offset = 0;
-    for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
-    {
-        DwarfLineEntry* entry = input.lines + line_index;
-        if (entry->file >= input.file_count || entry->code_offset > input.code_size || entry->code_offset < previous_offset)
+        u32 previous_offset = 0;
+        for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
         {
-            return result;
+            DwarfLineEntry* entry = input.lines + line_index;
+            if (entry->file >= input.file_count || entry->code_offset > input.code_size || entry->code_offset < previous_offset)
+            {
+                return result;
+            }
+            previous_offset = entry->code_offset;
         }
-        previous_offset = entry->code_offset;
-    }
-    u64 string_bytes = input.producer.length + input.comp_dir.length + 2;
-    u64 file_path_bytes = 0;
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        string_bytes += input.file_paths[file_index].length + 1;
-        file_path_bytes += input.file_paths[file_index].length + 1;
-    }
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        string_bytes += input.functions[function_index].name.length + 1;
-    }
-    DwarfBuffer str = {
-        .bytes = arena_allocate(arena, u8, string_bytes),
-        .capacity = string_bytes,
-    };
-    DwarfBuffer abbrev = {
-        .bytes = arena_allocate(arena, u8, 64),
-        .capacity = 64,
-    };
-    u64 info_capacity = 64 + (u64)input.function_count * 40;
-    DwarfBuffer info = {
-        .bytes = arena_allocate(arena, u8, info_capacity),
-        .capacity = info_capacity,
-    };
-    u64 line_capacity = 64 + file_path_bytes + (u64)input.file_count * 4 + (u64)input.line_count * 32;
-    DwarfBuffer line = {
-        .bytes = arena_allocate(arena, u8, line_capacity),
-        .capacity = line_capacity,
-    };
-    result.relocations = arena_allocate(arena, DwarfRelocation, (u64)input.function_count * 2 + 7);
-    DwarfStringTable strings = dwarf_string_table_make(arena, &str, input.file_count + input.function_count + 2);
+        u64 string_bytes = input.producer.length + input.comp_dir.length + 2;
+        u64 file_path_bytes = 0;
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
+        {
+            string_bytes += input.file_paths[file_index].length + 1;
+            file_path_bytes += input.file_paths[file_index].length + 1;
+        }
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
+        {
+            string_bytes += input.functions[function_index].name.length + 1;
+        }
+        DwarfBuffer str = {
+            .bytes = arena_allocate(arena, u8, string_bytes),
+            .capacity = string_bytes,
+        };
+        DwarfBuffer abbrev = {
+            .bytes = arena_allocate(arena, u8, 64),
+            .capacity = 64,
+        };
+        u64 info_capacity = 64 + (u64)input.function_count * 40;
+        DwarfBuffer info = {
+            .bytes = arena_allocate(arena, u8, info_capacity),
+            .capacity = info_capacity,
+        };
+        u64 line_capacity = 64 + file_path_bytes + (u64)input.file_count * 4 + (u64)input.line_count * 32;
+        DwarfBuffer line = {
+            .bytes = arena_allocate(arena, u8, line_capacity),
+            .capacity = line_capacity,
+        };
+        result.relocations = arena_allocate(arena, DwarfRelocation, (u64)input.function_count * 2 + 7);
+        DwarfStringTable strings = dwarf_string_table_make(arena, &str, input.file_count + input.function_count + 2);
 
-    // .debug_abbrev: abbreviation 1 is the compile unit, abbreviation 2 the subprogram.
-    dwarf_emit_uleb128(&abbrev, 1);
-    dwarf_emit_uleb128(&abbrev, DW_TAG_COMPILE_UNIT);
-    dwarf_emit_u8(&abbrev, 1);
-    dwarf_abbrev_pair(&abbrev, DW_AT_PRODUCER, DW_FORM_STRP);
-    dwarf_abbrev_pair(&abbrev, DW_AT_LANGUAGE, DW_FORM_DATA2);
-    dwarf_abbrev_pair(&abbrev, DW_AT_NAME, DW_FORM_STRP);
-    dwarf_abbrev_pair(&abbrev, DW_AT_COMP_DIR, DW_FORM_STRP);
-    dwarf_abbrev_pair(&abbrev, DW_AT_LOW_PC, DW_FORM_ADDR);
-    dwarf_abbrev_pair(&abbrev, DW_AT_HIGH_PC, DW_FORM_DATA8);
-    dwarf_abbrev_pair(&abbrev, DW_AT_STMT_LIST, DW_FORM_SEC_OFFSET);
-    dwarf_abbrev_pair(&abbrev, 0, 0);
-    dwarf_emit_uleb128(&abbrev, 2);
-    dwarf_emit_uleb128(&abbrev, DW_TAG_SUBPROGRAM);
-    dwarf_emit_u8(&abbrev, 0);
-    dwarf_abbrev_pair(&abbrev, DW_AT_NAME, DW_FORM_STRP);
-    dwarf_abbrev_pair(&abbrev, DW_AT_DECL_FILE, DW_FORM_UDATA);
-    dwarf_abbrev_pair(&abbrev, DW_AT_DECL_LINE, DW_FORM_UDATA);
-    dwarf_abbrev_pair(&abbrev, DW_AT_LOW_PC, DW_FORM_ADDR);
-    dwarf_abbrev_pair(&abbrev, DW_AT_HIGH_PC, DW_FORM_DATA8);
-    dwarf_abbrev_pair(&abbrev, 0, 0);
-    dwarf_emit_uleb128(&abbrev, 0);
+        // .debug_abbrev: abbreviation 1 is the compile unit, abbreviation 2 the subprogram.
+        dwarf_emit_uleb128(&abbrev, 1);
+        dwarf_emit_uleb128(&abbrev, DW_TAG_COMPILE_UNIT);
+        dwarf_emit_u8(&abbrev, 1);
+        dwarf_abbrev_pair(&abbrev, DW_AT_PRODUCER, DW_FORM_STRP);
+        dwarf_abbrev_pair(&abbrev, DW_AT_LANGUAGE, DW_FORM_DATA2);
+        dwarf_abbrev_pair(&abbrev, DW_AT_NAME, DW_FORM_STRP);
+        dwarf_abbrev_pair(&abbrev, DW_AT_COMP_DIR, DW_FORM_STRP);
+        dwarf_abbrev_pair(&abbrev, DW_AT_LOW_PC, DW_FORM_ADDR);
+        dwarf_abbrev_pair(&abbrev, DW_AT_HIGH_PC, DW_FORM_DATA8);
+        dwarf_abbrev_pair(&abbrev, DW_AT_STMT_LIST, DW_FORM_SEC_OFFSET);
+        dwarf_abbrev_pair(&abbrev, 0, 0);
+        dwarf_emit_uleb128(&abbrev, 2);
+        dwarf_emit_uleb128(&abbrev, DW_TAG_SUBPROGRAM);
+        dwarf_emit_u8(&abbrev, 0);
+        dwarf_abbrev_pair(&abbrev, DW_AT_NAME, DW_FORM_STRP);
+        dwarf_abbrev_pair(&abbrev, DW_AT_DECL_FILE, DW_FORM_UDATA);
+        dwarf_abbrev_pair(&abbrev, DW_AT_DECL_LINE, DW_FORM_UDATA);
+        dwarf_abbrev_pair(&abbrev, DW_AT_LOW_PC, DW_FORM_ADDR);
+        dwarf_abbrev_pair(&abbrev, DW_AT_HIGH_PC, DW_FORM_DATA8);
+        dwarf_abbrev_pair(&abbrev, 0, 0);
+        dwarf_emit_uleb128(&abbrev, 0);
 
-    // .debug_info: one DWARF 4 compile unit.
-    dwarf_emit_u32(&info, 0);
-    dwarf_emit_u16(&info, DWARF_VERSION);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .target = DWARF_SECTION_ABBREV,
-    };
-    dwarf_emit_u32(&info, 0);
-    dwarf_emit_u8(&info, DWARF_ADDRESS_SIZE);
-    dwarf_emit_uleb128(&info, 1);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .addend = dwarf_string_intern(&strings, input.producer),
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .target = DWARF_SECTION_STR,
-    };
-    dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
-    dwarf_emit_u16(&info, input.language);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .addend = dwarf_string_intern(&strings, input.file_paths[0]),
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .target = DWARF_SECTION_STR,
-    };
-    dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .addend = dwarf_string_intern(&strings, input.comp_dir),
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .target = DWARF_SECTION_STR,
-    };
-    dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .address = true,
-    };
-    dwarf_emit_u64(&info, 0);
-    dwarf_emit_u64(&info, input.code_size);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .offset = info.count,
-        .section = DWARF_SECTION_INFO,
-        .target = DWARF_SECTION_LINE,
-    };
-    dwarf_emit_u32(&info, 0);
-    for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
-    {
-        DwarfFunction* function = input.functions + function_index;
-        dwarf_emit_uleb128(&info, 2);
+        // .debug_info: one DWARF 4 compile unit.
+        dwarf_emit_u32(&info, 0);
+        dwarf_emit_u16(&info, DWARF_VERSION);
         result.relocations[result.relocation_count++] = (DwarfRelocation){
-            .addend = dwarf_string_intern(&strings, function->name),
+            .offset = info.count,
+            .section = DWARF_SECTION_INFO,
+            .target = DWARF_SECTION_ABBREV,
+        };
+        dwarf_emit_u32(&info, 0);
+        dwarf_emit_u8(&info, DWARF_ADDRESS_SIZE);
+        dwarf_emit_uleb128(&info, 1);
+        result.relocations[result.relocation_count++] = (DwarfRelocation){
+            .addend = dwarf_string_intern(&strings, input.producer),
             .offset = info.count,
             .section = DWARF_SECTION_INFO,
             .target = DWARF_SECTION_STR,
         };
         dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
-        dwarf_emit_uleb128(&info, (u64)function->file + 1);
-        dwarf_emit_uleb128(&info, function->line);
+        dwarf_emit_u16(&info, input.language);
         result.relocations[result.relocation_count++] = (DwarfRelocation){
-            .addend = function->code_offset,
+            .addend = dwarf_string_intern(&strings, input.file_paths[0]),
+            .offset = info.count,
+            .section = DWARF_SECTION_INFO,
+            .target = DWARF_SECTION_STR,
+        };
+        dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
+        result.relocations[result.relocation_count++] = (DwarfRelocation){
+            .addend = dwarf_string_intern(&strings, input.comp_dir),
+            .offset = info.count,
+            .section = DWARF_SECTION_INFO,
+            .target = DWARF_SECTION_STR,
+        };
+        dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
+        result.relocations[result.relocation_count++] = (DwarfRelocation){
             .offset = info.count,
             .section = DWARF_SECTION_INFO,
             .address = true,
         };
         dwarf_emit_u64(&info, 0);
-        dwarf_emit_u64(&info, function->code_size);
-    }
-    dwarf_emit_uleb128(&info, 0);
-    if (info.count > UINT32_MAX)
-    {
-        return result;
-    }
-    dwarf_write_u32_at(&info, 0, (u32)(info.count - 4));
+        dwarf_emit_u64(&info, input.code_size);
+        result.relocations[result.relocation_count++] = (DwarfRelocation){
+            .offset = info.count,
+            .section = DWARF_SECTION_INFO,
+            .target = DWARF_SECTION_LINE,
+        };
+        dwarf_emit_u32(&info, 0);
+        for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
+        {
+            DwarfFunction* function = input.functions + function_index;
+            dwarf_emit_uleb128(&info, 2);
+            result.relocations[result.relocation_count++] = (DwarfRelocation){
+                .addend = dwarf_string_intern(&strings, function->name),
+                .offset = info.count,
+                .section = DWARF_SECTION_INFO,
+                .target = DWARF_SECTION_STR,
+            };
+            dwarf_emit_u32(&info, (u32)result.relocations[result.relocation_count - 1].addend);
+            dwarf_emit_uleb128(&info, (u64)function->file + 1);
+            dwarf_emit_uleb128(&info, function->line);
+            result.relocations[result.relocation_count++] = (DwarfRelocation){
+                .addend = function->code_offset,
+                .offset = info.count,
+                .section = DWARF_SECTION_INFO,
+                .address = true,
+            };
+            dwarf_emit_u64(&info, 0);
+            dwarf_emit_u64(&info, function->code_size);
+        }
+        dwarf_emit_uleb128(&info, 0);
+        if (info.count > UINT32_MAX)
+        {
+            return result;
+        }
+        dwarf_write_u32_at(&info, 0, (u32)(info.count - 4));
 
-    // .debug_line: one DWARF 4 line program with a single sequence.
-    dwarf_emit_u32(&line, 0);
-    dwarf_emit_u16(&line, DWARF_VERSION);
-    dwarf_emit_u32(&line, 0);
-    u64 header_start = line.count;
-    dwarf_emit_u8(&line, 1);
-    dwarf_emit_u8(&line, 1);
-    dwarf_emit_u8(&line, 1);
-    dwarf_emit_u8(&line, (u8)(s8)DWARF_LINE_BASE);
-    dwarf_emit_u8(&line, DWARF_LINE_RANGE);
-    dwarf_emit_u8(&line, DWARF_OPCODE_BASE);
-    u8 const standard_opcode_lengths[DWARF_OPCODE_BASE - 1] = {0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1};
-    dwarf_emit_bytes(&line, standard_opcode_lengths, sizeof(standard_opcode_lengths));
-    dwarf_emit_u8(&line, 0);
-    for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
-    {
-        String8 path = input.file_paths[file_index];
-        dwarf_emit_bytes(&line, path.pointer, path.length);
+        // .debug_line: one DWARF 4 line program with a single sequence.
+        dwarf_emit_u32(&line, 0);
+        dwarf_emit_u16(&line, DWARF_VERSION);
+        dwarf_emit_u32(&line, 0);
+        u64 header_start = line.count;
+        dwarf_emit_u8(&line, 1);
+        dwarf_emit_u8(&line, 1);
+        dwarf_emit_u8(&line, 1);
+        dwarf_emit_u8(&line, (u8)(s8)DWARF_LINE_BASE);
+        dwarf_emit_u8(&line, DWARF_LINE_RANGE);
+        dwarf_emit_u8(&line, DWARF_OPCODE_BASE);
+        u8 const standard_opcode_lengths[DWARF_OPCODE_BASE - 1] = {0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1};
+        dwarf_emit_bytes(&line, standard_opcode_lengths, sizeof(standard_opcode_lengths));
         dwarf_emit_u8(&line, 0);
-        dwarf_emit_uleb128(&line, 0);
-        dwarf_emit_uleb128(&line, 0);
-        dwarf_emit_uleb128(&line, 0);
-    }
-    dwarf_emit_u8(&line, 0);
-    if (line.count > UINT32_MAX)
-    {
-        return result;
-    }
-    dwarf_write_u32_at(&line, header_start - 4, (u32)(line.count - header_start));
-    dwarf_emit_u8(&line, 0);
-    dwarf_emit_uleb128(&line, 1 + DWARF_ADDRESS_SIZE);
-    dwarf_emit_u8(&line, DW_LNE_SET_ADDRESS);
-    result.relocations[result.relocation_count++] = (DwarfRelocation){
-        .offset = line.count,
-        .section = DWARF_SECTION_LINE,
-        .address = true,
-    };
-    dwarf_emit_u64(&line, 0);
-    u32 current_address = 0;
-    u32 current_file = 1;
-    u32 current_line = 1;
-    u32 current_column = 0;
-    u32 emitted_line_count = 0;
-    for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
-    {
-        DwarfLineEntry* entry = input.lines + line_index;
-        if (!entry->line)
+        for (u32 file_index = 0; file_index < input.file_count; file_index += 1)
         {
-            continue;
+            String8 path = input.file_paths[file_index];
+            dwarf_emit_bytes(&line, path.pointer, path.length);
+            dwarf_emit_u8(&line, 0);
+            dwarf_emit_uleb128(&line, 0);
+            dwarf_emit_uleb128(&line, 0);
+            dwarf_emit_uleb128(&line, 0);
         }
-        if (emitted_line_count && entry->code_offset == current_address)
+        dwarf_emit_u8(&line, 0);
+        if (line.count > UINT32_MAX)
         {
-            continue;
+            return result;
         }
-        if (emitted_line_count && (u32)(entry->file + 1) == current_file && entry->line == current_line && entry->column == current_column)
+        dwarf_write_u32_at(&line, header_start - 4, (u32)(line.count - header_start));
+        dwarf_emit_u8(&line, 0);
+        dwarf_emit_uleb128(&line, 1 + DWARF_ADDRESS_SIZE);
+        dwarf_emit_u8(&line, DW_LNE_SET_ADDRESS);
+        result.relocations[result.relocation_count++] = (DwarfRelocation){
+            .offset = line.count,
+            .section = DWARF_SECTION_LINE,
+            .address = true,
+        };
+        dwarf_emit_u64(&line, 0);
+        u32 current_address = 0;
+        u32 current_file = 1;
+        u32 current_line = 1;
+        u32 current_column = 0;
+        u32 emitted_line_count = 0;
+        for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
         {
-            continue;
-        }
-        if ((u32)(entry->file + 1) != current_file)
-        {
-            current_file = (u32)(entry->file + 1);
-            dwarf_emit_u8(&line, DW_LNS_SET_FILE);
-            dwarf_emit_uleb128(&line, current_file);
-        }
-        if (entry->column != current_column)
-        {
-            current_column = entry->column;
-            dwarf_emit_u8(&line, DW_LNS_SET_COLUMN);
-            dwarf_emit_uleb128(&line, current_column);
-        }
-        u32 address_advance = entry->code_offset - current_address;
-        s64 line_delta = (s64)entry->line - (s64)current_line;
-        s64 adjusted = line_delta - DWARF_LINE_BASE;
-        u64 special = 0;
-        bool special_valid = false;
-        if (line_delta >= DWARF_LINE_BASE && line_delta < DWARF_LINE_BASE + DWARF_LINE_RANGE)
-        {
-            special = (u64)adjusted + (u64)DWARF_LINE_RANGE * address_advance + DWARF_OPCODE_BASE;
-            special_valid = special <= 255;
-        }
-        if (special_valid)
-        {
-            dwarf_emit_u8(&line, (u8)special);
-        }
-        else
-        {
-            if (line_delta)
+            DwarfLineEntry* entry = input.lines + line_index;
+            if (!entry->line)
             {
-                dwarf_emit_u8(&line, DW_LNS_ADVANCE_LINE);
-                dwarf_emit_sleb128(&line, line_delta);
+                continue;
             }
-            if (address_advance)
+            if (emitted_line_count && entry->code_offset == current_address)
             {
-                dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);
-                dwarf_emit_uleb128(&line, address_advance);
+                continue;
             }
-            dwarf_emit_u8(&line, DW_LNS_COPY);
+            if (emitted_line_count && (u32)(entry->file + 1) == current_file && entry->line == current_line && entry->column == current_column)
+            {
+                continue;
+            }
+            if ((u32)(entry->file + 1) != current_file)
+            {
+                current_file = (u32)(entry->file + 1);
+                dwarf_emit_u8(&line, DW_LNS_SET_FILE);
+                dwarf_emit_uleb128(&line, current_file);
+            }
+            if (entry->column != current_column)
+            {
+                current_column = entry->column;
+                dwarf_emit_u8(&line, DW_LNS_SET_COLUMN);
+                dwarf_emit_uleb128(&line, current_column);
+            }
+            u32 address_advance = entry->code_offset - current_address;
+            s64 line_delta = (s64)entry->line - (s64)current_line;
+            s64 adjusted = line_delta - DWARF_LINE_BASE;
+            u64 special = 0;
+            bool special_valid = false;
+            if (line_delta >= DWARF_LINE_BASE && line_delta < DWARF_LINE_BASE + DWARF_LINE_RANGE)
+            {
+                special = (u64)adjusted + (u64)DWARF_LINE_RANGE * address_advance + DWARF_OPCODE_BASE;
+                special_valid = special <= 255;
+            }
+            if (special_valid)
+            {
+                dwarf_emit_u8(&line, (u8)special);
+            }
+            else
+            {
+                if (line_delta)
+                {
+                    dwarf_emit_u8(&line, DW_LNS_ADVANCE_LINE);
+                    dwarf_emit_sleb128(&line, line_delta);
+                }
+                if (address_advance)
+                {
+                    dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);
+                    dwarf_emit_uleb128(&line, address_advance);
+                }
+                dwarf_emit_u8(&line, DW_LNS_COPY);
+            }
+            current_address = entry->code_offset;
+            current_line = entry->line;
+            emitted_line_count += 1;
         }
-        current_address = entry->code_offset;
-        current_line = entry->line;
-        emitted_line_count += 1;
-    }
-    if (input.code_size > current_address)
-    {
-        dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);
-        dwarf_emit_uleb128(&line, input.code_size - current_address);
-    }
-    dwarf_emit_u8(&line, 0);
-    dwarf_emit_uleb128(&line, 1);
-    dwarf_emit_u8(&line, DW_LNE_END_SEQUENCE);
-    if (line.count > UINT32_MAX)
-    {
-        return result;
-    }
-    dwarf_write_u32_at(&line, 0, (u32)(line.count - 4));
+        if (input.code_size > current_address)
+        {
+            dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);
+            dwarf_emit_uleb128(&line, input.code_size - current_address);
+        }
+        dwarf_emit_u8(&line, 0);
+        dwarf_emit_uleb128(&line, 1);
+        dwarf_emit_u8(&line, DW_LNE_END_SEQUENCE);
+        if (line.count > UINT32_MAX)
+        {
+            return result;
+        }
+        dwarf_write_u32_at(&line, 0, (u32)(line.count - 4));
 
-    if (str.error || abbrev.error || info.error || line.error)
-    {
-        return result;
+        if (str.error || abbrev.error || info.error || line.error)
+        {
+            return result;
+        }
+        result.sections[DWARF_SECTION_INFO] = (ByteSlice){
+            .pointer = info.bytes,
+            .length = info.count,
+        };
+        result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){
+            .pointer = abbrev.bytes,
+            .length = abbrev.count,
+        };
+        result.sections[DWARF_SECTION_LINE] = (ByteSlice){
+            .pointer = line.bytes,
+            .length = line.count,
+        };
+        result.sections[DWARF_SECTION_STR] = (ByteSlice){
+            .pointer = str.bytes,
+            .length = str.count,
+        };
+        result.valid = true;
     }
-    result.sections[DWARF_SECTION_INFO] = (ByteSlice){
-        .pointer = info.bytes,
-        .length = info.count,
-    };
-    result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){
-        .pointer = abbrev.bytes,
-        .length = abbrev.count,
-    };
-    result.sections[DWARF_SECTION_LINE] = (ByteSlice){
-        .pointer = line.bytes,
-        .length = line.count,
-    };
-    result.sections[DWARF_SECTION_STR] = (ByteSlice){
-        .pointer = str.bytes,
-        .length = str.count,
-    };
-    result.valid = true;
+
     return result;
 }
 
@@ -1026,54 +1025,54 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_ranges(DwarfModelWriter* writer, u32 st
 BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_expression(DwarfModelWriter* writer, DebugLocation location)
 {
     u32 expression_start = (u32)writer->loc.count;
-    if (location.kind == DEBUG_LOCATION_UNAVAILABLE)
+    if (location.kind != DEBUG_LOCATION_UNAVAILABLE)
     {
-        return expression_start;
-    }
-    if (location.kind == DEBUG_LOCATION_PIECEWISE)
-    {
-        for (u32 piece_index = 0; piece_index < location.piece_count; piece_index += 1)
+        if (location.kind == DEBUG_LOCATION_PIECEWISE)
         {
-            DebugLocationPiece* piece = location.pieces + piece_index;
-            if (piece->kind == DEBUG_LOCATION_REGISTER)
+            for (u32 piece_index = 0; piece_index < location.piece_count; piece_index += 1)
             {
-                dwarf_emit_u8(&writer->loc, DW_OP_REGX);
-                dwarf_emit_uleb128(&writer->loc, debug_register_dwarf_number(writer->input.target, piece->reg));
-            }
-            else if (piece->kind == DEBUG_LOCATION_FRAME)
-            {
-                dwarf_emit_u8(&writer->loc, DW_OP_FBREG);
-                dwarf_emit_sleb128(&writer->loc, piece->frame_offset);
-            }
-            else if (piece->kind == DEBUG_LOCATION_CONSTANT)
-            {
-                dwarf_emit_u8(&writer->loc, DW_OP_CONSTU);
-                dwarf_emit_uleb128(&writer->loc, piece->constant);
-                dwarf_emit_u8(&writer->loc, DW_OP_STACK_VALUE);
-            }
-            if (piece->size)
-            {
-                dwarf_emit_u8(&writer->loc, DW_OP_PIECE);
-                dwarf_emit_uleb128(&writer->loc, piece->size);
+                DebugLocationPiece* piece = location.pieces + piece_index;
+                if (piece->kind == DEBUG_LOCATION_REGISTER)
+                {
+                    dwarf_emit_u8(&writer->loc, DW_OP_REGX);
+                    dwarf_emit_uleb128(&writer->loc, debug_register_dwarf_number(writer->input.target, piece->reg));
+                }
+                else if (piece->kind == DEBUG_LOCATION_FRAME)
+                {
+                    dwarf_emit_u8(&writer->loc, DW_OP_FBREG);
+                    dwarf_emit_sleb128(&writer->loc, piece->frame_offset);
+                }
+                else if (piece->kind == DEBUG_LOCATION_CONSTANT)
+                {
+                    dwarf_emit_u8(&writer->loc, DW_OP_CONSTU);
+                    dwarf_emit_uleb128(&writer->loc, piece->constant);
+                    dwarf_emit_u8(&writer->loc, DW_OP_STACK_VALUE);
+                }
+                if (piece->size)
+                {
+                    dwarf_emit_u8(&writer->loc, DW_OP_PIECE);
+                    dwarf_emit_uleb128(&writer->loc, piece->size);
+                }
             }
         }
+        else if (location.kind == DEBUG_LOCATION_REGISTER)
+        {
+            dwarf_emit_u8(&writer->loc, DW_OP_REGX);
+            dwarf_emit_uleb128(&writer->loc, debug_register_dwarf_number(writer->input.target, location.reg));
+        }
+        else if (location.kind == DEBUG_LOCATION_FRAME)
+        {
+            dwarf_emit_u8(&writer->loc, DW_OP_FBREG);
+            dwarf_emit_sleb128(&writer->loc, location.frame_offset);
+        }
+        else if (location.kind == DEBUG_LOCATION_CONSTANT)
+        {
+            dwarf_emit_u8(&writer->loc, DW_OP_CONSTU);
+            dwarf_emit_uleb128(&writer->loc, location.constant);
+            dwarf_emit_u8(&writer->loc, DW_OP_STACK_VALUE);
+        }
     }
-    else if (location.kind == DEBUG_LOCATION_REGISTER)
-    {
-        dwarf_emit_u8(&writer->loc, DW_OP_REGX);
-        dwarf_emit_uleb128(&writer->loc, debug_register_dwarf_number(writer->input.target, location.reg));
-    }
-    else if (location.kind == DEBUG_LOCATION_FRAME)
-    {
-        dwarf_emit_u8(&writer->loc, DW_OP_FBREG);
-        dwarf_emit_sleb128(&writer->loc, location.frame_offset);
-    }
-    else if (location.kind == DEBUG_LOCATION_CONSTANT)
-    {
-        dwarf_emit_u8(&writer->loc, DW_OP_CONSTU);
-        dwarf_emit_uleb128(&writer->loc, location.constant);
-        dwarf_emit_u8(&writer->loc, DW_OP_STACK_VALUE);
-    }
+
     return expression_start;
 }
 
@@ -1614,200 +1613,200 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
 {
     DwarfResult result = {0};
     DebugModel* model = input.model;
-    if (!arena || !model || !model->valid)
+    if (arena && model && model->valid)
     {
-        return result;
-    }
-    DwarfInput line_input = input;
-    line_input.model = 0;
-    String8* model_paths = 0;
-    if (!line_input.file_count || !line_input.file_paths)
-    {
-        u32 count = model->source_count ? model->source_count : 1;
-        model_paths = arena_allocate(arena, String8, count);
-        for (u32 index = 0; index < count; index += 1)
+        DwarfInput line_input = input;
+        line_input.model = 0;
+        String8* model_paths = 0;
+        if (!line_input.file_count || !line_input.file_paths)
         {
-            model_paths[index] = model->source_count ? model->source_paths[index] : S8(".");
-        }
-        line_input.file_paths = model_paths;
-        line_input.file_count = count;
-    }
-    DwarfFunction* model_functions = 0;
-    if (!line_input.function_count || !line_input.functions)
-    {
-        model_functions = arena_allocate(arena, DwarfFunction, model->function_count);
-        for (u32 index = 0; index < model->function_count; index += 1)
-        {
-            DebugFunction* function = model->functions + index;
-            model_functions[index] = (DwarfFunction){
-                .name = function->name,
-                .code_offset = function->code_offset,
-                .code_size = function->code_size,
-                .file = function->declaration.source,
-                .line = function->declaration.line,
-            };
-        }
-        line_input.functions = model_functions;
-        line_input.function_count = model->function_count;
-    }
-    if (!line_input.code_size)
-    {
-        for (u32 index = 0; index < line_input.function_count; index += 1)
-        {
-            u64 end = (u64)line_input.functions[index].code_offset + line_input.functions[index].code_size;
-            line_input.code_size = BUSTER_MAX(line_input.code_size, end);
-        }
-    }
-    DwarfResult line_result = dwarf_build_legacy(arena, line_input);
-    if (!line_result.valid)
-    {
-        return result;
-    }
-    u64 string_capacity = 32 + input.producer.length + input.comp_dir.length;
-    u64 string_entry_capacity = 32 + line_input.file_count + model->type_count + model->function_count;
-    for (u32 file_index = 0; file_index < line_input.file_count; file_index += 1)
-    {
-        string_capacity += line_input.file_paths[file_index].length + 1;
-    }
-    u64 reference_capacity = 32 + (u64)model->type_count * 8 + (u64)model->function_count * 4 + (u64)model->variable_count * 2;
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
-    {
-        DebugType* type = model->types + type_index;
-        string_capacity += type->name.length + type->declaration_name.length + 2;
-        string_entry_capacity += type->field_count + type->enum_member_count;
-        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-        {
-            string_capacity += type->fields[field_index].name.length + 1;
-        }
-        for (u32 member_index = 0; member_index < type->enum_member_count; member_index += 1)
-        {
-            string_capacity += type->enum_members[member_index].name.length + 1;
-        }
-        reference_capacity += type->field_count + type->parameter_count;
-    }
-    for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
-    {
-        string_capacity += model->functions[function_index].name.length + 1;
-    }
-    for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
-    {
-        string_capacity += model->variables[variable_index].name.length + 1;
-    }
-    string_entry_capacity += model->variable_count + model->inline_site_count;
-    u64 info_capacity = 1024 + string_capacity * 12 + reference_capacity * 12;
-    u64 range_capacity = 32 + ((u64)model->function_count + model->scope_count + model->inline_site_count) * 32;
-    u64 location_capacity = 32 + (u64)model->variable_count * 128;
-    u64 relocation_capacity = 64 + (u64)model->function_count * 20 + (u64)model->scope_count * 8 + (u64)model->variable_count * 12 +
-                              (u64)model->type_count * 16;
-    DwarfModelWriter writer = {
-        .arena = arena,
-        .input = input,
-        .model = model,
-        .str = {.bytes = arena_allocate(arena, u8, string_capacity), .capacity = string_capacity},
-        .abbrev = {.bytes = arena_allocate(arena, u8, 2048), .capacity = 2048},
-        .info = {.bytes = arena_allocate(arena, u8, info_capacity), .capacity = info_capacity},
-        .loc = {.bytes = arena_allocate(arena, u8, location_capacity), .capacity = location_capacity},
-        .ranges = {.bytes = arena_allocate(arena, u8, range_capacity), .capacity = range_capacity},
-        .relocations = arena_allocate(arena, DwarfRelocation, relocation_capacity),
-        .refs = arena_allocate(arena, DwarfModelRefPatch, reference_capacity),
-        .relocation_capacity = (u32)BUSTER_MIN(relocation_capacity, UINT32_MAX),
-        .ref_capacity = (u32)BUSTER_MIN(reference_capacity, UINT32_MAX),
-        .type_offsets = arena_allocate(arena, u32, model->type_count ? model->type_count : 1),
-        .function_offsets = arena_allocate(arena, u32, model->function_count ? model->function_count : 1),
-    };
-    dwarf_model_build_scope_children(&writer);
-    writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
-    bool include_padded_float = false;
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
-    {
-        include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
-    }
-    dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
-    dwarf_emit_u32(&writer.info, 0);
-    dwarf_emit_u16(&writer.info, DWARF_VERSION);
-    dwarf_model_relocation(&writer, (DwarfRelocation){
-                                          .offset = writer.info.count,
-                                          .section = DWARF_SECTION_INFO,
-                                          .target = DWARF_SECTION_ABBREV,
-                                      });
-    dwarf_emit_u32(&writer.info, 0);
-    dwarf_emit_u8(&writer.info, DWARF_ADDRESS_SIZE);
-    dwarf_emit_uleb128(&writer.info, 1);
-    dwarf_model_string(&writer, line_input.file_paths[0]);
-    dwarf_emit_u16(&writer.info, line_input.language ? line_input.language : 0x0002);
-    dwarf_model_string(&writer, line_input.file_paths[0]);
-    dwarf_model_string(&writer, line_input.comp_dir);
-    dwarf_model_relocation(&writer, (DwarfRelocation){
-                                          .offset = writer.info.count,
-                                          .section = DWARF_SECTION_INFO,
-                                          .address = true,
-                                      });
-    dwarf_emit_u64(&writer.info, 0);
-    dwarf_emit_u64(&writer.info, line_input.code_size);
-    dwarf_model_relocation(&writer, (DwarfRelocation){
-                                          .offset = writer.info.count,
-                                          .section = DWARF_SECTION_INFO,
-                                          .target = DWARF_SECTION_LINE,
-                                      });
-    dwarf_emit_u32(&writer.info, 0);
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
-    {
-        dwarf_model_emit_type(&writer, type_index);
-    }
-    for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
-    {
-        DebugVariable* variable = model->variables + variable_index;
-        if (variable->kind == DEBUG_VARIABLE_GLOBAL)
-        {
-            dwarf_model_emit_global(&writer, variable);
-        }
-    }
-    for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
-    {
-        dwarf_model_emit_function(&writer, function_index);
-    }
-    dwarf_emit_u8(&writer.info, 0);
-    if (writer.info.count >= 4 && writer.info.count - 4 <= UINT32_MAX)
-    {
-        dwarf_write_u32_at(&writer.info, 0, (u32)(writer.info.count - 4));
-    }
-    for (u32 patch_index = 0; patch_index < writer.ref_count; patch_index += 1)
-    {
-        DwarfModelRefPatch patch = writer.refs[patch_index];
-        u32 target_offset = 0;
-        if (patch.function)
-        {
-            if (patch.target < model->function_count)
+            u32 count = model->source_count ? model->source_count : 1;
+            model_paths = arena_allocate(arena, String8, count);
+            for (u32 index = 0; index < count; index += 1)
             {
-                target_offset = writer.function_offsets[patch.target];
+                model_paths[index] = model->source_count ? model->source_paths[index] : S8(".");
+            }
+            line_input.file_paths = model_paths;
+            line_input.file_count = count;
+        }
+        DwarfFunction* model_functions = 0;
+        if (!line_input.function_count || !line_input.functions)
+        {
+            model_functions = arena_allocate(arena, DwarfFunction, model->function_count);
+            for (u32 index = 0; index < model->function_count; index += 1)
+            {
+                DebugFunction* function = model->functions + index;
+                model_functions[index] = (DwarfFunction){
+                    .name = function->name,
+                    .code_offset = function->code_offset,
+                    .code_size = function->code_size,
+                    .file = function->declaration.source,
+                    .line = function->declaration.line,
+                };
+            }
+            line_input.functions = model_functions;
+            line_input.function_count = model->function_count;
+        }
+        if (!line_input.code_size)
+        {
+            for (u32 index = 0; index < line_input.function_count; index += 1)
+            {
+                u64 end = (u64)line_input.functions[index].code_offset + line_input.functions[index].code_size;
+                line_input.code_size = BUSTER_MAX(line_input.code_size, end);
             }
         }
-        else if (patch.target < model->type_count)
+        DwarfResult line_result = dwarf_build_legacy(arena, line_input);
+        if (!line_result.valid)
         {
-            target_offset = writer.type_offsets[patch.target];
+            return result;
         }
-        // DW_FORM_ref4 is relative to the beginning of the compilation unit,
-        // including its four-byte length field.  The writer's offsets already
-        // use that same section-relative origin.
-        dwarf_write_u32_at(&writer.info, patch.offset, target_offset);
-    }
-    for (u32 relocation_index = 0; relocation_index < line_result.relocation_count; relocation_index += 1)
-    {
-        DwarfRelocation relocation = line_result.relocations[relocation_index];
-        if (relocation.section == DWARF_SECTION_LINE)
+        u64 string_capacity = 32 + input.producer.length + input.comp_dir.length;
+        u64 string_entry_capacity = 32 + line_input.file_count + model->type_count + model->function_count;
+        for (u32 file_index = 0; file_index < line_input.file_count; file_index += 1)
         {
-            dwarf_model_relocation(&writer, relocation);
+            string_capacity += line_input.file_paths[file_index].length + 1;
         }
+        u64 reference_capacity = 32 + (u64)model->type_count * 8 + (u64)model->function_count * 4 + (u64)model->variable_count * 2;
+        for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+        {
+            DebugType* type = model->types + type_index;
+            string_capacity += type->name.length + type->declaration_name.length + 2;
+            string_entry_capacity += type->field_count + type->enum_member_count;
+            for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+            {
+                string_capacity += type->fields[field_index].name.length + 1;
+            }
+            for (u32 member_index = 0; member_index < type->enum_member_count; member_index += 1)
+            {
+                string_capacity += type->enum_members[member_index].name.length + 1;
+            }
+            reference_capacity += type->field_count + type->parameter_count;
+        }
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            string_capacity += model->functions[function_index].name.length + 1;
+        }
+        for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+        {
+            string_capacity += model->variables[variable_index].name.length + 1;
+        }
+        string_entry_capacity += model->variable_count + model->inline_site_count;
+        u64 info_capacity = 1024 + string_capacity * 12 + reference_capacity * 12;
+        u64 range_capacity = 32 + ((u64)model->function_count + model->scope_count + model->inline_site_count) * 32;
+        u64 location_capacity = 32 + (u64)model->variable_count * 128;
+        u64 relocation_capacity = 64 + (u64)model->function_count * 20 + (u64)model->scope_count * 8 + (u64)model->variable_count * 12 +
+                                  (u64)model->type_count * 16;
+        DwarfModelWriter writer = {
+            .arena = arena,
+            .input = input,
+            .model = model,
+            .str = {.bytes = arena_allocate(arena, u8, string_capacity), .capacity = string_capacity},
+            .abbrev = {.bytes = arena_allocate(arena, u8, 2048), .capacity = 2048},
+            .info = {.bytes = arena_allocate(arena, u8, info_capacity), .capacity = info_capacity},
+            .loc = {.bytes = arena_allocate(arena, u8, location_capacity), .capacity = location_capacity},
+            .ranges = {.bytes = arena_allocate(arena, u8, range_capacity), .capacity = range_capacity},
+            .relocations = arena_allocate(arena, DwarfRelocation, relocation_capacity),
+            .refs = arena_allocate(arena, DwarfModelRefPatch, reference_capacity),
+            .relocation_capacity = (u32)BUSTER_MIN(relocation_capacity, UINT32_MAX),
+            .ref_capacity = (u32)BUSTER_MIN(reference_capacity, UINT32_MAX),
+            .type_offsets = arena_allocate(arena, u32, model->type_count ? model->type_count : 1),
+            .function_offsets = arena_allocate(arena, u32, model->function_count ? model->function_count : 1),
+        };
+        dwarf_model_build_scope_children(&writer);
+        writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
+        bool include_padded_float = false;
+        for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+        {
+            include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
+        }
+        dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
+        dwarf_emit_u32(&writer.info, 0);
+        dwarf_emit_u16(&writer.info, DWARF_VERSION);
+        dwarf_model_relocation(&writer, (DwarfRelocation){
+                                              .offset = writer.info.count,
+                                              .section = DWARF_SECTION_INFO,
+                                              .target = DWARF_SECTION_ABBREV,
+                                          });
+        dwarf_emit_u32(&writer.info, 0);
+        dwarf_emit_u8(&writer.info, DWARF_ADDRESS_SIZE);
+        dwarf_emit_uleb128(&writer.info, 1);
+        dwarf_model_string(&writer, line_input.file_paths[0]);
+        dwarf_emit_u16(&writer.info, line_input.language ? line_input.language : 0x0002);
+        dwarf_model_string(&writer, line_input.file_paths[0]);
+        dwarf_model_string(&writer, line_input.comp_dir);
+        dwarf_model_relocation(&writer, (DwarfRelocation){
+                                              .offset = writer.info.count,
+                                              .section = DWARF_SECTION_INFO,
+                                              .address = true,
+                                          });
+        dwarf_emit_u64(&writer.info, 0);
+        dwarf_emit_u64(&writer.info, line_input.code_size);
+        dwarf_model_relocation(&writer, (DwarfRelocation){
+                                              .offset = writer.info.count,
+                                              .section = DWARF_SECTION_INFO,
+                                              .target = DWARF_SECTION_LINE,
+                                          });
+        dwarf_emit_u32(&writer.info, 0);
+        for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+        {
+            dwarf_model_emit_type(&writer, type_index);
+        }
+        for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+        {
+            DebugVariable* variable = model->variables + variable_index;
+            if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+            {
+                dwarf_model_emit_global(&writer, variable);
+            }
+        }
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            dwarf_model_emit_function(&writer, function_index);
+        }
+        dwarf_emit_u8(&writer.info, 0);
+        if (writer.info.count >= 4 && writer.info.count - 4 <= UINT32_MAX)
+        {
+            dwarf_write_u32_at(&writer.info, 0, (u32)(writer.info.count - 4));
+        }
+        for (u32 patch_index = 0; patch_index < writer.ref_count; patch_index += 1)
+        {
+            DwarfModelRefPatch patch = writer.refs[patch_index];
+            u32 target_offset = 0;
+            if (patch.function)
+            {
+                if (patch.target < model->function_count)
+                {
+                    target_offset = writer.function_offsets[patch.target];
+                }
+            }
+            else if (patch.target < model->type_count)
+            {
+                target_offset = writer.type_offsets[patch.target];
+            }
+            // DW_FORM_ref4 is relative to the beginning of the compilation unit,
+            // including its four-byte length field.  The writer's offsets already
+            // use that same section-relative origin.
+            dwarf_write_u32_at(&writer.info, patch.offset, target_offset);
+        }
+        for (u32 relocation_index = 0; relocation_index < line_result.relocation_count; relocation_index += 1)
+        {
+            DwarfRelocation relocation = line_result.relocations[relocation_index];
+            if (relocation.section == DWARF_SECTION_LINE)
+            {
+                dwarf_model_relocation(&writer, relocation);
+            }
+        }
+        result.sections[DWARF_SECTION_INFO] = (ByteSlice){.pointer = writer.info.bytes, .length = writer.info.count};
+        result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){.pointer = writer.abbrev.bytes, .length = writer.abbrev.count};
+        result.sections[DWARF_SECTION_LINE] = line_result.sections[DWARF_SECTION_LINE];
+        result.sections[DWARF_SECTION_STR] = (ByteSlice){.pointer = writer.str.bytes, .length = writer.str.count};
+        result.sections[DWARF_SECTION_LOC] = (ByteSlice){.pointer = writer.loc.bytes, .length = writer.loc.count};
+        result.sections[DWARF_SECTION_RANGES] = (ByteSlice){.pointer = writer.ranges.bytes, .length = writer.ranges.count};
+        result.relocations = writer.relocations;
+        result.relocation_count = writer.relocation_count;
+        result.valid = !writer.str.error && !writer.abbrev.error && !writer.info.error && !writer.loc.error && !writer.ranges.error;
     }
-    result.sections[DWARF_SECTION_INFO] = (ByteSlice){.pointer = writer.info.bytes, .length = writer.info.count};
-    result.sections[DWARF_SECTION_ABBREV] = (ByteSlice){.pointer = writer.abbrev.bytes, .length = writer.abbrev.count};
-    result.sections[DWARF_SECTION_LINE] = line_result.sections[DWARF_SECTION_LINE];
-    result.sections[DWARF_SECTION_STR] = (ByteSlice){.pointer = writer.str.bytes, .length = writer.str.count};
-    result.sections[DWARF_SECTION_LOC] = (ByteSlice){.pointer = writer.loc.bytes, .length = writer.loc.count};
-    result.sections[DWARF_SECTION_RANGES] = (ByteSlice){.pointer = writer.ranges.bytes, .length = writer.ranges.count};
-    result.relocations = writer.relocations;
-    result.relocation_count = writer.relocation_count;
-    result.valid = !writer.str.error && !writer.abbrev.error && !writer.info.error && !writer.loc.error && !writer.ranges.error;
+
     return result;
 }
 

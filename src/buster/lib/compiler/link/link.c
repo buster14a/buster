@@ -236,61 +236,61 @@ BUSTER_GLOBAL_LOCAL bool link_x86_emit_zero(LinkX86InstructionBuilder* builder, 
 BUSTER_GLOBAL_LOCAL bool link_x86_emit_push_imm32(LinkX86InstructionBuilder* builder,
                                                   BusterX86MetadataPhysicalOperand const* immediate)
 {
-    if (!builder || builder->count > builder->capacity || !immediate || immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE ||
-        immediate->width != 32 || builder->capacity - builder->count < 5)
+    if (builder && builder->count <= builder->capacity && immediate && immediate->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
+        immediate->width == 32 && builder->capacity - builder->count >= 5)
     {
-        return false;
-    }
-    BusterX86MetadataPhysicalQuery physical = {
-        .mnemonic = S8("PUSH"),
-        .operands = immediate,
-        .operand_count = 1,
-        .features = {.names = 0, .count = 0},
-        .address_size = 64,
-        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
-        .include_privileged = true,
-        .include_not64 = false,
-        .include_implicit = false,
-        .source_semantics = false,
-    };
-    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(S8("PUSH"));
-    BusterX86MetadataCandidateIterator iterator = buster_x86_metadata_filter(candidates, (BusterX86MetadataFilter){
-                                                                                              .require_64_bit = true,
-                                                                                              .exclude_not64 = true,
-                                                                                          });
-    u32 form_id = UINT32_MAX;
-    while (buster_x86_metadata_candidate_next(&iterator, &form_id))
-    {
-        BusterX86MetadataForm form = {0};
-        if (!buster_x86_metadata_form(form_id, &form) || form.immediate_width != 4) continue;
-        bool has_imm32_operand = false;
-        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        BusterX86MetadataPhysicalQuery physical = {
+            .mnemonic = S8("PUSH"),
+            .operands = immediate,
+            .operand_count = 1,
+            .features = {.names = 0, .count = 0},
+            .address_size = 64,
+            .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            .include_privileged = true,
+            .include_not64 = false,
+            .include_implicit = false,
+            .source_semantics = false,
+        };
+        BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(S8("PUSH"));
+        BusterX86MetadataCandidateIterator iterator = buster_x86_metadata_filter(candidates, (BusterX86MetadataFilter){
+                                                                                                  .require_64_bit = true,
+                                                                                                  .exclude_not64 = true,
+                                                                                              });
+        u32 form_id = UINT32_MAX;
+        while (buster_x86_metadata_candidate_next(&iterator, &form_id))
         {
-            BusterX86MetadataOperand operand = {0};
-            if (!buster_x86_metadata_operand(form_id, operand_index, &operand))
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form) || form.immediate_width != 4) continue;
+            bool has_imm32_operand = false;
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
             {
-                has_imm32_operand = false;
-                break;
+                BusterX86MetadataOperand operand = {0};
+                if (!buster_x86_metadata_operand(form_id, operand_index, &operand))
+                {
+                    has_imm32_operand = false;
+                    break;
+                }
+                if (operand.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE &&
+                    (operand.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32))
+                {
+                    has_imm32_operand = true;
+                }
             }
-            if (operand.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE &&
-                (operand.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32))
-            {
-                has_imm32_operand = true;
-            }
+            if (!has_imm32_operand) continue;
+            u8 encoded[16] = {0};
+            BusterX86MetadataEmitResult result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = physical,
+                .form_id = form_id,
+                .output = encoded,
+                .output_capacity = BUSTER_ARRAY_LENGTH(encoded),
+            });
+            if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || result.byte_count != 5) continue;
+            memcpy(builder->bytes + builder->count, encoded, result.byte_count);
+            builder->count += result.byte_count;
+            return true;
         }
-        if (!has_imm32_operand) continue;
-        u8 encoded[16] = {0};
-        BusterX86MetadataEmitResult result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = physical,
-            .form_id = form_id,
-            .output = encoded,
-            .output_capacity = BUSTER_ARRAY_LENGTH(encoded),
-        });
-        if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || result.byte_count != 5) continue;
-        memcpy(builder->bytes + builder->count, encoded, result.byte_count);
-        builder->count += result.byte_count;
-        return true;
     }
+
     return false;
 }
 
@@ -376,51 +376,51 @@ struct LinkGlobalSymbolTable
 BUSTER_GLOBAL_LOCAL bool link_global_symbol_table_initialize(Arena* arena, ObjectSymbol* symbols, u64 total_symbols, LinkGlobalSymbolTable* table)
 {
     *table = (LinkGlobalSymbolTable){.symbols = symbols};
-    if (!total_symbols)
+    if (total_symbols)
     {
-        return true;
-    }
-    if (total_symbols > UINT64_MAX / 2)
-    {
-        return false;
-    }
-    u64 required_capacity = total_symbols * 2;
-    u64 capacity = 1;
-    while (capacity < required_capacity)
-    {
-        if (capacity > UINT64_MAX / 2)
+        if (total_symbols > UINT64_MAX / 2)
         {
             return false;
         }
-        capacity *= 2;
+        u64 required_capacity = total_symbols * 2;
+        u64 capacity = 1;
+        while (capacity < required_capacity)
+        {
+            if (capacity > UINT64_MAX / 2)
+            {
+                return false;
+            }
+            capacity *= 2;
+        }
+        if (capacity > UINT64_MAX / sizeof(*table->slots))
+        {
+            return false;
+        }
+        table->slots = arena_allocate(arena, u32, capacity);
+        table->capacity = capacity;
+        memset(table->slots, 0xff, sizeof(*table->slots) * capacity);
     }
-    if (capacity > UINT64_MAX / sizeof(*table->slots))
-    {
-        return false;
-    }
-    table->slots = arena_allocate(arena, u32, capacity);
-    table->capacity = capacity;
-    memset(table->slots, 0xff, sizeof(*table->slots) * capacity);
+
     return true;
 }
 
 BUSTER_GLOBAL_LOCAL u32* link_global_symbol_table_slot(LinkGlobalSymbolTable* table, String8 name)
 {
-    if (!table->capacity)
+    if (table->capacity)
     {
-        return 0;
-    }
-    u64 mask = table->capacity - 1;
-    u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
-    for (u64 probe = 0; probe < table->capacity; probe += 1)
-    {
-        u32* slot = table->slots + slot_index;
-        if (*slot == UINT32_MAX || string_equal(table->symbols[*slot].name, name))
+        u64 mask = table->capacity - 1;
+        u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
+        for (u64 probe = 0; probe < table->capacity; probe += 1)
         {
-            return slot;
+            u32* slot = table->slots + slot_index;
+            if (*slot == UINT32_MAX || string_equal(table->symbols[*slot].name, name))
+            {
+                return slot;
+            }
+            slot_index = (slot_index + 1) & mask;
         }
-        slot_index = (slot_index + 1) & mask;
     }
+
     return 0;
 }
 
@@ -451,21 +451,21 @@ enum
 
 BUSTER_GLOBAL_LOCAL LinkPeExportSlot* link_pe_export_slot(LinkPeExportIndex* table, String8 name)
 {
-    if (!table->capacity)
+    if (table->capacity)
     {
-        return 0;
-    }
-    u64 mask = table->capacity - 1;
-    u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
-    for (u64 probe = 0; probe < table->capacity; probe += 1)
-    {
-        LinkPeExportSlot* slot = table->slots + slot_index;
-        if (!slot->used || string_equal(slot->name, name))
+        u64 mask = table->capacity - 1;
+        u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
+        for (u64 probe = 0; probe < table->capacity; probe += 1)
         {
-            return slot;
+            LinkPeExportSlot* slot = table->slots + slot_index;
+            if (!slot->used || string_equal(slot->name, name))
+            {
+                return slot;
+            }
+            slot_index = (slot_index + 1) & mask;
         }
-        slot_index = (slot_index + 1) & mask;
     }
+
     return 0;
 }
 
@@ -502,49 +502,49 @@ BUSTER_GLOBAL_LOCAL bool link_pe_export_index_initialize(Arena* arena, NativeExe
         }
         export_count += library->exported_symbol_count;
     }
-    if (!export_count)
+    if (export_count)
     {
-        return true;
-    }
-    if (export_count > UINT64_MAX / 2)
-    {
-        return false;
-    }
-    u64 required_capacity = export_count * 2;
-    u64 capacity = 1;
-    while (capacity < required_capacity)
-    {
-        if (capacity > UINT64_MAX / 2)
+        if (export_count > UINT64_MAX / 2)
         {
             return false;
         }
-        capacity *= 2;
-    }
-    if (capacity > UINT64_MAX / sizeof(*table->slots))
-    {
-        return false;
-    }
-    table->slots = arena_allocate(arena, LinkPeExportSlot, capacity);
-    table->capacity = capacity;
-    memset(table->slots, 0, sizeof(*table->slots) * capacity);
-    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
-    {
-        NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
-        for (u32 export_index = 0; export_index < library->exported_symbol_count; export_index += 1)
+        u64 required_capacity = export_count * 2;
+        u64 capacity = 1;
+        while (capacity < required_capacity)
         {
-            if (!link_pe_export_insert(table, library->exported_symbols[export_index], library_index + 1))
+            if (capacity > UINT64_MAX / 2)
+            {
+                return false;
+            }
+            capacity *= 2;
+        }
+        if (capacity > UINT64_MAX / sizeof(*table->slots))
+        {
+            return false;
+        }
+        table->slots = arena_allocate(arena, LinkPeExportSlot, capacity);
+        table->capacity = capacity;
+        memset(table->slots, 0, sizeof(*table->slots) * capacity);
+        for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+        {
+            NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
+            for (u32 export_index = 0; export_index < library->exported_symbol_count; export_index += 1)
+            {
+                if (!link_pe_export_insert(table, library->exported_symbols[export_index], library_index + 1))
+                {
+                    return false;
+                }
+            }
+        }
+        for (u32 export_index = 0; export_index < options.runtime_exported_symbol_count; export_index += 1)
+        {
+            if (!link_pe_export_insert(table, options.runtime_exported_symbols[export_index], 0))
             {
                 return false;
             }
         }
     }
-    for (u32 export_index = 0; export_index < options.runtime_exported_symbol_count; export_index += 1)
-    {
-        if (!link_pe_export_insert(table, options.runtime_exported_symbols[export_index], 0))
-        {
-            return false;
-        }
-    }
+
     return true;
 }
 
@@ -581,21 +581,21 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
-    if (source->section == OBJECT_SECTION_UNDEFINED)
+    if (source->section != OBJECT_SECTION_UNDEFINED)
     {
-        return true;
+        if (source->section >= object->section_count)
+        {
+            return false;
+        }
+        ObjectSectionKind kind = object->sections[source->section].kind;
+        if (kind >= OBJECT_SECTION_COUNT)
+        {
+            return false;
+        }
+        destination->section = (u32)kind;
+        destination->value += section_offsets[source->section];
     }
-    if (source->section >= object->section_count)
-    {
-        return false;
-    }
-    ObjectSectionKind kind = object->sections[source->section].kind;
-    if (kind >= OBJECT_SECTION_COUNT)
-    {
-        return false;
-    }
-    destination->section = (u32)kind;
-    destination->value += section_offsets[source->section];
+
     return true;
 }
 
@@ -922,63 +922,63 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_pageoff12_shift(u32 instruction, u32* shift)
 {
-    if (!shift)
+    if (shift)
     {
-        return false;
-    }
-    u32 base = instruction & UINT32_C(0xffc00000);
-    bool valid_ldst = false;
-    switch (base)
-    {
-    case UINT32_C(0x39000000):
-    case UINT32_C(0x39400000):
-    case UINT32_C(0x39800000):
-    case UINT32_C(0x39c00000):
-    case UINT32_C(0x79000000):
-    case UINT32_C(0x79400000):
-    case UINT32_C(0x79800000):
-    case UINT32_C(0x79c00000):
-    case UINT32_C(0xb9000000):
-    case UINT32_C(0xb9400000):
-    case UINT32_C(0xb9800000):
-    case UINT32_C(0xf9000000):
-    case UINT32_C(0xf9400000):
-    case UINT32_C(0xf9800000):
-    case UINT32_C(0x3d000000):
-    case UINT32_C(0x3d400000):
-    case UINT32_C(0x3d800000):
-    case UINT32_C(0x3dc00000):
-    case UINT32_C(0x7d000000):
-    case UINT32_C(0x7d400000):
-    case UINT32_C(0xbd000000):
-    case UINT32_C(0xbd400000):
-    case UINT32_C(0xfd000000):
-    case UINT32_C(0xfd400000):
-        valid_ldst = true;
-        break;
-    default:
-        break;
-    }
-    if (valid_ldst)
-    {
-        u32 implicit_shift = instruction >> 30;
-        if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+        u32 base = instruction & UINT32_C(0xffc00000);
+        bool valid_ldst = false;
+        switch (base)
         {
-            implicit_shift = 4;
+        case UINT32_C(0x39000000):
+        case UINT32_C(0x39400000):
+        case UINT32_C(0x39800000):
+        case UINT32_C(0x39c00000):
+        case UINT32_C(0x79000000):
+        case UINT32_C(0x79400000):
+        case UINT32_C(0x79800000):
+        case UINT32_C(0x79c00000):
+        case UINT32_C(0xb9000000):
+        case UINT32_C(0xb9400000):
+        case UINT32_C(0xb9800000):
+        case UINT32_C(0xf9000000):
+        case UINT32_C(0xf9400000):
+        case UINT32_C(0xf9800000):
+        case UINT32_C(0x3d000000):
+        case UINT32_C(0x3d400000):
+        case UINT32_C(0x3d800000):
+        case UINT32_C(0x3dc00000):
+        case UINT32_C(0x7d000000):
+        case UINT32_C(0x7d400000):
+        case UINT32_C(0xbd000000):
+        case UINT32_C(0xbd400000):
+        case UINT32_C(0xfd000000):
+        case UINT32_C(0xfd400000):
+            valid_ldst = true;
+            break;
+        default:
+            break;
         }
-        if (instruction & (UINT32_C(0xfff) << 10))
+        if (valid_ldst)
         {
-            return false;
+            u32 implicit_shift = instruction >> 30;
+            if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+            {
+                implicit_shift = 4;
+            }
+            if (instruction & (UINT32_C(0xfff) << 10))
+            {
+                return false;
+            }
+            *shift = implicit_shift;
+            return true;
         }
-        *shift = implicit_shift;
-        return true;
+        if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+            !(instruction & (UINT32_C(0xfff) << 10)))
+        {
+            *shift = 0;
+            return true;
+        }
     }
-    if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-        !(instruction & (UINT32_C(0xfff) << 10)))
-    {
-        *shift = 0;
-        return true;
-    }
+
     return false;
 }
 
@@ -1203,94 +1203,94 @@ BUSTER_GLOBAL_LOCAL bool link_elf_cie_has_pcrel_sdata4(ByteSlice data, u64 cie_o
 BUSTER_GLOBAL_LOCAL LinkElfEhFrameTable link_elf_eh_frame_table_build(Arena* arena, ObjectFile* object)
 {
     LinkElfEhFrameTable result = {0};
-    if (!arena || !object || object->section_count <= OBJECT_SECTION_UNWIND)
+    if (arena && object && object->section_count > OBJECT_SECTION_UNWIND)
     {
-        return result;
-    }
-    ByteSlice data = object->sections[OBJECT_SECTION_UNWIND].data;
-    if (!data.length)
-    {
+        ByteSlice data = object->sections[OBJECT_SECTION_UNWIND].data;
+        if (!data.length)
+        {
+            result.valid = true;
+            return result;
+        }
+        if (object->relocation_count > (UINT32_C(1) << 30))
+        {
+            return result;
+        }
+        result.entries = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
+        result.scratch = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
+        u32 relocation_map_capacity = 1;
+        while (relocation_map_capacity < object->relocation_count * 2)
+        {
+            relocation_map_capacity <<= 1;
+        }
+        u32* relocation_map = arena_allocate(arena, u32, relocation_map_capacity);
+        memset(relocation_map, 0xff, sizeof(*relocation_map) * relocation_map_capacity);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            if (relocation->section != OBJECT_SECTION_UNWIND ||
+                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_AARCH64_PREL32))
+            {
+                continue;
+            }
+            u32 slot = (u32)((relocation->offset ^ (relocation->offset >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
+            while (relocation_map[slot] != UINT32_MAX)
+            {
+                if (object->relocations[relocation_map[slot]].offset == relocation->offset)
+                {
+                    return result;
+                }
+                slot = (slot + 1) & (relocation_map_capacity - 1);
+            }
+            relocation_map[slot] = relocation_index;
+        }
+        u64 cursor = 0;
+        while (cursor < data.length)
+        {
+            if (data.length - cursor < 4)
+            {
+                return result;
+            }
+            u32 length = link_read_u32(data.pointer, cursor);
+            if (!length)
+            {
+                cursor += 4;
+                continue;
+            }
+            if (length == UINT32_MAX || length > data.length - cursor - 4 || length < 4)
+            {
+                return result;
+            }
+            u64 record_end = cursor + 4 + length;
+            u32 cie_pointer = link_read_u32(data.pointer, cursor + 4);
+            if (cie_pointer)
+            {
+                u64 cie_pointer_offset = cursor + 4;
+                if (cie_pointer > cie_pointer_offset || record_end - cursor < 12 || !link_elf_cie_has_pcrel_sdata4(data, cie_pointer_offset - cie_pointer))
+                {
+                    return result;
+                }
+                u64 initial_location = cursor + 8;
+                u32 relocation_slot = (u32)((initial_location ^ (initial_location >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
+                while (relocation_map[relocation_slot] != UINT32_MAX &&
+                       object->relocations[relocation_map[relocation_slot]].offset != initial_location)
+                {
+                    relocation_slot = (relocation_slot + 1) & (relocation_map_capacity - 1);
+                }
+                u32 matched_relocation = relocation_map[relocation_slot];
+                if (matched_relocation == UINT32_MAX || object->relocations[matched_relocation].symbol >= object->symbol_count || result.count == UINT32_MAX)
+                {
+                    return result;
+                }
+                result.entries[result.count++] = (LinkElfEhFrameEntry){
+                    .fde_offset = cursor,
+                    .relocation = matched_relocation,
+                };
+            }
+            cursor = record_end;
+        }
         result.valid = true;
-        return result;
     }
-    if (object->relocation_count > (UINT32_C(1) << 30))
-    {
-        return result;
-    }
-    result.entries = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
-    result.scratch = arena_allocate(arena, LinkElfEhFrameEntry, object->relocation_count);
-    u32 relocation_map_capacity = 1;
-    while (relocation_map_capacity < object->relocation_count * 2)
-    {
-        relocation_map_capacity <<= 1;
-    }
-    u32* relocation_map = arena_allocate(arena, u32, relocation_map_capacity);
-    memset(relocation_map, 0xff, sizeof(*relocation_map) * relocation_map_capacity);
-    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + relocation_index;
-        if (relocation->section != OBJECT_SECTION_UNWIND ||
-            (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_AARCH64_PREL32))
-        {
-            continue;
-        }
-        u32 slot = (u32)((relocation->offset ^ (relocation->offset >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
-        while (relocation_map[slot] != UINT32_MAX)
-        {
-            if (object->relocations[relocation_map[slot]].offset == relocation->offset)
-            {
-                return result;
-            }
-            slot = (slot + 1) & (relocation_map_capacity - 1);
-        }
-        relocation_map[slot] = relocation_index;
-    }
-    u64 cursor = 0;
-    while (cursor < data.length)
-    {
-        if (data.length - cursor < 4)
-        {
-            return result;
-        }
-        u32 length = link_read_u32(data.pointer, cursor);
-        if (!length)
-        {
-            cursor += 4;
-            continue;
-        }
-        if (length == UINT32_MAX || length > data.length - cursor - 4 || length < 4)
-        {
-            return result;
-        }
-        u64 record_end = cursor + 4 + length;
-        u32 cie_pointer = link_read_u32(data.pointer, cursor + 4);
-        if (cie_pointer)
-        {
-            u64 cie_pointer_offset = cursor + 4;
-            if (cie_pointer > cie_pointer_offset || record_end - cursor < 12 || !link_elf_cie_has_pcrel_sdata4(data, cie_pointer_offset - cie_pointer))
-            {
-                return result;
-            }
-            u64 initial_location = cursor + 8;
-            u32 relocation_slot = (u32)((initial_location ^ (initial_location >> 32)) * UINT64_C(11400714819323198485)) & (relocation_map_capacity - 1);
-            while (relocation_map[relocation_slot] != UINT32_MAX &&
-                   object->relocations[relocation_map[relocation_slot]].offset != initial_location)
-            {
-                relocation_slot = (relocation_slot + 1) & (relocation_map_capacity - 1);
-            }
-            u32 matched_relocation = relocation_map[relocation_slot];
-            if (matched_relocation == UINT32_MAX || object->relocations[matched_relocation].symbol >= object->symbol_count || result.count == UINT32_MAX)
-            {
-                return result;
-            }
-            result.entries[result.count++] = (LinkElfEhFrameEntry){
-                .fde_offset = cursor,
-                .relocation = matched_relocation,
-            };
-        }
-        cursor = record_end;
-    }
-    result.valid = true;
+
     return result;
 }
 
@@ -2942,65 +2942,64 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
                                                        u32 output_section_count)
 {
     ByteSlice result = {0};
-    if (!arena || !object || !debug_module || !object_output_sections || !object_section_offsets || !output_section_count ||
-        debug_module->symbols_size > UINT32_MAX ||
-        debug_module->symbols_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length ||
-        debug_module->symbols_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length - debug_module->symbols_offset)
+    if (arena && object && debug_module && object_output_sections && object_section_offsets && output_section_count &&
+        debug_module->symbols_size <= UINT32_MAX && debug_module->symbols_offset <= object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length &&
+        debug_module->symbols_size <= object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length - debug_module->symbols_offset)
     {
-        return result;
+        u8* bytes = arena_allocate(arena, u8, debug_module->symbols_size);
+        memcpy(bytes, object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer + debug_module->symbols_offset, debug_module->symbols_size);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            if (relocation->section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || relocation->offset < debug_module->symbols_offset ||
+                relocation->offset - debug_module->symbols_offset >= debug_module->symbols_size || relocation->symbol >= object->symbol_count)
+            {
+                continue;
+            }
+            u64 offset = relocation->offset - debug_module->symbols_offset;
+            ObjectSymbol* symbol = object->symbols + relocation->symbol;
+            if (symbol->section >= OBJECT_SECTION_COUNT || object_output_sections[symbol->section] >= output_section_count ||
+                object_output_sections[symbol->section] >= UINT16_MAX)
+            {
+                return (ByteSlice){0};
+            }
+            if (relocation->kind == OBJECT_RELOCATION_COFF_SECREL32)
+            {
+                if (offset + 4 > debug_module->symbols_size || symbol->value > INT64_MAX || object_section_offsets[symbol->section] > INT64_MAX)
+                {
+                    return (ByteSlice){0};
+                }
+                s64 signed_value = (s64)symbol->value;
+                if ((relocation->addend > 0 && signed_value > INT64_MAX - relocation->addend) ||
+                    (relocation->addend < 0 && signed_value < INT64_MIN - relocation->addend))
+                {
+                    return (ByteSlice){0};
+                }
+                signed_value += relocation->addend;
+                if (signed_value > INT64_MAX - (s64)object_section_offsets[symbol->section])
+                {
+                    return (ByteSlice){0};
+                }
+                signed_value += (s64)object_section_offsets[symbol->section];
+                if (signed_value < 0 || signed_value > UINT32_MAX)
+                {
+                    return (ByteSlice){0};
+                }
+                memcpy(bytes + offset, &(u32){(u32)signed_value}, sizeof(u32));
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_COFF_SECTION16)
+            {
+                if (offset + 2 > debug_module->symbols_size)
+                {
+                    return (ByteSlice){0};
+                }
+                u16 section = (u16)(object_output_sections[symbol->section] + 1);
+                memcpy(bytes + offset, &section, sizeof(section));
+            }
+        }
+        result = (ByteSlice){.pointer = bytes, .length = debug_module->symbols_size};
     }
-    u8* bytes = arena_allocate(arena, u8, debug_module->symbols_size);
-    memcpy(bytes, object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer + debug_module->symbols_offset, debug_module->symbols_size);
-    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + relocation_index;
-        if (relocation->section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || relocation->offset < debug_module->symbols_offset ||
-            relocation->offset - debug_module->symbols_offset >= debug_module->symbols_size || relocation->symbol >= object->symbol_count)
-        {
-            continue;
-        }
-        u64 offset = relocation->offset - debug_module->symbols_offset;
-        ObjectSymbol* symbol = object->symbols + relocation->symbol;
-        if (symbol->section >= OBJECT_SECTION_COUNT || object_output_sections[symbol->section] >= output_section_count ||
-            object_output_sections[symbol->section] >= UINT16_MAX)
-        {
-            return (ByteSlice){0};
-        }
-        if (relocation->kind == OBJECT_RELOCATION_COFF_SECREL32)
-        {
-            if (offset + 4 > debug_module->symbols_size || symbol->value > INT64_MAX || object_section_offsets[symbol->section] > INT64_MAX)
-            {
-                return (ByteSlice){0};
-            }
-            s64 signed_value = (s64)symbol->value;
-            if ((relocation->addend > 0 && signed_value > INT64_MAX - relocation->addend) ||
-                (relocation->addend < 0 && signed_value < INT64_MIN - relocation->addend))
-            {
-                return (ByteSlice){0};
-            }
-            signed_value += relocation->addend;
-            if (signed_value > INT64_MAX - (s64)object_section_offsets[symbol->section])
-            {
-                return (ByteSlice){0};
-            }
-            signed_value += (s64)object_section_offsets[symbol->section];
-            if (signed_value < 0 || signed_value > UINT32_MAX)
-            {
-                return (ByteSlice){0};
-            }
-            memcpy(bytes + offset, &(u32){(u32)signed_value}, sizeof(u32));
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_COFF_SECTION16)
-        {
-            if (offset + 2 > debug_module->symbols_size)
-            {
-                return (ByteSlice){0};
-            }
-            u16 section = (u16)(object_output_sections[symbol->section] + 1);
-            memcpy(bytes + offset, &section, sizeof(section));
-        }
-    }
-    result = (ByteSlice){.pointer = bytes, .length = debug_module->symbols_size};
+
     return result;
 }
 
@@ -5872,49 +5871,49 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     {
         result.error = LINK_ERROR_UNSUPPORTED_HOST;
     }
-    if (result.error != LINK_ERROR_NONE)
+    if (result.error == LINK_ERROR_NONE)
     {
-        return result;
-    }
-    u8* bytes = result.executable.pointer;
-    link_write_u16(bytes, 16, 3);
-    if (has_import)
-    {
-        u64 interpreter_program_header = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE;
-        u64 interpreter_offset = link_read_u64(bytes, interpreter_program_header + 8);
-        u64 interpreter_size = link_read_u64(bytes, interpreter_program_header + 32);
-        if (sizeof(interpreter) > interpreter_size)
+        u8* bytes = result.executable.pointer;
+        link_write_u16(bytes, 16, 3);
+        if (has_import)
         {
-            result.error = LINK_ERROR_INVALID_INPUT;
-            return result;
-        }
-        memset(bytes + interpreter_offset, 0, interpreter_size);
-        memcpy(bytes + interpreter_offset, interpreter, sizeof(interpreter));
-        u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
-        u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
-        u64 string_table_offset = 0;
-        u32 dynamic_count = ELF_DYNAMIC_COUNT + options.dynamic_library_count;
-        for (u32 index = 0; index < dynamic_count; index += 1)
-        {
-            u64 entry = dynamic_offset + (u64)index * ELF_DYNAMIC_SIZE;
-            if (link_read_u64(bytes, entry) == 5)
+            u64 interpreter_program_header = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE;
+            u64 interpreter_offset = link_read_u64(bytes, interpreter_program_header + 8);
+            u64 interpreter_size = link_read_u64(bytes, interpreter_program_header + 32);
+            if (sizeof(interpreter) > interpreter_size)
             {
-                string_table_offset = link_read_u64(bytes, entry + 8) - UINT64_C(0x400000);
-                break;
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
             }
+            memset(bytes + interpreter_offset, 0, interpreter_size);
+            memcpy(bytes + interpreter_offset, interpreter, sizeof(interpreter));
+            u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
+            u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
+            u64 string_table_offset = 0;
+            u32 dynamic_count = ELF_DYNAMIC_COUNT + options.dynamic_library_count;
+            for (u32 index = 0; index < dynamic_count; index += 1)
+            {
+                u64 entry = dynamic_offset + (u64)index * ELF_DYNAMIC_SIZE;
+                if (link_read_u64(bytes, entry) == 5)
+                {
+                    string_table_offset = link_read_u64(bytes, entry + 8) - UINT64_C(0x400000);
+                    break;
+                }
+            }
+            if (!string_table_offset)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
+            memcpy(bytes + string_table_offset + 1, library, sizeof(library));
         }
-        if (!string_table_offset)
+        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
         {
-            result.error = LINK_ERROR_INVALID_INPUT;
-            return result;
+            result.error = LINK_ERROR_FILE_WRITE;
         }
-        memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
-        memcpy(bytes + string_table_offset + 1, library, sizeof(library));
     }
-    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
-    {
-        result.error = LINK_ERROR_FILE_WRITE;
-    }
+
     return result;
 }
 

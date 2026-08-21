@@ -125,15 +125,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_string_contains(String8 value, St
     u32 offset = 0;
     u32 index = 0;
     bool equal = true;
-    if (!needle.length || needle.length > value.length) return false;
-    for (; offset + needle.length <= value.length; offset += 1)
+    if (needle.length && needle.length <= value.length)
     {
-        equal = true;
-        index = 0;
-        for (; index < needle.length; index += 1)
-            equal &= value.pointer[offset + index] == needle.pointer[index];
-        if (equal) return true;
+        for (; offset + needle.length <= value.length; offset += 1)
+        {
+            equal = true;
+            index = 0;
+            for (; index < needle.length; index += 1)
+                equal &= value.pointer[offset + index] == needle.pointer[index];
+            if (equal) return true;
+        }
     }
+
     return false;
 }
 
@@ -241,25 +244,28 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_decorator_shape(BusterX86Me
                   operand.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM))
             vector_register_count += 1;
     }
-    if (!mask_slot || physical_index != query.operand_count) return false;
-    if (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST)
-        return memory_count == 1 && ordinary_memory_count == 1 && !query.attributes.sae &&
-               query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
-    if (query.attributes.sae || query.attributes.rounding_mode)
-        return !has_memory && vector_register_count >= 2;
-    // Gather/scatter forms carry the mask decorator in metadata order around
-    // one VSIB memory operand and one visible vector register.  The vector
-    // index nested inside the memory operand is not a separate binding, so
-    // requiring a visible vector register keeps prefetch-only VSIB rows out
-    // of this source path.  This is a topology rule, independent of mnemonic
-    // and generated form identity.
-    if ((form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) && mask_slot &&
-        !(query.attributes.decorator_flags & (BUSTER_X86_METADATA_DECORATOR_ZEROING |
-                                               BUSTER_X86_METADATA_DECORATOR_BROADCAST |
-                                               BUSTER_X86_METADATA_DECORATOR_ROUNDING |
-                                               BUSTER_X86_METADATA_DECORATOR_SAE)) &&
-        has_vsib_memory && memory_count == 1 && vector_register_count >= 1)
-        return true;
+    if (mask_slot && physical_index == query.operand_count)
+    {
+        if (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST)
+            return memory_count == 1 && ordinary_memory_count == 1 && !query.attributes.sae &&
+                   query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
+        if (query.attributes.sae || query.attributes.rounding_mode)
+            return !has_memory && vector_register_count >= 2;
+        // Gather/scatter forms carry the mask decorator in metadata order around
+        // one VSIB memory operand and one visible vector register.  The vector
+        // index nested inside the memory operand is not a separate binding, so
+        // requiring a visible vector register keeps prefetch-only VSIB rows out
+        // of this source path.  This is a topology rule, independent of mnemonic
+        // and generated form identity.
+        if ((form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) && mask_slot &&
+            !(query.attributes.decorator_flags & (BUSTER_X86_METADATA_DECORATOR_ZEROING |
+                                                   BUSTER_X86_METADATA_DECORATOR_BROADCAST |
+                                                   BUSTER_X86_METADATA_DECORATOR_ROUNDING |
+                                                   BUSTER_X86_METADATA_DECORATOR_SAE)) &&
+            has_vsib_memory && memory_count == 1 && vector_register_count >= 1)
+            return true;
+    }
+
     return false;
 }
 
@@ -374,23 +380,26 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_has_compact_immediate_sibling(Bus
     BusterX86MetadataForm candidate = {0};
     u32 candidate_id = 0;
     u32 position = 0;
-    if (!form.immediate_signed || form.immediate_width <= 1) return false;
-    range = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
-    for (; position < range.count; position += 1)
+    if (form.immediate_signed && form.immediate_width > 1)
     {
-        if (!buster_x86_metadata_candidate_at(range, position, &candidate_id) || candidate_id == form.id ||
-            !buster_x86_metadata_form(candidate_id, &candidate))
-            continue;
-        if (candidate.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED || candidate.immediate_width != 1 ||
-            !candidate.immediate_signed || candidate.prefix_kind != form.prefix_kind || candidate.map != form.map ||
-            candidate.mandatory_prefix != form.mandatory_prefix || candidate.field_flags != form.field_flags ||
-            candidate.decorator_flags != form.decorator_flags || candidate.apx_flags != form.apx_flags ||
-            candidate.amx_flags != form.amx_flags || candidate.mode_flags != form.mode_flags ||
-            candidate.displacement_width != form.displacement_width || candidate.displacement_scale != form.displacement_scale ||
-            candidate.relocation_base != form.relocation_base || !buster_x86_completion_operand_schema_equal(form, candidate))
-            continue;
-        return true;
+        range = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
+        for (; position < range.count; position += 1)
+        {
+            if (!buster_x86_metadata_candidate_at(range, position, &candidate_id) || candidate_id == form.id ||
+                !buster_x86_metadata_form(candidate_id, &candidate))
+                continue;
+            if (candidate.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED || candidate.immediate_width != 1 ||
+                !candidate.immediate_signed || candidate.prefix_kind != form.prefix_kind || candidate.map != form.map ||
+                candidate.mandatory_prefix != form.mandatory_prefix || candidate.field_flags != form.field_flags ||
+                candidate.decorator_flags != form.decorator_flags || candidate.apx_flags != form.apx_flags ||
+                candidate.amx_flags != form.amx_flags || candidate.mode_flags != form.mode_flags ||
+                candidate.displacement_width != form.displacement_width || candidate.displacement_scale != form.displacement_scale ||
+                candidate.relocation_base != form.relocation_base || !buster_x86_completion_operand_schema_equal(form, candidate))
+                continue;
+            return true;
+        }
     }
+
     return false;
 }
 
@@ -1399,47 +1408,50 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_alias_equivalent(u32 form_id, Bus
     u8 bytes[32] = {0};
     BusterX86MetadataRelocation relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     BusterX86MetadataEmitResult result = {0};
-    if (!buster_x86_metadata_form(form_id, &form)) return false;
-    range = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
-    for (position = 0; position < range.count; position += 1)
+    if (buster_x86_metadata_form(form_id, &form))
     {
-        candidate_id = 0;
-        candidate = (BusterX86MetadataForm){0};
-        if (!buster_x86_metadata_candidate_at(range, position, &candidate_id) || candidate_id == form_id ||
-            !buster_x86_metadata_form(candidate_id, &candidate) ||
-            candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX)
-            continue;
-        if (candidate.operand_count != form.operand_count) continue;
-        schema_equal = true;
-        for (operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        range = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
+        for (position = 0; position < range.count; position += 1)
         {
-            first = (BusterX86MetadataOperand){0};
-            second = (BusterX86MetadataOperand){0};
-            if (!buster_x86_metadata_operand(form_id, operand_index, &first) ||
-                !buster_x86_metadata_operand(candidate_id, operand_index, &second) ||
-                first.slot != second.slot || first.visible != second.visible || first.kind != second.kind ||
-                first.access != second.access || first.field_source != second.field_source ||
-                first.physical_class != second.physical_class || first.physical_width_flags != second.physical_width_flags ||
-                !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.atom),
-                                                    buster_x86_metadata_string_span(second.atom)) ||
-                !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.width),
-                                                    buster_x86_metadata_string_span(second.width)))
+            candidate_id = 0;
+            candidate = (BusterX86MetadataForm){0};
+            if (!buster_x86_metadata_candidate_at(range, position, &candidate_id) || candidate_id == form_id ||
+                !buster_x86_metadata_form(candidate_id, &candidate) ||
+                candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX)
+                continue;
+            if (candidate.operand_count != form.operand_count) continue;
+            schema_equal = true;
+            for (operand_index = 0; operand_index < form.operand_count; operand_index += 1)
             {
-                schema_equal = false;
-                break;
+                first = (BusterX86MetadataOperand){0};
+                second = (BusterX86MetadataOperand){0};
+                if (!buster_x86_metadata_operand(form_id, operand_index, &first) ||
+                    !buster_x86_metadata_operand(candidate_id, operand_index, &second) ||
+                    first.slot != second.slot || first.visible != second.visible || first.kind != second.kind ||
+                    first.access != second.access || first.field_source != second.field_source ||
+                    first.physical_class != second.physical_class || first.physical_width_flags != second.physical_width_flags ||
+                    !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.atom),
+                                                        buster_x86_metadata_string_span(second.atom)) ||
+                    !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.width),
+                                                        buster_x86_metadata_string_span(second.width)))
+                {
+                    schema_equal = false;
+                    break;
+                }
             }
+            if (!schema_equal) continue;
+            memset(bytes, 0, sizeof(bytes));
+            memset(relocations, 0, sizeof(relocations));
+            result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = query, .form_id = candidate_id, .output = bytes, .output_capacity = sizeof(bytes),
+                .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
+            if (result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && result.byte_count == source.bytes.length &&
+                (!result.byte_count || memcmp(bytes, source.bytes.pointer, result.byte_count) == 0) &&
+                buster_x86_completion_relocations_match(relocations, result.relocation_count, source))
+                return true;
         }
-        if (!schema_equal) continue;
-        memset(bytes, 0, sizeof(bytes));
-        memset(relocations, 0, sizeof(relocations));
-        result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = query, .form_id = candidate_id, .output = bytes, .output_capacity = sizeof(bytes),
-            .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
-        if (result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && result.byte_count == source.bytes.length &&
-            (!result.byte_count || memcmp(bytes, source.bytes.pointer, result.byte_count) == 0) &&
-            buster_x86_completion_relocations_match(relocations, result.relocation_count, source))
-            return true;
     }
+
     return false;
 }
 
