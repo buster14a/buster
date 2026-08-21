@@ -2026,43 +2026,38 @@ BUSTER_GLOBAL_LOCAL bool a64_pc_relative_insert(A64PCRelativeLayout layout, u32 
         switch (layout)
         {
         case A64_PC_RELATIVE_IMM26:
-            if (!a64_signed_scaled_immediate_encode(displacement, 26, 2, &immediate))
+            if (a64_signed_scaled_immediate_encode(displacement, 26, 2, &immediate))
             {
-                return false;
+                *patched = (word & ~UINT32_C(0x03ffffff)) | immediate;
+                return true;
+            case A64_PC_RELATIVE_IMM19:
+                if (a64_signed_scaled_immediate_encode(displacement, 19, 2, &immediate))
+                {
+                    *patched = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
+                    return true;
+                case A64_PC_RELATIVE_IMM14:
+                    if (a64_signed_scaled_immediate_encode(displacement, 14, 2, &immediate))
+                    {
+                        *patched = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
+                        return true;
+                    case A64_PC_RELATIVE_ADRP:
+                        if (a64_signed_scaled_immediate_encode(displacement, 21, 12, &immediate))
+                        {
+                            *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+                            return true;
+                        case A64_PC_RELATIVE_ADR:
+                            if (a64_signed_scaled_immediate_encode(displacement, 21, 0, &immediate))
+                            {
+                                *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+                                return true;
+                            case A64_PC_RELATIVE_NONE:
+                            case A64_PC_RELATIVE_LAYOUT_COUNT:
+                                return false;
+                            }
+                        }
+                    }
+                }
             }
-            *patched = (word & ~UINT32_C(0x03ffffff)) | immediate;
-            return true;
-        case A64_PC_RELATIVE_IMM19:
-            if (!a64_signed_scaled_immediate_encode(displacement, 19, 2, &immediate))
-            {
-                return false;
-            }
-            *patched = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
-            return true;
-        case A64_PC_RELATIVE_IMM14:
-            if (!a64_signed_scaled_immediate_encode(displacement, 14, 2, &immediate))
-            {
-                return false;
-            }
-            *patched = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
-            return true;
-        case A64_PC_RELATIVE_ADRP:
-            if (!a64_signed_scaled_immediate_encode(displacement, 21, 12, &immediate))
-            {
-                return false;
-            }
-            *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-            return true;
-        case A64_PC_RELATIVE_ADR:
-            if (!a64_signed_scaled_immediate_encode(displacement, 21, 0, &immediate))
-            {
-                return false;
-            }
-            *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-            return true;
-        case A64_PC_RELATIVE_NONE:
-        case A64_PC_RELATIVE_LAYOUT_COUNT:
-            return false;
         }
     }
 

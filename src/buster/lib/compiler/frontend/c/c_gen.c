@@ -833,71 +833,69 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
     if (function_type && function_type->kind == C_TYPE_FUNCTION)
     {
         CType* return_type = c_type_from_id(parse, function_type->return_type);
-        if (!return_type || function_type->return_type.value >= parse->type_count)
+        if (return_type && function_type->return_type.value < parse->type_count)
         {
-            return result;
-        }
-        result.return_type = c_type_ir_map[function_type->return_type.value];
-        if (result.return_type.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return result;
-        }
-        result.returns_void = return_type->kind == C_TYPE_VOID;
-        result.is_variadic = function_type->is_variadic;
-        result.parameters = &parse->parameters[declaration.parameter_start];
-        result.parameter_count = declaration.parameter_count;
-        if (result.parameter_count != function_type->parameter_count)
-        {
-            return (CIrSignature){0};
-        }
-        result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
-        // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
-        // through ir_type_abi_value, which resolves the type on demand, so this
-        // was pre-warming only -- and running it once per function declaration
-        // made signature lowering cost O(functions * types).
-        for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
-        {
-            CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
-            if (!parameter_type || result.parameters[parameter_index].type.value >= parse->type_count)
+            result.return_type = c_type_ir_map[function_type->return_type.value];
+            if (result.return_type.value != IR_ID_UNDERLYING_INVALID)
             {
-                return (CIrSignature){0};
-            }
-            result.parameter_types[parameter_index] = c_type_ir_map[result.parameters[parameter_index].type.value];
-            if (parameter_type->kind == C_TYPE_ARRAY)
-            {
-                CTypeId element_type = parameter_type->element_type;
-                CType* element = c_type_from_id(parse, element_type);
-                IrTypeId canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
-                if (canonical_element.value == IR_ID_UNDERLYING_INVALID)
+                result.returns_void = return_type->kind == C_TYPE_VOID;
+                result.is_variadic = function_type->is_variadic;
+                result.parameters = &parse->parameters[declaration.parameter_start];
+                result.parameter_count = declaration.parameter_count;
+                if (result.parameter_count != function_type->parameter_count)
                 {
-                    while (element && element->kind == C_TYPE_ARRAY)
+                    return (CIrSignature){0};
+                }
+                result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
+                // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
+                // through ir_type_abi_value, which resolves the type on demand, so this
+                // was pre-warming only -- and running it once per function declaration
+                // made signature lowering cost O(functions * types).
+                for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
+                {
+                    CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
+                    if (!parameter_type || result.parameters[parameter_index].type.value >= parse->type_count)
                     {
-                        element_type = element->element_type;
-                        element = c_type_from_id(parse, element_type);
+                        return (CIrSignature){0};
                     }
-                    canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+                    result.parameter_types[parameter_index] = c_type_ir_map[result.parameters[parameter_index].type.value];
+                    if (parameter_type->kind == C_TYPE_ARRAY)
+                    {
+                        CTypeId element_type = parameter_type->element_type;
+                        CType* element = c_type_from_id(parse, element_type);
+                        IrTypeId canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+                        if (canonical_element.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            while (element && element->kind == C_TYPE_ARRAY)
+                            {
+                                element_type = element->element_type;
+                                element = c_type_from_id(parse, element_type);
+                            }
+                            canonical_element = element ? c_type_ir_map[element_type.value] : IR_TYPE_ID_INVALID;
+                        }
+                        if (canonical_element.value != IR_ID_UNDERLYING_INVALID)
+                        {
+                            result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, canonical_element);
+                        }
+                    }
+                    else if (parameter_type->kind == C_TYPE_FUNCTION)
+                    {
+                        result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
+                    }
+                    else if (parameter_type->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
+                    {
+                        result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
+                    }
+                    if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return (CIrSignature){0};
+                    }
                 }
-                if (canonical_element.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, canonical_element);
-                }
-            }
-            else if (parameter_type->kind == C_TYPE_FUNCTION)
-            {
-                result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
-            }
-            else if (parameter_type->kind == C_TYPE_VA_LIST && c_ir_va_list_parameter_decays(target))
-            {
-                result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
-            }
-            if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
-            {
-                return (CIrSignature){0};
+                result.body_supported = c_ir_signature_body_supported(program, wide_float_cache, result.return_type, result.parameter_types,
+                                                                      result.parameter_count, result.is_variadic, target);
+                result.valid = true;
             }
         }
-        result.body_supported = c_ir_signature_body_supported(program, wide_float_cache, result.return_type, result.parameter_types,
-                                                              result.parameter_count, result.is_variadic, target);
-        result.valid = true;
     }
 
     return result;

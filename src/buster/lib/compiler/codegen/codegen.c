@@ -2079,35 +2079,34 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, 
         }
         u64 loop_patch = buffer->count;
         BusterX86MetadataPhysicalOperand loop_branch_operand = codegen_canonical_x64_metadata_relative(0, 8);
-        if (!codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1))
+        if (codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &loop_branch_operand, 1))
         {
-            return true;
-        }
-        u64 final_offset = buffer->count;
-        if (!codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
-            !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_rsp_operands, BUSTER_ARRAY_LENGTH(sub_rsp_operands)))
-        {
-            return true;
-        }
-        s64 final_displacement = (s64)final_offset - (s64)(final_patch + 2);
-        s64 loop_displacement = (s64)loop_offset - (s64)(loop_patch + 2);
-        if (buffer->error != CODEGEN_ERROR_NONE || final_displacement < INT8_MIN || final_displacement > INT8_MAX || loop_displacement < INT8_MIN ||
-            loop_displacement > INT8_MAX || buffer->count - function_offset > UINT32_MAX)
-        {
-            buffer->error = CODEGEN_ERROR_CAPACITY;
-            return true;
-        }
-        if (final_patch + 2 > buffer->count || loop_patch + 2 > buffer->count)
-        {
-            buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-            return true;
-        }
-        buffer->bytes[final_patch + 1] = (u8)(s8)final_displacement;
-        buffer->bytes[loop_patch + 1] = (u8)(s8)loop_displacement;
-        if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)(buffer->count - function_offset),
-                                                        CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
-        {
-            buffer->error = CODEGEN_ERROR_CAPACITY;
+            u64 final_offset = buffer->count;
+            if (!codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_r10_operands, BUSTER_ARRAY_LENGTH(test_r10_operands)) ||
+                !codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), sub_rsp_operands, BUSTER_ARRAY_LENGTH(sub_rsp_operands)))
+            {
+                return true;
+            }
+            s64 final_displacement = (s64)final_offset - (s64)(final_patch + 2);
+            s64 loop_displacement = (s64)loop_offset - (s64)(loop_patch + 2);
+            if (buffer->error != CODEGEN_ERROR_NONE || final_displacement < INT8_MIN || final_displacement > INT8_MAX || loop_displacement < INT8_MIN ||
+                loop_displacement > INT8_MAX || buffer->count - function_offset > UINT32_MAX)
+            {
+                buffer->error = CODEGEN_ERROR_CAPACITY;
+                return true;
+            }
+            if (final_patch + 2 > buffer->count || loop_patch + 2 > buffer->count)
+            {
+                buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                return true;
+            }
+            buffer->bytes[final_patch + 1] = (u8)(s8)final_displacement;
+            buffer->bytes[loop_patch + 1] = (u8)(s8)loop_displacement;
+            if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)(buffer->count - function_offset),
+                                                            CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
+            {
+                buffer->error = CODEGEN_ERROR_CAPACITY;
+            }
         }
     }
 

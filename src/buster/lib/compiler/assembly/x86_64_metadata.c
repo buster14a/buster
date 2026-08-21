@@ -9783,23 +9783,22 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_source_key_matches(const Buste
         if (!had_source)
         {
             u32 iclass_length = 0;
-            if (!buster_x86_metadata_string_offset_terminated(form->iclass_offset, &iclass_length) || iclass_length != key_length)
+            if (buster_x86_metadata_string_offset_terminated(form->iclass_offset, &iclass_length) && iclass_length == key_length)
             {
-                return false;
-            }
-            for (u32 index = 0; index < key_length; index += 1)
-            {
-                char8 character = buster_x86_metadata_pool_byte((u64)form->iclass_offset + index);
-                if (character >= 'A' && character <= 'Z')
+                for (u32 index = 0; index < key_length; index += 1)
                 {
-                    character = (char8)(character - 'A' + 'a');
+                    char8 character = buster_x86_metadata_pool_byte((u64)form->iclass_offset + index);
+                    if (character >= 'A' && character <= 'Z')
+                    {
+                        character = (char8)(character - 'A' + 'a');
+                    }
+                    if (character != key[index])
+                    {
+                        return false;
+                    }
                 }
-                if (character != key[index])
-                {
-                    return false;
-                }
+                return true;
             }
-            return true;
         }
     }
 

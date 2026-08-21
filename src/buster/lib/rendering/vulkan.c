@@ -1119,43 +1119,42 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_surface_formats(Arena* arena, VkPhysic
     {
         u32 capacity = 0;
         VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &capacity, 0);
-        if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+        if (result == VK_SUCCESS || result == VK_INCOMPLETE)
         {
-            return false;
-        }
-        if (capacity == 0)
-        {
-            *formats_out = 0;
-            *count_out = 0;
-            return true;
-        }
-
-        for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
-        {
-            VkSurfaceFormatKHR* formats = arena_allocate(arena, VkSurfaceFormatKHR, capacity);
-            u32 reported_count = capacity;
-            result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &reported_count, formats);
-            if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+            if (capacity == 0)
             {
-                *formats_out = formats;
-                *count_out = reported_count;
+                *formats_out = 0;
+                *count_out = 0;
                 return true;
             }
-            if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+
+            for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
             {
-                return false;
-            }
-            if (reported_count > capacity)
-            {
-                capacity = reported_count;
-            }
-            else if (capacity <= UINT32_MAX / 2)
-            {
-                capacity *= 2;
-            }
-            else
-            {
-                return false;
+                VkSurfaceFormatKHR* formats = arena_allocate(arena, VkSurfaceFormatKHR, capacity);
+                u32 reported_count = capacity;
+                result = vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &reported_count, formats);
+                if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+                {
+                    *formats_out = formats;
+                    *count_out = reported_count;
+                    return true;
+                }
+                if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+                {
+                    return false;
+                }
+                if (reported_count > capacity)
+                {
+                    capacity = reported_count;
+                }
+                else if (capacity <= UINT32_MAX / 2)
+                {
+                    capacity *= 2;
+                }
+                else
+                {
+                    return false;
+                }
             }
         }
     }
@@ -1170,43 +1169,42 @@ BUSTER_GLOBAL_LOCAL bool vulkan_enumerate_present_modes(Arena* arena, VkPhysical
     {
         u32 capacity = 0;
         VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &capacity, 0);
-        if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+        if (result == VK_SUCCESS || result == VK_INCOMPLETE)
         {
-            return false;
-        }
-        if (capacity == 0)
-        {
-            *modes_out = 0;
-            *count_out = 0;
-            return true;
-        }
-
-        for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
-        {
-            VkPresentModeKHR* modes = arena_allocate(arena, VkPresentModeKHR, capacity);
-            u32 reported_count = capacity;
-            result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &reported_count, modes);
-            if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+            if (capacity == 0)
             {
-                *modes_out = modes;
-                *count_out = reported_count;
+                *modes_out = 0;
+                *count_out = 0;
                 return true;
             }
-            if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+
+            for (u32 attempt = 0; attempt < VULKAN_ENUMERATION_RETRY_COUNT; attempt += 1)
             {
-                return false;
-            }
-            if (reported_count > capacity)
-            {
-                capacity = reported_count;
-            }
-            else if (capacity <= UINT32_MAX / 2)
-            {
-                capacity *= 2;
-            }
-            else
-            {
-                return false;
+                VkPresentModeKHR* modes = arena_allocate(arena, VkPresentModeKHR, capacity);
+                u32 reported_count = capacity;
+                result = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &reported_count, modes);
+                if (result == VK_SUCCESS && !vulkan_result_or_count_requires_retry(result, capacity, reported_count))
+                {
+                    *modes_out = modes;
+                    *count_out = reported_count;
+                    return true;
+                }
+                if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+                {
+                    return false;
+                }
+                if (reported_count > capacity)
+                {
+                    capacity = reported_count;
+                }
+                else if (capacity <= UINT32_MAX / 2)
+                {
+                    capacity *= 2;
+                }
+                else
+                {
+                    return false;
+                }
             }
         }
     }

@@ -183,35 +183,34 @@ DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* l
         u32 bucket_mask = bucket_count - 1;
         u32* bucket_ends = arena_allocate(arena, u32, bucket_count);
         u32* order = arena_allocate(arena, u32, location_count);
-        if (!bucket_ends || !order)
+        if (bucket_ends && order)
         {
-            return result;
+            memset(bucket_ends, 0, sizeof(u32) * bucket_count);
+            for (u32 index = 0; index < location_count; index += 1)
+            {
+                bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
+            }
+            u32 running = 0;
+            for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
+            {
+                u32 count = bucket_ends[bucket];
+                bucket_ends[bucket] = running;
+                running += count;
+            }
+            // Filling through the exclusive prefix sums advances every entry to its
+            // bucket's end offset, which is exactly what queries need.
+            for (u32 index = 0; index < location_count; index += 1)
+            {
+                order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
+            }
+            result = (DebugLocationIndex){
+                .locations = locations,
+                .bucket_ends = bucket_ends,
+                .order = order,
+                .bucket_count = bucket_count,
+                .location_count = location_count,
+            };
         }
-        memset(bucket_ends, 0, sizeof(u32) * bucket_count);
-        for (u32 index = 0; index < location_count; index += 1)
-        {
-            bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
-        }
-        u32 running = 0;
-        for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
-        {
-            u32 count = bucket_ends[bucket];
-            bucket_ends[bucket] = running;
-            running += count;
-        }
-        // Filling through the exclusive prefix sums advances every entry to its
-        // bucket's end offset, which is exactly what queries need.
-        for (u32 index = 0; index < location_count; index += 1)
-        {
-            order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
-        }
-        result = (DebugLocationIndex){
-            .locations = locations,
-            .bucket_ends = bucket_ends,
-            .order = order,
-            .bucket_count = bucket_count,
-            .location_count = location_count,
-        };
     }
 
     return result;

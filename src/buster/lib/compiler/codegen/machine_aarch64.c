@@ -3023,16 +3023,15 @@ u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 
                 return 0u;
             }
             u32 inverse = 0;
-            if (!a64_condition_invert(condition, &inverse))
+            if (a64_condition_invert(condition, &inverse))
             {
-                return UINT8_MAX;
+                if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
+                {
+                    return 2u;
+                }
+                word = UINT32_C(0x14000000);
+                return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
             }
-            if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
-            {
-                return 2u;
-            }
-            word = UINT32_C(0x14000000);
-            return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
         }
     }
 
