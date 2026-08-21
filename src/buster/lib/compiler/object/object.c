@@ -4704,6 +4704,7 @@ bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offse
 
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice bytes, Target target)
 {
+    bool read_ok = true;
     ObjectFile result = {
         .target = target,
         .error = OBJECT_ERROR_INVALID_INPUT,
@@ -4729,738 +4730,623 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         (cpu_type == 0x01000007 && target.cpu_arch != CPU_ARCH_X86_64) || (cpu_type == 0x0100000c && target.cpu_arch != CPU_ARCH_AARCH64) ||
         (cpu_type != 0x01000007 && cpu_type != 0x0100000c))
     {
-        return result;
+        read_ok = false;
     }
     u32 mach_section_count = 0;
+    if (read_ok)
+    {
+        mach_section_count = 0;
+    }
     u32 symbol_offset = 0;
+    if (read_ok)
+    {
+        symbol_offset = 0;
+    }
     u32 symbol_count = 0;
+    if (read_ok)
+    {
+        symbol_count = 0;
+    }
     u32 string_offset = 0;
+    if (read_ok)
+    {
+        string_offset = 0;
+    }
     u32 string_size = 0;
-    u64 command = MACH_HEADER_SIZE;
-    u64 command_table_end = MACH_HEADER_SIZE + commands_size;
+    if (read_ok)
+    {
+        string_size = 0;
+    }
+    u64 command = 0;
+    if (read_ok)
+    {
+        command = MACH_HEADER_SIZE;
+    }
+    u64 command_table_end = 0;
+    if (read_ok)
+    {
+        command_table_end = MACH_HEADER_SIZE + commands_size;
+    }
     bool symbol_command_seen = false;
-    for (u32 command_index = 0; command_index < command_count; command_index += 1)
+    if (read_ok)
     {
-        u32 kind = 0;
-        u32 size = 0;
-        if (!object_read_u32(bytes, command, &kind) || !object_read_u32(bytes, command + 4, &size) || size < 8 || command > command_table_end ||
-            size > command_table_end - command || command > bytes.length || size > bytes.length - command)
+        symbol_command_seen = false;
+        for (u32 command_index = 0; command_index < command_count && read_ok; command_index += 1)
         {
-            return result;
-        }
-        if (kind == MACH_SEGMENT_COMMAND)
-        {
-            u32 section_count = 0;
-            if (size < 72 || !object_read_u32(bytes, command + 64, &section_count) || (u64)section_count * MACH_SECTION_SIZE > size - 72 ||
-                section_count > UINT32_MAX - mach_section_count)
+            u32 kind = 0;
+            u32 size = 0;
+            if (!object_read_u32(bytes, command, &kind) || !object_read_u32(bytes, command + 4, &size) || size < 8 || command > command_table_end ||
+                size > command_table_end - command || command > bytes.length || size > bytes.length - command)
             {
-                return result;
+                read_ok = false;
             }
-            mach_section_count += section_count;
-        }
-        else if (kind == MACH_SYMTAB_COMMAND)
-        {
-            if (size < 24 || symbol_command_seen || !object_read_u32(bytes, command + 8, &symbol_offset) || !object_read_u32(bytes, command + 12, &symbol_count) ||
-                !object_read_u32(bytes, command + 16, &string_offset) || !object_read_u32(bytes, command + 20, &string_size))
+            if (read_ok)
             {
-                return result;
+                if (kind == MACH_SEGMENT_COMMAND)
+                {
+                    u32 section_count = 0;
+                    if (size < 72 || !object_read_u32(bytes, command + 64, &section_count) || (u64)section_count * MACH_SECTION_SIZE > size - 72 ||
+                        section_count > UINT32_MAX - mach_section_count)
+                    {
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        mach_section_count += section_count;
+                    }
+                }
+                else if (kind == MACH_SYMTAB_COMMAND)
+                {
+                    if (size < 24 || symbol_command_seen || !object_read_u32(bytes, command + 8, &symbol_offset) || !object_read_u32(bytes, command + 12, &symbol_count) ||
+                        !object_read_u32(bytes, command + 16, &string_offset) || !object_read_u32(bytes, command + 20, &string_size))
+                    {
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        symbol_command_seen = true;
+                    }
+                }
             }
-            symbol_command_seen = true;
+            if (read_ok)
+            {
+                command += size;
+            }
         }
-        command += size;
     }
-    if (command != command_table_end || !mach_section_count || !symbol_command_seen || !symbol_offset || symbol_offset > bytes.length ||
-        (u64)symbol_count * MACH_SYMBOL_SIZE > bytes.length - symbol_offset ||
-        !string_size || string_offset > bytes.length || string_size > bytes.length - string_offset || bytes.pointer[string_offset] != 0)
+    if (read_ok)
     {
-        return result;
+        if (command != command_table_end || !mach_section_count || !symbol_command_seen || !symbol_offset || symbol_offset > bytes.length ||
+            (u64)symbol_count * MACH_SYMBOL_SIZE > bytes.length - symbol_offset ||
+            !string_size || string_offset > bytes.length || string_size > bytes.length - string_offset || bytes.pointer[string_offset] != 0)
+        {
+            read_ok = false;
+        }
     }
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    if (read_ok)
     {
-        return result;
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+        {
+            read_ok = false;
+        }
     }
-    u64* mach_sections = arena_allocate(arena, u64, mach_section_count);
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+    u64*mach_sections = 0;
+    if (read_ok)
     {
-        return result;
+        mach_sections = arena_allocate(arena, u64, mach_section_count);
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
     }
-    u32* section_kinds = arena_allocate(arena, u32, mach_section_count);
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    u32*section_kinds = 0;
+    if (read_ok)
     {
-        return result;
+        section_kinds = arena_allocate(arena, u32, mach_section_count);
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+        {
+            read_ok = false;
+        }
     }
-    u64* section_bases = arena_allocate(arena, u64, mach_section_count);
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+    u64*section_bases = 0;
+    if (read_ok)
     {
-        return result;
+        section_bases = arena_allocate(arena, u64, mach_section_count);
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
+        {
+            read_ok = false;
+        }
     }
-    u64* section_addresses = arena_allocate(arena, u64, mach_section_count);
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+    u64*section_addresses = 0;
+    if (read_ok)
     {
-        return result;
+        section_addresses = arena_allocate(arena, u64, mach_section_count);
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+        {
+            read_ok = false;
+        }
     }
-    bool* compact_sections = arena_allocate(arena, bool, mach_section_count);
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+    bool*compact_sections = 0;
+    if (read_ok)
     {
-        return result;
+        compact_sections = arena_allocate(arena, bool, mach_section_count);
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(bool), BUSTER_ALIGN_OF(bool)))
+        {
+            read_ok = false;
+        }
     }
-    bool* eh_frame_sections = arena_allocate(arena, bool, mach_section_count);
-    memset(compact_sections, 0, (u64)mach_section_count * sizeof(*compact_sections));
-    memset(eh_frame_sections, 0, (u64)mach_section_count * sizeof(*eh_frame_sections));
+    bool*eh_frame_sections = 0;
+    if (read_ok)
+    {
+        eh_frame_sections = arena_allocate(arena, bool, mach_section_count);
+        memset(compact_sections, 0, (u64)mach_section_count * sizeof(*compact_sections));
+        memset(eh_frame_sections, 0, (u64)mach_section_count * sizeof(*eh_frame_sections));
+    }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
-    for (u32 alignment_kind = 0; alignment_kind < OBJECT_SECTION_COUNT; alignment_kind += 1)
+    if (read_ok)
     {
-        section_alignments[alignment_kind] = 1;
+        for (u32 alignment_kind = 0; alignment_kind < OBJECT_SECTION_COUNT; alignment_kind += 1)
+        {
+            section_alignments[alignment_kind] = 1;
+        }
     }
     u32 relocation_capacity = 0;
+    if (read_ok)
+    {
+        relocation_capacity = 0;
+    }
     u32 compact_entry_count = 0;
+    if (read_ok)
+    {
+        compact_entry_count = 0;
+    }
     bool has_compact = false;
+    if (read_ok)
+    {
+        has_compact = false;
+    }
     u32 output_section_index = 0;
-    command = MACH_HEADER_SIZE;
-    for (u32 command_index = 0; command_index < command_count; command_index += 1)
+    if (read_ok)
     {
-        u32 kind = 0;
-        u32 size = 0;
-        object_read_u32(bytes, command, &kind);
-        object_read_u32(bytes, command + 4, &size);
-        if (kind == MACH_SEGMENT_COMMAND)
+        output_section_index = 0;
+        command = MACH_HEADER_SIZE;
+        for (u32 command_index = 0; command_index < command_count && read_ok; command_index += 1)
         {
-            u32 section_count = 0;
-            object_read_u32(bytes, command + 64, &section_count);
-            for (u32 section_index = 0; section_index < section_count; section_index += 1)
+            u32 kind = 0;
+            u32 size = 0;
+            object_read_u32(bytes, command, &kind);
+            object_read_u32(bytes, command + 4, &size);
+            if (kind == MACH_SEGMENT_COMMAND)
             {
-                u64 section = command + 72 + (u64)section_index * MACH_SECTION_SIZE;
-                u64 address = 0;
-                u64 section_size = 0;
-                u32 offset = 0;
-                u32 alignment_power = 0;
-                u32 relocation_offset = 0;
-                u32 relocation_count = 0;
-                u32 flags = 0;
-                if (!object_read_u64(bytes, section + 32, &address) || !object_read_u64(bytes, section + 40, &section_size) ||
-                    !object_read_u32(bytes, section + 48, &offset) || !object_read_u32(bytes, section + 52, &alignment_power) ||
-                    !object_read_u32(bytes, section + 56, &relocation_offset) || !object_read_u32(bytes, section + 60, &relocation_count) ||
-                    !object_read_u32(bytes, section + 64, &flags) || alignment_power > 31 ||
-                    (relocation_count &&
-                     (relocation_offset > bytes.length || (u64)relocation_count * MACH_RELOCATION_SIZE > bytes.length - relocation_offset)) ||
-                    relocation_count > UINT32_MAX - relocation_capacity)
+                u32 section_count = 0;
+                object_read_u32(bytes, command + 64, &section_count);
+                for (u32 section_index = 0; section_index < section_count && read_ok; section_index += 1)
                 {
-                    return result;
+                    u64 section = command + 72 + (u64)section_index * MACH_SECTION_SIZE;
+                    u64 address = 0;
+                    u64 section_size = 0;
+                    u32 offset = 0;
+                    u32 alignment_power = 0;
+                    u32 relocation_offset = 0;
+                    u32 relocation_count = 0;
+                    u32 flags = 0;
+                    if (!object_read_u64(bytes, section + 32, &address) || !object_read_u64(bytes, section + 40, &section_size) ||
+                        !object_read_u32(bytes, section + 48, &offset) || !object_read_u32(bytes, section + 52, &alignment_power) ||
+                        !object_read_u32(bytes, section + 56, &relocation_offset) || !object_read_u32(bytes, section + 60, &relocation_count) ||
+                        !object_read_u32(bytes, section + 64, &flags) || alignment_power > 31 ||
+                        (relocation_count &&
+                         (relocation_offset > bytes.length || (u64)relocation_count * MACH_RELOCATION_SIZE > bytes.length - relocation_offset)) ||
+                        relocation_count > UINT32_MAX - relocation_capacity)
+                    {
+                        read_ok = false;
+                    }
+                    u32 section_type = 0;
+                    if (read_ok)
+                    {
+                        section_type = flags & 0xff;
+                    }
+                    bool zero_fill = false;
+                    if (read_ok)
+                    {
+                        zero_fill = section_type == 1 || section_type == 0x12;
+                        if (!zero_fill && (offset > bytes.length || section_size > bytes.length - offset))
+                        {
+                            read_ok = false;
+                        }
+                    }
+                    String8 name = {0};
+                    if (read_ok)
+                    {
+                        name = (String8){
+                            .pointer = (char8*)bytes.pointer + section,
+                            .length = 0,
+                        };
+                        while (name.length < 16 && name.pointer[name.length])
+                        {
+                            name.length += 1;
+                        }
+                    }
+                    bool is_thread_local = false;
+                    if (read_ok)
+                    {
+                        is_thread_local = section_type == 0x11 || section_type == 0x12 || string_starts_with_sequence(name, S8("__thread"));
+                    }
+                    bool compact_unwind = false;
+                    if (read_ok)
+                    {
+                        compact_unwind = string_equal(name, S8("__compact_unwind"));
+                    }
+                    bool eh_frame = false;
+                    if (read_ok)
+                    {
+                        eh_frame = string_equal(name, S8("__eh_frame"));
+                        if (compact_unwind && (section_size % 32 || section_size / 32 > UINT32_MAX - compact_entry_count))
+                        {
+                            read_ok = false;
+                        }
+                    }
+                    if (read_ok)
+                    {
+                        has_compact |= compact_unwind;
+                        compact_entry_count += compact_unwind ? (u32)(section_size / 32) : 0;
+                    }
+                    // The __DWARF sections must keep their debug identity so that
+                    // their contents and relocations do not land in read-only data.
+                    ObjectSectionKind debug_kind = {0};
+                    if (read_ok)
+                    {
+                        debug_kind = object_debug_section_kind_from_name(name);
+                    }
+                    ObjectSectionKind output_kind = {0};
+                    if (read_ok)
+                    {
+                        output_kind = eh_frame                         ? OBJECT_SECTION_UNWIND
+                                                        : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+                                                        : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
+                                                        : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
+                                                        : zero_fill || string_starts_with_sequence(name, S8("__bss")) ? OBJECT_SECTION_ZERO
+                                                        : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
+                                                                                                             : OBJECT_SECTION_READ_ONLY_DATA;
+                    }
+                    u32 alignment = 0;
+                    if (read_ok)
+                    {
+                        alignment = 1u << alignment_power;
+                    }
+                    u64 output_size = 0;
+                    if (read_ok)
+                    {
+                        output_size = compact_unwind ? 0 : section_size;
+                    }
+                    u64 base = 0;
+                    if (read_ok)
+                    {
+                        base = align_forward(section_sizes[output_kind], alignment);
+                        if (base < section_sizes[output_kind] || output_size > UINT64_MAX - base)
+                        {
+                            read_ok = false;
+                        }
+                    }
+                    if (read_ok)
+                    {
+                        mach_sections[output_section_index] = section;
+                        section_kinds[output_section_index] = (u32)output_kind;
+                        section_bases[output_section_index] = base;
+                        section_addresses[output_section_index] = address;
+                        compact_sections[output_section_index] = compact_unwind;
+                        eh_frame_sections[output_section_index] = eh_frame;
+                        section_sizes[output_kind] = base + output_size;
+                        section_alignments[output_kind] = BUSTER_MAX(section_alignments[output_kind], alignment);
+                        relocation_capacity += relocation_count;
+                        output_section_index += 1;
+                    }
                 }
-                u32 section_type = flags & 0xff;
-                bool zero_fill = section_type == 1 || section_type == 0x12;
-                if (!zero_fill && (offset > bytes.length || section_size > bytes.length - offset))
-                {
-                    return result;
-                }
-                String8 name = {
-                    .pointer = (char8*)bytes.pointer + section,
-                    .length = 0,
+            }
+            if (read_ok)
+            {
+                command += size;
+            }
+        }
+    }
+    if (read_ok)
+    {
+        if (has_compact)
+        {
+            if (compact_entry_count > UINT32_MAX - relocation_capacity)
+            {
+                read_ok = false;
+            }
+            if (read_ok)
+            {
+                section_sizes[OBJECT_SECTION_UNWIND] = 0;
+                relocation_capacity += compact_entry_count;
+            }
+        }
+    }
+    if (read_ok)
+    {
+        if (!object_reader_section_sizes_valid(arena, section_sizes))
+        {
+            read_ok = false;
+        }
+    }
+    u64 symbol_capacity = 0;
+    if (read_ok)
+    {
+        symbol_capacity = (u64)symbol_count + mach_section_count + compact_entry_count;
+        if (symbol_capacity > UINT32_MAX)
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+        result.section_count = OBJECT_SECTION_COUNT;
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT && read_ok; kind += 1)
+        {
+            bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
+            if (!zero_fill && !object_reader_arena_can_allocate_count(arena, section_sizes[kind], sizeof(u8), BUSTER_ALIGN_OF(u8)))
+            {
+                read_ok = false;
+            }
+            if (read_ok)
+            {
+                result.sections[kind] = (ObjectSection){
+                    .name = object_section_name_for_kind((ObjectSectionKind)kind),
+                    .data =
+                        {
+                            .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
+                            .length = zero_fill ? 0 : section_sizes[kind],
+                        },
+                    .virtual_size = section_sizes[kind],
+                    .kind = (ObjectSectionKind)kind,
+                    .alignment = section_alignments[kind],
                 };
-                while (name.length < 16 && name.pointer[name.length])
-                {
-                    name.length += 1;
-                }
-                bool is_thread_local = section_type == 0x11 || section_type == 0x12 || string_starts_with_sequence(name, S8("__thread"));
-                bool compact_unwind = string_equal(name, S8("__compact_unwind"));
-                bool eh_frame = string_equal(name, S8("__eh_frame"));
-                if (compact_unwind && (section_size % 32 || section_size / 32 > UINT32_MAX - compact_entry_count))
-                {
-                    return result;
-                }
-                has_compact |= compact_unwind;
-                compact_entry_count += compact_unwind ? (u32)(section_size / 32) : 0;
-                // The __DWARF sections must keep their debug identity so that
-                // their contents and relocations do not land in read-only data.
-                ObjectSectionKind debug_kind = object_debug_section_kind_from_name(name);
-                ObjectSectionKind output_kind = eh_frame                         ? OBJECT_SECTION_UNWIND
-                                                : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
-                                                : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
-                                                : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
-                                                : zero_fill || string_starts_with_sequence(name, S8("__bss")) ? OBJECT_SECTION_ZERO
-                                                : string_starts_with_sequence(name, S8("__data")) ? OBJECT_SECTION_DATA
-                                                                                                     : OBJECT_SECTION_READ_ONLY_DATA;
-                u32 alignment = 1u << alignment_power;
-                u64 output_size = compact_unwind ? 0 : section_size;
-                u64 base = align_forward(section_sizes[output_kind], alignment);
-                if (base < section_sizes[output_kind] || output_size > UINT64_MAX - base)
-                {
-                    return result;
-                }
-                mach_sections[output_section_index] = section;
-                section_kinds[output_section_index] = (u32)output_kind;
-                section_bases[output_section_index] = base;
-                section_addresses[output_section_index] = address;
-                compact_sections[output_section_index] = compact_unwind;
-                eh_frame_sections[output_section_index] = eh_frame;
-                section_sizes[output_kind] = base + output_size;
-                section_alignments[output_kind] = BUSTER_MAX(section_alignments[output_kind], alignment);
-                relocation_capacity += relocation_count;
-                output_section_index += 1;
-            }
-        }
-        command += size;
-    }
-    if (has_compact)
-    {
-        if (compact_entry_count > UINT32_MAX - relocation_capacity)
-        {
-            return result;
-        }
-        section_sizes[OBJECT_SECTION_UNWIND] = 0;
-        relocation_capacity += compact_entry_count;
-    }
-    if (!object_reader_section_sizes_valid(arena, section_sizes))
-    {
-        return result;
-    }
-    u64 symbol_capacity = (u64)symbol_count + mach_section_count + compact_entry_count;
-    if (symbol_capacity > UINT32_MAX)
-    {
-        return result;
-    }
-    if (!object_reader_arena_can_allocate_count(arena, OBJECT_SECTION_COUNT, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)))
-    {
-        return result;
-    }
-    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
-    result.section_count = OBJECT_SECTION_COUNT;
-    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
-    {
-        bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
-        if (!zero_fill && !object_reader_arena_can_allocate_count(arena, section_sizes[kind], sizeof(u8), BUSTER_ALIGN_OF(u8)))
-        {
-            return result;
-        }
-        result.sections[kind] = (ObjectSection){
-            .name = object_section_name_for_kind((ObjectSectionKind)kind),
-            .data =
-                {
-                    .pointer = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]),
-                    .length = zero_fill ? 0 : section_sizes[kind],
-                },
-            .virtual_size = section_sizes[kind],
-            .kind = (ObjectSectionKind)kind,
-            .alignment = section_alignments[kind],
-        };
-    }
-    for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
-    {
-        u64 section = mach_sections[section_index];
-        u64 size = 0;
-        u32 offset = 0;
-        u32 flags = 0;
-        object_read_u64(bytes, section + 40, &size);
-        object_read_u32(bytes, section + 48, &offset);
-        object_read_u32(bytes, section + 64, &flags);
-        u32 section_type = flags & 0xff;
-        if (section_type != 1 && section_type != 0x12 && size && !compact_sections[section_index] && !(has_compact && eh_frame_sections[section_index]))
-        {
-            ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
-            memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
-        }
-    }
-    if (!object_reader_arena_can_allocate_count(arena, symbol_capacity, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
-    {
-        return result;
-    }
-    result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
-    if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
-    {
-        return result;
-    }
-    u32* symbol_map = arena_allocate(arena, u32, symbol_count);
-    u64 symbol_name_bytes = 0;
-    for (u32 source_index = 0; source_index < symbol_count; source_index += 1)
-    {
-        symbol_map[source_index] = UINT32_MAX;
-        u64 source = symbol_offset + (u64)source_index * MACH_SYMBOL_SIZE;
-        u32 name_offset = 0;
-        u16 description = 0;
-        u64 value = 0;
-        if (!object_read_u32(bytes, source, &name_offset) || !object_read_u16(bytes, source + 6, &description) ||
-            !object_read_u64(bytes, source + 8, &value))
-        {
-            return result;
-        }
-        u8 symbol_type = bytes.pointer[source + 4];
-        u8 section_number = bytes.pointer[source + 5];
-        if (symbol_type & 0xe0)
-        {
-            continue;
-        }
-        u8 kind = symbol_type & 0x0e;
-        if (kind == 0x0e && (!section_number || section_number > mach_section_count))
-        {
-            return result;
-        }
-        if (kind == 0x0e && section_kinds[section_number - 1] == UINT32_MAX)
-        {
-            continue;
-        }
-        if (kind != 0 && kind != 0x0e)
-        {
-            continue;
-        }
-        String8 name = {0};
-        if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
-        {
-            return result;
-        }
-        if (name.length > UINT64_MAX - symbol_name_bytes)
-        {
-            return result;
-        }
-        symbol_name_bytes += name.length;
-        if (name.length && name.pointer[0] == '_')
-        {
-            name.pointer += 1;
-            name.length -= 1;
-        }
-        if (!name.length)
-        {
-            String8 prefix = S8(".Lmach.");
-            if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
-            {
-                return result;
-            }
-            name = string_format(arena, S8(".Lmach.{u32}"), source_index);
-        }
-        if (!object_reader_arena_can_allocate_bytes(arena, name.length, BUSTER_ALIGN_OF(char8)))
-        {
-            return result;
-        }
-        u32 destination_index = result.symbol_count++;
-        u64 section_value = 0;
-        if (kind == 0x0e)
-        {
-            u32 section_index = section_number - 1;
-            if (value < section_addresses[section_index])
-            {
-                return result;
-            }
-            u64 relative_value = value - section_addresses[section_index];
-            ObjectSectionKind symbol_kind = (ObjectSectionKind)section_kinds[section_index];
-            u64 symbol_base = section_bases[section_index];
-            if (symbol_base > result.sections[symbol_kind].virtual_size || relative_value > result.sections[symbol_kind].virtual_size - symbol_base ||
-                relative_value > UINT64_MAX - symbol_base)
-            {
-                return result;
-            }
-            section_value = symbol_base + relative_value;
-        }
-        u32 reference_kind = description & 0x7;
-        // Mach-O's reference type is a state/visibility flag, not a symbol
-        // language-kind bit.  Keep the standard values and reject unknown or
-        // state-inconsistent combinations instead of silently treating them
-        // as data.  LLVM commonly leaves defined symbols at NON_LAZY (0),
-        // while our writer emits DEFINED (2), so both are accepted for N_SECT.
-        if (reference_kind > 5 ||
-            (kind == 0 && (reference_kind == 2 || reference_kind == 3)) ||
-            (kind == 0x0e && (reference_kind == 1 || reference_kind == 4 || reference_kind == 5)))
-        {
-            return result;
-        }
-        // PAGE/PAGEOFF references can name either a function address or data,
-        // so ordinary undefined symbols remain data until a BRANCH26
-        // relocation below upgrades them.  Genuine lazy-symbol-pointer
-        // references carry explicit function evidence in n_desc (1 or 5).
-        bool function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
-                               (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
-        result.symbols[destination_index] = (ObjectSymbol){
-            .name = string_duplicate_arena(arena, name, false),
-            .value = section_value,
-            .section = kind == 0x0e ? section_kinds[section_number - 1] : OBJECT_SECTION_UNDEFINED,
-            .kind = function_symbol ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
-            .global = (symbol_type & 1) != 0,
-        };
-        symbol_map[source_index] = destination_index;
-    }
-    if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
-    {
-        return result;
-    }
-    u32* section_symbol_maps = arena_allocate(arena, u32, mach_section_count);
-    for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
-    {
-        section_symbol_maps[section_index] = UINT32_MAX;
-    }
-    if (!object_reader_arena_can_allocate_count(arena, relocation_capacity, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)))
-    {
-        return result;
-    }
-    result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
-    for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
-    {
-        u64 section = mach_sections[section_index];
-        u64 section_size = 0;
-        u32 raw_offset = 0;
-        u32 relocation_offset = 0;
-        u32 relocation_count = 0;
-        object_read_u64(bytes, section + 40, &section_size);
-        object_read_u32(bytes, section + 48, &raw_offset);
-        object_read_u32(bytes, section + 56, &relocation_offset);
-        object_read_u32(bytes, section + 60, &relocation_count);
-        if (compact_sections[section_index] || (has_compact && eh_frame_sections[section_index]))
-        {
-            continue;
-        }
-        bool pending_addend = false;
-        s64 pending_addend_value = 0;
-        u32 pending_addend_offset = 0;
-        for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
-        {
-            u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
-            u32 source_offset_u32 = 0;
-            u32 information = 0;
-            object_read_u32(bytes, relocation, &source_offset_u32);
-            object_read_u32(bytes, relocation + 4, &information);
-            s32 source_offset = (s32)source_offset_u32;
-            u32 source_symbol = information & 0x00ffffff;
-            bool pc_relative = (information & (1u << 24)) != 0;
-            bool external = (information & (1u << 27)) != 0;
-            u32 relocation_type = information >> 28;
-            u32 length = (information >> 25) & 0x3;
-            if (source_offset < 0 || (u64)source_offset > section_size)
-            {
-                return result;
-            }
-            u32 relocation_width = 1u << length;
-            if (object_section_kind_is_zero_fill((ObjectSectionKind)section_kinds[section_index]) ||
-                relocation_width > section_size - (u64)source_offset)
-            {
-                return result;
-            }
-            ObjectSectionKind current_section_kind = (ObjectSectionKind)section_kinds[section_index];
-            if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1 && length == 2 &&
-                !object_section_kind_is_zero_fill(current_section_kind))
-            {
-                u32 next_source_offset = 0;
-                u32 next_information = 0;
-                if (relocation_index + 1 >= relocation_count || !external || pc_relative || (source_offset_u32 & 3) ||
-                    section_bases[section_index] > UINT64_MAX - source_offset_u32 ||
-                    ((section_bases[section_index] + source_offset_u32) & 3) ||
-                    result.sections[section_kinds[section_index]].alignment < 4 ||
-                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
-                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
-                    (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)) ||
-                    (next_information & (1u << 24)))
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                u32 subtractor_source_symbol = source_symbol;
-                u32 target_source_symbol = next_information & 0x00ffffff;
-                if (subtractor_source_symbol >= symbol_count || target_source_symbol >= symbol_count ||
-                    symbol_map[subtractor_source_symbol] == UINT32_MAX || symbol_map[target_source_symbol] == UINT32_MAX)
-                {
-                    return result;
-                }
-                ObjectSymbol* subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
-                u64 place = section_bases[section_index] + (u64)source_offset_u32;
-                if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind || subtractor->value != place)
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                u32 stored = 0;
-                if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                {
-                    return result;
-                }
-                result.relocations[result.relocation_count++] = (ObjectRelocation){
-                    .addend = (s32)stored,
-                    .offset = place,
-                    .section = (u32)current_section_kind,
-                    .symbol = symbol_map[target_source_symbol],
-                    .kind = OBJECT_RELOCATION_AARCH64_PREL32,
-                };
-                relocation_index += 1;
-                continue;
-            }
-            if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 10)
-            {
-                u32 next_source_offset = 0;
-                u32 next_information = 0;
-                if (pending_addend || pc_relative || external || length != 2 || relocation_index + 1 >= relocation_count ||
-                    !a64_signed_scaled_immediate_decode(source_symbol, 24, 0, &pending_addend_value) ||
-                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
-                    !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
-                    ((next_information >> 28) != 2 && (next_information >> 28) != 3 && (next_information >> 28) != 4 &&
-                     (next_information >> 28) != 8 && (next_information >> 28) != 9))
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                pending_addend = true;
-                pending_addend_offset = source_offset_u32;
-                continue;
-            }
-            if (pending_addend && (target.cpu_arch != CPU_ARCH_AARCH64 || source_offset_u32 != pending_addend_offset ||
-                                   (relocation_type != 2 && relocation_type != 3 && relocation_type != 4 && relocation_type != 8 && relocation_type != 9)))
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                return result;
-            }
-            u32 destination_symbol = UINT32_MAX;
-            if (external)
-            {
-                if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
-                {
-                    return result;
-                }
-                destination_symbol = symbol_map[source_symbol];
-            }
-            else
-            {
-                if (!source_symbol || source_symbol > mach_section_count)
-                {
-                    return result;
-                }
-                u32 referenced_section = source_symbol - 1;
-                if (section_kinds[referenced_section] == UINT32_MAX)
-                {
-                    return result;
-                }
-                destination_symbol = section_symbol_maps[referenced_section];
-                if (destination_symbol == UINT32_MAX)
-                {
-                    String8 prefix = S8(".Lmach_section.");
-                    if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
-                    {
-                        return result;
-                    }
-                    destination_symbol = result.symbol_count++;
-                    section_symbol_maps[referenced_section] = destination_symbol;
-                    result.symbols[destination_symbol] = (ObjectSymbol){
-                        .name = string_format(arena, S8(".Lmach_section.{u32}"), referenced_section),
-                        .section = section_kinds[referenced_section],
-                        .kind = OBJECT_SYMBOL_DATA,
-                    };
-                }
-            }
-            ObjectRelocationKind output_kind = OBJECT_RELOCATION_COUNT;
-            s64 addend = 0;
-            if (target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                if (relocation_type == 0 && length == 3)
-                {
-                    u64 stored = 0;
-                    if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                    {
-                        return result;
-                    }
-                    output_kind = OBJECT_RELOCATION_ABSOLUTE64;
-                    addend = (s64)stored;
-                }
-                else if (relocation_type == 0 && length == 2)
-                {
-                    u32 stored = 0;
-                    if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                    {
-                        return result;
-                    }
-                    output_kind = OBJECT_RELOCATION_ABSOLUTE32;
-                    addend = (s64)stored;
-                }
-                else if ((relocation_type == 1 || relocation_type == 2 || (relocation_type >= 6 && relocation_type <= 8) || relocation_type == 9) &&
-                         length == 2)
-                {
-                    u32 stored = 0;
-                    if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                    {
-                        return result;
-                    }
-                    output_kind = relocation_type == 9 ? OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 : OBJECT_RELOCATION_X86_64_PC32;
-                    addend = (s64)(s32)stored - 4;
-                    if (relocation_type == 2)
-                    {
-                        result.symbols[destination_symbol].kind = OBJECT_SYMBOL_FUNCTION;
-                    }
-                }
-            }
-            else
-            {
-                output_kind = relocation_type == 0 && length == 3   ? OBJECT_RELOCATION_ABSOLUTE64
-                              : relocation_type == 0 && length == 2 && object_section_kind_is_debug(current_section_kind)
-                                  ? OBJECT_RELOCATION_ABSOLUTE32
-                              : relocation_type == 2 && length == 2 ? OBJECT_RELOCATION_AARCH64_CALL26
-                              : relocation_type == 3 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_PAGE21
-                              : relocation_type == 4 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12
-                              : relocation_type == 8 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21
-                              : relocation_type == 9 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
-                                                                    : OBJECT_RELOCATION_COUNT;
-                if (relocation_type == 0 && length == 3)
-                {
-                    u64 stored = 0;
-                    if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                    {
-                        return result;
-                    }
-                    addend = (s64)stored;
-                }
-                if (relocation_type == 0 && length == 2 && object_section_kind_is_debug(current_section_kind))
-                {
-                    u32 stored = 0;
-                    if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
-                    {
-                        return result;
-                    }
-                    addend = (s64)stored;
-                }
-                if (relocation_type == 2 && length == 2)
-                {
-                    u32 stored = 0;
-                    A64MCInst decoded = {0};
-                    if (!pc_relative || !external || ((section_bases[section_index] + source_offset_u32) & 3) ||
-                        result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored) ||
-                        !a64_mc_decode(stored, &decoded) || (decoded.opcode != A64_OPCODE_B && decoded.opcode != A64_OPCODE_BL) ||
-                        decoded.operands[0].value != 0)
-                    {
-                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
-                    }
-                    output_kind = decoded.opcode == A64_OPCODE_B ? OBJECT_RELOCATION_AARCH64_JUMP26 : OBJECT_RELOCATION_AARCH64_CALL26;
-                    addend = pending_addend ? pending_addend_value : 0;
-                    pending_addend = false;
-                    result.symbols[destination_symbol].kind = OBJECT_SYMBOL_FUNCTION;
-                }
-                if (relocation_type == 3 && length == 2)
-                {
-                    u32 stored = 0;
-                    if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
-                    {
-                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
-                    }
-                    addend = pending_addend ? pending_addend_value : 0;
-                    pending_addend = false;
-                }
-                if (relocation_type == 4 && length == 2)
-                {
-                    u32 stored = 0;
-                    u32 shift = 0;
-                    if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
-                        !object_mach_pageoff12_shift(stored, &shift))
-                    {
-                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
-                    }
-                    addend = pending_addend ? pending_addend_value : 0;
-                    pending_addend = false;
-                }
-                if (relocation_type == 8 && length == 2)
-                {
-                    u32 stored = 0;
-                    if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
-                    {
-                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
-                    }
-                    addend = pending_addend ? pending_addend_value : 0;
-                    pending_addend = false;
-                }
-                if (relocation_type == 9 && length == 2)
-                {
-                    u32 stored = 0;
-                    u32 shift = 0;
-                    if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_pageoff12_shift(stored, &shift) || shift != 3 ||
-                        (stored & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000))
-                    {
-                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
-                    }
-                    addend = pending_addend ? pending_addend_value : 0;
-                    pending_addend = false;
-                }
-            }
-            if (output_kind == OBJECT_RELOCATION_COUNT)
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                return result;
-            }
-            result.relocations[result.relocation_count++] = (ObjectRelocation){
-                .addend = addend,
-                .offset = section_bases[section_index] + (u32)source_offset,
-                .section = section_kinds[section_index],
-                .symbol = destination_symbol,
-                .kind = output_kind,
-            };
-        }
-        if (pending_addend)
-        {
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            return result;
-        }
-    }
-    u32* text_symbol_map = 0;
-    u64 text_symbol_map_capacity = 0;
-    if (has_compact)
-    {
-        u64 desired_capacity = (u64)result.symbol_count * 2 + 1;
-        text_symbol_map_capacity = 1;
-        while (text_symbol_map_capacity < desired_capacity)
-        {
-            if (text_symbol_map_capacity > UINT64_MAX / 2)
-            {
-                return result;
-            }
-            text_symbol_map_capacity *= 2;
-        }
-        if (!object_reader_arena_can_allocate_count(arena, text_symbol_map_capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)))
-        {
-            return result;
-        }
-        text_symbol_map = arena_allocate(arena, u32, text_symbol_map_capacity);
-        memset(text_symbol_map, 0xff, sizeof(*text_symbol_map) * text_symbol_map_capacity);
-        for (u32 symbol_index = 0; symbol_index < result.symbol_count; symbol_index += 1)
-        {
-            if (result.symbols[symbol_index].section != OBJECT_SECTION_TEXT)
-            {
-                continue;
-            }
-            u64 bucket = object_reader_hash_u64(result.symbols[symbol_index].value) & (text_symbol_map_capacity - 1);
-            for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
-            {
-                u32 candidate = text_symbol_map[bucket];
-                if (candidate == UINT32_MAX)
-                {
-                    text_symbol_map[bucket] = symbol_index;
-                    break;
-                }
-                if (result.symbols[candidate].value == result.symbols[symbol_index].value)
-                {
-                    break;
-                }
-                bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
             }
         }
     }
-    if (has_compact)
+    if (read_ok)
     {
-        if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(CodegenFunctionDescriptor), BUSTER_ALIGN_OF(CodegenFunctionDescriptor)))
-        {
-            return result;
-        }
-        CodegenFunctionDescriptor* functions = arena_allocate(arena, CodegenFunctionDescriptor, compact_entry_count);
-        if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
-        {
-            return result;
-        }
-        u32* function_symbols = arena_allocate(arena, u32, compact_entry_count);
-        u32 function_count = 0;
         for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
         {
-            if (!compact_sections[section_index])
+            u64 section = mach_sections[section_index];
+            u64 size = 0;
+            u32 offset = 0;
+            u32 flags = 0;
+            object_read_u64(bytes, section + 40, &size);
+            object_read_u32(bytes, section + 48, &offset);
+            object_read_u32(bytes, section + 64, &flags);
+            u32 section_type = flags & 0xff;
+            if (section_type != 1 && section_type != 0x12 && size && !compact_sections[section_index] && !(has_compact && eh_frame_sections[section_index]))
             {
-                continue;
+                ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
+                memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
             }
+        }
+        if (!object_reader_arena_can_allocate_count(arena, symbol_capacity, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)))
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        result.symbols = arena_allocate(arena, ObjectSymbol, symbol_capacity);
+        if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    u32*symbol_map = 0;
+    if (read_ok)
+    {
+        symbol_map = arena_allocate(arena, u32, symbol_count);
+    }
+    u64 symbol_name_bytes = 0;
+    if (read_ok)
+    {
+        symbol_name_bytes = 0;
+        for (u32 source_index = 0; source_index < symbol_count && read_ok; source_index += 1)
+        {
+            symbol_map[source_index] = UINT32_MAX;
+            u64 source = symbol_offset + (u64)source_index * MACH_SYMBOL_SIZE;
+            u32 name_offset = 0;
+            u16 description = 0;
+            u64 value = 0;
+            if (!object_read_u32(bytes, source, &name_offset) || !object_read_u16(bytes, source + 6, &description) ||
+                !object_read_u64(bytes, source + 8, &value))
+            {
+                read_ok = false;
+            }
+            u8 symbol_type = 0;
+            if (read_ok)
+            {
+                symbol_type = bytes.pointer[source + 4];
+            }
+            u8 section_number = 0;
+            if (read_ok)
+            {
+                section_number = bytes.pointer[source + 5];
+                if (symbol_type & 0xe0)
+                {
+                    continue;
+                }
+            }
+            u8 kind = 0;
+            if (read_ok)
+            {
+                kind = symbol_type & 0x0e;
+                if (kind == 0x0e && (!section_number || section_number > mach_section_count))
+                {
+                    read_ok = false;
+                }
+            }
+            if (read_ok)
+            {
+                if (kind == 0x0e && section_kinds[section_number - 1] == UINT32_MAX)
+                {
+                    continue;
+                }
+                if (kind != 0 && kind != 0x0e)
+                {
+                    continue;
+                }
+            }
+            String8 name = {0};
+            if (read_ok)
+            {
+                name = (String8){0};
+                if (!object_read_string_checked(bytes, string_offset, string_size, name_offset, &name))
+                {
+                    read_ok = false;
+                }
+            }
+            if (read_ok)
+            {
+                if (name.length > UINT64_MAX - symbol_name_bytes)
+                {
+                    read_ok = false;
+                }
+            }
+            if (read_ok)
+            {
+                symbol_name_bytes += name.length;
+                if (name.length && name.pointer[0] == '_')
+                {
+                    name.pointer += 1;
+                    name.length -= 1;
+                }
+                if (!name.length)
+                {
+                    String8 prefix = S8(".Lmach.");
+                    if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                    {
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        name = string_format(arena, S8(".Lmach.{u32}"), source_index);
+                    }
+                }
+            }
+            if (read_ok)
+            {
+                if (!object_reader_arena_can_allocate_bytes(arena, name.length, BUSTER_ALIGN_OF(char8)))
+                {
+                    read_ok = false;
+                }
+            }
+            u32 destination_index = 0;
+            if (read_ok)
+            {
+                destination_index = result.symbol_count++;
+            }
+            u64 section_value = 0;
+            if (read_ok)
+            {
+                section_value = 0;
+                if (kind == 0x0e)
+                {
+                    u32 section_index = section_number - 1;
+                    if (value < section_addresses[section_index])
+                    {
+                        read_ok = false;
+                    }
+                    u64 relative_value = 0;
+                    if (read_ok)
+                    {
+                        relative_value = value - section_addresses[section_index];
+                    }
+                    ObjectSectionKind symbol_kind = {0};
+                    if (read_ok)
+                    {
+                        symbol_kind = (ObjectSectionKind)section_kinds[section_index];
+                    }
+                    u64 symbol_base = 0;
+                    if (read_ok)
+                    {
+                        symbol_base = section_bases[section_index];
+                        if (symbol_base > result.sections[symbol_kind].virtual_size || relative_value > result.sections[symbol_kind].virtual_size - symbol_base ||
+                            relative_value > UINT64_MAX - symbol_base)
+                        {
+                            read_ok = false;
+                        }
+                    }
+                    if (read_ok)
+                    {
+                        section_value = symbol_base + relative_value;
+                    }
+                }
+            }
+            u32 reference_kind = 0;
+            if (read_ok)
+            {
+                reference_kind = description & 0x7;
+                // Mach-O's reference type is a state/visibility flag, not a symbol
+                // language-kind bit.  Keep the standard values and reject unknown or
+                // state-inconsistent combinations instead of silently treating them
+                // as data.  LLVM commonly leaves defined symbols at NON_LAZY (0),
+                // while our writer emits DEFINED (2), so both are accepted for N_SECT.
+                if (reference_kind > 5 ||
+                    (kind == 0 && (reference_kind == 2 || reference_kind == 3)) ||
+                    (kind == 0x0e && (reference_kind == 1 || reference_kind == 4 || reference_kind == 5)))
+                {
+                    read_ok = false;
+                }
+            }
+            // PAGE/PAGEOFF references can name either a function address or data,
+            // so ordinary undefined symbols remain data until a BRANCH26
+            // relocation below upgrades them.  Genuine lazy-symbol-pointer
+            // references carry explicit function evidence in n_desc (1 or 5).
+            bool function_symbol = false;
+            if (read_ok)
+            {
+                function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
+                                  (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
+                result.symbols[destination_index] = (ObjectSymbol){
+                    .name = string_duplicate_arena(arena, name, false),
+                    .value = section_value,
+                    .section = kind == 0x0e ? section_kinds[section_number - 1] : OBJECT_SECTION_UNDEFINED,
+                    .kind = function_symbol ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+                    .global = (symbol_type & 1) != 0,
+                };
+                symbol_map[source_index] = destination_index;
+            }
+        }
+    }
+    if (read_ok)
+    {
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    u32*section_symbol_maps = 0;
+    if (read_ok)
+    {
+        section_symbol_maps = arena_allocate(arena, u32, mach_section_count);
+        for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
+        {
+            section_symbol_maps[section_index] = UINT32_MAX;
+        }
+        if (!object_reader_arena_can_allocate_count(arena, relocation_capacity, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)))
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity);
+        for (u32 section_index = 0; section_index < mach_section_count && read_ok; section_index += 1)
+        {
             u64 section = mach_sections[section_index];
             u64 section_size = 0;
             u32 raw_offset = 0;
@@ -5470,184 +5356,705 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             object_read_u32(bytes, section + 48, &raw_offset);
             object_read_u32(bytes, section + 56, &relocation_offset);
             object_read_u32(bytes, section + 60, &relocation_count);
-            u32 entry_count = (u32)(section_size / 32);
-            if (relocation_count != entry_count)
+            if (compact_sections[section_index] || (has_compact && eh_frame_sections[section_index]))
             {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                return result;
+                continue;
             }
-            if (entry_count && !object_reader_arena_can_allocate_count(arena, entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
-            {
-                return result;
-            }
-            u32* compact_relocation_map = entry_count ? arena_allocate(arena, u32, entry_count) : 0;
-            for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
-            {
-                compact_relocation_map[entry_index] = UINT32_MAX;
-            }
-            for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
+            bool pending_addend = false;
+            s64 pending_addend_value = 0;
+            u32 pending_addend_offset = 0;
+            for (u32 relocation_index = 0; relocation_index < relocation_count && read_ok; relocation_index += 1)
             {
                 u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
-                u32 source_offset = 0;
-                if (!object_read_u32(bytes, relocation, &source_offset) || source_offset % 32 != 0 || source_offset / 32 >= entry_count)
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                u32 compact_entry_index = source_offset / 32;
-                if (compact_relocation_map[compact_entry_index] != UINT32_MAX)
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                compact_relocation_map[compact_entry_index] = relocation_index;
-            }
-            for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
-            {
-                u32 entry_offset = entry_index * 32;
-                u64 entry = (u64)raw_offset + entry_offset;
-                u32 function_size = 0;
-                u32 encoding = 0;
-                u64 personality = 0;
-                u64 lsda = 0;
-                if (!object_read_u32(bytes, entry + 8, &function_size) || !object_read_u32(bytes, entry + 12, &encoding) ||
-                    !object_read_u64(bytes, entry + 16, &personality) || !object_read_u64(bytes, entry + 24, &lsda) || personality || lsda)
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                u32 relocation_index = compact_relocation_map[entry_index];
+                u32 source_offset_u32 = 0;
                 u32 information = 0;
-                if (relocation_index == UINT32_MAX ||
-                    !object_read_u32(bytes, relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE + 4, &information) ||
-                    (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
+                object_read_u32(bytes, relocation, &source_offset_u32);
+                object_read_u32(bytes, relocation + 4, &information);
+                s32 source_offset = (s32)source_offset_u32;
                 u32 source_symbol = information & 0x00ffffff;
+                bool pc_relative = (information & (1u << 24)) != 0;
                 bool external = (information & (1u << 27)) != 0;
-                u64 stored = 0;
-                object_read_u64(bytes, entry, &stored);
-                u64 function_offset = 0;
-                if (external)
+                u32 relocation_type = information >> 28;
+                u32 length = (information >> 25) & 0x3;
+                if (source_offset < 0 || (u64)source_offset > section_size)
                 {
-                    if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
+                    read_ok = false;
+                }
+                u32 relocation_width = 0;
+                if (read_ok)
+                {
+                    relocation_width = 1u << length;
+                    if (object_section_kind_is_zero_fill((ObjectSectionKind)section_kinds[section_index]) ||
+                        relocation_width > section_size - (u64)source_offset)
                     {
-                        return result;
+                        read_ok = false;
                     }
-                    ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
-                    if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                }
+                ObjectSectionKind current_section_kind = {0};
+                if (read_ok)
+                {
+                    current_section_kind = (ObjectSectionKind)section_kinds[section_index];
+                    if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1 && length == 2 &&
+                        !object_section_kind_is_zero_fill(current_section_kind))
+                    {
+                        u32 next_source_offset = 0;
+                        u32 next_information = 0;
+                        if (relocation_index + 1 >= relocation_count || !external || pc_relative || (source_offset_u32 & 3) ||
+                            section_bases[section_index] > UINT64_MAX - source_offset_u32 ||
+                            ((section_bases[section_index] + source_offset_u32) & 3) ||
+                            result.sections[section_kinds[section_index]].alignment < 4 ||
+                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
+                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
+                            (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)) ||
+                            (next_information & (1u << 24)))
+                        {
+                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                            read_ok = false;
+                        }
+                        u32 subtractor_source_symbol = 0;
+                        if (read_ok)
+                        {
+                            subtractor_source_symbol = source_symbol;
+                        }
+                        u32 target_source_symbol = 0;
+                        if (read_ok)
+                        {
+                            target_source_symbol = next_information & 0x00ffffff;
+                            if (subtractor_source_symbol >= symbol_count || target_source_symbol >= symbol_count ||
+                                symbol_map[subtractor_source_symbol] == UINT32_MAX || symbol_map[target_source_symbol] == UINT32_MAX)
+                            {
+                                read_ok = false;
+                            }
+                        }
+                        ObjectSymbol*subtractor = 0;
+                        if (read_ok)
+                        {
+                            subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
+                        }
+                        u64 place = 0;
+                        if (read_ok)
+                        {
+                            place = section_bases[section_index] + (u64)source_offset_u32;
+                            if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind || subtractor->value != place)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                        }
+                        u32 stored = 0;
+                        if (read_ok)
+                        {
+                            stored = 0;
+                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            {
+                                read_ok = false;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                                .addend = (s32)stored,
+                                .offset = place,
+                                .section = (u32)current_section_kind,
+                                .symbol = symbol_map[target_source_symbol],
+                                .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+                            };
+                            relocation_index += 1;
+                        }
+                        continue;
+                    }
+                }
+                if (read_ok)
+                {
+                    if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 10)
+                    {
+                        u32 next_source_offset = 0;
+                        u32 next_information = 0;
+                        if (pending_addend || pc_relative || external || length != 2 || relocation_index + 1 >= relocation_count ||
+                            !a64_signed_scaled_immediate_decode(source_symbol, 24, 0, &pending_addend_value) ||
+                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
+                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
+                            ((next_information >> 28) != 2 && (next_information >> 28) != 3 && (next_information >> 28) != 4 &&
+                             (next_information >> 28) != 8 && (next_information >> 28) != 9))
+                        {
+                            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                            read_ok = false;
+                        }
+                        if (read_ok)
+                        {
+                            pending_addend = true;
+                            pending_addend_offset = source_offset_u32;
+                        }
+                        continue;
+                    }
+                }
+                if (read_ok)
+                {
+                    if (pending_addend && (target.cpu_arch != CPU_ARCH_AARCH64 || source_offset_u32 != pending_addend_offset ||
+                                           (relocation_type != 2 && relocation_type != 3 && relocation_type != 4 && relocation_type != 8 && relocation_type != 9)))
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
+                        read_ok = false;
                     }
-                    function_offset = symbol->value + stored;
                 }
-                else
+                u32 destination_symbol = 0;
+                if (read_ok)
                 {
-                    if (!source_symbol || source_symbol > mach_section_count)
+                    destination_symbol = UINT32_MAX;
+                    if (external)
                     {
-                        return result;
+                        if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
+                        {
+                            read_ok = false;
+                        }
+                        if (read_ok)
+                        {
+                            destination_symbol = symbol_map[source_symbol];
+                        }
                     }
-                    u32 referenced_section = source_symbol - 1;
-                    if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                    else
+                    {
+                        if (!source_symbol || source_symbol > mach_section_count)
+                        {
+                            read_ok = false;
+                        }
+                        u32 referenced_section = 0;
+                        if (read_ok)
+                        {
+                            referenced_section = source_symbol - 1;
+                            if (section_kinds[referenced_section] == UINT32_MAX)
+                            {
+                                read_ok = false;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            destination_symbol = section_symbol_maps[referenced_section];
+                            if (destination_symbol == UINT32_MAX)
+                            {
+                                String8 prefix = S8(".Lmach_section.");
+                                if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    read_ok = false;
+                                }
+                                destination_symbol = result.symbol_count++;
+                                section_symbol_maps[referenced_section] = destination_symbol;
+                                result.symbols[destination_symbol] = (ObjectSymbol){
+                                    .name = string_format(arena, S8(".Lmach_section.{u32}"), referenced_section),
+                                    .section = section_kinds[referenced_section],
+                                    .kind = OBJECT_SYMBOL_DATA,
+                                };
+                            }
+                        }
+                    }
+                }
+                ObjectRelocationKind output_kind = {0};
+                if (read_ok)
+                {
+                    output_kind = OBJECT_RELOCATION_COUNT;
+                }
+                s64 addend = 0;
+                if (read_ok)
+                {
+                    addend = 0;
+                    if (target.cpu_arch == CPU_ARCH_X86_64)
+                    {
+                        if (relocation_type == 0 && length == 3)
+                        {
+                            u64 stored = 0;
+                            if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            {
+                                read_ok = false;
+                            }
+                            output_kind = OBJECT_RELOCATION_ABSOLUTE64;
+                            addend = (s64)stored;
+                        }
+                        else if (relocation_type == 0 && length == 2)
+                        {
+                            u32 stored = 0;
+                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            {
+                                read_ok = false;
+                            }
+                            output_kind = OBJECT_RELOCATION_ABSOLUTE32;
+                            addend = (s64)stored;
+                        }
+                        else if ((relocation_type == 1 || relocation_type == 2 || (relocation_type >= 6 && relocation_type <= 8) || relocation_type == 9) &&
+                                 length == 2)
+                        {
+                            u32 stored = 0;
+                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            {
+                                read_ok = false;
+                            }
+                            output_kind = relocation_type == 9 ? OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 : OBJECT_RELOCATION_X86_64_PC32;
+                            addend = (s64)(s32)stored - 4;
+                            if (relocation_type == 2)
+                            {
+                                result.symbols[destination_symbol].kind = OBJECT_SYMBOL_FUNCTION;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        output_kind = relocation_type == 0 && length == 3   ? OBJECT_RELOCATION_ABSOLUTE64
+                                      : relocation_type == 0 && length == 2 && object_section_kind_is_debug(current_section_kind)
+                                          ? OBJECT_RELOCATION_ABSOLUTE32
+                                      : relocation_type == 2 && length == 2 ? OBJECT_RELOCATION_AARCH64_CALL26
+                                      : relocation_type == 3 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_PAGE21
+                                      : relocation_type == 4 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12
+                                      : relocation_type == 8 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21
+                                      : relocation_type == 9 && length == 2 ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
+                                                                            : OBJECT_RELOCATION_COUNT;
+                        if (relocation_type == 0 && length == 3)
+                        {
+                            u64 stored = 0;
+                            if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            {
+                                read_ok = false;
+                            }
+                            addend = (s64)stored;
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 0 && length == 2 && object_section_kind_is_debug(current_section_kind))
+                            {
+                                u32 stored = 0;
+                                if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                                {
+                                    read_ok = false;
+                                }
+                                addend = (s64)stored;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 2 && length == 2)
+                            {
+                                u32 stored = 0;
+                                A64MCInst decoded = {0};
+                                if (!pc_relative || !external || ((section_bases[section_index] + source_offset_u32) & 3) ||
+                                    result.sections[section_kinds[section_index]].alignment < 4 ||
+                                    !object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored) ||
+                                    !a64_mc_decode(stored, &decoded) || (decoded.opcode != A64_OPCODE_B && decoded.opcode != A64_OPCODE_BL) ||
+                                    decoded.operands[0].value != 0)
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                output_kind = decoded.opcode == A64_OPCODE_B ? OBJECT_RELOCATION_AARCH64_JUMP26 : OBJECT_RELOCATION_AARCH64_CALL26;
+                                addend = pending_addend ? pending_addend_value : 0;
+                                pending_addend = false;
+                                result.symbols[destination_symbol].kind = OBJECT_SYMBOL_FUNCTION;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 3 && length == 2)
+                            {
+                                u32 stored = 0;
+                                if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                addend = pending_addend ? pending_addend_value : 0;
+                                pending_addend = false;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 4 && length == 2)
+                            {
+                                u32 stored = 0;
+                                u32 shift = 0;
+                                if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
+                                    !object_mach_pageoff12_shift(stored, &shift))
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                addend = pending_addend ? pending_addend_value : 0;
+                                pending_addend = false;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 8 && length == 2)
+                            {
+                                u32 stored = 0;
+                                if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                addend = pending_addend ? pending_addend_value : 0;
+                                pending_addend = false;
+                            }
+                        }
+                        if (read_ok)
+                        {
+                            if (relocation_type == 9 && length == 2)
+                            {
+                                u32 stored = 0;
+                                u32 shift = 0;
+                                if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_pageoff12_shift(stored, &shift) || shift != 3 ||
+                                    (stored & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000))
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                addend = pending_addend ? pending_addend_value : 0;
+                                pending_addend = false;
+                            }
+                        }
+                    }
+                }
+                if (read_ok)
+                {
+                    if (output_kind == OBJECT_RELOCATION_COUNT)
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                        return result;
+                        read_ok = false;
                     }
-                    u64 local_offset = stored - section_addresses[referenced_section];
-                    if (local_offset > UINT64_MAX - section_bases[referenced_section])
-                    {
-                        return result;
-                    }
-                    function_offset = section_bases[referenced_section] + local_offset;
                 }
-                if (function_offset > UINT32_MAX || function_offset > result.sections[OBJECT_SECTION_TEXT].data.length ||
-                    function_size > result.sections[OBJECT_SECTION_TEXT].data.length - function_offset ||
-                    !object_mach_compact_decode(arena, result.sections[OBJECT_SECTION_TEXT].data, (u32)function_offset, function_size, encoding, target,
-                                                &functions[function_count]))
+                if (read_ok)
                 {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                u32 function_symbol = UINT32_MAX;
-                u64 bucket = object_reader_hash_u64(function_offset) & (text_symbol_map_capacity - 1);
-                for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
-                {
-                    u32 symbol_index = text_symbol_map[bucket];
-                    if (symbol_index == UINT32_MAX)
-                    {
-                        break;
-                    }
-                    if (result.symbols[symbol_index].value == function_offset)
-                    {
-                        function_symbol = symbol_index;
-                        result.symbols[symbol_index].kind = OBJECT_SYMBOL_FUNCTION;
-                        break;
-                    }
-                    bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
-                }
-                if (function_symbol == UINT32_MAX)
-                {
-                    String8 prefix = S8(".Lmach_unwind.");
-                    if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
-                    {
-                        return result;
-                    }
-                    function_symbol = result.symbol_count++;
-                    result.symbols[function_symbol] = (ObjectSymbol){
-                        .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
-                        .value = function_offset,
-                        .size = function_size,
-                        .section = OBJECT_SECTION_TEXT,
-                        .kind = OBJECT_SYMBOL_FUNCTION,
+                    result.relocations[result.relocation_count++] = (ObjectRelocation){
+                        .addend = addend,
+                        .offset = section_bases[section_index] + (u32)source_offset,
+                        .section = section_kinds[section_index],
+                        .symbol = destination_symbol,
+                        .kind = output_kind,
                     };
                 }
-                function_symbols[function_count++] = function_symbol;
             }
-        }
-        u64 cfi_capacity = 64;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
-        {
-            u64 action_bytes = (u64)functions[function_index].unwind_action_count * 24;
-            if (action_bytes > UINT64_MAX - 64 || cfi_capacity > UINT64_MAX - 64 - action_bytes)
+            if (read_ok)
             {
-                return result;
+                if (pending_addend)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    read_ok = false;
+                }
             }
-            cfi_capacity += 64 + action_bytes;
-        }
-        u64 cfi_position = 0;
-        if (!object_reader_arena_position_after(arena, arena->position, cfi_capacity, BUSTER_ALIGN_OF(u8), &cfi_position) ||
-            !object_reader_arena_position_after(arena, cfi_position, (u64)function_count * sizeof(DwarfCfiRelocation), BUSTER_ALIGN_OF(DwarfCfiRelocation), &cfi_position))
-        {
-            return result;
-        }
-        DwarfCfiResult cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
-                                                        .functions = functions,
-                                                        .target = target,
-                                                        .function_count = function_count,
-                                                    });
-        if (!cfi.valid || cfi.relocation_count != function_count)
-        {
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            return result;
-        }
-        result.sections[OBJECT_SECTION_UNWIND].data = cfi.bytes;
-        result.sections[OBJECT_SECTION_UNWIND].virtual_size = cfi.bytes.length;
-        result.sections[OBJECT_SECTION_UNWIND].alignment = object_section_default_alignment(OBJECT_SECTION_UNWIND);
-        for (u32 relocation_index = 0; relocation_index < cfi.relocation_count; relocation_index += 1)
-        {
-            DwarfCfiRelocation relocation = cfi.relocations[relocation_index];
-            result.relocations[result.relocation_count++] = (ObjectRelocation){
-                .offset = relocation.offset,
-                .section = OBJECT_SECTION_UNWIND,
-                .symbol = function_symbols[relocation.function],
-                .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
-            };
         }
     }
-    result.error = OBJECT_ERROR_NONE;
+    u32*text_symbol_map = 0;
+    if (read_ok)
+    {
+        text_symbol_map = 0;
+    }
+    u64 text_symbol_map_capacity = 0;
+    if (read_ok)
+    {
+        text_symbol_map_capacity = 0;
+        if (has_compact)
+        {
+            u64 desired_capacity = (u64)result.symbol_count * 2 + 1;
+            text_symbol_map_capacity = 1;
+            while (text_symbol_map_capacity < desired_capacity && read_ok)
+            {
+                if (text_symbol_map_capacity > UINT64_MAX / 2)
+                {
+                    read_ok = false;
+                }
+                if (read_ok)
+                {
+                    text_symbol_map_capacity *= 2;
+                }
+            }
+            if (read_ok)
+            {
+                if (!object_reader_arena_can_allocate_count(arena, text_symbol_map_capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+                {
+                    read_ok = false;
+                }
+            }
+            if (read_ok)
+            {
+                text_symbol_map = arena_allocate(arena, u32, text_symbol_map_capacity);
+                memset(text_symbol_map, 0xff, sizeof(*text_symbol_map) * text_symbol_map_capacity);
+                for (u32 symbol_index = 0; symbol_index < result.symbol_count; symbol_index += 1)
+                {
+                    if (result.symbols[symbol_index].section != OBJECT_SECTION_TEXT)
+                    {
+                        continue;
+                    }
+                    u64 bucket = object_reader_hash_u64(result.symbols[symbol_index].value) & (text_symbol_map_capacity - 1);
+                    for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
+                    {
+                        u32 candidate = text_symbol_map[bucket];
+                        if (candidate == UINT32_MAX)
+                        {
+                            text_symbol_map[bucket] = symbol_index;
+                            break;
+                        }
+                        if (result.symbols[candidate].value == result.symbols[symbol_index].value)
+                        {
+                            break;
+                        }
+                        bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
+                    }
+                }
+            }
+        }
+    }
+    if (read_ok)
+    {
+        if (has_compact)
+        {
+            if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(CodegenFunctionDescriptor), BUSTER_ALIGN_OF(CodegenFunctionDescriptor)))
+            {
+                read_ok = false;
+            }
+            CodegenFunctionDescriptor*functions = 0;
+            if (read_ok)
+            {
+                functions = arena_allocate(arena, CodegenFunctionDescriptor, compact_entry_count);
+                if (!object_reader_arena_can_allocate_count(arena, compact_entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+                {
+                    read_ok = false;
+                }
+            }
+            u32*function_symbols = 0;
+            if (read_ok)
+            {
+                function_symbols = arena_allocate(arena, u32, compact_entry_count);
+            }
+            u32 function_count = 0;
+            if (read_ok)
+            {
+                function_count = 0;
+                for (u32 section_index = 0; section_index < mach_section_count && read_ok; section_index += 1)
+                {
+                    if (!compact_sections[section_index])
+                    {
+                        continue;
+                    }
+                    u64 section = mach_sections[section_index];
+                    u64 section_size = 0;
+                    u32 raw_offset = 0;
+                    u32 relocation_offset = 0;
+                    u32 relocation_count = 0;
+                    object_read_u64(bytes, section + 40, &section_size);
+                    object_read_u32(bytes, section + 48, &raw_offset);
+                    object_read_u32(bytes, section + 56, &relocation_offset);
+                    object_read_u32(bytes, section + 60, &relocation_count);
+                    u32 entry_count = (u32)(section_size / 32);
+                    if (relocation_count != entry_count)
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        if (entry_count && !object_reader_arena_can_allocate_count(arena, entry_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+                        {
+                            read_ok = false;
+                        }
+                    }
+                    u32*compact_relocation_map = 0;
+                    if (read_ok)
+                    {
+                        compact_relocation_map = entry_count ? arena_allocate(arena, u32, entry_count) : 0;
+                        for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+                        {
+                            compact_relocation_map[entry_index] = UINT32_MAX;
+                        }
+                        for (u32 relocation_index = 0; relocation_index < relocation_count && read_ok; relocation_index += 1)
+                        {
+                            u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
+                            u32 source_offset = 0;
+                            if (!object_read_u32(bytes, relocation, &source_offset) || source_offset % 32 != 0 || source_offset / 32 >= entry_count)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            u32 compact_entry_index = source_offset / 32;
+                            if (compact_relocation_map[compact_entry_index] != UINT32_MAX)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            compact_relocation_map[compact_entry_index] = relocation_index;
+                        }
+                    }
+                    if (read_ok)
+                    {
+                        for (u32 entry_index = 0; entry_index < entry_count && read_ok; entry_index += 1)
+                        {
+                            u32 entry_offset = entry_index * 32;
+                            u64 entry = (u64)raw_offset + entry_offset;
+                            u32 function_size = 0;
+                            u32 encoding = 0;
+                            u64 personality = 0;
+                            u64 lsda = 0;
+                            if (!object_read_u32(bytes, entry + 8, &function_size) || !object_read_u32(bytes, entry + 12, &encoding) ||
+                                !object_read_u64(bytes, entry + 16, &personality) || !object_read_u64(bytes, entry + 24, &lsda) || personality || lsda)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            u32 relocation_index = compact_relocation_map[entry_index];
+                            u32 information = 0;
+                            if (relocation_index == UINT32_MAX ||
+                                !object_read_u32(bytes, relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE + 4, &information) ||
+                                (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            u32 source_symbol = information & 0x00ffffff;
+                            bool external = (information & (1u << 27)) != 0;
+                            u64 stored = 0;
+                            object_read_u64(bytes, entry, &stored);
+                            u64 function_offset = 0;
+                            if (external)
+                            {
+                                if (source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX)
+                                {
+                                    read_ok = false;
+                                }
+                                ObjectSymbol* symbol = &result.symbols[symbol_map[source_symbol]];
+                                if (symbol->section != OBJECT_SECTION_TEXT || stored > UINT64_MAX - symbol->value)
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                function_offset = symbol->value + stored;
+                            }
+                            else
+                            {
+                                if (!source_symbol || source_symbol > mach_section_count)
+                                {
+                                    read_ok = false;
+                                }
+                                u32 referenced_section = source_symbol - 1;
+                                if (section_kinds[referenced_section] != OBJECT_SECTION_TEXT || stored < section_addresses[referenced_section])
+                                {
+                                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                    read_ok = false;
+                                }
+                                u64 local_offset = stored - section_addresses[referenced_section];
+                                if (local_offset > UINT64_MAX - section_bases[referenced_section])
+                                {
+                                    read_ok = false;
+                                }
+                                function_offset = section_bases[referenced_section] + local_offset;
+                            }
+                            if (function_offset > UINT32_MAX || function_offset > result.sections[OBJECT_SECTION_TEXT].data.length ||
+                                function_size > result.sections[OBJECT_SECTION_TEXT].data.length - function_offset ||
+                                !object_mach_compact_decode(arena, result.sections[OBJECT_SECTION_TEXT].data, (u32)function_offset, function_size, encoding, target,
+                                                            &functions[function_count]))
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            u32 function_symbol = UINT32_MAX;
+                            u64 bucket = object_reader_hash_u64(function_offset) & (text_symbol_map_capacity - 1);
+                            for (u64 probe = 0; probe < text_symbol_map_capacity; probe += 1)
+                            {
+                                u32 symbol_index = text_symbol_map[bucket];
+                                if (symbol_index == UINT32_MAX)
+                                {
+                                    break;
+                                }
+                                if (result.symbols[symbol_index].value == function_offset)
+                                {
+                                    function_symbol = symbol_index;
+                                    result.symbols[symbol_index].kind = OBJECT_SYMBOL_FUNCTION;
+                                    break;
+                                }
+                                bucket = (bucket + 1) & (text_symbol_map_capacity - 1);
+                            }
+                            if (function_symbol == UINT32_MAX)
+                            {
+                                String8 prefix = S8(".Lmach_unwind.");
+                                if (!object_reader_arena_can_allocate_bytes(arena, prefix.length + 10, BUSTER_ALIGN_OF(char8)))
+                                {
+                                    read_ok = false;
+                                }
+                                function_symbol = result.symbol_count++;
+                                result.symbols[function_symbol] = (ObjectSymbol){
+                                    .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
+                                    .value = function_offset,
+                                    .size = function_size,
+                                    .section = OBJECT_SECTION_TEXT,
+                                    .kind = OBJECT_SYMBOL_FUNCTION,
+                                };
+                            }
+                            function_symbols[function_count++] = function_symbol;
+                        }
+                    }
+                }
+            }
+            u64 cfi_capacity = 0;
+            if (read_ok)
+            {
+                cfi_capacity = 64;
+                for (u32 function_index = 0; function_index < function_count && read_ok; function_index += 1)
+                {
+                    u64 action_bytes = (u64)functions[function_index].unwind_action_count * 24;
+                    if (action_bytes > UINT64_MAX - 64 || cfi_capacity > UINT64_MAX - 64 - action_bytes)
+                    {
+                        read_ok = false;
+                    }
+                    if (read_ok)
+                    {
+                        cfi_capacity += 64 + action_bytes;
+                    }
+                }
+            }
+            u64 cfi_position = 0;
+            if (read_ok)
+            {
+                cfi_position = 0;
+                if (!object_reader_arena_position_after(arena, arena->position, cfi_capacity, BUSTER_ALIGN_OF(u8), &cfi_position) ||
+                    !object_reader_arena_position_after(arena, cfi_position, (u64)function_count * sizeof(DwarfCfiRelocation), BUSTER_ALIGN_OF(DwarfCfiRelocation), &cfi_position))
+                {
+                    read_ok = false;
+                }
+            }
+            DwarfCfiResult cfi = {0};
+            if (read_ok)
+            {
+                cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
+                                                                .functions = functions,
+                                                                .target = target,
+                                                                .function_count = function_count,
+                                                            });
+                if (!cfi.valid || cfi.relocation_count != function_count)
+                {
+                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    read_ok = false;
+                }
+            }
+            if (read_ok)
+            {
+                result.sections[OBJECT_SECTION_UNWIND].data = cfi.bytes;
+                result.sections[OBJECT_SECTION_UNWIND].virtual_size = cfi.bytes.length;
+                result.sections[OBJECT_SECTION_UNWIND].alignment = object_section_default_alignment(OBJECT_SECTION_UNWIND);
+                for (u32 relocation_index = 0; relocation_index < cfi.relocation_count; relocation_index += 1)
+                {
+                    DwarfCfiRelocation relocation = cfi.relocations[relocation_index];
+                    result.relocations[result.relocation_count++] = (ObjectRelocation){
+                        .offset = relocation.offset,
+                        .section = OBJECT_SECTION_UNWIND,
+                        .symbol = function_symbols[relocation.function],
+                        .kind = target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
+                    };
+                }
+            }
+        }
+    }
+    if (read_ok)
+    {
+        result.error = OBJECT_ERROR_NONE;
+    }
     return result;
 }
 
