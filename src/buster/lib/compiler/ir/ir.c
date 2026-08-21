@@ -3341,34 +3341,31 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_float_constant_valid(IrType* type, IrInstr
     return (type->bit_width == 32 || type->bit_width == 64) && instruction->immediate_count == 1;
 }
 
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_ok(void)
 {
-    IrValidationResult result = {
+    return (IrValidationResult){
+        .error = IR_VALIDATION_NONE,
         .function = IR_FUNCTION_ID_INVALID,
         .block = IR_BLOCK_ID_INVALID,
         .instruction = IR_INSTRUCTION_ID_INVALID,
     };
-    if (!program || !module)
+}
+
+// One global's alignment, initializer, and relocation table. Nothing here names
+// a function, a block or an instruction, so the caller keeps the invalid ids the
+// module-level result already carries and only the error kind travels back.
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrModule* module, IrGlobal* global)
+{
+    IrValidationError error = IR_VALIDATION_NONE;
+    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+    IrType* type = ir_type_from_id(&program->types, global->type);
+    if (type && global->alignment &&
+        ((global->alignment & (global->alignment - 1)) || !type->layout.resolved || global->alignment < type->layout.alignment))
     {
-        result.error = IR_VALIDATION_INVALID_ID;
-        return result;
+        error = IR_VALIDATION_ALIGNMENT;
     }
-    result = ir_validate_module_ownership(module);
-    if (result.error != IR_VALIDATION_NONE)
+    else
     {
-        return result;
-    }
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-    {
-        IrGlobal* global = module->globals + global_index;
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
-        IrType* type = ir_type_from_id(&program->types, global->type);
-        if (type && global->alignment &&
-            ((global->alignment & (global->alignment - 1)) || !type->layout.resolved || global->alignment < type->layout.alignment))
-        {
-            result.error = IR_VALIDATION_ALIGNMENT;
-            return result;
-        }
         bool initializer_valid = false;
         if (symbol && type && type->layout.resolved && symbol->kind == IR_SYMBOL_DATA && symbol->is_definition && symbol->type.value == global->type.value)
         {
@@ -3412,775 +3409,866 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         }
         if (!initializer_valid)
         {
-            result.error = IR_VALIDATION_OPERATION;
-            return result;
+            error = IR_VALIDATION_OPERATION;
         }
-        if (global->relocation_count && !global->relocations)
+        else if (global->relocation_count && !global->relocations)
         {
-            result.error = IR_VALIDATION_OPERATION;
-            return result;
+            error = IR_VALIDATION_OPERATION;
         }
-        u64 pointer_size = program->data_layout.pointer.size;
-        for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
+        else
         {
-            IrGlobalRelocation* relocation = global->relocations + relocation_index;
-            IrSymbol* relocation_symbol = ir_symbol_from_id(&program->symbols, relocation->symbol);
-            bool offset_valid = pointer_size != 0 && relocation->offset <= type->layout.size && pointer_size <= type->layout.size - relocation->offset;
-            bool bytes_valid = global->bytes.pointer && global->bytes.length == type->layout.size && relocation->offset <= global->bytes.length &&
-                               pointer_size <= global->bytes.length - relocation->offset;
-            bool overlap_free = true;
-            for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
+            u64 pointer_size = program->data_layout.pointer.size;
+            for (u32 relocation_index = 0; relocation_index < global->relocation_count && error == IR_VALIDATION_NONE; relocation_index += 1)
             {
-                IrGlobalRelocation* previous = global->relocations + previous_index;
-                bool previous_end_valid = previous->offset <= UINT64_MAX - pointer_size;
-                bool relocation_end_valid = relocation->offset <= UINT64_MAX - pointer_size;
-                overlap_free &= previous_end_valid && relocation_end_valid &&
-                                (previous->offset >= relocation->offset + pointer_size || relocation->offset >= previous->offset + pointer_size);
-            }
-            if (!relocation_symbol || !offset_valid || !bytes_valid || !overlap_free)
-            {
-                result.error = IR_VALIDATION_OPERATION;
-                return result;
-            }
-            if (relocation->is_label_address)
-            {
-                IrFunction* owner = ir_module_function_for_symbol(module, relocation->symbol);
-                if (relocation_symbol->kind != IR_SYMBOL_FUNCTION || !relocation_symbol->is_definition || !owner ||
-                    owner->state != IR_FUNCTION_LOWERED || relocation->label_block.value >= owner->block_count || relocation->addend != 0)
+                IrGlobalRelocation* relocation = global->relocations + relocation_index;
+                IrSymbol* relocation_symbol = ir_symbol_from_id(&program->symbols, relocation->symbol);
+                bool offset_valid = pointer_size != 0 && relocation->offset <= type->layout.size && pointer_size <= type->layout.size - relocation->offset;
+                bool bytes_valid = global->bytes.pointer && global->bytes.length == type->layout.size && relocation->offset <= global->bytes.length &&
+                                   pointer_size <= global->bytes.length - relocation->offset;
+                bool overlap_free = true;
+                for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
                 {
-                    result.error = IR_VALIDATION_OPERATION;
-                    return result;
+                    IrGlobalRelocation* previous = global->relocations + previous_index;
+                    bool previous_end_valid = previous->offset <= UINT64_MAX - pointer_size;
+                    bool relocation_end_valid = relocation->offset <= UINT64_MAX - pointer_size;
+                    overlap_free &= previous_end_valid && relocation_end_valid &&
+                                    (previous->offset >= relocation->offset + pointer_size || relocation->offset >= previous->offset + pointer_size);
+                }
+                if (!relocation_symbol || !offset_valid || !bytes_valid || !overlap_free)
+                {
+                    error = IR_VALIDATION_OPERATION;
+                }
+                else if (relocation->is_label_address)
+                {
+                    IrFunction* owner = ir_module_function_for_symbol(module, relocation->symbol);
+                    if (relocation_symbol->kind != IR_SYMBOL_FUNCTION || !relocation_symbol->is_definition || !owner ||
+                        owner->state != IR_FUNCTION_LOWERED || relocation->label_block.value >= owner->block_count || relocation->addend != 0)
+                    {
+                        error = IR_VALIDATION_OPERATION;
+                    }
                 }
             }
         }
     }
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    return error;
+}
+
+// Every value's type, label provenance and alignment. These faults name the
+// instruction that defined the value rather than a block.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result = ir_validation_ok();
+    for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
     {
-        IrFunction* function = module->functions + function_index;
-        if (function->state != IR_FUNCTION_LOWERED)
+        IrValue* value = function->values + value_index;
+        IrValueId value_id = {.value = value_index};
+        IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+        if (!value_type || value->definition.value >= function->instruction_count)
         {
-            continue;
+            result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
         }
-        IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-        if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
+        else
         {
-            return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
-        }
-        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-        {
-            IrValue* value = function->values + value_index;
-            IrValueId value_id = {.value = value_index};
-            IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-            if (!value_type || value->definition.value >= function->instruction_count)
-            {
-                return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
-            }
             IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
             bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value_id);
             bool shape_valid = ir_label_metadata_shape_valid(program, function, value_id);
             if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !ir_label_provenance_valid(&metadata)) ||
                 (metadata.has_label_provenance && !ir_label_storage_provenance_valid(&metadata)) || !transfer_valid || !shape_valid)
             {
-                return ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+                result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
             }
-            if (ir_label_provenance_valid(&metadata) || ir_label_storage_provenance_valid(&metadata))
+            else if (ir_label_provenance_valid(&metadata) || ir_label_storage_provenance_valid(&metadata))
             {
-                for (u32 label_index = 0; label_index < metadata.label_block_count; label_index += 1)
+                for (u32 label_index = 0; label_index < metadata.label_block_count && result.error == IR_VALIDATION_NONE; label_index += 1)
                 {
                     if (metadata.label_blocks[label_index].value >= function->block_count)
                     {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
+                        result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
                     }
                 }
             }
-            if (value->alignment &&
+            if (result.error == IR_VALIDATION_NONE && value->alignment &&
                 ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
             {
-                return ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
+                result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
             }
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    }
+    return result;
+}
+
+// A block's parameters against its predecessors: one incoming value per
+// predecessor, in the same order, at the parameter's type.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* function, IrBlock* block)
+{
+    IrValidationResult result = ir_validation_ok();
+    for (IrBlockParameter* parameter = block->first_parameter; parameter && result.error == IR_VALIDATION_NONE; parameter = parameter->next)
+    {
+        if (parameter->value.value >= function->value_count || parameter->incoming_count != block->predecessor_count ||
+            function->values[parameter->value.value].canonical_type.value != parameter->canonical_type.value)
         {
-            IrBlock* block = function->blocks + block_index;
-            if (!block->terminated || !block->sealed)
+            result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+        }
+        else
+        {
+            IrIncoming* incoming = parameter->first_incoming;
+            IrPredecessor* predecessor = block->first_predecessor;
+            while (incoming && predecessor && result.error == IR_VALIDATION_NONE)
             {
-                return ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
-                                           block->last_instruction);
-            }
-            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
-            {
-                if (parameter->value.value >= function->value_count || parameter->incoming_count != block->predecessor_count ||
-                    function->values[parameter->value.value].canonical_type.value != parameter->canonical_type.value)
+                if (incoming->predecessor.value != predecessor->block.value || incoming->value.value >= function->value_count ||
+                    function->values[incoming->value.value].canonical_type.value != parameter->canonical_type.value)
                 {
-                    return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+                    result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
                 }
-                IrIncoming* incoming = parameter->first_incoming;
-                IrPredecessor* predecessor = block->first_predecessor;
-                while (incoming && predecessor)
+                else
                 {
-                    if (incoming->predecessor.value != predecessor->block.value || incoming->value.value >= function->value_count ||
-                        function->values[incoming->value.value].canonical_type.value != parameter->canonical_type.value)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
-                    }
                     incoming = incoming->next;
                     predecessor = predecessor->next;
                 }
-                if (incoming || predecessor || !ir_label_block_parameter_provenance_valid(function, parameter))
+            }
+            if (result.error == IR_VALIDATION_NONE && (incoming || predecessor || !ir_label_block_parameter_provenance_valid(function, parameter)))
+            {
+                result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+            }
+        }
+    }
+    return result;
+}
+
+// The per-opcode obligations: operand counts and types, immediates, targets and
+// result shape. Every fault here names the instruction the caller is holding, so
+// only the kind comes back.
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
+                                                                        IrInstruction* instruction)
+{
+    IrValidationError error = IR_VALIDATION_NONE;
+    if (instruction->opcode == IR_OPCODE_ARGUMENT)
+    {
+        u64 argument_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
+        if (argument_index >= signature->parameter_count || signature->parameter_types[argument_index].value != instruction->canonical_type.value ||
+            instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_LOCAL)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!type || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+            function->values[instruction->result.value].category != IR_VALUE_PLACE || instruction->canonical_local.value >= function->local_count)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_STACK_ALLOCATE)
+    {
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrType* size_type =
+            instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
+        u64 alignment = instruction->immediate_count == 1 ? instruction->immediates[0] : 0;
+        if (!pointer || pointer->kind != IR_TYPE_POINTER || !size_type || size_type->kind != IR_TYPE_INTEGER ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE ||
+            !alignment || alignment > UINT32_MAX || (alignment & (alignment - 1)))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_STACK_SAVE)
+    {
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
+    {
+        IrType* restored =
+            instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
+        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!restored || restored->kind != IR_TYPE_POINTER || !result_type || result_type->kind != IR_TYPE_VOID ||
+            instruction->immediate_count != 0 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_GLOBAL)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+        if (!symbol || symbol->kind != IR_SYMBOL_DATA || symbol->type.value != instruction->canonical_type.value ||
+            instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+            function->values[instruction->result.value].category != IR_VALUE_PLACE)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_LOAD)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        if (!place || place->category != IR_VALUE_PLACE || place->canonical_type.value != instruction->canonical_type.value ||
+            instruction->operand_count != 1 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_STORE)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE ||
+            place->canonical_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
+            instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!ir_canonical_float_constant_valid(type, instruction))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_FUNCTION)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+        IrType* reference_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool type_matches =
+            symbol && (symbol->type.value == instruction->canonical_type.value ||
+                       (reference_type && reference_type->kind == IR_TYPE_POINTER && reference_type->element_type.value == symbol->type.value));
+        if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION || !type_matches || instruction->operand_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_CALL_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+        bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_CONSUME ||
+                           instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE || instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+        if (!place || place->category != IR_VALUE_PLACE || !place_type || !place_type->is_atomic ||
+            place_type->unqualified_type.value != instruction->canonical_type.value || instruction->operand_count != 1 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+        IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                           instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+        if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+            place_type->unqualified_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID || !valid_order)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+        IrType* value_type = value ? ir_type_from_id(&program->types, value->canonical_type) : 0;
+        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool valid_order = instruction->memory_order < IR_MEMORY_ORDER_COUNT;
+        bool pointer_arithmetic = result_type && result_type->kind == IR_TYPE_POINTER &&
+                                  (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
+        if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+            place_type->unqualified_type.value != instruction->canonical_type.value || !value_type ||
+            (!pointer_arithmetic && value->canonical_type.value != instruction->canonical_type.value) ||
+            (pointer_arithmetic && (value_type->kind != IR_TYPE_INTEGER || !result_type || value_type->layout.size != result_type->layout.size)) ||
+            (!pointer_arithmetic && value_type->kind != IR_TYPE_INTEGER &&
+             (instruction->atomic_operation != IR_ATOMIC_EXCHANGE ||
+              (value_type->kind != IR_TYPE_BOOLEAN && value_type->kind != IR_TYPE_POINTER))) ||
+            instruction->atomic_operation >= IR_ATOMIC_OPERATION_COUNT || instruction->operand_count != 2 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
+    {
+        IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrValue* expected = instruction->operand_count == 3 ? function->values + instruction->operands[1].value : 0;
+        IrValue* desired = instruction->operand_count == 3 ? function->values + instruction->operands[2].value : 0;
+        IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
+        IrType* value_type = expected ? ir_type_from_id(&program->types, expected->canonical_type) : 0;
+        IrMemoryOrder success = instruction->memory_order;
+        IrMemoryOrder failure = instruction->failure_memory_order;
+        bool valid_failure = failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME || failure == IR_MEMORY_ORDER_ACQUIRE ||
+                             failure == IR_MEMORY_ORDER_SEQUENTIAL;
+        bool compatible_orders =
+            success == IR_MEMORY_ORDER_SEQUENTIAL || (success == IR_MEMORY_ORDER_ACQUIRE_RELEASE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
+            (success == IR_MEMORY_ORDER_ACQUIRE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
+            (success == IR_MEMORY_ORDER_CONSUME && (failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME)) ||
+            (success == IR_MEMORY_ORDER_RELEASE && failure == IR_MEMORY_ORDER_RELAXED) ||
+            (success == IR_MEMORY_ORDER_RELAXED && failure == IR_MEMORY_ORDER_RELAXED);
+        if (!place || !expected || !desired || place->category != IR_VALUE_PLACE || expected->category != IR_VALUE_VALUE ||
+            desired->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
+            place_type->unqualified_type.value != expected->canonical_type.value ||
+            expected->canonical_type.value != desired->canonical_type.value ||
+            instruction->canonical_type.value != expected->canonical_type.value || !value_type ||
+            (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || instruction->operand_count != 3 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_failure || !compatible_orders)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ATOMIC_FENCE)
+    {
+        IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || instruction->operand_count != 0 ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID || instruction->memory_order >= IR_MEMORY_ORDER_COUNT)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
+    {
+        IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrValue* begin = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+        IrValue* end = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* begin_type = begin ? ir_type_from_id(&program->types, begin->canonical_type) : 0;
+        IrType* end_type = end ? ir_type_from_id(&program->types, end->canonical_type) : 0;
+        if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || !begin_type || begin_type->kind != IR_TYPE_POINTER || !end_type ||
+            end_type->kind != IR_TYPE_POINTER || instruction->operand_count != 2 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERAND_TYPE;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_CALL)
+    {
+        IrValue* callee = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
+        IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
+        bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
+        IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
+        IrInstruction* reference =
+            callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
+        if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION ||
+            (!signature_type->is_variadic && instruction->operand_count != signature_type->parameter_count + 1) ||
+            (signature_type->is_variadic && instruction->operand_count < signature_type->parameter_count + 1) ||
+            signature_type->return_type.value != instruction->canonical_type.value || !reference ||
+            (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
+            (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
+            ((ir_type_from_id(&program->types, signature_type->return_type)->kind == IR_TYPE_VOID) !=
+             (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
+        {
+            error = IR_VALIDATION_CALL_SIGNATURE;
+        }
+        for (u32 argument_index = 0; argument_index < signature_type->parameter_count && error == IR_VALIDATION_NONE; argument_index += 1)
+        {
+            if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
+                signature_type->parameter_types[argument_index].value)
+            {
+                error = IR_VALIDATION_CALL_SIGNATURE;
+            }
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ADDRESS_OF)
+    {
+        IrValue* object = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrValue* result_value = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+        IrValueLabelMetadata result_metadata = result_value ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        if (!object || object->category != IR_VALUE_PLACE || !pointer || pointer->kind != IR_TYPE_POINTER ||
+            pointer->element_type.value != object->canonical_type.value || instruction->result.value == IR_ID_UNDERLYING_INVALID || !result_value ||
+            (result_metadata.is_label_value || result_metadata.has_label_provenance || result_metadata.label_blocks || result_metadata.label_block_count))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_DEREFERENCE)
+    {
+        IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
+        IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+        IrValueLabelMetadata address_metadata = address ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata place_metadata = place ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        if (!address || address->category != IR_VALUE_VALUE || !pointer || pointer->kind != IR_TYPE_POINTER ||
+            pointer->element_type.value != instruction->canonical_type.value || !place || place->category != IR_VALUE_PLACE ||
+            ir_label_metadata_has_label(&address_metadata) || ir_label_metadata_has_label(&place_metadata))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_UNARY)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrType* vector_element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
+        bool valid_operation =
+            (type && type->kind == IR_TYPE_INTEGER &&
+             (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
+              instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+              instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+              instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)) ||
+            (type && type->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_FLOAT_NEGATE) ||
+            (type && type->kind == IR_TYPE_BOOLEAN && instruction->unary_operation == IR_UNARY_BOOLEAN_NOT) ||
+            (vector_element && vector_element->kind == IR_TYPE_INTEGER &&
+             (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE ||
+              instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
+            (vector_element && vector_element->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE);
+        if (!type || instruction->operand_count != 1 ||
+            function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value || !valid_operation ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_BINARY)
+    {
+        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+        IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* operand_type = left ? ir_type_from_id(&program->types, left->canonical_type) : 0;
+        bool arithmetic =
+            instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE ||
+            (instruction->binary_operation >= IR_BINARY_SIGNED_REMAINDER && instruction->binary_operation <= IR_BINARY_INTEGER_BITWISE_XOR);
+        bool comparison =
+            instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
+            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+            (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+        bool vector_operation =
+            instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+        bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
+                                 instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+        bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
+        bool valid_arithmetic = arithmetic && result_type && (result_type->kind == IR_TYPE_INTEGER || result_type->kind == IR_TYPE_FLOAT) &&
+                                matching_operands && left->canonical_type.value == instruction->canonical_type.value;
+        bool valid_comparison = comparison && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type &&
+                                (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_FLOAT);
+        IrType* operand_element =
+            operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
+        IrType* result_element =
+            result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
+        bool vector_float_operation =
+            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
+            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
+             instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
+        bool valid_vector_result = !vector_comparison ? result_type == operand_type
+                                                      : result_type && operand_type && operand_element && result_element &&
+                                                            result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
+                                                            result_type->element_count == operand_type->element_count &&
+                                                            result_type->layout.size == operand_type->layout.size &&
+                                                            result_element->bit_width == operand_element->bit_width;
+        bool valid_vector_operation = vector_operation && matching_operands && operand_type && operand_type->kind == IR_TYPE_VECTOR &&
+                                      operand_element &&
+                                      ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
+                                       (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
+                                      valid_vector_result;
+        bool valid_pointer_comparison =
+            (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
+            result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
+        if ((!valid_arithmetic && !valid_comparison && !valid_vector_operation && !valid_pointer_comparison) ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_CAST)
+    {
+        IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
+        bool result_in_range = instruction->result.value < function->value_count;
+        IrValueLabelMetadata operand_metadata =
+            operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
+        IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
+        bool label_conversion_valid = true;
+        if ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result)))
+        {
+            label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&
+                                     ir_canonical_void_pointer_type(program, instruction->canonical_type) && source->id.value == destination->id.value &&
+                                     instruction->conversion_operation == IR_CONVERSION_IDENTITY && label_result &&
+                                     ir_label_provenance_valid(operand) && ir_label_provenance_valid(label_result) &&
+                                     label_result->label_block_count == operand->label_block_count;
+            for (u32 label_index = 0; label_conversion_valid && label_index < operand->label_block_count; label_index += 1)
+            {
+                label_conversion_valid = ir_label_provenance_contains(label_result, operand->label_blocks[label_index]);
+            }
+        }
+        if (!ir_canonical_conversion_valid(source, destination, instruction->conversion_operation) ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || !label_conversion_valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_ARRAY)
+    {
+        IrType* array = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool valid = array && (array->kind == IR_TYPE_ARRAY || array->kind == IR_TYPE_VECTOR) &&
+                     instruction->operand_count == array->element_count && instruction->immediate_count == 0 &&
+                     instruction->result.value != IR_ID_UNDERLYING_INVALID;
+        for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
+        {
+            valid = function->values[instruction->operands[operand_index].value].canonical_type.value == array->element_type.value;
+        }
+        if (!valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_AGGREGATE)
+    {
+        IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
+                     instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                     (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
+        for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
+        {
+            u64 field_index = instruction->immediates[operand_index];
+            valid = field_index < aggregate->field_count &&
+                    function->values[instruction->operands[operand_index].value].canonical_type.value == aggregate->fields[field_index].type.value;
+            for (u32 previous = 0; valid && previous < operand_index; previous += 1)
+            {
+                valid = instruction->immediates[previous] != field_index;
+            }
+        }
+        if (!valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_FIELD)
+    {
+        IrValue* base = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
+        u64 field_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
+        bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) &&
+                           field_index < base_type->field_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                           function->values[instruction->result.value].category == IR_VALUE_PLACE &&
+                           instruction->canonical_type.value == base_type->fields[field_index].type.value;
+        if (!valid_field)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_INDEX)
+    {
+        IrValue* base = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
+        IrValue* index = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
+        IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
+        IrType* index_type = index ? ir_type_from_id(&program->types, index->canonical_type) : 0;
+        bool valid_index =
+            base_type && (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR || base_type->kind == IR_TYPE_POINTER) &&
+            index_type && index_type->kind == IR_TYPE_INTEGER && instruction->immediate_count == 0 &&
+            instruction->result.value != IR_ID_UNDERLYING_INVALID && function->values[instruction->result.value].category == IR_VALUE_PLACE &&
+            instruction->canonical_type.value == base_type->element_type.value;
+        if (!valid_index)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END ||
+             instruction->opcode == IR_OPCODE_VA_ARG)
+    {
+        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
+        bool start = instruction->opcode == IR_OPCODE_VA_START;
+        bool end = instruction->opcode == IR_OPCODE_VA_END;
+        bool valid = result_type && function_type && function_type->kind == IR_TYPE_FUNCTION && instruction->immediate_count == 0;
+        if (start)
+        {
+            valid &= function_type->is_variadic && result_type->kind == IR_TYPE_VA_LIST && instruction->operand_count == 0 &&
+                     instruction->result.value != IR_ID_UNDERLYING_INVALID;
+        }
+        else
+        {
+            IrValue* operand = instruction->operand_count == 1 ? &function->values[instruction->operands[0].value] : 0;
+            IrType* pointer = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
+            IrType* pointee = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, pointer->element_type) : 0;
+            valid &= operand && pointer && pointee && pointee->kind == IR_TYPE_VA_LIST;
+            if (end)
+            {
+                valid &= result_type->kind == IR_TYPE_VOID && instruction->result.value == IR_ID_UNDERLYING_INVALID;
+            }
+            else
+            {
+                valid &= instruction->result.value != IR_ID_UNDERLYING_INVALID;
+                if (instruction->opcode == IR_OPCODE_VA_COPY)
                 {
-                    return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+                    valid &= result_type->kind == IR_TYPE_VA_LIST;
+                }
+                else
+                {
+                    valid &= result_type->kind != IR_TYPE_VOID;
                 }
             }
-            // No range or revisit guard here: ir_validate_module_ownership
-            // already proved every chain is a simple path of in-range ids, and
-            // its owner array bounds the walk in one pass instead of the
-            // per-block counter this used to carry.
-            IrInstructionId instruction_id = block->first_instruction;
-            bool terminated = false;
-            while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
+        }
+        if (!valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+    {
+        if (!ir_canonical_inline_assembly_valid(program, function, instruction))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_SIMD)
+    {
+        if (!ir_canonical_simd_valid(program, function, instruction))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool result_in_range = instruction->result.value < function->value_count;
+        IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
+        bool valid = type && ir_canonical_void_pointer_type(program, instruction->canonical_type) && instruction->operand_count == 0 && instruction->target_count == 1 &&
+                     instruction->targets && instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 &&
+                     label_result && instruction->result.value != IR_ID_UNDERLYING_INVALID && !label_result->has_non_label_provenance &&
+                     !label_result->has_label_provenance && !label_result->label_paths && !label_result->label_path_count && ir_label_provenance_valid(label_result) &&
+                     label_result->label_block_count == 1 && label_result->label_blocks && label_result->label_blocks[0].value == instruction->targets[0].value;
+        if (!valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!type || type->kind != IR_TYPE_VOID || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_BRANCH)
+    {
+        if (instruction->operand_count != 0 || instruction->target_count != 1 || instruction->targets[0].value >= function->block_count ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_BRANCH_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
+    {
+        IrValue* condition = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* condition_type = condition ? ir_type_from_id(&program->types, condition->canonical_type) : 0;
+        if (!condition_type || condition_type->kind != IR_TYPE_BOOLEAN || instruction->target_count != 2 ||
+            instruction->targets[0].value >= function->block_count || instruction->targets[1].value >= function->block_count ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_BRANCH_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+    {
+        IrValue* target_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
+                                   ? function->values + instruction->operands[0].value
+                                   : 0;
+        IrValueLabelMetadata target_metadata = target_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* target = target_slot ? &target_metadata : 0;
+        IrType* target_type = target_slot ? ir_type_from_id(&program->types, target_slot->canonical_type) : 0;
+        bool valid = target && target_type && ir_canonical_void_pointer_type(program, target_slot->canonical_type) && !target->has_non_label_provenance &&
+                     ir_label_provenance_valid(target) && instruction->target_count == target->label_block_count &&
+                     instruction->operand_count == 1 && instruction->target_count != 0 && instruction->targets &&
+                     instruction->result.value == IR_ID_UNDERLYING_INVALID && ir_block_id_array_unique(instruction->targets, instruction->target_count);
+        bool label_targets = valid;
+        for (u32 label_index = 0; label_targets && label_index < target->label_block_count; label_index += 1)
+        {
+            bool found = false;
+            for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
             {
-                IrInstruction* instruction = function->instructions + instruction_id.value;
-                if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
-                {
-                    return ir_validation_error(terminated ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID, function, block->id,
-                                               instruction_id);
-                }
-                if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
-                    (instruction->immediate_count && !instruction->immediates))
-                {
-                    return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                }
-                for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-                {
-                    if (instruction->operands[operand_index].value >= function->value_count)
-                    {
-                        return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
-                    }
-                }
-                for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
-                {
-                    if (instruction->targets[target_index].value >= function->block_count)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    if (instruction->result.value >= function->value_count ||
-                        function->values[instruction->result.value].definition.value != instruction_id.value ||
-                        function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value)
-                    {
-                        return ir_validation_error(IR_VALIDATION_RESULT_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                if (instruction->opcode == IR_OPCODE_ARGUMENT)
-                {
-                    u64 argument_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
-                    if (argument_index >= signature->parameter_count || signature->parameter_types[argument_index].value != instruction->canonical_type.value ||
-                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_LOCAL)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!type || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
-                        function->values[instruction->result.value].category != IR_VALUE_PLACE || instruction->canonical_local.value >= function->local_count)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_STACK_ALLOCATE)
-                {
-                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrType* size_type =
-                        instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
-                    u64 alignment = instruction->immediate_count == 1 ? instruction->immediates[0] : 0;
-                    if (!pointer || pointer->kind != IR_TYPE_POINTER || !size_type || size_type->kind != IR_TYPE_INTEGER ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE ||
-                        !alignment || alignment > UINT32_MAX || (alignment & (alignment - 1)))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_STACK_SAVE)
-                {
-                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
-                {
-                    IrType* restored =
-                        instruction->operand_count == 1 ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type) : 0;
-                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!restored || restored->kind != IR_TYPE_POINTER || !result_type || result_type->kind != IR_TYPE_VOID ||
-                        instruction->immediate_count != 0 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_GLOBAL)
-                {
-                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-                    if (!symbol || symbol->kind != IR_SYMBOL_DATA || symbol->type.value != instruction->canonical_type.value ||
-                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
-                        function->values[instruction->result.value].category != IR_VALUE_PLACE)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_LOAD)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    if (!place || place->category != IR_VALUE_PLACE || place->canonical_type.value != instruction->canonical_type.value ||
-                        instruction->operand_count != 1 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_STORE)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE ||
-                        place->canonical_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
-                        instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!ir_canonical_float_constant_valid(type, instruction))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_FUNCTION)
-                {
-                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-                    IrType* reference_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool type_matches =
-                        symbol && (symbol->type.value == instruction->canonical_type.value ||
-                                   (reference_type && reference_type->kind == IR_TYPE_POINTER && reference_type->element_type.value == symbol->type.value));
-                    if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION || !type_matches || instruction->operand_count != 0 ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_CALL_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
-                    bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_CONSUME ||
-                                       instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE || instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
-                    if (!place || place->category != IR_VALUE_PLACE || !place_type || !place_type->is_atomic ||
-                        place_type->unqualified_type.value != instruction->canonical_type.value || instruction->operand_count != 1 ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
-                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool valid_order = instruction->memory_order == IR_MEMORY_ORDER_RELAXED || instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
-                                       instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
-                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
-                        place_type->unqualified_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID || !valid_order)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
-                    IrType* value_type = value ? ir_type_from_id(&program->types, value->canonical_type) : 0;
-                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool valid_order = instruction->memory_order < IR_MEMORY_ORDER_COUNT;
-                    bool pointer_arithmetic = result_type && result_type->kind == IR_TYPE_POINTER &&
-                                              (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
-                    if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
-                        place_type->unqualified_type.value != instruction->canonical_type.value || !value_type ||
-                        (!pointer_arithmetic && value->canonical_type.value != instruction->canonical_type.value) ||
-                        (pointer_arithmetic && (value_type->kind != IR_TYPE_INTEGER || !result_type || value_type->layout.size != result_type->layout.size)) ||
-                        (!pointer_arithmetic && value_type->kind != IR_TYPE_INTEGER &&
-                         (instruction->atomic_operation != IR_ATOMIC_EXCHANGE ||
-                          (value_type->kind != IR_TYPE_BOOLEAN && value_type->kind != IR_TYPE_POINTER))) ||
-                        instruction->atomic_operation >= IR_ATOMIC_OPERATION_COUNT || instruction->operand_count != 2 ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_order)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
-                {
-                    IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrValue* expected = instruction->operand_count == 3 ? function->values + instruction->operands[1].value : 0;
-                    IrValue* desired = instruction->operand_count == 3 ? function->values + instruction->operands[2].value : 0;
-                    IrType* place_type = place ? ir_type_from_id(&program->types, place->canonical_type) : 0;
-                    IrType* value_type = expected ? ir_type_from_id(&program->types, expected->canonical_type) : 0;
-                    IrMemoryOrder success = instruction->memory_order;
-                    IrMemoryOrder failure = instruction->failure_memory_order;
-                    bool valid_failure = failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME || failure == IR_MEMORY_ORDER_ACQUIRE ||
-                                         failure == IR_MEMORY_ORDER_SEQUENTIAL;
-                    bool compatible_orders =
-                        success == IR_MEMORY_ORDER_SEQUENTIAL || (success == IR_MEMORY_ORDER_ACQUIRE_RELEASE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
-                        (success == IR_MEMORY_ORDER_ACQUIRE && failure != IR_MEMORY_ORDER_SEQUENTIAL) ||
-                        (success == IR_MEMORY_ORDER_CONSUME && (failure == IR_MEMORY_ORDER_RELAXED || failure == IR_MEMORY_ORDER_CONSUME)) ||
-                        (success == IR_MEMORY_ORDER_RELEASE && failure == IR_MEMORY_ORDER_RELAXED) ||
-                        (success == IR_MEMORY_ORDER_RELAXED && failure == IR_MEMORY_ORDER_RELAXED);
-                    if (!place || !expected || !desired || place->category != IR_VALUE_PLACE || expected->category != IR_VALUE_VALUE ||
-                        desired->category != IR_VALUE_VALUE || !place_type || !place_type->is_atomic ||
-                        place_type->unqualified_type.value != expected->canonical_type.value ||
-                        expected->canonical_type.value != desired->canonical_type.value ||
-                        instruction->canonical_type.value != expected->canonical_type.value || !value_type ||
-                        (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || instruction->operand_count != 3 ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !valid_failure || !compatible_orders)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ATOMIC_FENCE)
-                {
-                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || instruction->operand_count != 0 ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID || instruction->memory_order >= IR_MEMORY_ORDER_COUNT)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE)
-                {
-                    IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* begin = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
-                    IrValue* end = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* begin_type = begin ? ir_type_from_id(&program->types, begin->canonical_type) : 0;
-                    IrType* end_type = end ? ir_type_from_id(&program->types, end->canonical_type) : 0;
-                    if (!instruction_type || instruction_type->kind != IR_TYPE_VOID || !begin_type || begin_type->kind != IR_TYPE_POINTER || !end_type ||
-                        end_type->kind != IR_TYPE_POINTER || instruction->operand_count != 2 || instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERAND_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_CALL)
-                {
-                    IrValue* callee = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-                    IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
-                    bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
-                    IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
-                    IrInstruction* reference =
-                        callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
-                    if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION ||
-                        (!signature_type->is_variadic && instruction->operand_count != signature_type->parameter_count + 1) ||
-                        (signature_type->is_variadic && instruction->operand_count < signature_type->parameter_count + 1) ||
-                        signature_type->return_type.value != instruction->canonical_type.value || !reference ||
-                        (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
-                        (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
-                        ((ir_type_from_id(&program->types, signature_type->return_type)->kind == IR_TYPE_VOID) !=
-                         (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
-                    {
-                        return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
-                    }
-                    for (u32 argument_index = 0; argument_index < signature_type->parameter_count; argument_index += 1)
-                    {
-                        if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
-                            signature_type->parameter_types[argument_index].value)
-                        {
-                            return ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, block->id, instruction_id);
-                        }
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ADDRESS_OF)
-                {
-                    IrValue* object = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* result_value = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
-                    IrValueLabelMetadata result_metadata = result_value ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
-                    if (!object || object->category != IR_VALUE_PLACE || !pointer || pointer->kind != IR_TYPE_POINTER ||
-                        pointer->element_type.value != object->canonical_type.value || instruction->result.value == IR_ID_UNDERLYING_INVALID || !result_value ||
-                        (result_metadata.is_label_value || result_metadata.has_label_provenance || result_metadata.label_blocks || result_metadata.label_block_count))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_DEREFERENCE)
-                {
-                    IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
-                    IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
-                    IrValueLabelMetadata address_metadata = address ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
-                    IrValueLabelMetadata place_metadata = place ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
-                    if (!address || address->category != IR_VALUE_VALUE || !pointer || pointer->kind != IR_TYPE_POINTER ||
-                        pointer->element_type.value != instruction->canonical_type.value || !place || place->category != IR_VALUE_PLACE ||
-                        ir_label_metadata_has_label(&address_metadata) || ir_label_metadata_has_label(&place_metadata))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_UNARY)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrType* vector_element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
-                    bool valid_operation =
-                        (type && type->kind == IR_TYPE_INTEGER &&
-                         (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
-                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
-                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
-                          instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)) ||
-                        (type && type->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_FLOAT_NEGATE) ||
-                        (type && type->kind == IR_TYPE_BOOLEAN && instruction->unary_operation == IR_UNARY_BOOLEAN_NOT) ||
-                        (vector_element && vector_element->kind == IR_TYPE_INTEGER &&
-                         (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE ||
-                          instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
-                        (vector_element && vector_element->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE);
-                    if (!type || instruction->operand_count != 1 ||
-                        function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value || !valid_operation ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_BINARY)
-                {
-                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
-                    IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* operand_type = left ? ir_type_from_id(&program->types, left->canonical_type) : 0;
-                    bool arithmetic =
-                        instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE ||
-                        (instruction->binary_operation >= IR_BINARY_SIGNED_REMAINDER && instruction->binary_operation <= IR_BINARY_INTEGER_BITWISE_XOR);
-                    bool comparison =
-                        instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
-                        instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
-                        (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-                    bool vector_operation =
-                        instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-                    bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
-                                             instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-                    bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
-                    bool valid_arithmetic = arithmetic && result_type && (result_type->kind == IR_TYPE_INTEGER || result_type->kind == IR_TYPE_FLOAT) &&
-                                            matching_operands && left->canonical_type.value == instruction->canonical_type.value;
-                    bool valid_comparison = comparison && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type &&
-                                            (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_FLOAT);
-                    IrType* operand_element =
-                        operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
-                    IrType* result_element =
-                        result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
-                    bool vector_float_operation =
-                        (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
-                        (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
-                         instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
-                    bool valid_vector_result = !vector_comparison ? result_type == operand_type
-                                                                  : result_type && operand_type && operand_element && result_element &&
-                                                                        result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
-                                                                        result_type->element_count == operand_type->element_count &&
-                                                                        result_type->layout.size == operand_type->layout.size &&
-                                                                        result_element->bit_width == operand_element->bit_width;
-                    bool valid_vector_operation = vector_operation && matching_operands && operand_type && operand_type->kind == IR_TYPE_VECTOR &&
-                                                  operand_element &&
-                                                  ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
-                                                   (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
-                                                  valid_vector_result;
-                    bool valid_pointer_comparison =
-                        (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
-                        result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
-                    if ((!valid_arithmetic && !valid_comparison && !valid_vector_operation && !valid_pointer_comparison) ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_CAST)
-                {
-                    IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
-                    bool result_in_range = instruction->result.value < function->value_count;
-                    IrValueLabelMetadata operand_metadata =
-                        operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
-                    IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
-                    IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
-                    IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
-                    bool label_conversion_valid = true;
-                    if ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result)))
-                    {
-                        label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&
-                                                 ir_canonical_void_pointer_type(program, instruction->canonical_type) && source->id.value == destination->id.value &&
-                                                 instruction->conversion_operation == IR_CONVERSION_IDENTITY && label_result &&
-                                                 ir_label_provenance_valid(operand) && ir_label_provenance_valid(label_result) &&
-                                                 label_result->label_block_count == operand->label_block_count;
-                        for (u32 label_index = 0; label_conversion_valid && label_index < operand->label_block_count; label_index += 1)
-                        {
-                            label_conversion_valid = ir_label_provenance_contains(label_result, operand->label_blocks[label_index]);
-                        }
-                    }
-                    if (!ir_canonical_conversion_valid(source, destination, instruction->conversion_operation) ||
-                        instruction->result.value == IR_ID_UNDERLYING_INVALID || !label_conversion_valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_ARRAY)
-                {
-                    IrType* array = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool valid = array && (array->kind == IR_TYPE_ARRAY || array->kind == IR_TYPE_VECTOR) &&
-                                 instruction->operand_count == array->element_count && instruction->immediate_count == 0 &&
-                                 instruction->result.value != IR_ID_UNDERLYING_INVALID;
-                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
-                    {
-                        valid = function->values[instruction->operands[operand_index].value].canonical_type.value == array->element_type.value;
-                    }
-                    if (!valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_AGGREGATE)
-                {
-                    IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
-                                 instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                                 (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
-                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
-                    {
-                        u64 field_index = instruction->immediates[operand_index];
-                        valid = field_index < aggregate->field_count &&
-                                function->values[instruction->operands[operand_index].value].canonical_type.value == aggregate->fields[field_index].type.value;
-                        for (u32 previous = 0; valid && previous < operand_index; previous += 1)
-                        {
-                            valid = instruction->immediates[previous] != field_index;
-                        }
-                    }
-                    if (!valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_FIELD)
-                {
-                    IrValue* base = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
-                    u64 field_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
-                    bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) &&
-                                       field_index < base_type->field_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                                       function->values[instruction->result.value].category == IR_VALUE_PLACE &&
-                                       instruction->canonical_type.value == base_type->fields[field_index].type.value;
-                    if (!valid_field)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_INDEX)
-                {
-                    IrValue* base = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
-                    IrValue* index = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-                    IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
-                    IrType* index_type = index ? ir_type_from_id(&program->types, index->canonical_type) : 0;
-                    bool valid_index =
-                        base_type && (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR || base_type->kind == IR_TYPE_POINTER) &&
-                        index_type && index_type->kind == IR_TYPE_INTEGER && instruction->immediate_count == 0 &&
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID && function->values[instruction->result.value].category == IR_VALUE_PLACE &&
-                        instruction->canonical_type.value == base_type->element_type.value;
-                    if (!valid_index)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END ||
-                         instruction->opcode == IR_OPCODE_VA_ARG)
-                {
-                    IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-                    bool start = instruction->opcode == IR_OPCODE_VA_START;
-                    bool end = instruction->opcode == IR_OPCODE_VA_END;
-                    bool valid = result_type && function_type && function_type->kind == IR_TYPE_FUNCTION && instruction->immediate_count == 0;
-                    if (start)
-                    {
-                        valid &= function_type->is_variadic && result_type->kind == IR_TYPE_VA_LIST && instruction->operand_count == 0 &&
-                                 instruction->result.value != IR_ID_UNDERLYING_INVALID;
-                    }
-                    else
-                    {
-                        IrValue* operand = instruction->operand_count == 1 ? &function->values[instruction->operands[0].value] : 0;
-                        IrType* pointer = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
-                        IrType* pointee = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, pointer->element_type) : 0;
-                        valid &= operand && pointer && pointee && pointee->kind == IR_TYPE_VA_LIST;
-                        if (end)
-                        {
-                            valid &= result_type->kind == IR_TYPE_VOID && instruction->result.value == IR_ID_UNDERLYING_INVALID;
-                        }
-                        else
-                        {
-                            valid &= instruction->result.value != IR_ID_UNDERLYING_INVALID;
-                            if (instruction->opcode == IR_OPCODE_VA_COPY)
-                            {
-                                valid &= result_type->kind == IR_TYPE_VA_LIST;
-                            }
-                            else
-                            {
-                                valid &= result_type->kind != IR_TYPE_VOID;
-                            }
-                        }
-                    }
-                    if (!valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
-                {
-                    if (!ir_canonical_inline_assembly_valid(program, function, instruction))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_SIMD)
-                {
-                    if (!ir_canonical_simd_valid(program, function, instruction))
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool result_in_range = instruction->result.value < function->value_count;
-                    IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
-                    IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
-                    bool valid = type && ir_canonical_void_pointer_type(program, instruction->canonical_type) && instruction->operand_count == 0 && instruction->target_count == 1 &&
-                                 instruction->targets && instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 &&
-                                 label_result && instruction->result.value != IR_ID_UNDERLYING_INVALID && !label_result->has_non_label_provenance &&
-                                 !label_result->has_label_provenance && !label_result->label_paths && !label_result->label_path_count && ir_label_provenance_valid(label_result) &&
-                                 label_result->label_block_count == 1 && label_result->label_blocks && label_result->label_blocks[0].value == instruction->targets[0].value;
-                    if (!valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_DEBUG_TRAP)
-                {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!type || type->kind != IR_TYPE_VOID || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_BRANCH)
-                {
-                    if (instruction->operand_count != 0 || instruction->target_count != 1 || instruction->targets[0].value >= function->block_count ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
-                {
-                    IrValue* condition = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* condition_type = condition ? ir_type_from_id(&program->types, condition->canonical_type) : 0;
-                    if (!condition_type || condition_type->kind != IR_TYPE_BOOLEAN || instruction->target_count != 2 ||
-                        instruction->targets[0].value >= function->block_count || instruction->targets[1].value >= function->block_count ||
-                        instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
-                {
-                    IrValue* target_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
-                                               ? function->values + instruction->operands[0].value
-                                               : 0;
-                    IrValueLabelMetadata target_metadata = target_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
-                    IrValueLabelMetadata* target = target_slot ? &target_metadata : 0;
-                    IrType* target_type = target_slot ? ir_type_from_id(&program->types, target_slot->canonical_type) : 0;
-                    bool valid = target && target_type && ir_canonical_void_pointer_type(program, target_slot->canonical_type) && !target->has_non_label_provenance &&
-                                 ir_label_provenance_valid(target) && instruction->target_count == target->label_block_count &&
-                                 instruction->operand_count == 1 && instruction->target_count != 0 && instruction->targets &&
-                                 instruction->result.value == IR_ID_UNDERLYING_INVALID && ir_block_id_array_unique(instruction->targets, instruction->target_count);
-                    bool label_targets = valid;
-                    for (u32 label_index = 0; label_targets && label_index < target->label_block_count; label_index += 1)
-                    {
-                        bool found = false;
-                        for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
-                        {
-                            found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
-                        }
-                        label_targets &= target->label_blocks[label_index].value < function->block_count && found;
-                    }
-                    for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
-                    {
-                        bool found = false;
-                        for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
-                        {
-                            found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
-                        }
-                        valid &= found;
-                    }
-                    valid &= label_targets;
-                    if (!valid)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_SWITCH)
-                {
-                    IrValue* switched = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* switched_type = switched ? ir_type_from_id(&program->types, switched->canonical_type) : 0;
-                    bool valid_targets = instruction->target_count == instruction->immediate_count + 1;
-                    for (u32 target_index = 0; valid_targets && target_index < instruction->target_count; target_index += 1)
-                    {
-                        valid_targets = instruction->targets[target_index].value < function->block_count;
-                    }
-                    if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, block->id, instruction_id);
-                    }
-                }
-                else if (instruction->opcode == IR_OPCODE_RETURN)
-                {
-                    IrType* return_type = ir_type_from_id(&program->types, signature->return_type);
-                    bool valid_return =
-                        return_type && (return_type->kind == IR_TYPE_VOID
-                                            ? instruction->operand_count == 0
-                                            : instruction->operand_count == 1 &&
-                                                  function->values[instruction->operands[0].value].canonical_type.value == signature->return_type.value);
-                    if (!valid_return)
-                    {
-                        return ir_validation_error(IR_VALIDATION_RETURN_TYPE, function, block->id, instruction_id);
-                    }
-                }
-                terminated = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF || instruction->opcode == IR_OPCODE_SWITCH ||
-                             instruction->opcode == IR_OPCODE_INDIRECT_BRANCH || instruction->opcode == IR_OPCODE_RETURN || instruction->opcode == IR_OPCODE_UNREACHABLE ||
-                             (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
-                instruction_id = instruction->next;
+                found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
             }
-            if (!terminated)
+            label_targets &= target->label_blocks[label_index].value < function->block_count && found;
+        }
+        for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+        {
+            bool found = false;
+            for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
             {
-                return ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
+                found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
+            }
+            valid &= found;
+        }
+        valid &= label_targets;
+        if (!valid)
+        {
+            error = IR_VALIDATION_BRANCH_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_SWITCH)
+    {
+        IrValue* switched = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+        IrType* switched_type = switched ? ir_type_from_id(&program->types, switched->canonical_type) : 0;
+        bool valid_targets = instruction->target_count == instruction->immediate_count + 1;
+        for (u32 target_index = 0; valid_targets && target_index < instruction->target_count; target_index += 1)
+        {
+            valid_targets = instruction->targets[target_index].value < function->block_count;
+        }
+        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_BRANCH_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_RETURN)
+    {
+        IrType* return_type = ir_type_from_id(&program->types, signature->return_type);
+        bool valid_return =
+            return_type && (return_type->kind == IR_TYPE_VOID
+                                ? instruction->operand_count == 0
+                                : instruction->operand_count == 1 &&
+                                      function->values[instruction->operands[0].value].canonical_type.value == signature->return_type.value);
+        if (!valid_return)
+        {
+            error = IR_VALIDATION_RETURN_TYPE;
+        }
+    }
+    return error;
+}
+
+// One block's instruction chain. ir_validate_module_ownership already proved
+// the chain is a simple path of in-range ids, which is why there is no range or
+// revisit guard here.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_instructions(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block)
+{
+    IrValidationResult result = ir_validation_ok();
+    IrInstructionId instruction_id = block->first_instruction;
+    bool terminated = false;
+    while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+    {
+        IrInstruction* instruction = function->instructions + instruction_id.value;
+        IrValidationError error = IR_VALIDATION_NONE;
+        if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
+        {
+            error = terminated ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID;
+        }
+        else if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
+                 (instruction->immediate_count && !instruction->immediates))
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+        else
+        {
+            for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
+            {
+                if (instruction->operands[operand_index].value >= function->value_count)
+                {
+                    error = IR_VALIDATION_INVALID_ID;
+                }
+            }
+            for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
+            {
+                if (instruction->targets[target_index].value >= function->block_count)
+                {
+                    error = IR_VALIDATION_BRANCH_TARGET;
+                }
+            }
+            if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                (instruction->result.value >= function->value_count ||
+                 function->values[instruction->result.value].definition.value != instruction_id.value ||
+                 function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
+            {
+                error = IR_VALIDATION_RESULT_TYPE;
+            }
+            if (error == IR_VALIDATION_NONE)
+            {
+                error = ir_validate_instruction_operation(program, function, signature, instruction);
+            }
+        }
+        if (error != IR_VALIDATION_NONE)
+        {
+            result = ir_validation_error(error, function, block->id, instruction_id);
+        }
+        else
+        {
+            terminated = instruction->opcode == IR_OPCODE_BRANCH || instruction->opcode == IR_OPCODE_BRANCH_IF || instruction->opcode == IR_OPCODE_SWITCH ||
+                         instruction->opcode == IR_OPCODE_INDIRECT_BRANCH || instruction->opcode == IR_OPCODE_RETURN ||
+                         instruction->opcode == IR_OPCODE_UNREACHABLE || (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count != 0);
+            instruction_id = instruction->next;
+        }
+    }
+    if (result.error == IR_VALIDATION_NONE && !terminated)
+    {
+        result = ir_validation_error(IR_VALIDATION_UNTERMINATED_BLOCK, function, block->id, block->last_instruction);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* program, IrFunction* function, IrType* signature)
+{
+    IrValidationResult result = ir_validation_ok();
+    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        if (!block->terminated || !block->sealed)
+        {
+            result = ir_validation_error(!block->terminated ? IR_VALIDATION_UNTERMINATED_BLOCK : IR_VALIDATION_BLOCK_PARAMETER, function, block->id,
+                                         block->last_instruction);
+        }
+        else
+        {
+            result = ir_validate_block_parameters(function, block);
+            if (result.error == IR_VALIDATION_NONE)
+            {
+                result = ir_validate_block_instructions(program, function, signature, block);
+            }
+        }
+    }
+    return result;
+}
+
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+{
+    IrValidationResult result = ir_validation_ok();
+    if (!program || !module)
+    {
+        result.error = IR_VALIDATION_INVALID_ID;
+    }
+    else
+    {
+        result = ir_validate_module_ownership(module);
+        for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
+        {
+            result.error = ir_validate_global(program, module, module->globals + global_index);
+        }
+        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+            if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                result = ir_validate_function_values(program, function);
+                if (result.error == IR_VALIDATION_NONE)
+                {
+                    result = ir_validate_function_blocks(program, function, signature);
+                }
             }
         }
     }
