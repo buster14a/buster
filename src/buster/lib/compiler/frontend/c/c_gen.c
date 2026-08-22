@@ -1451,6 +1451,13 @@ struct CIntegerIrBuilder
     CIrWideFloatCache* wide_float_cache;
     u32* prepared_call_indices;
     u32* matching_delimiters;
+    // Whole-stream matching-delimiter array borrowed from the parse position
+    // index, non-null only when the index scanned the stream with zero
+    // delimiter mismatches. Properly nested sub-ranges answer identically to
+    // the per-body index, so when this is set the per-body build and its
+    // array are skipped entirely; malformed streams leave it null and keep
+    // the per-body scan's exact verdicts.
+    u32 const* stream_matching_delimiters;
     // Borrowed from the parse position index when it is built: ascending
     // positions of every identifier-then-colon token pair, the necessary
     // condition of c_ir_named_label_at. label_candidates_valid distinguishes
@@ -1952,6 +1959,19 @@ BUSTER_C_INTERNAL bool c_ir_build_delimiter_index(CIntegerIrBuilder* builder)
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    if (builder->stream_matching_delimiters)
+    {
+        if (open < builder->preprocess.token_count)
+        {
+            u32 match = builder->stream_matching_delimiters[open];
+            if (match < end && c_token_is_punctuator(&builder->preprocess.tokens[open], opening) &&
+                c_token_is_punctuator(&builder->preprocess.tokens[match], closing))
+            {
+                return match;
+            }
+        }
+        return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
+    }
     if (open >= builder->body_token_start)
     {
         u32 offset = open - builder->body_token_start;
@@ -30618,6 +30638,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     bool label_candidates_valid = parse.position_index && parse.position_index->built;
     u32 const* label_candidate_positions = label_candidates_valid ? parse.position_index->label_candidate_positions : 0;
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
+    u32 const* stream_matching_delimiters =
+        label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters : 0;
     CIrQueryMachine queries = {
         .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
         .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
@@ -30902,6 +30924,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .target = target,
         .failure_token_index = UINT32_MAX,
         .body_token_start = (u32)preprocess.token_count,
+        .stream_matching_delimiters = stream_matching_delimiters,
     };
     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
     {
@@ -32206,7 +32229,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
             .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
-            .matching_delimiters = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .matching_delimiters =
+                stream_matching_delimiters ? 0 : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .stream_matching_delimiters = stream_matching_delimiters,
             .label_candidate_positions = label_candidate_positions,
             .label_candidate_count = label_candidate_count,
             .label_candidates_valid = label_candidates_valid,
@@ -32221,7 +32246,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
-            builder.matching_delimiters[token_offset] = UINT32_MAX;
+        }
+        if (!builder.stream_matching_delimiters)
+        {
+            for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
+            {
+                builder.matching_delimiters[token_offset] = UINT32_MAX;
+            }
         }
         // The label-metadata store arrays are sized here but cleared by the
         // first store that tracks label metadata: only a body containing an
@@ -32230,7 +32261,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         // translation unit — 2,46% of the compile's DRAM fills in the
         // cache-miss survey of 2026-08-22T114019Z.  label_place_indexed_count
         // starts at zero so the first store still files every value it finds.
-        bool delimiters_valid = c_ir_build_delimiter_index(&builder);
+        // A mismatch-free stream answers every delimiter query from the parse
+        // index's whole-stream array, so the per-body build (a classifying
+        // scan of every body token) runs only for malformed streams.
+        bool delimiters_valid = builder.stream_matching_delimiters ? true : c_ir_build_delimiter_index(&builder);
         if (!delimiters_valid)
         {
             builder.failure_message = S8("function body has mismatched delimiters");

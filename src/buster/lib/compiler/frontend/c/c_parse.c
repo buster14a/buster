@@ -316,11 +316,13 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
         }
         if (!stack_count || stack[stack_count - 1].opening != expected)
         {
+            index->delimiter_mismatch_count += 1;
             stack_count = 0;
             continue;
         }
         index->matching_delimiters[stack[--stack_count].position] = (u32)token_index;
     }
+    index->delimiter_mismatch_count += stack_count;
     scratch_end(temporary);
     index->built = true;
 }

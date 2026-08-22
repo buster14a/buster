@@ -909,6 +909,13 @@ struct CTokenPositionIndex
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
+    // Delimiter scan verdicts that matching_delimiters alone cannot carry:
+    // closers that matched nothing (mismatched or excess) plus openers still
+    // unmatched at the end of the stream. Zero means the whole stream is
+    // properly nested, which is what lets a consumer trust the array for any
+    // sub-range without re-scanning it; non-zero sends malformed streams back
+    // to their exact scalar walks.
+    u32 delimiter_mismatch_count;
     bool built;
 };
 
