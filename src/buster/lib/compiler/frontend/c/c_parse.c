@@ -9898,7 +9898,7 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
     // the _Static_assert statements, and a body that has none is the common
     // case by a wide margin: the parser records the answer as it appends the
     // statements, and the two chasing lines were 1,17% of the compile's DRAM
-    // fills in the cache-miss survey of 2026-08-22T125406Z.
+    // fills in the cache-miss survey of 2026-08-22T114019Z.
     if (!declaration->syntax_body || !declaration->syntax_declaration || !declaration->syntax_declaration->body_has_static_assert)
     {
         return;

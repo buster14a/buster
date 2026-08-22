@@ -3177,7 +3177,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     // Without the count this walks every global in the module per emitted
     // global place — quadratic in the module's globals, and 2,46% of the
     // compile's L1d misses at 9,6x its cycles share in the cache-miss survey
-    // of 2026-08-22T125406Z — to reach a `break` that changes nothing.
+    // of 2026-08-22T114019Z — to reach a `break` that changes nothing.
     for (u32 global_index = 0; builder->module->label_address_relocation_count && global_index < builder->module->global_count; global_index += 1)
     {
         IrGlobal* global = builder->module->globals + global_index;
@@ -31769,7 +31769,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         // address-of-label enables the apparatus, and clearing them per
         // function zeroed 9 bytes per lowering slot for every function in the
         // translation unit — 2,46% of the compile's DRAM fills in the
-        // cache-miss survey of 2026-08-22T125406Z.  label_place_indexed_count
+        // cache-miss survey of 2026-08-22T114019Z.  label_place_indexed_count
         // starts at zero so the first store still files every value it finds.
         bool delimiters_valid = c_ir_build_delimiter_index(&builder);
         if (!delimiters_valid)
