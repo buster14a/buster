@@ -16360,6 +16360,24 @@ c_ir_expression_core_loop:
                 return;
             }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
+            if (is_sizeof && parenthesized && operand_end + 1 < end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                // `sizeof (int[3]){...}`: the parenthesis is a compound
+                // literal's type, not the operand, so the operand is the
+                // whole literal. Widening the range past the brace close
+                // routes it through the sizeof query's compound-literal
+                // shape; the type-name shortcut below skips itself because
+                // the range no longer starts with an identifier.
+                u32 initializer_close =
+                    c_ir_matching_delimiter_cached(builder, operand_end + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                if (initializer_close < end)
+                {
+                    operand_start = index + 1;
+                    operand_end = initializer_close + 1;
+                    consumed_index = initializer_close;
+                }
+            }
             if (is_sizeof && builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER)
             {
                 CEntityId size_entity = c_ir_identifier_entity(builder, operand_start);

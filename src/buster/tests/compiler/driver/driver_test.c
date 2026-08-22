@@ -4167,10 +4167,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_runtime_fixture_paths[] = {
         S8("tests/basic_c_sizeof_unevaluated.c"),
         S8("tests/basic_c_enum_sizeof_object.c"),
+        S8("tests/basic_c_sizeof_compound_literal.c"),
     };
     String8 c_runtime_fixture_names[] = {
         S8("buster-c-sizeof-unevaluated"),
         S8("buster-c-enum-sizeof-object"),
+        S8("buster-c-sizeof-compound-literal"),
     };
     for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_runtime_fixture_paths); fixture_index += 1)
     {
