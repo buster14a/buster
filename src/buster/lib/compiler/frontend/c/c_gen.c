@@ -8059,7 +8059,7 @@ BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* 
     {
         return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
     }
-    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
     {
         return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
     }
@@ -13578,7 +13578,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         }
         CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
         IrType* type = ir_type_from_id(&builder->program->types, task.type);
-        if (!type || (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION) || task.open >= task.close)
+        if (!type || (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION) ||
+            task.open >= task.close)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -13637,7 +13638,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             u32 designator_equals = UINT32_MAX;
             CToken promoted_member = {0};
             bool promoted_designator = false;
-            if (type->kind == IR_TYPE_ARRAY && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET))
+            if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET))
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                 u64 designated = UINT64_MAX;
@@ -13675,7 +13676,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 selected_index = (u32)designated;
                 value_start = close + 2;
             }
-            else if (type->kind != IR_TYPE_ARRAY && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT))
+            else if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT))
             {
                 if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
                 {
@@ -13709,14 +13710,14 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 value_start = designator_equals + 1;
             }
-            u64 child_count = type->kind == IR_TYPE_ARRAY ? type->element_count : type->field_count;
+            u64 child_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count : type->field_count;
             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
             {
                 goto c_ir_nested_compound_failed;
             }
-            IrTypeId child_type = promoted_designator           ? IR_TYPE_ID_INVALID
-                                  : type->kind == IR_TYPE_ARRAY ? type->element_type
-                                                                : type->fields[selected_index].type;
+            IrTypeId child_type = promoted_designator                                              ? IR_TYPE_ID_INVALID
+                                  : (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type
+                                                                                                  : type->fields[selected_index].type;
             IrValueId child_place = IR_VALUE_ID_INVALID;
             IrSourceRange source =
                 c_ir_token_source_range(builder, builder->preprocess.tokens[value_start]);
@@ -13735,7 +13736,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     child_type = builder->function->values[child_place.value].canonical_type;
                 }
             }
-            else if (type->kind == IR_TYPE_ARRAY)
+            else if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
             {
                 IrValueId subscript = c_ir_emit_integer_value(builder, selected_index, false, builder->preprocess.tokens[value_start]);
                 child_place = c_ir_emit_index_place(builder, task.place, subscript, source);
@@ -13766,7 +13767,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 child_type = builder->function->values[child_place.value].canonical_type;
             }
             IrType* child = ir_type_from_id(&builder->program->types, child_type);
-            bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
+            bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
                           c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
                           c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                           c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == index - 1;
@@ -13787,7 +13788,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 u32 scalar_start = value_start;
                 u32 scalar_end = index;
-                if (child && child->kind != IR_TYPE_ARRAY && child->kind != IR_TYPE_STRUCT && child->kind != IR_TYPE_UNION && scalar_end > scalar_start + 1 &&
+                if (child && child->kind != IR_TYPE_ARRAY && child->kind != IR_TYPE_VECTOR && child->kind != IR_TYPE_STRUCT && child->kind != IR_TYPE_UNION && scalar_end > scalar_start + 1 &&
                     c_token_is_punctuator(&builder->preprocess.tokens[scalar_start], C_PUNCTUATOR_LEFT_BRACE) &&
                     c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_RIGHT_BRACE))
                 {
@@ -13876,7 +13877,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             return;
         }
         u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && type->kind == IR_TYPE_ARRAY)
+        if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
         {
             frame->as.compound_literal_machine.operands[field_index] = value;
         }
@@ -13900,7 +13901,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
         frame->as.compound_literal_machine.source = source;
-        if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
+        if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
         {
             if (open + 1 >= close)
             {
@@ -13990,12 +13991,12 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
                 return;
             }
         }
-        if (type->kind == IR_TYPE_ARRAY && type->element_count > UINT32_MAX)
+        if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && type->element_count > UINT32_MAX)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        u32 slot_count = type->kind == IR_TYPE_ARRAY ? (u32)type->element_count : type->field_count;
+        u32 slot_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? (u32)type->element_count : type->field_count;
         frame->as.compound_literal_machine.operands = arena_allocate(builder->arena, IrValueId, slot_count);
         frame->as.compound_literal_machine.fields = arena_allocate(builder->arena, u64, slot_count);
         frame->as.compound_literal_machine.initialized = arena_allocate(builder->arena, bool, slot_count);
@@ -14021,7 +14022,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     while (index < close)
     {
         u32 field_index = next_field;
-        if (type->kind == IR_TYPE_ARRAY && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 designator_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
             if (designator_close >= close || designator_close == index + 1 || designator_close + 1 >= close ||
@@ -14049,7 +14050,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         else if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT))
         {
-            if (type->kind == IR_TYPE_ARRAY)
+            if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
             {
                 goto c_ir_compound_literal_failed;
             }
@@ -14116,7 +14117,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         IrSourceRange source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[index]);
-        IrTypeId field_type = type->kind == IR_TYPE_ARRAY ? type->element_type : type->fields[field_index].type;
+        IrTypeId field_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[field_index].type;
         frame->as.compound_literal_machine.index = index;
         frame->as.compound_literal_machine.item_end = end;
         frame->as.compound_literal_machine.field_index = field_index;
@@ -14139,7 +14140,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         return;
     }
-    if (type->kind == IR_TYPE_ARRAY)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
     {
         for (u32 element_index = 0; element_index < slot_count; element_index += 1)
         {
@@ -14174,16 +14175,17 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         goto c_ir_compound_literal_failed;
     }
-    if (type->kind != IR_TYPE_ARRAY && operand_count > UINT16_MAX)
+    if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && operand_count > UINT16_MAX)
     {
         goto c_ir_compound_literal_failed;
     }
     IrValueId result = c_ir_add_result(builder, type_id);
     IrSourceRange instruction_source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
-    IrInstruction instruction = c_ir_instruction_initialize(type->kind == IR_TYPE_ARRAY ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
+    IrInstruction instruction =
+        c_ir_instruction_initialize((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
     instruction.operands = operands;
     instruction.operand_count = operand_count;
-    if (type->kind != IR_TYPE_ARRAY)
+    if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR)
     {
         instruction.immediates = fields;
         instruction.immediate_count = (u16)operand_count;
@@ -19492,8 +19494,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             {
                 IrTypeId literal_type = c_ir_compound_literal_type(builder, start + 1, type_close, type_close + 1, end - 1);
                 IrType* literal_type_value = ir_type_from_id(&builder->program->types, literal_type);
-                if (literal_type_value && literal_type_value->kind != IR_TYPE_ARRAY && literal_type_value->kind != IR_TYPE_STRUCT &&
-                    literal_type_value->kind != IR_TYPE_UNION)
+                if (literal_type_value && literal_type_value->kind != IR_TYPE_ARRAY && literal_type_value->kind != IR_TYPE_VECTOR &&
+                    literal_type_value->kind != IR_TYPE_STRUCT && literal_type_value->kind != IR_TYPE_UNION)
                 {
                     if (!c_ir_expression_task_push(builder, frame,
                                                    (CIrLowerFrame){
@@ -24531,8 +24533,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                       c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                                       c_ir_matching_delimiter_cached(builder, value_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
                         IrType* initializer_type = ir_type_from_id(&builder->program->types, local_type);
-                        bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_STRUCT ||
-                                                              initializer_type->kind == IR_TYPE_UNION);
+                        bool aggregate = initializer_type && (initializer_type->kind == IR_TYPE_ARRAY || initializer_type->kind == IR_TYPE_VECTOR ||
+                                                              initializer_type->kind == IR_TYPE_STRUCT || initializer_type->kind == IR_TYPE_UNION);
                         if (braced && aggregate)
                         {
                             child = (CIrLowerFrame){
@@ -25671,7 +25673,7 @@ BUSTER_C_INTERNAL u64 c_ir_constant_initializer_slot_count(IrType* type)
     {
         return 0;
     }
-    if (type->kind == IR_TYPE_ARRAY)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
     {
         return type->element_count;
     }
@@ -25736,7 +25738,7 @@ BUSTER_C_INTERNAL IrField* c_ir_constant_initializer_field_at(IrType* type, u64 
 
 BUSTER_C_INTERNAL IrTypeId c_ir_constant_initializer_child_type(IrType* type, u64 index)
 {
-    if (type->kind == IR_TYPE_ARRAY)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
     {
         return index < type->element_count ? type->element_type : IR_TYPE_ID_INVALID;
     }
@@ -25746,7 +25748,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_constant_initializer_child_type(IrType* type, u6
 
 BUSTER_C_INTERNAL u64 c_ir_constant_initializer_child_offset(IrType* type, u64 index)
 {
-    if (type->kind == IR_TYPE_ARRAY)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
     {
         return index < type->element_count ? index : UINT64_MAX;
     }
@@ -26087,7 +26089,7 @@ struct CIrInitializerInferenceDesignator
 
 BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type)
 {
-    return type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
+    return type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
 BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end)
@@ -26142,7 +26144,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_inference_slots(CIntegerIrBuilder* build
     {
         return false;
     }
-    if (type->kind == IR_TYPE_ARRAY)
+    if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
     {
         *slots_out = type->element_count;
         return true;
@@ -26317,7 +26319,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* 
                         .next_index = last + 1,
                     };
                 }
-                if (!container || container->kind != IR_TYPE_ARRAY || last >= container->element_count)
+                if (!container || (container->kind != IR_TYPE_ARRAY && container->kind != IR_TYPE_VECTOR) || last >= container->element_count)
                 {
                     return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator index is outside the array bounds"), cursor);
                 }
@@ -26422,7 +26424,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* 
         {
             return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer has more elements than the aggregate can hold"), start);
         }
-        if (type->kind == IR_TYPE_ARRAY)
+        if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
         {
             designator->value_type = type->element_type;
         }
@@ -27132,7 +27134,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
         IrType* container = ir_type_from_id(&builder->program->types, current_type);
         if (c_token_is_punctuator(&builder->preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
         {
-            if (!container || container->kind != IR_TYPE_ARRAY)
+            if (!container || (container->kind != IR_TYPE_ARRAY && container->kind != IR_TYPE_VECTOR))
             {
                 return c_ir_constant_initializer_fail(builder, S8("invalid array designator"), cursor);
             }
@@ -27313,11 +27315,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
         return c_ir_constant_initializer_fail(builder, S8("could not resolve the aggregate initializer element type"), frame->cursor);
     }
     u64 child_offset = c_ir_constant_initializer_child_offset(type, selected);
-    if (child_offset == UINT64_MAX || (type->kind == IR_TYPE_ARRAY && child->layout.size && child_offset > UINT64_MAX / child->layout.size))
+    if (child_offset == UINT64_MAX ||
+        ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && child->layout.size && child_offset > UINT64_MAX / child->layout.size))
     {
         return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), frame->cursor);
     }
-    u64 scaled_offset = type->kind == IR_TYPE_ARRAY ? child_offset * child->layout.size : child_offset;
+    u64 scaled_offset = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? child_offset * child->layout.size : child_offset;
     if (scaled_offset > UINT64_MAX - frame->offset)
     {
         return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), frame->cursor);
@@ -27400,7 +27403,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), range_work, (u32)(span + 1), &designator)) return false;
         u64 selected = designator.selected;
         u32 value_start = designator.value_start;
-        if ((!designator.has_designator && designator.selected_end >= slot_count) || (type && type->kind == IR_TYPE_ARRAY && designator.selected_end >= slot_count))
+        if ((!designator.has_designator && designator.selected_end >= slot_count) ||
+            (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && designator.selected_end >= slot_count))
         {
             return c_ir_constant_initializer_fail(builder, S8("array designator index is outside the array bounds"), frame->cursor);
         }
@@ -27430,7 +27434,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
-        bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
+        bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
         if (aggregate)
         {
             bool child_string_handled = false;
@@ -29714,7 +29718,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
             }
         }
     }
-    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+    bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
     if (!aggregate_type && end > start + 1 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
         c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
         c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)

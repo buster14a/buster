@@ -3676,6 +3676,55 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_vector_cross.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, c_vector_cross.has_object);
     }
+    // Braced vector initializers: locals, statics, partial init zero-fill,
+    // vectors nested in structs/arrays, and compound literals all lower
+    // through the aggregate slot walks rather than the scalar conversion
+    // path, so the fixture runs the full lane checks natively and must
+    // still produce objects for every cross target.
+    String8 c_vector_initializer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-initializer"),
+#if BUSTER_WINDOWS
+                                                                   S8(".exe"));
+#else
+                                                                   S8(""));
+#endif
+    String8 c_vector_initializer_command_line[] = {
+        S8("-o"),
+        c_vector_initializer_path,
+        S8("tests/basic_c_vector_initializer.c"),
+    };
+    CompilerDriverResult c_vector_initializer = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_initializer_command_line)));
+    BUSTER_TEST(arguments, c_vector_initializer.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_vector_initializer.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_vector_initializer_arguments[] = {
+            c_vector_initializer_path,
+        };
+        ProcessSpawnResult c_vector_initializer_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_initializer_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_vector_initializer_spawn.handle != 0);
+        if (c_vector_initializer_spawn.handle)
+        {
+            ProcessWaitResult c_vector_initializer_wait = os_process_wait_sync(arguments->arena, c_vector_initializer_spawn);
+            BUSTER_TEST(arguments, c_vector_initializer_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_vector_cross_targets); target_index += 1)
+    {
+        String8 c_vector_initializer_cross_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-initializer-cross"),
+                                                                             string_format(arguments->arena, S8("-{u32}.o"), target_index));
+        String8 c_vector_initializer_cross_command_line[] = {
+            S8("-c"), S8("-target"), c_vector_cross_targets[target_index], S8("-o"), c_vector_initializer_cross_path,
+            S8("tests/basic_c_vector_initializer.c"),
+        };
+        CompilerDriverResult c_vector_initializer_cross = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_initializer_cross_command_line)));
+        BUSTER_TEST(arguments, c_vector_initializer_cross.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, c_vector_initializer_cross.has_object);
+    }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
     // compiles its body out where the vocabulary is unavailable; that is what
