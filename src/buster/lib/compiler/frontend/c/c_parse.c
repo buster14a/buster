@@ -246,6 +246,13 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
     *count += 1;
 }
 
+// The two GNU attribute spellings as one membership test. The scans below
+// look at every identifier token of a declaration range or of the whole
+// translation unit, so the pair is a set of interned ids rather than two
+// string_equal calls that each materialize the spelling through
+// c_token_length's oversized guard.
+#define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
+
 BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
 {
     CTokenPositionIndex* index = result->position_index;
@@ -263,6 +270,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     u32 vector_size_capacity = 0;
     u32 alignas_capacity = 0;
     u32 label_candidate_capacity = 0;
+    u32 attribute_capacity = 0;
     // One pass over the token stream for all three products.  The identifier
     // classification used to run twice, once to count and once to fill, and
     // the delimiter match was a third walk: together 3,55% of the stage-1
@@ -290,6 +298,11 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
             {
                 c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
                                               &label_candidate_capacity, (u32)token_index);
+            }
+            if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
+            {
+                c_parse_position_index_append(result->arena, &index->attribute_positions, &index->attribute_count, &attribute_capacity,
+                                              (u32)token_index);
             }
             continue;
         }
@@ -4347,13 +4360,6 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
     return index;
 }
 
-// The two GNU attribute spellings as one membership test. The scans below
-// look at every identifier token of a declaration range or of the whole
-// translation unit, so the pair is a set of interned ids rather than two
-// string_equal calls that each materialize the spelling through
-// c_token_length's oversized guard.
-#define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
-
 // The three aggregate introducers as one membership test, for the specifier
 // scans that ask "does an aggregate head start here" per identifier token.
 #define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
@@ -8032,8 +8038,61 @@ BUSTER_C_INTERNAL bool c_parse_cleanup_attribute_was_checked(CParseResult* resul
     return found;
 }
 
+// Validate the attribute keyword at index and return the next position the
+// scan should visit: past the attribute's first specifier when one parsed,
+// index + 1 otherwise.
+BUSTER_C_INTERNAL u32 c_parse_validate_cleanup_attribute_keyword(CParseResult* result, CPreprocessResult preprocess, u32 index)
+{
+    CCleanupAttributeInfo attribute = {0};
+    if (!c_parse_cleanup_attribute_at(preprocess, index, (u32)preprocess.token_count, &attribute))
+    {
+        return index + 1;
+    }
+    if (!c_parse_cleanup_attribute_was_checked(result, attribute.first_start))
+    {
+        if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+        {
+            c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+        }
+        else if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+        {
+            c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
+        }
+        else
+        {
+            c_parse_cleanup_diagnostic(result, preprocess, attribute,
+                                       S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+        }
+    }
+    if (attribute.first_end > index && attribute.first_end <= preprocess.token_count)
+    {
+        return attribute.first_end;
+    }
+    return index + 1;
+}
+
 BUSTER_C_SHARED void c_parse_validate_unattached_cleanup_attributes(CParseResult* result, CPreprocessResult preprocess)
 {
+    // The position index recorded every attribute keyword when it is built
+    // (which the delimiter queries of any real parse force); walking those
+    // positions skips the re-classification of every other token. An unbuilt
+    // index keeps the full scan rather than paying a whole build for one
+    // walk.
+    CTokenPositionIndex* position_index = result->position_index && result->position_index->built ? result->position_index : 0;
+    if (position_index)
+    {
+        u32 resume = 0;
+        for (u32 cursor = 0; cursor < position_index->attribute_count; cursor += 1)
+        {
+            u32 position = position_index->attribute_positions[cursor];
+            if (position < resume)
+            {
+                continue;
+            }
+            resume = c_parse_validate_cleanup_attribute_keyword(result, preprocess, position);
+        }
+        return;
+    }
     for (u32 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -8042,31 +8101,7 @@ BUSTER_C_SHARED void c_parse_validate_unattached_cleanup_attributes(CParseResult
         {
             continue;
         }
-        CCleanupAttributeInfo attribute = {0};
-        if (!c_parse_cleanup_attribute_at(preprocess, index, (u32)preprocess.token_count, &attribute))
-        {
-            continue;
-        }
-        if (!c_parse_cleanup_attribute_was_checked(result, attribute.first_start))
-        {
-            if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
-            {
-                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
-            }
-            else if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
-            {
-                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
-            }
-            else
-            {
-                c_parse_cleanup_diagnostic(result, preprocess, attribute,
-                                           S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
-            }
-        }
-        if (attribute.first_end > index && attribute.first_end <= preprocess.token_count)
-        {
-            index = attribute.first_end - 1;
-        }
+        index = c_parse_validate_cleanup_attribute_keyword(result, preprocess, index) - 1;
     }
 }
 

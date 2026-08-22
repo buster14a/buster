@@ -901,6 +901,10 @@ struct CTokenPositionIndex
     // body token; the population includes ternary and bit-field colons, so
     // consumers still run the proof per candidate.
     u32* label_candidate_positions;
+    // Ascending positions of every __attribute__/__attribute identifier, so
+    // the once-per-parse unattached-cleanup validation visits attributes
+    // instead of re-classifying the whole stream.
+    u32* attribute_positions;
     // Per token: the position of the matching closer for every opening
     // (/[/{ whose whole group is properly nested across all three delimiter
     // kinds, else UINT32_MAX. A mismatched closer unmatches everything still
@@ -909,6 +913,7 @@ struct CTokenPositionIndex
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
+    u32 attribute_count;
     // Delimiter scan verdicts that matching_delimiters alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
