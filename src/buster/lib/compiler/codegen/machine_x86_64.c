@@ -41,6 +41,12 @@ struct MachineX64ValueShape
     // callees exist that read the widened register directly. Zero when a
     // plain move suffices.
     u16 scalar_extend_opcode;
+    // The unrounded size of an indirect result. byte_size is rounded up to
+    // whole eightbytes for the value's own slot; the store through the
+    // caller's hidden pointer must not write the rounding — the caller
+    // allocated exactly the type, and clang puts its stack canary right
+    // after.
+    u32 exact_byte_size;
 };
 
 // One argument's placement after running register assignment: either its
@@ -376,6 +382,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             // Large results return through a hidden pointer.
             *shape = (MachineX64ValueShape){
                 .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
             };
@@ -3901,7 +3908,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
                                                                   machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                     .payload = selector->return_shape.byte_size,
+                                                     .payload = selector->return_shape.exact_byte_size ? selector->return_shape.exact_byte_size
+                                                                                                       : selector->return_shape.byte_size,
                                                      .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
                                                  });
                 // The System V contract returns the hidden pointer in RAX.

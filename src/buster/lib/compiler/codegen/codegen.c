@@ -13559,18 +13559,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
-                                for (u32 part_index = 0; part_index < return_parts; part_index += 1)
+                                // Copy the exact type size: the caller
+                                // allocated exactly the type behind the
+                                // hidden pointer, and clang keeps its stack
+                                // canary right after, so the rounding the
+                                // eightbyte part count carries must not be
+                                // written.
+                                IrType* return_layout_type = ir_type_from_id(&program->types, function->values[return_value.value].canonical_type);
+                                u64 return_copy_size =
+                                    return_layout_type && return_layout_type->layout.resolved ? return_layout_type->layout.size : (u64)return_parts * 8;
+                                u64 return_copied = 0;
+                                while (return_copied < return_copy_size)
                                 {
-                                    s64 displacement = c_x64_frame_displacement(&emitter, value_offsets[return_value.value]) + (s32)(part_index * 8);
+                                    u64 return_remaining = return_copy_size - return_copied;
+                                    u16 chunk_bits = return_remaining >= 8 ? 64 : return_remaining >= 4 ? 32 : return_remaining >= 2 ? 16 : 8;
+                                    u16 load_register_bits = chunk_bits <= 16 ? 32 : chunk_bits;
+                                    s64 displacement = c_x64_frame_displacement(&emitter, value_offsets[return_value.value]) + (s64)return_copied;
                                     BusterX86MetadataPhysicalOperand load_part_operands[2] = {
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
-                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, load_register_bits),
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, chunk_bits, displacement),
                                     };
                                     BusterX86MetadataPhysicalOperand store_part_operands[2] = {
-                                        codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RCX, 64, (s64)(part_index * 8)),
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RCX, chunk_bits, (s64)return_copied),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, chunk_bits),
                                     };
-                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), load_part_operands,
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, chunk_bits <= 16 ? S8("MOVZX") : S8("MOV"), load_part_operands,
                                                                                BUSTER_ARRAY_LENGTH(load_part_operands)) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), store_part_operands,
                                                                                BUSTER_ARRAY_LENGTH(store_part_operands)))
@@ -13578,6 +13591,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         result.error = buffer.error;
                                         return result;
                                     }
+                                    return_copied += chunk_bits / 8;
                                 }
                                 BusterX86MetadataPhysicalOperand move_result_operands[2] = {
                                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),

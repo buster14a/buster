@@ -96,6 +96,11 @@ struct MachineA64ValueShape
     u8 part_sizes[4];
     u32 part_count;
     u32 byte_size;
+    // The unrounded size of an indirect result. byte_size is rounded up to
+    // whole eightbytes for the value's own slot; the store through the
+    // caller's X8 buffer must not write the rounding — the caller allocated
+    // exactly the type.
+    u32 exact_byte_size;
     bool aggregate;
     // Indirect result: returned through the caller's buffer named by X8.
     // Indirect argument: passed as a pointer riding the integer file.
@@ -279,6 +284,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
             // Large results return through the caller's X8-named buffer.
             *shape = (MachineA64ValueShape){
                 .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
             };
@@ -2598,7 +2604,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
                 machine_a64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
                                                                   machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                     .payload = selector->return_shape.byte_size,
+                                                     .payload = selector->return_shape.exact_byte_size ? selector->return_shape.exact_byte_size
+                                                                                                       : selector->return_shape.byte_size,
                                                      .opcode = MACHINE_A64_COPY_PTR_FROM_FRAME,
                                                  });
             }
