@@ -15335,6 +15335,88 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     return false;
 }
 
+// Walks the call, subscript, member and postfix-increment suffixes that may
+// follow a postfix expression's primary, and answers where they stop.
+// UINT32_MAX means the chain is malformed — an unclosed delimiter or a `.`
+// with no member name — which every caller reports as "not an expression"
+// rather than as a shorter one. Shared by c_ir_unary_expression_end and the
+// sizeof compound-literal operand extent, which must agree on where an
+// operand ends.
+BUSTER_C_INTERNAL u32 c_ir_postfix_suffix_end(CIntegerIrBuilder* builder, u32 index, u32 end)
+{
+    while (index < end)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close >= end)
+            {
+                return UINT32_MAX;
+            }
+            index = close + 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            if (close >= end)
+            {
+                return UINT32_MAX;
+            }
+            index = close + 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+        {
+            if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+            {
+                return UINT32_MAX;
+            }
+            index += 2;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))
+        {
+            index += 1;
+        }
+        break;
+    }
+    return index;
+}
+
+// `sizeof (T){...}` is sizeof applied to a compound literal, not `sizeof (T)`
+// followed by a stray brace: the C grammar is ambiguous there and both the
+// standard and clang resolve it toward the literal, so `sizeof (int[3]){1, 2,
+// 3}` is 12 and not `sizeof(int[3])` with `{1, 2, 3}` left over. Every operand
+// scan that stops at the type name's `)` has to look one token further, and an
+// operand extent it gets wrong is not a diagnostic but a wrong size folded into
+// whatever the operand feeds — an array bound included. `open` is the `(` that
+// follows the sizeof/alignof word; the result is the token index just past the
+// initializer's `}`, or UINT32_MAX when the shape is not a compound literal.
+// The test is deliberately syntactic: after a sizeof operand's `)`, a `{` can
+// begin nothing but a compound literal's initializer, and the callers resolve
+// the type themselves.
+BUSTER_C_INTERNAL u32 c_ir_sizeof_compound_literal_operand_end(CIntegerIrBuilder* builder, u32 open, u32 end)
+{
+    u32 result = UINT32_MAX;
+    if (open < end && c_token_is_punctuator(&builder->preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, open, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close < end && close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            if (initializer_close < end)
+            {
+                // A compound literal is a postfix expression, so `sizeof (char[3]){1}[0]`
+                // sizes the element and not the array; the suffixes belong to the operand.
+                result = c_ir_postfix_suffix_end(builder, initializer_close + 1, end);
+            }
+        }
+    }
+    return result;
+}
+
 // Is this token range an inline struct/union/enum *definition* — the
 // keyword, an optional tag, and its brace body — rather than a reference to
 // a named tag? The sizeof fold has no path that resolves such a definition,
@@ -15375,6 +15457,33 @@ BUSTER_C_INTERNAL bool c_ir_tokens_start_aggregate_definition(CIntegerIrBuilder*
 BUSTER_C_INTERNAL u64 c_ir_sizeof_operand_size(IrType* value)
 {
     return value->kind == IR_TYPE_FUNCTION ? 1 : value->layout.size;
+}
+
+// Does this operand name an object whose array type never mapped to an IR
+// type? A bound that did not fold and an array still incomplete at the end of
+// the unit are the two ways to get there, and neither has a knowable size.
+// The expression-type prediction below guesses int for both, so `sizeof v`
+// answers 4 — and unlike every other use of `v`, which fails to lower, that
+// wrong answer carries no diagnostic. Refused for the same reason an inline
+// aggregate definition operand is; clang rejects both shapes outright.
+// An `extern char v[];` some later declaration completes is not one of them:
+// the redeclaration merge adopts the completing type, so it maps and the
+// guard never sees it.
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = false;
+    if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT &&
+            !c_ir_find_local_by_entity(builder, entity))
+        {
+            CTypeId c_type = builder->parse.entities[entity.value].type;
+            CType* record = c_type.value < builder->parse.type_count ? &builder->parse.types[c_type.value] : 0;
+            result = record && record->kind == C_TYPE_ARRAY && builder->c_type_ir_map[c_type.value].value == IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
@@ -15760,45 +15869,8 @@ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 
             return start;
         }
     }
-    while (index < end)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (close >= end)
-            {
-                return start;
-            }
-            index = close + 1;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (close >= end)
-            {
-                return start;
-            }
-            index = close + 1;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
-        {
-            if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
-            {
-                return start;
-            }
-            index += 2;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS))
-        {
-            index += 1;
-        }
-        break;
-    }
-    return index;
+    u32 suffix_end = c_ir_postfix_suffix_end(builder, index, end);
+    return suffix_end == UINT32_MAX ? start : suffix_end;
 }
 
 BUSTER_C_INTERNAL void c_ir_expression_core_save(CIrLowerFrame* frame, IrValueId* values, CConditionalOperator* operations,
@@ -16378,13 +16450,22 @@ c_ir_expression_core_loop:
         {
             bool is_sizeof = string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof"));
             bool parenthesized = c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            if (!is_sizeof && !parenthesized)
+            // A `{` past the closing parenthesis makes the operand a compound
+            // literal rather than a parenthesized type name, so the operand
+            // starts at that `(` and runs to the initializer's `}`. The
+            // widened range no longer begins with an identifier, so the
+            // type-name shortcut below skips itself and the sizeof query
+            // resolves it through its compound-literal shape.
+            u32 literal_end = parenthesized ? c_ir_sizeof_compound_literal_operand_end(builder, index + 1, end) : UINT32_MAX;
+            parenthesized = parenthesized && literal_end == UINT32_MAX;
+            if (!is_sizeof && !parenthesized && literal_end == UINT32_MAX)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
             u32 operand_start = index + (parenthesized ? 2 : 1);
-            u32 operand_end = parenthesized
+            u32 operand_end = literal_end != UINT32_MAX ? literal_end
+                              : parenthesized
                                   ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
                                   : c_ir_unary_expression_end(builder, operand_start, end);
             if (operand_end > end || operand_start >= operand_end)
@@ -16393,24 +16474,6 @@ c_ir_expression_core_loop:
                 return;
             }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
-            if (is_sizeof && parenthesized && operand_end + 1 < end &&
-                c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACE))
-            {
-                // `sizeof (int[3]){...}`: the parenthesis is a compound
-                // literal's type, not the operand, so the operand is the
-                // whole literal. Widening the range past the brace close
-                // routes it through the sizeof query's compound-literal
-                // shape; the type-name shortcut below skips itself because
-                // the range no longer starts with an identifier.
-                u32 initializer_close =
-                    c_ir_matching_delimiter_cached(builder, operand_end + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-                if (initializer_close < end)
-                {
-                    operand_start = index + 1;
-                    operand_end = initializer_close + 1;
-                    consumed_index = initializer_close;
-                }
-            }
             if (is_sizeof && builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER)
             {
                 CEntityId size_entity = c_ir_identifier_entity(builder, operand_start);
@@ -16448,9 +16511,18 @@ c_ir_expression_core_loop:
                 builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER ? c_ir_type_name(builder, operand_start, operand_end) : IR_TYPE_ID_INVALID;
             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
             u64 value = 0;
+            u32 literal_alignment = 0;
             if (operand && operand->layout.resolved)
             {
                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : operand->layout.alignment;
+            }
+            else if (!is_sizeof && literal_end != UINT32_MAX &&
+                     c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
+            {
+                // The alignof words take a type name, so the only expression
+                // operand reaching here is the compound literal the extent
+                // scan above claimed; its alignment is the literal type's.
+                value = literal_alignment;
             }
             else if (is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
             {
@@ -16460,7 +16532,8 @@ c_ir_expression_core_loop:
                 // The prediction guesses int for an operand it cannot type; an
                 // inline aggregate definition is such an operand, and a guess
                 // for one silently misfolds the size, so it fails here instead.
-                IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end)
+                IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end) ||
+                                                   c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                ? IR_TYPE_ID_INVALID
                                                : c_ir_predict_expression_type(builder, operand_start, operand_end);
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
@@ -29823,11 +29896,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 if (close >= end) return false;
+                // `sizeof (T){...}` sizes the compound literal, so the operand
+                // is the whole postfix expression and not the type name the
+                // parenthesis closes.
+                u32 literal_end = c_ir_sizeof_compound_literal_operand_end(builder, index + 1, end);
+                bool literal = literal_end != UINT32_MAX;
+                u32 operand_start = literal ? index + 1 : index + 2;
+                u32 operand_end = literal ? literal_end : close;
+                u32 consumed_index = literal ? literal_end - 1 : close;
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
-                bool type_resolved = c_ir_query_type_name(builder, index + 2, close, true, &type_id);
-                if (!type_resolved && builder->queries->has_request)
+                // A compound literal is an expression, so it never names a type
+                // here; it resolves through the sizeof query below.
+                bool type_resolved = !literal && c_ir_query_type_name(builder, operand_start, operand_end, true, &type_id);
+                if (!literal && !type_resolved && builder->queries->has_request)
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
@@ -29840,13 +29923,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     size = type->layout.size;
                     alignment = type->layout.alignment;
                 }
-                else if (!c_ir_query_sizeof(builder, index + 2, close, &size, &alignment))
+                else if (!c_ir_query_sizeof(builder, operand_start, operand_end, &size, &alignment))
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
                 values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) ? alignment : size);
                 expect_operand = false;
-                index = close;
+                index = consumed_index;
                 continue;
             }
             if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_offsetof")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("offsetof"))) &&
@@ -30850,16 +30933,29 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            // `char pad[sizeof (int[3]){1, 2, 3}]` sizes the compound literal,
+            // so the operand runs past the type name's `)` to the end of the
+            // initializer (and any postfix suffix on it). Stopping at that `)`
+            // folds the right size but leaves `{1, 2, 3}` in the retokenized
+            // integer expression, which then fails to evaluate.
+            u32 literal_end = c_ir_sizeof_compound_literal_operand_end(builder, index + 1, end);
+            bool literal = literal_end != UINT32_MAX;
+            u32 operand_start = literal ? index + 1 : index + 2;
+            u32 operand_end = literal ? literal_end : close;
+            u32 consumed_index = literal ? literal_end - 1 : close;
             IrTypeId type = IR_TYPE_ID_INVALID;
             u64 operand_size = 0;
             u32 operand_alignment = 0;
             bool operand_resolved = false;
             if (close != UINT32_MAX)
             {
-                c_ir_query_type_name(builder, index + 2, close, true, &type);
-                if (builder->queries->has_request)
+                if (!literal)
                 {
-                    return false;
+                    c_ir_query_type_name(builder, operand_start, operand_end, true, &type);
+                    if (builder->queries->has_request)
+                    {
+                        return false;
+                    }
                 }
                 IrType* value = ir_type_from_id(&program->types, type);
                 if (value && value->layout.resolved)
@@ -30877,7 +30973,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
                     // out too small (the stage-1 stray-global-write incident of
                     // 2026-08-08). Failing here re-queues the bound for a later
                     // type-mapping pass instead.
-                    operand_resolved = c_ir_query_sizeof(builder, index + 2, close, &operand_size, &operand_alignment);
+                    operand_resolved = c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment);
                     if (builder->queries->has_request)
                     {
                         return false;
@@ -30893,7 +30989,7 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
                 string_format(arena, S8("{u64}"),
                               c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) ? operand_alignment : operand_size),
                 C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            index = close;
+            index = consumed_index;
             continue;
         }
         if (token.kind == C_TOKEN_IDENTIFIER)

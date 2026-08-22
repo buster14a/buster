@@ -2450,10 +2450,24 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
     u32 comma = end;
     u32 close = end;
     u32 depth = 0;
+    // Braces and brackets carry commas of their own -- a compound literal
+    // operand (`_Static_assert(sizeof (struct S){1, 2} == 8, "...")`) or a
+    // subscript -- and neither can close the assert's parenthesis, so they get
+    // their own depth. Counting only parentheses takes the literal's first
+    // comma for the message separator and truncates the expression.
+    u32 group_depth = 0;
     for (u32 token_index = start + 1; token_index < end; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            group_depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            group_depth -= group_depth != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             depth += 1;
         }
@@ -2470,7 +2484,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                 break;
             }
         }
-        else if (depth == 1 && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        else if (depth == 1 && !group_depth && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
         {
             comma = token_index;
         }
@@ -2575,6 +2589,19 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             {
                 return false;
             }
+            // `sizeof (T){...}` sizes the compound literal, not the type name
+            // the parenthesis closes: the size is the same either way, but the
+            // initializer has to be consumed here or it stays in the
+            // retokenized integer expression and fails to evaluate. A postfix
+            // suffix on the literal is left unclaimed, so it still reports
+            // "not an integer constant expression" instead of folding the
+            // whole literal's size.
+            u32 literal_close = UINT32_MAX;
+            if (type_end + 1 < expression_end && c_token_is_punctuator(&preprocess.tokens[type_end + 1], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                u32 initializer_close = c_parse_matching_delimiter(preprocess, type_end + 1, expression_end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
+            }
             u32 type_index = type_start;
             CTypeId type = machine ? c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &type_index)
                                    : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
@@ -2614,7 +2641,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
             token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            expression_index = type_end - (start + 2);
+            expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - (start + 2);
             tokens[token_count++] = token;
             continue;
         }
@@ -6700,6 +6727,19 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
     {
         return false;
     }
+    // `(T){...}` is a compound literal, and its size is T's. The base-type
+    // walk below stops at the `(` and the expression walk after it wants an
+    // object name, so without this arm neither answers the shape and the
+    // caller reports the whole constant expression as unfoldable.
+    if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 type_close = c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (type_close + 1 < end && c_token_is_punctuator(&preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_parse_matching_delimiter(preprocess, type_close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)
+        {
+            return c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, start + 1, type_close, size_out, alignment_out);
+        }
+    }
     // Resolving the operand can append pointer, array, and tag records; keep
     // them in a copy so an operand never mutates the caller's type table.
     CParseResult operand_parse = *result;
@@ -6962,9 +7002,24 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
         aggregate->enum_member_start = result->enum_member_count;
         u32 enum_start = open + 1;
         s64 previous_value = -1;
+        // Only a top-level comma separates enumerators. An initializer may
+        // group commas of its own inside parentheses, brackets or braces --
+        // `enum { E = (int)sizeof (struct S){1, 2}, F }` -- and splitting on
+        // one of those cuts the initializer in half and fails the whole
+        // definition.
+        u32 enum_group_depth = 0;
         for (u32 token_index = enum_start; token_index <= close; token_index += 1)
         {
-            bool enum_end = token_index == close || c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_COMMA);
+            if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+            {
+                enum_group_depth += 1;
+            }
+            else if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+            {
+                enum_group_depth -= enum_group_depth != 0;
+            }
+            bool enum_end = token_index == close ||
+                            (!enum_group_depth && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_COMMA));
             if (!enum_end)
             {
                 continue;
@@ -7072,6 +7127,19 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                             }
                             operand_end += 1;
                         }
+                        // `sizeof (T){...}` sizes the compound literal. The
+                        // size is the same as the type name's, but the
+                        // initializer has to be consumed here too or it stays
+                        // in the retokenized integer expression and fails to
+                        // evaluate, taking the whole enum definition with it.
+                        u32 literal_close = UINT32_MAX;
+                        if (parenthesized && !operand_depth && operand_end + 1 < expression_end &&
+                            c_token_is_punctuator(&preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACE))
+                        {
+                            u32 initializer_close =
+                                c_parse_matching_delimiter(preprocess, operand_end + 1, expression_end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                            literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
+                        }
                         u64 operand_size = 0;
                         u32 operand_alignment = 0;
                         if (!parenthesized || operand_depth || operand_end == operand_start ||
@@ -7086,7 +7154,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                         evaluation_tokens[evaluation_token_count++] =
                             c_space_token(&enum_space, string_format(temporary.arena, S8("{u64}"), enum_word_is_alignof ? operand_alignment : operand_size),
                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-                        expression_index = operand_end - expression_start;
+                        expression_index = (literal_close != UINT32_MAX ? literal_close : operand_end) - expression_start;
                         continue;
                     }
                     bool folded_member = false;
@@ -7533,13 +7601,16 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
                                                                     c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
                 if (!function_declarator)
                 {
-                    u32 suffix_end = name_index + 1;
-                    while (suffix_end < end && !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_ASSIGN) &&
-                           !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_COMMA) &&
-                           !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_SEMICOLON))
-                    {
-                        suffix_end += 1;
-                    }
+                    // The declarator suffix ends at the first top-level '=', ','
+                    // or ';', and only at a top-level one: an array bound may
+                    // carry commas of its own inside brackets, parentheses or
+                    // braces (`char pad[sizeof (int[3]){1, 2, 3}];`). Stopping
+                    // at the first comma anywhere hands
+                    // c_parse_array_suffixes an unterminated '[', which fails
+                    // the declarator and drops the declaration. The
+                    // depth-aware scan is the same one the block-scope path
+                    // uses.
+                    u32 suffix_end = c_parse_declarator_segment_end(preprocess, name_index + 1, end);
                     u32 suffix_index = name_index + 1;
                     base = c_parse_apply_vector_attribute(result, preprocess, declaration->scope, base, name_index + 1, suffix_end);
                     suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);

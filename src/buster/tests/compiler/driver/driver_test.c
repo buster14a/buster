@@ -4161,9 +4161,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    // Unevaluated sizeof/_Alignof operands and enum constants over object
-    // sizeofs are both only observable at run time -- the wrong lowering
-    // still produces plausible constants -- so these fixtures run.
+    // Every fixture here folds a sizeof or _Alignof whose wrong lowering still
+    // produces a plausible constant -- an unevaluated operand, an enum constant
+    // over an object sizeof, a compound literal, a call-typed array bound, a
+    // function designator -- so reading the diagnostic is no evidence and the
+    // fixtures run.
     String8 c_runtime_fixture_paths[] = {
         S8("tests/basic_c_sizeof_unevaluated.c"),
         S8("tests/basic_c_enum_sizeof_object.c"),
