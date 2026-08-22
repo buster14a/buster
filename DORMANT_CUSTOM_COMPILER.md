@@ -499,6 +499,18 @@ history could not do. The index line is the only shared text, and
 inserts keep both lines rather than conflicting — after such a merge, check
 that the newest id is on top, because union does not know which line is newer.
 
+The id is the **UTC timestamp at which the audit is recorded**,
+`2026-08-22T140351Z` — ISO 8601 with the colons dropped, because Windows
+forbids them in filenames. `tools/new_audit.py` mints one, creates the file and
+inserts the index line; use it rather than typing an id by hand, because the id
+is the one field two concurrent sessions can independently choose the same
+value for. Audits before 2026-08-22 are named by date plus a sequence letter
+(`2026-08-08k`), and that is precisely what collided: the letter is picked by
+counting the day's existing entries, so two sessions auditing the same day
+always picked the same letter, and three of the four PRs open when the history
+was split had done exactly that. Those older names are historical — entries
+cross-reference each other by them — and stay as written.
+
 ## Core rules
 
 ## Machine instruction selection and scheduling

@@ -16,12 +16,27 @@ only shared text left, and `.gitattributes` marks this file `merge=union` so
 even that merges without a conflict; check the order after a union merge, since
 union keeps both lines but does not know which is newer.
 
-The index carries the order, not the directory listing: a same-day id runs
-`a`..`z` and then `aa`.., which sorts wrong past `z`, and a few entries were
-deliberately recorded out of id order (`2026-08-08k` says so itself). The two
-audits both dated `2026-08-02` became `2026-08-02` and `2026-08-02b` when the
-split gave each its own file — the corpus convention is that the first audit of
-a day is unsuffixed — and no other entry text changed.
+An audit's id is the UTC timestamp at which it is recorded,
+`2026-08-22T140351Z`, which is ISO 8601 with the colons dropped because Windows
+forbids them in filenames. `tools/new_audit.py` mints it, writes the file and
+inserts the index line — mint the id rather than typing one, since it is the
+only field two concurrent sessions can pick identically. Seconds resolution is
+enough because the id is stamped when a human writes the entry, not when a
+benchmark iterates.
+
+Audits up to 2026-08-22 carry the older name: a date plus a sequence letter,
+`2026-08-08k`. That scheme is what the timestamp replaces — the letter is
+chosen by counting the day's entries, so concurrent sessions reliably chose the
+same one. Those names are historical, entries cross-reference each other by
+them, and they stay as written; the two audits both dated `2026-08-02` became
+`2026-08-02` and `2026-08-02b` when the split gave each its own file, and no
+other entry text changed.
+
+The index carries the order, not the directory listing. Timestamp ids do sort
+chronologically, but the older letter ids do not past `z` (`aa` sorts before
+`b`), a few entries were deliberately recorded out of id order (`2026-08-08k`
+says so itself), and `T` sorts before a lowercase letter, so a timestamp id
+lands above the same day's letter ids.
 
 Entries written before the C-only consolidation on 2026-08-14 may mention the
 removed experimental frontend, its fixtures, or its editor model. The `.bbb`
