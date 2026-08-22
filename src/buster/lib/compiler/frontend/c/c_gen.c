@@ -3603,6 +3603,31 @@ BUSTER_C_INTERNAL bool c_ir_emit_store(CIntegerIrBuilder* builder, CIntegerIrLoc
     return c_ir_emit_store_place(builder, local->place, local->type, value, source);
 }
 
+// Whether a promoted-member search has already queued `type`.
+//
+// The two searches below (this one and c_ir_promoted_member_path) walk the
+// anonymous nested aggregates of one struct or union, so their work lists hold
+// a handful of entries and almost always exactly one. Both used to answer this
+// question with a `bool` array indexed by type id, allocated and memset per
+// call over the whole program type table: 72.167 calls at a mean capacity of
+// 17.432 types, 1,26 GB of zeroing per self-host compile, 6,74% of every
+// stage-1 L1d miss for a set that never held more than a few members (audit
+// 2026-08-22T084855Z). The work list is the visited set; scanning it costs
+// less than clearing the table did.
+BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTypeId type)
+{
+    bool found = false;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (queued[index].value == type.value)
+        {
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* builder, IrValueId operand, CToken access, CToken member)
 {
     if (operand.value >= builder->function->value_count)
@@ -3678,8 +3703,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
     u32* work_parents = arena_allocate(field_search.arena, u32, capacity);
     u32* work_parent_fields = arena_allocate(field_search.arena, u32, capacity);
     u32* work_depths = arena_allocate(field_search.arena, u32, capacity);
-    bool* visited = arena_allocate(field_search.arena, bool, capacity);
-    memset(visited, 0, sizeof(*visited) * capacity);
     u32 work_count = 1;
     u32 work_index = 0;
     u32 found_node = UINT32_MAX;
@@ -3690,10 +3713,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
     work_parents[0] = UINT32_MAX;
     work_parent_fields[0] = UINT32_MAX;
     work_depths[0] = 0;
-    if (aggregate_type_id.value < capacity)
-    {
-        visited[aggregate_type_id.value] = true;
-    }
     while (work_index < work_count && !ambiguous)
     {
         IrType* candidate = ir_type_from_id(&builder->program->types, work_types[work_index]);
@@ -3730,9 +3749,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
             }
             IrType* nested = ir_type_from_id(&builder->program->types, candidate_field->type);
             if (!candidate_field->name.length && nested && (nested->kind == IR_TYPE_STRUCT || nested->kind == IR_TYPE_UNION) &&
-                candidate_field->type.value < capacity && !visited[candidate_field->type.value] && work_count < capacity)
+                candidate_field->type.value < capacity && work_count < capacity && !c_ir_type_queued(work_types, work_count, candidate_field->type))
             {
-                visited[candidate_field->type.value] = true;
                 work_types[work_count] = candidate_field->type;
                 work_parents[work_count] = work_index;
                 work_parent_fields[work_count] = index;
@@ -14018,6 +14036,37 @@ struct CIrPromotedMemberPath
     u8 reserved[2];
 };
 
+typedef struct CIrPromotedMemberWork CIrPromotedMemberWork;
+struct CIrPromotedMemberWork
+{
+    IrTypeId type;
+    u64 offset;
+    u64 union_offset;
+    u64 union_size;
+    u32 root_field;
+    u32 depth;
+    bool has_union;
+    u8 reserved[3];
+};
+
+// Whether the search below has already queued `type`. Same reasoning as
+// c_ir_type_queued: the queue holds the anonymous nested aggregates reached so
+// far, which is a handful, so scanning it beats clearing a type-indexed table
+// per call.
+BUSTER_C_INTERNAL bool c_ir_promoted_member_queued(const CIrPromotedMemberWork* queued, u32 count, IrTypeId type)
+{
+    bool found = false;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (queued[index].type.value == type.value)
+        {
+            found = true;
+            break;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrTypeId root, String8 member, CIrPromotedMemberPath* result)
 {
     u32 capacity = builder->program->types.count;
@@ -14025,30 +14074,17 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
     {
         return false;
     }
-    struct CIrPromotedMemberWork
-    {
-        IrTypeId type;
-        u64 offset;
-        u64 union_offset;
-        u64 union_size;
-        u32 root_field;
-        u32 depth;
-        bool has_union;
-        u8 reserved[3];
-    };
     result->ambiguous = false;
     TemporalArena promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
     Arena* arena = promoted_member_scratch.arena;
-    struct CIrPromotedMemberWork* work = arena_allocate(arena, struct CIrPromotedMemberWork, capacity);
-    bool* visited = arena_allocate(arena, bool, capacity);
-    memset(visited, 0, sizeof(*visited) * capacity);
+    CIrPromotedMemberWork* work = arena_allocate(arena, CIrPromotedMemberWork, capacity);
     u32 work_index = 0;
     u32 work_count = 1;
     bool found = false;
     bool ambiguous = false;
     u32 found_depth = UINT32_MAX;
     IrType* root_type = ir_type_from_id(&builder->program->types, root);
-    work[0] = (struct CIrPromotedMemberWork){
+    work[0] = (CIrPromotedMemberWork){
         .type = root,
         .root_field = UINT32_MAX,
         .depth = 0,
@@ -14059,10 +14095,9 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
     {
         work[0].has_union = false;
     }
-    visited[root.value] = true;
     while (work_index < work_count && !ambiguous)
     {
-        struct CIrPromotedMemberWork current = work[work_index++];
+        CIrPromotedMemberWork current = work[work_index++];
         IrType* type = ir_type_from_id(&builder->program->types, current.type);
         if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
         {
@@ -14108,12 +14143,11 @@ BUSTER_C_INTERNAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrT
             }
             IrType* child = ir_type_from_id(&builder->program->types, field->type);
             if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
-                !visited[field->type.value] && work_count < capacity && current.offset <= UINT64_MAX - field->offset)
+                work_count < capacity && current.offset <= UINT64_MAX - field->offset && !c_ir_promoted_member_queued(work, work_count, field->type))
             {
-                visited[field->type.value] = true;
                 IrTypeId child_id = field->type;
                 bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
-                work[work_count++] = (struct CIrPromotedMemberWork){
+                work[work_count++] = (CIrPromotedMemberWork){
                     .type = child_id,
                     .offset = current.offset + field->offset,
                     .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
