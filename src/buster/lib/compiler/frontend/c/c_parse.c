@@ -7498,11 +7498,16 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
         if (base.value != C_ID_UNDERLYING_INVALID)
         {
             declaration->base_type = base;
+            // GNU attributes may sit between the specifiers and the declarator
+            // (`Coord2 __attribute__((stdcall)) f(...)`); the scalar-type parse stops
+            // before them, so hop over them here or the declarator is never reached.
+            declarator_start = c_parse_skip_attributes(preprocess, declarator_start, name_index);
             base = c_parse_pointer_chain(result, preprocess, base, &declarator_start, name_index);
             if (base.value == C_ID_UNDERLYING_INVALID)
             {
                 return;
             }
+            declarator_start = c_parse_skip_attributes(preprocess, declarator_start, name_index);
             bool parenthesized = declarator_start < name_index && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
             if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
             {
