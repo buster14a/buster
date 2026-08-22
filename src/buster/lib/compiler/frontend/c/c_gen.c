@@ -19252,6 +19252,39 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         }
         u32 start = frame->as.expression.start;
         u32 end = frame->as.expression.end;
+        // A control expression the prepass already lowered has run its side
+        // effects. An operand that is exactly that group -- under however
+        // many redundant parentheses -- must reuse the prepared result:
+        // c_ir_root_conditional below sees through the parentheses, so
+        // without this check the group's condition is lowered a second time
+        // and its side effects run twice (tests/basic_c_conditional_operand.c).
+        // The descent stops at the first non-redundant layer, so a cast or
+        // compound literal never reaches the find.
+        bool reused_prepared = false;
+        u32 prepared_probe_start = start;
+        u32 prepared_probe_end = end;
+        while (!reused_prepared && prepared_probe_end > prepared_probe_start + 1 &&
+               c_token_is_punctuator(&builder->preprocess.tokens[prepared_probe_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_ir_matching_delimiter_cached(builder, prepared_probe_start, prepared_probe_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                             C_PUNCTUATOR_RIGHT_PARENTHESIS) == prepared_probe_end - 1)
+        {
+            CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, prepared_probe_start);
+            if (prepared && prepared->emitted && prepared->close_index == prepared_probe_end - 1)
+            {
+                frame->as.expression.value = prepared->result;
+                reused_prepared = true;
+            }
+            else
+            {
+                prepared_probe_start += 1;
+                prepared_probe_end -= 1;
+            }
+        }
+        if (reused_prepared)
+        {
+            unwind = true;
+            continue;
+        }
         u32 conditional_start = 0;
         u32 conditional_question = 0;
         u32 conditional_colon = 0;

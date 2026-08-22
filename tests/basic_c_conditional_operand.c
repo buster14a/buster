@@ -116,6 +116,50 @@ static int index_conditional(int masked, int value)
     return table[masked ? make(value) : 0];
 }
 
+// A fully parenthesized control expression in these positions is lowered by
+// the control-expression prepass and then must be *reused* by the operand's
+// own lowering: without the reuse the condition is lowered twice, and a side
+// effect in the condition runs twice while side effects in the arms stay
+// correct -- which is why these shapes count the condition, not the arm.
+static int conditions;
+
+static int count_condition(int value)
+{
+    conditions += 1;
+    return value;
+}
+
+static int parenthesized_condition_increment(int value)
+{
+    conditions = 0;
+    return take((conditions++ ? 0 : make(value)));
+}
+
+static int double_parenthesized_condition_increment(int value)
+{
+    conditions = 0;
+    return take(((conditions++ ? 0 : make(value))));
+}
+
+static int parenthesized_condition_logical_and(int masked)
+{
+    conditions = 0;
+    return take((conditions++ && make(masked)));
+}
+
+static int parenthesized_condition_call(int masked, int value)
+{
+    conditions = 0;
+    return take((count_condition(masked) ? make(value) : 0));
+}
+
+static int compound_literal_condition_increment(int value)
+{
+    conditions = 0;
+    Pair pair = (Pair){.a = 1, .b = (conditions++ ? 0 : make(value))};
+    return pair.b;
+}
+
 // Both directions of every shape share one failure code, so the exit status
 // names the shape rather than the symptom.
 static int check(int (*shape)(int, int), int not_taken_result, int taken_result, int code)
@@ -218,6 +262,29 @@ int main(void)
     if (failure)
     {
         return failure;
+    }
+    // The parenthesized shapes: each must observe exactly one condition
+    // evaluation, and the value selected by that single evaluation.
+    if (parenthesized_condition_increment(3) != 3 || conditions != 1)
+    {
+        return 16;
+    }
+    if (double_parenthesized_condition_increment(3) != 3 || conditions != 1)
+    {
+        return 17;
+    }
+    if (parenthesized_condition_logical_and(5) != 0 || conditions != 1)
+    {
+        return 18;
+    }
+    before = calls;
+    if (parenthesized_condition_call(1, 4) != 4 || conditions != 1 || calls != before + 1)
+    {
+        return 19;
+    }
+    if (compound_literal_condition_increment(6) != 6 || conditions != 1)
+    {
+        return 20;
     }
     return 0;
 }
