@@ -550,7 +550,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_word_lane_fallback(Simd512 va
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 value)
 {
-    Simd512 result;
+    // Initialized rather than merely filled, like every other fallback here:
+    // at -O0 Clang's -Wconditional-uninitialized does not credit the constant
+    // loop bound, and that is a -Werror build on the Android runner.
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 16; lane += 1)
     {
         result.bytes[lane * 4] = (u8)value;
