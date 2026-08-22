@@ -184,6 +184,20 @@ BUSTER_GLOBAL_LOCAL CodegenFunctionDescriptor* codegen_test_c_descriptor_find(Co
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL CodegenModuleGlobal* codegen_test_c_global_find(CodegenModule* module, IrProgram* program, String8 name)
+{
+    CodegenModuleGlobal* result = 0;
+    for (u32 index = 0; index < module->global_count; index += 1)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[index].symbol);
+        if (!result && symbol && string_equal(symbol->name, name))
+        {
+            result = module->globals + index;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_value_frame_size(IrProgram* program, IrFunction* function)
 {
     u64 value_bytes = 0;
@@ -1738,6 +1752,63 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         u32 actual_frame_size = codegen_test_canonical_descriptor_stack_size(read_fields_descriptor);
         BUSTER_TEST(arguments, actual_frame_size < BUSTER_KB(64));
         BUSTER_TEST(arguments, actual_frame_size >= expected_frame_size);
+    }
+    // Zero-fill layout: offsets are planned small-first rather than in
+    // declaration order, because a global declared after a ~2GiB array would
+    // otherwise sit past RIP-relative +/-2^31 reach and fail the link with
+    // LINK_ERROR_RELOCATION. The second array is exactly
+    // CODEGEN_LARGE_ZERO_FILL_THRESHOLD bytes to pin the boundary as large;
+    // no byte of it is ever allocated, since zero-fill sections carry no data.
+    String8 zero_fill_layout_c_source = S8(
+        "static volatile int first_small;\n"
+        "static char first_large[2147483644];\n"
+        "static volatile int middle_small;\n"
+        "static char second_large[65536];\n"
+        "static volatile int last_small;\n"
+        "void touch_zero_fill(void) {\n"
+        "    first_small = 1;\n"
+        "    first_large[0] = 1;\n"
+        "    middle_small = 2;\n"
+        "    second_large[0] = 2;\n"
+        "    last_small = 3;\n"
+        "}\n");
+    CPreprocessResult zero_fill_layout_tokens = c_preprocess(arguments->arena, zero_fill_layout_c_source, (CPreprocessOptions){0});
+    CParseResult zero_fill_layout_parse = c_parse(arguments->arena, zero_fill_layout_tokens);
+    CIRLowerResult zero_fill_layout_ir =
+        c_lower_to_ir(arguments->arena, S8("zero-fill-layout.c"), zero_fill_layout_tokens, zero_fill_layout_parse, target);
+    BUSTER_TEST(arguments, zero_fill_layout_tokens.error_count == 0);
+    BUSTER_TEST(arguments, zero_fill_layout_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, zero_fill_layout_ir.diagnostic_count == 0);
+    if (zero_fill_layout_ir.program)
+    {
+        IrProgram* zero_fill_layout_program = zero_fill_layout_ir.program;
+        IrModule* zero_fill_layout_module = zero_fill_layout_program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(zero_fill_layout_program, zero_fill_layout_module).error == IR_VALIDATION_NONE);
+        CodegenModule zero_fill_layout_codegen = codegen_generate_canonical_module(arguments->arena, zero_fill_layout_program, zero_fill_layout_module,
+                                                                                   target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, zero_fill_layout_codegen.error == CODEGEN_ERROR_NONE);
+        CodegenModuleGlobal* first_small = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("first_small"));
+        CodegenModuleGlobal* first_large = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("first_large"));
+        CodegenModuleGlobal* middle_small = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("middle_small"));
+        CodegenModuleGlobal* second_large = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("second_large"));
+        CodegenModuleGlobal* last_small = codegen_test_c_global_find(&zero_fill_layout_codegen, zero_fill_layout_program, S8("last_small"));
+        BUSTER_TEST(arguments, first_small && first_large && middle_small && second_large && last_small);
+        if (first_small && first_large && middle_small && second_large && last_small)
+        {
+            BUSTER_TEST(arguments, first_small->zero_fill && first_large->zero_fill && middle_small->zero_fill && second_large->zero_fill &&
+                                       last_small->zero_fill);
+            BUSTER_TEST(arguments, first_large->size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD);
+            BUSTER_TEST(arguments, second_large->size == CODEGEN_LARGE_ZERO_FILL_THRESHOLD);
+            // The small globals keep declaration order at the bottom of the
+            // section, wholly below both large arrays.
+            BUSTER_TEST(arguments, first_small->offset + first_small->size <= middle_small->offset);
+            BUSTER_TEST(arguments, middle_small->offset + middle_small->size <= last_small->offset);
+            BUSTER_TEST(arguments, last_small->offset + last_small->size <= first_large->offset);
+            BUSTER_TEST(arguments, last_small->offset + last_small->size <= second_large->offset);
+            // The large arrays follow in declaration order without overlap.
+            BUSTER_TEST(arguments, (u64)first_large->offset + first_large->size <= second_large->offset);
+            BUSTER_TEST(arguments, zero_fill_layout_codegen.zero_fill_size >= (u64)second_large->offset + second_large->size);
+        }
     }
     String8 aggregate_copy_c_source = S8(
         "struct AggregatePair { int first; int second; };\n"

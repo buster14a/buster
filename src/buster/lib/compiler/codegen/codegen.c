@@ -6394,10 +6394,36 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     {
         memset(thread_local_bytes, 0, thread_local_capacity);
     }
+    // Zero-fill offsets are planned ahead of the assignment loop below because
+    // they are not taken in declaration order: globals under
+    // CODEGEN_LARGE_ZERO_FILL_THRESHOLD come first and the large ones follow,
+    // each group in declaration order so the layout stays deterministic.
+    u64* zero_fill_offsets = arena_allocate(arena, u64, module->global_count ? module->global_count : 1);
+    u64 zero_fill_count = 0;
+    for (u32 layout_pass = 0; layout_pass < 2; layout_pass += 1)
+    {
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrType* type = ir_type_from_id(&program->types, global->type);
+            bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+            bool large = type->layout.size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD;
+            if (zero_fill && !global->is_thread_local && large == (layout_pass == 1))
+            {
+                u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
+                u64 remainder = zero_fill_count % global_alignment;
+                if (remainder)
+                {
+                    zero_fill_count += global_alignment - remainder;
+                }
+                zero_fill_offsets[global_index] = zero_fill_count;
+                zero_fill_count += type->layout.size;
+            }
+        }
+    }
     u64 read_only_count = 0;
     u64 writable_count = 0;
     u64 thread_local_count = 0;
-    u64 zero_fill_count = 0;
     u64 thread_local_zero_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -6405,18 +6431,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrType* type = ir_type_from_id(&program->types, global->type);
         u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
         bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-        u64* count = zero_fill && global->is_thread_local ? &thread_local_zero_count
-                     : zero_fill                           ? &zero_fill_count
-                     : global->is_thread_local ? &thread_local_count
-                     : global->is_read_only    ? &read_only_count
-                                               : &writable_count;
         u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : global->is_read_only ? read_only_bytes : writable_bytes;
-        u64 remainder = *count % global_alignment;
-        if (remainder)
+        u32 offset;
+        if (zero_fill && !global->is_thread_local)
         {
-            *count += global_alignment - remainder;
+            offset = (u32)zero_fill_offsets[global_index];
         }
-        u32 offset = (u32)*count;
+        else
+        {
+            u64* count = zero_fill                ? &thread_local_zero_count
+                         : global->is_thread_local ? &thread_local_count
+                         : global->is_read_only    ? &read_only_count
+                                                   : &writable_count;
+            u64 remainder = *count % global_alignment;
+            if (remainder)
+            {
+                *count += global_alignment - remainder;
+            }
+            offset = (u32)*count;
+            *count += type->layout.size;
+        }
         result.globals[result.global_count++] = (CodegenModuleGlobal){
             .symbol = global->symbol,
             .offset = offset,
@@ -6445,7 +6479,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
             return result;
         }
-        *count += type->layout.size;
     }
     result.read_only_data = (ByteSlice){
         .pointer = read_only_bytes,

@@ -270,6 +270,16 @@ struct CodegenModuleDataRelocation
     CodegenDataRelocationKind kind;
 };
 
+// A zero-fill global at or past this size is laid out after every smaller one.
+// Every image layout places the zero-fill section beyond code, so offsets taken
+// purely in declaration order let a ~2GiB array push each global declared after
+// it past RIP-relative +/-2^31 reach, failing the link with
+// LINK_ERROR_RELOCATION for a program clang links. Small-first keeps every
+// small global and every large array's base in range; array interiors are
+// reached through a register either way. The value matches clang's
+// -mlarge-data-threshold default.
+#define CODEGEN_LARGE_ZERO_FILL_THRESHOLD (64u * 1024)
+
 typedef struct CodegenModuleGlobal CodegenModuleGlobal;
 struct CodegenModuleGlobal
 {
