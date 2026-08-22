@@ -149,39 +149,30 @@ BUSTER_C_INTERNAL u8 c_parse_token_class(CParseResult* result, CPreprocessResult
     return token_class;
 }
 
+// Append one ascending position, doubling the run from an empty start. The two
+// populations this serves — `vector_size` and `_Alignas` spellings — are tens
+// of tokens in a million, so the run is small and the copies are rare; sizing
+// them exactly instead cost a second pass over the whole token stream.
+BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positions, u32* count, u32* capacity, u32 position)
+{
+    if (*count == *capacity)
+    {
+        u32 grown = *capacity ? *capacity * 2 : 8;
+        u32* moved = arena_allocate(arena, u32, grown);
+        if (*count)
+        {
+            memcpy(moved, *positions, sizeof(*moved) * *count);
+        }
+        *positions = moved;
+        *capacity = grown;
+    }
+    (*positions)[*count] = position;
+    *count += 1;
+}
+
 BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
 {
     CTokenPositionIndex* index = result->position_index;
-    u32 vector_size_count = 0;
-    u32 alignas_count = 0;
-    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
-    {
-        if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
-        vector_size_count += (token_class & C_TOKEN_CLASS_VECTOR_SIZE) != 0;
-        alignas_count += (token_class & C_TOKEN_CLASS_ALIGNAS) != 0;
-    }
-    index->vector_size_positions = arena_allocate(result->arena, u32, vector_size_count ? vector_size_count : 1);
-    index->alignas_positions = arena_allocate(result->arena, u32, alignas_count ? alignas_count : 1);
-    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
-    {
-        if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
-        if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
-        {
-            index->vector_size_positions[index->vector_size_count++] = (u32)token_index;
-        }
-        if (token_class & C_TOKEN_CLASS_ALIGNAS)
-        {
-            index->alignas_positions[index->alignas_count++] = (u32)token_index;
-        }
-    }
     index->matching_delimiters = arena_allocate(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
     memset(index->matching_delimiters, 0xff, sizeof(*index->matching_delimiters) * preprocess.token_count);
     TemporalArena temporary = scratch_begin(&result->arena, 1);
@@ -193,9 +184,30 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     };
     CDelimiterStackEntry* stack = arena_allocate(temporary.arena, CDelimiterStackEntry, preprocess.token_count ? preprocess.token_count : 1);
     u32 stack_count = 0;
+    u32 vector_size_capacity = 0;
+    u32 alignas_capacity = 0;
+    // One pass over the token stream for all three products.  The identifier
+    // classification used to run twice, once to count and once to fill, and
+    // the delimiter match was a third walk: together 3,55% of the stage-1
+    // branch mispredictions in the survey of 2026-08-22T082003Z, on a filter
+    // no predictor can learn because it is the token kinds of the program.
     for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
+            if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
+            {
+                c_parse_position_index_append(result->arena, &index->vector_size_positions, &index->vector_size_count, &vector_size_capacity,
+                                              (u32)token_index);
+            }
+            if (token_class & C_TOKEN_CLASS_ALIGNAS)
+            {
+                c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, &alignas_capacity, (u32)token_index);
+            }
+            continue;
+        }
         if (token.kind != C_TOKEN_PUNCTUATOR)
         {
             continue;
