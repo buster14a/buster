@@ -208,6 +208,11 @@ MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram*
         IrInstruction* instruction = function->instructions + instruction_index;
         IrBlockId owner = result.instruction_owner_blocks[instruction_index];
         u32 block_index = owner.value;
+        if (instruction->opcode >= IR_OPCODE_COUNT)
+        {
+            result.error = MACHINE_SELECTION_PREPASS_INVALID_OPCODE;
+            return result;
+        }
         if (instruction->operand_count && !instruction->operands)
         {
             result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;
@@ -414,6 +419,11 @@ MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, Ir
             visited[id.value] = 1;
             visited_count += 1;
             IrInstruction* instruction = function->instructions + id.value;
+            if (instruction->opcode >= IR_OPCODE_COUNT)
+            {
+                result.error = MACHINE_SELECTION_PREPASS_INVALID_OPCODE;
+                return result;
+            }
             if (instruction->operand_count && !instruction->operands)
             {
                 result.error = MACHINE_SELECTION_PREPASS_INVALID_VALUE;

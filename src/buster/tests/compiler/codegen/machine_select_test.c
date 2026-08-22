@@ -365,6 +365,25 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_minimal_invalid_value(Arena* are
            minimal.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_invalid_opcode(Arena* arena, IrProgram* program, IrFunction* function, Target x86_target,
+                                                               Target aarch64_target)
+{
+    if (!arena || !program || !function || !function->instruction_count)
+    {
+        return false;
+    }
+    IrInstruction* probe = function->instructions;
+    u8 saved_opcode = probe->opcode;
+    probe->opcode = UINT8_MAX;
+    MachineSelectionPrepass full = machine_selection_prepass_build(arena, program, function);
+    MachineSelectionPrepass minimal = machine_selection_prepass_build_minimal(arena, program, function);
+    MachineSelectResult x86 = machine_select_canonical_function(arena, program, function, x86_target);
+    MachineSelectResult aarch64 = machine_select_canonical_function(arena, program, function, aarch64_target);
+    probe->opcode = saved_opcode;
+    return !full.valid && full.error == MACHINE_SELECTION_PREPASS_INVALID_OPCODE && !minimal.valid &&
+           minimal.error == MACHINE_SELECTION_PREPASS_INVALID_OPCODE && !x86.supported && !aarch64.supported;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -484,6 +503,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
         // branch.
         BUSTER_TEST(arguments, machine_selection_test_invalid_operand_storage(arguments->arena, program, memory, x86_target));
         BUSTER_TEST(arguments, machine_selection_test_minimal_invalid_value(arguments->arena, program, memory));
+        BUSTER_TEST(arguments, machine_selection_test_invalid_opcode(arguments->arena, program, add, x86_target, aarch64_target));
 
         MachineSelectionPrepass invalid = machine_selection_prepass_build(0, program, add);
         BUSTER_TEST(arguments, !invalid.valid && invalid.error == MACHINE_SELECTION_PREPASS_INVALID_ARGUMENT);
