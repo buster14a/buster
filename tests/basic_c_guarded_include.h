@@ -1,0 +1,4 @@
+#ifndef BASIC_C_GUARDED_INCLUDE_H
+#define BASIC_C_GUARDED_INCLUDE_H
+#define GUARDED_VALUE 41
+#endif

@@ -1,0 +1,4 @@
+#ifndef BASIC_C_PARTIAL_GUARD_INCLUDE_H
+#define BASIC_C_PARTIAL_GUARD_INCLUDE_H
+#endif
+int partial_guard_marker;

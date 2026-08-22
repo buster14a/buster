@@ -147,9 +147,15 @@ struct CompilerDriverResult
     ObjectFile object;
     CodegenStatistics codegen_statistics;
     // What the C frontend consumed, per inclusion and per distinct file, and
-    // what preprocessing made of it.
+    // what preprocessing made of it. `lexed_files` attributes the difference
+    // between the two aggregates: across several inputs it keeps only the
+    // rows lexed more than once within their own unit, since each unit
+    // legitimately lexes a shared header once.
     CSourceMetrics source_lexed;
     CSourceMetrics source_unique;
+    CSourceFileMetrics* lexed_files;
+    u32 lexed_file_count;
+    u32 lexed_files_reserved;
     CPreprocessedMetrics preprocessed;
     CompilerDriverError error;
     CodegenError codegen_error;

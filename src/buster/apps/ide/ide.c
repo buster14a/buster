@@ -561,7 +561,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
 // The source measurement table (see CSourceMetrics), two aggregates side by
 // side so include amplification reads off the page: `unique` covers the
 // distinct files of the include closure, `lexed` every inclusion, and a
-// header without #pragma once is re-read at each one.
+// header with neither #pragma once nor a recognized whole-file #ifndef
+// guard is re-read at each one; the block after the table names those files.
 #define REPORT_SOURCE_LABEL_WIDTH 26
 #define REPORT_SOURCE_VALUE_WIDTH 14
 #define REPORT_SOURCE_SHARE_WIDTH 9
@@ -650,6 +651,48 @@ BUSTER_GLOBAL_LOCAL void report_preprocessed_row(Arena* arena, String8 label, u6
 {
     string_print(S8("{S8}{S8}{S8}\n"), report_source_label(arena, label), report_source_number(arena, value, REPORT_SOURCE_VALUE_WIDTH),
                  report_source_share(arena, value, total, true));
+}
+
+// The attribution behind the unique/lexed ratio: every file lexed more than
+// once, its lex count, and the bytes its re-reads added to the lexed column,
+// largest first. For one unit the re-read total equals the two aggregates'
+// scanned-byte difference exactly; the block is absent when nothing was
+// re-lexed, so closing an amplification source removes its rows here.
+BUSTER_GLOBAL_LOCAL void report_source_amplification(Arena* arena, CSourceFileMetrics const* files, u32 file_count)
+{
+    u32* order = file_count ? arena_allocate(arena, u32, file_count) : 0;
+    u32 repeated = 0;
+    u64 total = 0;
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        if (files[index].lex_count > 1)
+        {
+            u64 re_read = (files[index].lex_count - 1) * files[index].translated_bytes;
+            u32 position = repeated;
+            while (position && (files[order[position - 1]].lex_count - 1) * files[order[position - 1]].translated_bytes < re_read)
+            {
+                order[position] = order[position - 1];
+                position -= 1;
+            }
+            order[position] = index;
+            repeated += 1;
+            total += re_read;
+        }
+    }
+    if (repeated)
+    {
+        string_print(S8("\nfiles lexed more than once\n"));
+        string_print(S8("{S8}{S8}  path\n"), report_source_cell(arena, S8("lexes"), REPORT_SOURCE_VALUE_WIDTH),
+                     report_source_cell(arena, S8("re-read bytes"), REPORT_SOURCE_VALUE_WIDTH));
+        for (u32 index = 0; index < repeated; index += 1)
+        {
+            CSourceFileMetrics const* file = &files[order[index]];
+            string_print(S8("{S8}{S8}  {S8}\n"), report_source_number(arena, file->lex_count, REPORT_SOURCE_VALUE_WIDTH),
+                         report_source_number(arena, (file->lex_count - 1) * file->translated_bytes, REPORT_SOURCE_VALUE_WIDTH), file->path);
+        }
+        string_print(S8("{S8}{S8}  re-read in total\n"), report_source_cell(arena, (String8){0}, REPORT_SOURCE_VALUE_WIDTH),
+                     report_source_number(arena, total, REPORT_SOURCE_VALUE_WIDTH));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSourceMetrics unique, CSourceMetrics lexed, CPreprocessedMetrics preprocessed)
@@ -808,6 +851,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (invocation.verbose)
         {
             report_source_metrics(arena, unit, compile.source_unique, compile.source_lexed, compile.preprocessed);
+            report_source_amplification(arena, compile.lexed_files, compile.lexed_file_count);
         }
         // A metrics file that was asked for and could not be written is an
         // error like an unwritable -o: the caller asked for a measurement and

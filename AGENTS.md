@@ -394,9 +394,14 @@ compilation is explicitly enabled.
   `ide cc -v` prints it, and the self-host stages pass `-v` so it lands in the
   log beside their instruction counts. The `unique` column covers the distinct
   files of the include closure, the `lexed` column every inclusion: a header
-  without `#pragma once` is re-read and re-lexed at each `#include`, so the
-  two columns' ratio is the unit's include amplification (currently 283
-  files/15.4 MB against 487/18.1 MB). `bytes on disk`/`physical lines` measure
+  with neither `#pragma once` nor a whole-file `#ifndef` include guard the
+  preprocessor recognizes (see `CIncludeGuardTable` in `c_source.c`) is
+  re-read and re-lexed at each `#include`, so the two columns' ratio is the
+  unit's include amplification (currently 295 files/27,2 MB against
+  326/27,3 MB; before the guard optimization the same tree read 448/29,4 MB).
+  A `files lexed more than once` block under the table attributes the
+  remainder per path — deliberately re-includable files like the builtin
+  `stddef.h` and glibc's `bits/wordsize.h`, whose re-reads total 28 KB. `bytes on disk`/`physical lines` measure
   the files as written, `bytes scanned`/`lines scanned` what the lexer saw
   after carriage returns and line splices are folded out, and two partitions
   hold exactly: bytes are code plus comment plus whitespace, and lines are

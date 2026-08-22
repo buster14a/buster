@@ -18,7 +18,8 @@
 //   c_translate_source                         phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
-//   c_source_metrics_add                       the SOURCE table counters
+//   c_source_metrics_add,                      the SOURCE table counters and
+//   c_source_metrics_file_row                  the per-file attribution rows
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
 //   c_lex_compact                              the SIMD lexer (Validark
 //                                              method, AGENTS.md); c_lex
@@ -32,6 +33,9 @@
 //   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
 //   c_include_read .. c_include_name           include resolution and the
 //                                              builtin resource headers
+//   CIncludeGuardState, CIncludeGuardTable     the multiple-include
+//                                              optimization for #ifndef
+//                                              guard-shaped headers
 //   c_preprocess_define_directive              #define parsing
 //   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
@@ -759,23 +763,32 @@ u64 c_source_metrics_code_bytes(CSourceMetrics metrics)
 }
 
 // Paths already lexed, so the unique aggregate counts a header once however
-// often it is included. Hashes only: two distinct paths colliding on 64 bits
-// would merge into one entry, which is cheaper to accept than a string table
-// on a counter that feeds no decision.
+// often it is included, plus one attribution row per distinct path so the
+// amplification the two aggregates state only as a ratio can be charged to
+// the files that cause it. Slots key on the path hash alone: two distinct paths
+// colliding on 64 bits would merge into one row, which is cheaper to accept
+// than slot-side path compares on counters that feed no decision.
 typedef struct CSourceMetricsFileSet CSourceMetricsFileSet;
 struct CSourceMetricsFileSet
 {
     u64* hashes;
+    // Parallel to `hashes`: the row the occupied slot's path owns.
+    u32* slot_rows;
+    CSourceFileMetrics* rows;
     u32 capacity;
     u32 count;
+    u32 row_capacity;
 };
 
-BUSTER_C_INTERNAL bool c_source_metrics_file_first(Arena* arena, CSourceMetricsFileSet* set, String8 path)
+// The row index for `path`, appending a fresh zero-count row the first time
+// the path is seen; a first sight is `rows[result].lex_count == 0`.
+BUSTER_C_INTERNAL u32 c_source_metrics_file_row(Arena* arena, CSourceMetricsFileSet* set, String8 path)
 {
     if (set->count * 2 >= set->capacity)
     {
         u32 capacity = set->capacity ? set->capacity * 2 : 256;
         u64* hashes = arena_allocate(arena, u64, capacity);
+        u32* slot_rows = arena_allocate(arena, u32, capacity);
         memset(hashes, 0, capacity * sizeof(*hashes));
         for (u32 index = 0; index < set->capacity; index += 1)
         {
@@ -788,25 +801,48 @@ BUSTER_C_INTERNAL bool c_source_metrics_file_first(Arena* arena, CSourceMetricsF
                     slot = (slot + 1) & (capacity - 1);
                 }
                 hashes[slot] = moved;
+                slot_rows[slot] = set->slot_rows[index];
             }
         }
         set->hashes = hashes;
+        set->slot_rows = slot_rows;
         set->capacity = capacity;
     }
     // Zero marks an empty slot, so no path may hash to it.
     u64 hash = buster_hash_64((u8*)path.pointer, path.length) | 1;
     u32 slot = (u32)hash & (set->capacity - 1);
-    while (set->hashes[slot])
+    bool found = false;
+    while (set->hashes[slot] && !found)
     {
-        if (set->hashes[slot] == hash)
-        {
-            return false;
-        }
-        slot = (slot + 1) & (set->capacity - 1);
+        found = set->hashes[slot] == hash;
+        slot = found ? slot : (slot + 1) & (set->capacity - 1);
     }
-    set->hashes[slot] = hash;
-    set->count += 1;
-    return true;
+    u32 result;
+    if (found)
+    {
+        result = set->slot_rows[slot];
+    }
+    else
+    {
+        if (set->count == set->row_capacity)
+        {
+            u32 row_capacity = set->row_capacity ? set->row_capacity * 2 : 128;
+            CSourceFileMetrics* rows = arena_allocate(arena, CSourceFileMetrics, row_capacity);
+            if (set->count)
+            {
+                memcpy(rows, set->rows, set->count * sizeof(*rows));
+            }
+            set->rows = rows;
+            set->row_capacity = row_capacity;
+        }
+        result = set->count;
+        set->rows[result] = (CSourceFileMetrics){.path = path};
+        set->hashes[slot] = hash;
+        set->slot_rows[slot] = result;
+        set->count += 1;
+    }
+
+    return result;
 }
 
 // The cold tail of c_token_push: the item is 0xFFFF bytes or longer. A
@@ -4254,11 +4290,30 @@ BUSTER_C_INTERNAL u64 c_preprocess_line_end(CLexResult lex, u64 token_index)
     return token_index;
 }
 
+// The whole-file include-guard proof, per source frame: SEARCHING until the
+// file's first top-level directive, GUARDED while inside a leading
+// `#ifndef NAME` conditional, CLOSED once its `#endif` returns to the
+// frame's base with the shape still intact, and DISQUALIFIED as soon as any
+// token or directive is seen at the frame's top level outside that one
+// conditional. A frame that reaches end of file CLOSED has proven that
+// re-lexing it while NAME is defined can only produce an empty token
+// sequence, which is what lets the next inclusion be dropped unread.
+typedef enum CIncludeGuardState
+{
+    C_INCLUDE_GUARD_SEARCHING = 0,
+    C_INCLUDE_GUARD_GUARDED,
+    C_INCLUDE_GUARD_CLOSED,
+    C_INCLUDE_GUARD_DISQUALIFIED,
+} CIncludeGuardState;
+
 typedef struct CPreprocessSourceFrame CPreprocessSourceFrame;
 struct CPreprocessSourceFrame
 {
     CPreprocessSourceFrame* previous;
     CConditionalFrame* conditional_base;
+    // The leading top-level conditional while the guard proof is GUARDED,
+    // and the interned symbol of its `#ifndef` name (see CIncludeGuardState).
+    CConditionalFrame* guard;
     CLexResult lex;
     String8 path;
     String8 logical_path;
@@ -4272,10 +4327,65 @@ struct CPreprocessSourceFrame
     // registered but token-free header would break the fixed point.
     u32 map_entry;
     u32 depth;
+    u32 guard_symbol;
+    u8 guard_state;
     bool line_start;
     FileMapRead source_map;
     CIncludeSearchOrigin include_origin;
 };
+
+// Files whose completed lex proved the guard shape above, keyed by resolved
+// path with the guard macro as its interned symbol id. A later #include of
+// the path is dropped without re-reading or re-lexing when that macro is
+// still defined — the multiple-include optimization, the include-guard
+// counterpart of the #pragma once suppression list. Symbol 0 doubles as
+// "absent" because interned ids start at 1.
+typedef struct CIncludeGuardTable CIncludeGuardTable;
+struct CIncludeGuardTable
+{
+    String8* paths;
+    u32* symbols;
+    u32 count;
+    u32 capacity;
+};
+
+BUSTER_C_INTERNAL u32 c_include_guard_symbol(CIncludeGuardTable const* table, String8 path)
+{
+    u32 result = 0;
+    for (u32 index = 0; index < table->count && !result; index += 1)
+    {
+        if (string_equal(table->paths[index], path))
+        {
+            result = table->symbols[index];
+        }
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_include_guard_record(Arena* arena, CIncludeGuardTable* table, String8 path, u32 symbol)
+{
+    if (!c_include_guard_symbol(table, path))
+    {
+        if (table->count == table->capacity)
+        {
+            u32 capacity = table->capacity ? table->capacity * 2 : 64;
+            String8* paths = arena_allocate(arena, String8, capacity);
+            u32* symbols = arena_allocate(arena, u32, capacity);
+            if (table->count)
+            {
+                memcpy(paths, table->paths, table->count * sizeof(*paths));
+                memcpy(symbols, table->symbols, table->count * sizeof(*symbols));
+            }
+            table->paths = paths;
+            table->symbols = symbols;
+            table->capacity = capacity;
+        }
+        table->paths[table->count] = path;
+        table->symbols[table->count] = symbol;
+        table->count += 1;
+    }
+}
 
 typedef struct CPragmaPackStack CPragmaPackStack;
 struct CPragmaPackStack
@@ -5526,9 +5636,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CLexResult root_lex = c_lex_space(arena, space, source);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.source_lexed, &root_lex.metrics);
-    if (c_source_metrics_file_first(arena, &metrics_files, options.source_path))
     {
-        c_source_metrics_add(&result.source_unique, &root_lex.metrics);
+        u32 root_row = c_source_metrics_file_row(arena, &metrics_files, options.source_path);
+        if (metrics_files.rows[root_row].lex_count == 0)
+        {
+            c_source_metrics_add(&result.source_unique, &root_lex.metrics);
+        }
+        metrics_files.rows[root_row].translated_bytes = root_lex.metrics.translated_bytes;
+        metrics_files.rows[root_row].lex_count += 1;
     }
     CSymbolTable* symbol_table = arena_allocate(arena, CSymbolTable, 1);
     *symbol_table = c_symbol_table_create(arena);
@@ -5874,6 +5989,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                           (CSourceLocation){.line = 1, .column = 1});
     String8* once_paths = arena_allocate(arena, String8, source.length + 1);
     u32 once_path_count = 0;
+    CIncludeGuardTable guard_table = {0};
     CPreprocessPragmaContext pragma_context = {
         .arena = arena,
         .symbols = symbol_table,
@@ -5903,6 +6019,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             }
             if (source_frame != &root_frame)
             {
+                if (source_frame->guard_state == C_INCLUDE_GUARD_CLOSED)
+                {
+                    c_include_guard_record(arena, &guard_table, source_frame->path, source_frame->guard_symbol);
+                }
                 file_map_unmap(source_frame->source_map);
             }
             source_frame = source_frame->previous;
@@ -5952,6 +6072,13 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 bool is_pragma = c_token_spelling_equal(base, directive, S8("pragma"));
                 bool is_error = c_token_spelling_equal(base, directive, S8("error"));
                 bool is_warning = c_token_spelling_equal(base, directive, S8("warning"));
+                // Any directive at the frame's top level other than the
+                // conditionals themselves sits outside a candidate include
+                // guard, so the file cannot be guard-shaped.
+                if (!(is_if || is_ifdef || is_ifndef || is_elif || is_else || is_endif) && conditional == source_frame->conditional_base)
+                {
+                    source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                }
                 if (is_if || is_ifdef || is_ifndef)
                 {
                     bool condition_value = false;
@@ -5990,6 +6117,25 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         .branch_taken = active && condition_value,
                     };
                     conditional = frame;
+                    if (conditional->previous == source_frame->conditional_base)
+                    {
+                        // A guard candidate is the file's first top-level
+                        // directive and must be `#ifndef NAME` exactly; a
+                        // second top-level conditional after the candidate
+                        // closed means tokens could survive a re-include.
+                        if (source_frame->guard_state == C_INCLUDE_GUARD_SEARCHING && is_ifndef && valid)
+                        {
+                            CToken guard_name = lex.tokens[token_index];
+                            source_frame->guard_state = C_INCLUDE_GUARD_GUARDED;
+                            source_frame->guard = conditional;
+                            source_frame->guard_symbol =
+                                guard_name.symbol ? guard_name.symbol : c_symbol_intern(symbol_table, c_token_spelling(base, guard_name));
+                        }
+                        else
+                        {
+                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                        }
+                    }
                 }
                 else if (is_elif)
                 {
@@ -6000,6 +6146,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     }
                     else
                     {
+                        // An #elif arm on the guard conditional itself could
+                        // pass tokens on a re-include, so it breaks the shape.
+                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+                        {
+                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                        }
                         bool condition_value = false;
                         bool evaluate = conditional->parent_active && !conditional->branch_taken;
                         bool valid = true;
@@ -6027,6 +6179,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     }
                     else
                     {
+                        // Same as #elif: an #else arm on the guard passes
+                        // tokens exactly when the guard macro is defined.
+                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+                        {
+                            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+                        }
                         conditional->else_seen = true;
                         conditional->active = conditional->parent_active && !conditional->branch_taken;
                         conditional->branch_taken |= conditional->active;
@@ -6041,6 +6199,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     }
                     else
                     {
+                        if (source_frame->guard_state == C_INCLUDE_GUARD_GUARDED && conditional == source_frame->guard)
+                        {
+                            // The guard's own #endif: the proof holds unless
+                            // anything but end of file follows.
+                            source_frame->guard_state = C_INCLUDE_GUARD_CLOSED;
+                        }
                         conditional = conditional->previous;
                     }
                 }
@@ -6199,14 +6363,32 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                             {
                                 once_paths[once_path_count++] = include_path;
                             }
+                            if (!include_once)
+                            {
+                                // The multiple-include optimization: a file
+                                // that proved the whole-file guard shape on an
+                                // earlier lex produces no tokens while its
+                                // guard macro is defined, so it is dropped
+                                // like a #pragma once re-include.
+                                u32 guard_symbol = c_include_guard_symbol(&guard_table, include_path);
+                                CMacro* guard_macro = guard_symbol ? c_macro_find(first_macro, guard_symbol) : 0;
+                                include_once = guard_macro && guard_macro->definition.defined;
+                            }
                             CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
                             // A suppressed include lexed nothing and adds
                             // zeroes; its path was already counted by the
-                            // inclusion that did the lexing.
+                            // inclusion that did the lexing, and its
+                            // attribution row keeps that lex count.
                             c_source_metrics_add(&result.source_lexed, &include_lex.metrics);
-                            if (c_source_metrics_file_first(arena, &metrics_files, include_path))
+                            u32 include_row = c_source_metrics_file_row(arena, &metrics_files, include_path);
+                            if (metrics_files.rows[include_row].lex_count == 0)
                             {
                                 c_source_metrics_add(&result.source_unique, &include_lex.metrics);
+                            }
+                            if (!include_once)
+                            {
+                                metrics_files.rows[include_row].translated_bytes = include_lex.metrics.translated_bytes;
+                                metrics_files.rows[include_row].lex_count += 1;
                             }
                             c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_count);
                             for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
@@ -6284,6 +6466,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             continue;
         }
         source_frame->line_start = false;
+        // A token line at the frame's top level sits outside any candidate
+        // include guard, so tokens would survive a re-include.
+        if (conditional == source_frame->conditional_base)
+        {
+            source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
+        }
         u64 line_end = c_preprocess_line_end(lex, token_index);
         if (!c_preprocess_is_active(conditional))
         {
@@ -6418,6 +6606,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.preprocessed.spelling_bytes = space->used;
     result.files = file_table.files;
     result.file_count = file_table.count;
+    result.lexed_files = metrics_files.rows;
+    result.lexed_file_count = metrics_files.count;
     // The map was append-only while the stream was built; sort it once so
     // recovery can binary-search. Only #line splits append out of order, so
     // the insertion pass is effectively linear.

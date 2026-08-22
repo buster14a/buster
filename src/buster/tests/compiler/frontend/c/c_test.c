@@ -3184,6 +3184,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, import.diagnostic_count == 0);
     BUSTER_TEST(arguments, import.token_count == 2);
     c_test_preprocessed_token(arguments, &result, import, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("37"));
+    // The multiple-include optimization: a header whose whole body sits in
+    // one `#ifndef` guard is lexed once however often it is included, so the
+    // lexed aggregate counts the root plus one lex and no attribution row
+    // repeats.
+    CPreprocessResult guarded = c_preprocess(arguments->arena,
+                                             S8("#include \"basic_c_guarded_include.h\"\n"
+                                                "#include \"basic_c_guarded_include.h\"\n"
+                                                "GUARDED_VALUE\n"),
+                                             (CPreprocessOptions){
+                                                 .source_path = S8("tests/guarded_include_test.c"),
+                                             });
+    BUSTER_TEST(arguments, guarded.diagnostic_count == 0);
+    BUSTER_TEST(arguments, guarded.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, guarded, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
+    BUSTER_TEST(arguments, guarded.source_lexed.files == 2);
+    BUSTER_TEST(arguments, guarded.source_unique.files == 2);
+    BUSTER_TEST(arguments, guarded.lexed_file_count == 2);
+    BUSTER_TEST(arguments, guarded.lexed_files[0].lex_count == 1);
+    BUSTER_TEST(arguments, guarded.lexed_files[1].lex_count == 1);
+    // Undefining the guard macro re-arms the header: the suppression tests
+    // the macro at each inclusion, so the third include is lexed again and
+    // the macro it defines comes back.
+    CPreprocessResult unguarded = c_preprocess(arguments->arena,
+                                               S8("#include \"basic_c_guarded_include.h\"\n"
+                                                  "#undef BASIC_C_GUARDED_INCLUDE_H\n"
+                                                  "#undef GUARDED_VALUE\n"
+                                                  "#include \"basic_c_guarded_include.h\"\n"
+                                                  "GUARDED_VALUE\n"),
+                                               (CPreprocessOptions){
+                                                   .source_path = S8("tests/unguarded_include_test.c"),
+                                               });
+    BUSTER_TEST(arguments, unguarded.diagnostic_count == 0);
+    BUSTER_TEST(arguments, unguarded.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, unguarded, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
+    BUSTER_TEST(arguments, unguarded.source_lexed.files == 3);
+    BUSTER_TEST(arguments, unguarded.source_unique.files == 2);
+    // A token after the guard's #endif breaks the whole-file shape, so the
+    // header is re-lexed at every inclusion and its declaration repeats.
+    CPreprocessResult partial_guard = c_preprocess(arguments->arena,
+                                                   S8("#include \"basic_c_partial_guard_include.h\"\n"
+                                                      "#include \"basic_c_partial_guard_include.h\"\n"),
+                                                   (CPreprocessOptions){
+                                                       .source_path = S8("tests/partial_guard_include_test.c"),
+                                                   });
+    BUSTER_TEST(arguments, partial_guard.diagnostic_count == 0);
+    BUSTER_TEST(arguments, partial_guard.token_count == 7);
+    BUSTER_TEST(arguments, partial_guard.source_lexed.files == 3);
+    BUSTER_TEST(arguments, partial_guard.source_unique.files == 2);
     CPreprocessResult builtin_headers = c_preprocess(arguments->arena,
                                                      S8("#include <stdbool.h>\n"
                                                         "#include <stdalign.h>\n"

@@ -271,6 +271,25 @@ struct CSourceMetrics
     u64 tokens;
 };
 
+// One distinct path of a unit's include closure, with how many times its
+// bytes were actually lexed and the scanned size of one lex. A `lex_count`
+// above one attributes the unit's include amplification — nothing suppressed
+// that file's re-inclusion — and `(lex_count - 1) * translated_bytes` of the
+// lexed aggregate is what re-reading it cost. Suppressed re-inclusions
+// (#pragma once, #import, a recognized include guard) do not count: the rows
+// sum to the lexed aggregate, not to the #include directives reached. This
+// is deliberately not the token-carrying file table next to `map_entry`
+// (see c_source.c): that one is populated lazily so token-free headers never
+// enter the program's source map, while attribution needs every lexed file.
+typedef struct CSourceFileMetrics CSourceFileMetrics;
+struct CSourceFileMetrics
+{
+    String8 path;
+    u64 translated_bytes;
+    u32 lex_count;
+    u32 reserved;
+};
+
 // The other half of the frontend's work: what preprocessing produced, as
 // against what it read. Macro expansion multiplies the source by whatever
 // factor the macros ask for, so parsing and lowering scale with these numbers
@@ -455,11 +474,13 @@ struct CPreprocessResult
     Target target;
     TargetDataLayout data_layout;
     // Every file the preprocessor lexed, summed twice: once per inclusion,
-    // and once per distinct path. A header without #pragma once is re-read
-    // and re-lexed at every #include, so their ratio is the translation
-    // unit's include amplification.
+    // and once per distinct path. A header with neither #pragma once nor a
+    // recognized whole-file include guard is re-read and re-lexed at every
+    // #include, so their ratio is the translation unit's include
+    // amplification, and `lexed_files` attributes it per path.
     CSourceMetrics source_lexed;
     CSourceMetrics source_unique;
+    CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
     u64 token_count;
     u64 diagnostic_count;
@@ -467,6 +488,7 @@ struct CPreprocessResult
     u64 warning_count;
     u64 diagnostic_capacity;
     u32 file_count;
+    u32 lexed_file_count;
     CPreprocessDialect dialect;
     u32 pack_change_count;
 };

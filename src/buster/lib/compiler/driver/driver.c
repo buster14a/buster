@@ -2214,6 +2214,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // what it read is worth knowing.
     result.source_lexed = preprocess.source_lexed;
     result.source_unique = preprocess.source_unique;
+    result.lexed_files = preprocess.lexed_files;
+    result.lexed_file_count = preprocess.lexed_file_count;
     result.preprocessed = preprocess.preprocessed;
     for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
     {
@@ -2879,6 +2881,31 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         // a shared header once per unit that included it.
         c_source_metrics_add(&result.source_lexed, &unit.source_lexed);
         c_source_metrics_add(&result.source_unique, &unit.source_unique);
+        // Only the amplification rows survive the unit arena: a row lexed
+        // once is not amplification, and a header shared between units is
+        // legitimately lexed once per unit, so per-unit rows are appended
+        // rather than merged by path.
+        for (u32 row_index = 0; row_index < unit.lexed_file_count; row_index += 1)
+        {
+            CSourceFileMetrics row = unit.lexed_files[row_index];
+            if (row.lex_count > 1)
+            {
+                if (result.lexed_file_count == result.lexed_files_reserved)
+                {
+                    u32 row_capacity = result.lexed_files_reserved ? result.lexed_files_reserved * 2 : 64;
+                    CSourceFileMetrics* rows = arena_allocate(arena, CSourceFileMetrics, row_capacity);
+                    if (result.lexed_file_count)
+                    {
+                        memcpy(rows, result.lexed_files, result.lexed_file_count * sizeof(*rows));
+                    }
+                    result.lexed_files = rows;
+                    result.lexed_files_reserved = row_capacity;
+                }
+                row.path = string_duplicate_arena(arena, row.path, false);
+                result.lexed_files[result.lexed_file_count] = row;
+                result.lexed_file_count += 1;
+            }
+        }
         result.preprocessed.tokens += unit.preprocessed.tokens;
         result.preprocessed.bytes += unit.preprocessed.bytes;
         result.preprocessed.spelling_bytes += unit.preprocessed.spelling_bytes;
