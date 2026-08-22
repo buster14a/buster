@@ -37,6 +37,11 @@
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
 //   c_parse_primitive_type                        construction, attributes
+//   c_parse_word_bits_compute,                    specifier words answered
+//   c_parse_word_bits_token                       from the interned symbol
+//                                                 id (C_WORD_* bits), with
+//                                                 the spelling ladders as
+//                                                 the symbol-0 fallback
 //   c_type_parse_alignment_step ..                the type-parse machine
 //   c_type_parse_machine_run                      steps
 //   c_parse_scalar_type_core_begin,               declarators: pointers,
@@ -97,6 +102,77 @@ enum
     C_TOKEN_CLASS_VECTOR_SIZE = 1 << 4,
     C_TOKEN_CLASS_ALIGNAS = 1 << 5,
 };
+
+// Specifier-word facts stored per predefined symbol id in
+// CSymbolTable.word_bits, derived at table-create time from the same
+// spelling predicates the `_token` variants below fall back to, so the two
+// paths cannot drift. The qualifier bits carry which qualifier matched
+// because c_parse_type_qualifier_word reports its answer by setting the
+// matching CType flag.
+enum
+{
+    C_WORD_TYPE = 1 << 0,
+    C_WORD_AUTO_TYPE = 1 << 1,
+    C_WORD_TYPEOF = 1 << 2,
+    C_WORD_CONSTEXPR = 1 << 3,
+    C_WORD_TYPEOF_UNQUAL = 1 << 4,
+    C_WORD_QUALIFIER_CONST = 1 << 5,
+    C_WORD_QUALIFIER_VOLATILE = 1 << 6,
+    C_WORD_QUALIFIER_RESTRICT = 1 << 7,
+    C_WORD_QUALIFIER_ATOMIC = 1 << 8,
+    C_WORD_STORAGE_PREFIX = 1 << 9,
+};
+
+#define C_WORD_QUALIFIER_ANY (C_WORD_QUALIFIER_CONST | C_WORD_QUALIFIER_VOLATILE | C_WORD_QUALIFIER_RESTRICT | C_WORD_QUALIFIER_ATOMIC)
+
+// The `_token` specifier predicates: same answers as their String8
+// counterparts, but an interned token settles on one word_bits load instead
+// of a spelling ladder. Symbol 0 (pasted, synthesized, or test-built tokens)
+// falls back to the spelling compute, so a missed path costs speed and never
+// correctness; a symbol above predefined_limit is a constant-time "no"
+// because every specifier-word spelling is interned into the predefined
+// range. Defined after the spelling ladders they derive from.
+BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
+BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token);
+BUSTER_C_INTERNAL bool c_parse_auto_type_word_token(CPreprocessResult preprocess, CToken token);
+BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult preprocess, CToken token, CType* type);
+BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers);
+
+// The declaration-keyword pair answered from class_bits by symbol id; the
+// bits come from c_parse_token_class_compute over the same spellings, so
+// the id path and the spelling path cannot drift.
+BUSTER_C_INTERNAL bool c_declaration_keyword_token(CPreprocessResult preprocess, CToken token)
+{
+    bool result;
+    if (token.symbol && preprocess.symbols)
+    {
+        result = token.symbol <= preprocess.symbols->predefined_limit &&
+                 (preprocess.symbols->class_bits[token.symbol] & C_TOKEN_CLASS_DECLARATION_KEYWORD) != 0;
+    }
+    else
+    {
+        result = c_declaration_keyword(c_token_spelling(preprocess.spelling_base, token));
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_declaration_keyword_for_dialect_token(CPreprocessResult preprocess, CToken token)
+{
+    bool result;
+    if (token.symbol && preprocess.symbols)
+    {
+        u8 token_class = token.symbol <= preprocess.symbols->predefined_limit ? preprocess.symbols->class_bits[token.symbol] : 0;
+        result = (token_class & C_TOKEN_CLASS_DECLARATION_KEYWORD) != 0 ||
+                 (c_preprocess_dialect_is_c23(preprocess.dialect) && (token_class & C_TOKEN_CLASS_C23_EXTRA_KEYWORD) != 0) ||
+                 ((c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
+                  (token_class & C_TOKEN_CLASS_TYPEOF) != 0);
+    }
+    else
+    {
+        result = c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect);
+    }
+    return result;
+}
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling)
 {
@@ -951,7 +1027,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         for (u32 cast_type_index = absolute + 1; cast_type && cast_type_index < close; cast_type_index += 1)
                         {
                             CToken type_token = preprocess.tokens[cast_type_index];
-                            bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, type_token), preprocess.dialect);
+                            bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect_token(preprocess, type_token);
                             bool typedef_name =
                                 !type_word && c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, type_token), false).value != C_ID_UNDERLYING_INVALID;
                             cast_type = type_word || typedef_name;
@@ -3985,7 +4061,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             continue;
         }
         CToken token = preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER || !c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect))
+        if (token.kind != C_TOKEN_IDENTIFIER || !c_parse_type_word_for_dialect_token(preprocess, token))
         {
             break;
         }
@@ -4205,6 +4281,10 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
 // string_equal calls that each materialize the spelling through
 // c_token_length's oversized guard.
 #define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
+
+// The three aggregate introducers as one membership test, for the specifier
+// scans that ask "does an aggregate head start here" per identifier token.
+#define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
 
 typedef struct CCleanupAttributeInfo CCleanupAttributeInfo;
 struct CCleanupAttributeInfo
@@ -4450,7 +4530,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             continue;
         }
         CToken token = preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER || !c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect))
+        if (token.kind != C_TOKEN_IDENTIFIER || !c_parse_type_word_for_dialect_token(preprocess, token))
         {
             break;
         }
@@ -4673,7 +4753,6 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
 }
 
 BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
-BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix(String8 spelling, CPreprocessDialect dialect, CType* qualifiers);
 
 BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                            u32* declarator_start)
@@ -4693,12 +4772,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
             typedef_index = c_parse_skip_attributes(preprocess, alignment_end, end);
             continue;
         }
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[typedef_index]);
-        if (c_parse_type_qualifier_word(spelling, &qualifiers))
+        if (c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[typedef_index], &qualifiers))
         {
             has_qualifier = true;
         }
-        else if (!c_parse_atomic_declaration_prefix(spelling, preprocess.dialect, &qualifiers))
+        else if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[typedef_index], &qualifiers))
         {
             break;
         }
@@ -4734,12 +4812,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
                 qualifier_index = c_parse_skip_attributes(preprocess, alignment_end, end);
                 continue;
             }
-            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[qualifier_index]);
-            if (c_parse_type_qualifier_word(spelling, &qualifiers))
+            if (c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[qualifier_index], &qualifiers))
             {
                 has_qualifier = true;
             }
-            else if (!c_parse_atomic_declaration_prefix(spelling, preprocess.dialect, &qualifiers))
+            else if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[qualifier_index], &qualifiers))
             {
                 break;
             }
@@ -4759,17 +4836,133 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
 
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start);
 
-BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix(String8 spelling, CPreprocessDialect dialect, CType* qualifiers)
+// The dialect-independent storage/function-specifier words the atomic
+// declaration prefix accepts besides the qualifiers; split out so
+// c_parse_word_bits_compute can derive C_WORD_STORAGE_PREFIX from the same
+// ladder the spelling path runs.
+BUSTER_C_INTERNAL bool c_parse_storage_prefix_word(String8 spelling)
 {
-    if (c_parse_type_qualifier_word(spelling, qualifiers))
-    {
-        return true;
-    }
     return string_equal(spelling, S8("auto")) || string_equal(spelling, S8("extern")) || string_equal(spelling, S8("inline")) ||
            string_equal(spelling, S8("__inline")) || string_equal(spelling, S8("__inline__")) || string_equal(spelling, S8("_Noreturn")) ||
            string_equal(spelling, S8("register")) || string_equal(spelling, S8("static")) || string_equal(spelling, S8("typedef")) ||
-           string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")) || string_equal(spelling, S8("__extension__")) ||
-           (c_preprocess_dialect_is_c23(dialect) && string_equal(spelling, S8("constexpr")));
+           string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")) || string_equal(spelling, S8("__extension__"));
+}
+
+// The single source of truth for word_bits: every bit is derived from the
+// spelling predicate the corresponding `_token` variant would otherwise
+// fall back to. The qualifier probe reads the answer back out of a scratch
+// CType because c_parse_type_qualifier_word reports which word matched by
+// setting the matching flag.
+BUSTER_C_SHARED u16 c_parse_word_bits_compute(String8 spelling)
+{
+    u16 bits = 0;
+    if (c_parse_type_word(spelling))
+    {
+        bits |= C_WORD_TYPE;
+    }
+    if (c_parse_auto_type_word(spelling))
+    {
+        bits |= C_WORD_AUTO_TYPE;
+    }
+    if (string_equal(spelling, S8("typeof")))
+    {
+        bits |= C_WORD_TYPEOF;
+    }
+    if (string_equal(spelling, S8("constexpr")))
+    {
+        bits |= C_WORD_CONSTEXPR;
+    }
+    if (string_equal(spelling, S8("typeof_unqual")))
+    {
+        bits |= C_WORD_TYPEOF_UNQUAL;
+    }
+    CType qualifier_probe = {0};
+    if (c_parse_type_qualifier_word(spelling, &qualifier_probe))
+    {
+        bits |= qualifier_probe.is_const ? C_WORD_QUALIFIER_CONST : 0;
+        bits |= qualifier_probe.is_volatile ? C_WORD_QUALIFIER_VOLATILE : 0;
+        bits |= qualifier_probe.is_restrict ? C_WORD_QUALIFIER_RESTRICT : 0;
+        bits |= qualifier_probe.is_atomic ? C_WORD_QUALIFIER_ATOMIC : 0;
+    }
+    if (c_parse_storage_prefix_word(spelling))
+    {
+        bits |= C_WORD_STORAGE_PREFIX;
+    }
+    return bits;
+}
+
+BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token)
+{
+    u16 bits;
+    if (token.symbol && preprocess.symbols)
+    {
+        bits = token.symbol <= preprocess.symbols->predefined_limit ? preprocess.symbols->word_bits[token.symbol] : 0;
+    }
+    else
+    {
+        bits = c_parse_word_bits_compute(c_token_spelling(preprocess.spelling_base, token));
+    }
+    return bits;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_word_for_dialect_token(CPreprocessResult preprocess, CToken token)
+{
+    u16 mask = C_WORD_TYPE;
+    if (c_preprocess_dialect_is_gnu(preprocess.dialect))
+    {
+        mask |= C_WORD_AUTO_TYPE | C_WORD_TYPEOF;
+    }
+    if (c_preprocess_dialect_is_c23(preprocess.dialect))
+    {
+        mask |= C_WORD_TYPEOF | C_WORD_CONSTEXPR | C_WORD_TYPEOF_UNQUAL;
+    }
+    return (c_parse_word_bits_token(preprocess, token) & mask) != 0;
+}
+
+BUSTER_C_INTERNAL bool c_parse_auto_type_word_token(CPreprocessResult preprocess, CToken token)
+{
+    return (c_parse_word_bits_token(preprocess, token) & C_WORD_AUTO_TYPE) != 0;
+}
+
+// Sets the matching qualifier flags exactly as the spelling form does: at
+// most one qualifier bit is set per word, so at most one flag is written.
+BUSTER_C_INTERNAL bool c_parse_qualifier_bits_apply(u16 bits, CType* type)
+{
+    u16 qualifier_bits = bits & C_WORD_QUALIFIER_ANY;
+    if (qualifier_bits & C_WORD_QUALIFIER_CONST)
+    {
+        type->is_const = true;
+    }
+    if (qualifier_bits & C_WORD_QUALIFIER_VOLATILE)
+    {
+        type->is_volatile = true;
+    }
+    if (qualifier_bits & C_WORD_QUALIFIER_RESTRICT)
+    {
+        type->is_restrict = true;
+    }
+    if (qualifier_bits & C_WORD_QUALIFIER_ATOMIC)
+    {
+        type->is_atomic = true;
+    }
+    return qualifier_bits != 0;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult preprocess, CToken token, CType* type)
+{
+    return c_parse_qualifier_bits_apply(c_parse_word_bits_token(preprocess, token), type);
+}
+
+BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers)
+{
+    u16 bits = c_parse_word_bits_token(preprocess, token);
+    u16 mask = C_WORD_QUALIFIER_ANY | C_WORD_STORAGE_PREFIX;
+    if (c_preprocess_dialect_is_c23(preprocess.dialect))
+    {
+        mask |= C_WORD_CONSTEXPR;
+    }
+    c_parse_qualifier_bits_apply(bits, qualifiers);
+    return (bits & mask) != 0;
 }
 
 BUSTER_C_INTERNAL void c_type_parse_alignment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
@@ -5253,7 +5446,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         while (specifier_index < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
                !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("_Atomic")))
         {
-            if (!c_parse_atomic_declaration_prefix(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), preprocess.dialect, &frame->qualifiers))
+            if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
             {
                 break;
             }
@@ -5408,7 +5601,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         }
         u32 suffix = frame->close;
         while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[suffix]), &frame->qualifiers))
+               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
         {
             suffix += 1;
         }
@@ -5437,7 +5630,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     frame->qualifiers.is_atomic = true;
     u32 suffix = frame->close;
     while (suffix < frame->end && preprocess.tokens[suffix].kind == C_TOKEN_IDENTIFIER &&
-           c_parse_atomic_declaration_prefix(c_token_spelling(preprocess.spelling_base, preprocess.tokens[suffix]), preprocess.dialect, &frame->qualifiers))
+           c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[suffix], &frame->qualifiers))
     {
         suffix += 1;
     }
@@ -5627,7 +5820,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
                 {
                     close_index += 1;
                     while (close_index < frame->end && preprocess.tokens[close_index].kind == C_TOKEN_IDENTIFIER &&
-                           c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[close_index]), &ignored))
+                           c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[close_index], &ignored))
                     {
                         close_index += 1;
                     }
@@ -6044,7 +6237,7 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
         type = c_parse_pointer_chain(&operand_parse, preprocess, type, &index, end);
         CType qualifiers = {0};
         while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-               c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), &qualifiers))
+               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[index], &qualifiers))
         {
             index += 1;
         }
@@ -6086,20 +6279,18 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             }
             continue;
         }
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]);
-        if (string_equal(spelling, S8("struct")) || string_equal(spelling, S8("union")) || string_equal(spelling, S8("enum")))
+        if (c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[aggregate_index], C_PARSE_AGGREGATE_KEYWORDS))
         {
             break;
         }
-        if (!c_parse_type_word_for_dialect(spelling, preprocess.dialect))
+        if (!c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[aggregate_index]))
         {
             break;
         }
         aggregate_index += 1;
     }
     if (aggregate_index >= end || preprocess.tokens[aggregate_index].kind != C_TOKEN_IDENTIFIER ||
-        (!string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]), S8("struct")) && !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]), S8("union")) &&
-         !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[aggregate_index]), S8("enum"))))
+        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[aggregate_index], C_PARSE_AGGREGATE_KEYWORDS))
     {
         if (aggregate_index == start && aggregate_index < end && preprocess.tokens[aggregate_index].kind == C_TOKEN_IDENTIFIER)
         {
@@ -6124,7 +6315,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                     bool has_qualifier = false;
                     while (qualifier_index < end && preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
                     {
-                        if (!c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[qualifier_index]), &qualified))
+                        if (!c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[qualifier_index], &qualified))
                         {
                             break;
                         }
@@ -6354,7 +6545,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                         break;
                                     }
                                 }
-                                bool type_word = c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, cast_token), preprocess.dialect);
+                                bool type_word = c_parse_type_word_for_dialect_token(preprocess, cast_token);
                                 cast_valid &= type_word || typedef_name || tag_name;
                                 cast_type |= type_word || typedef_name;
                                 tag_name = string_equal(c_token_spelling(preprocess.spelling_base, cast_token), S8("struct")) || string_equal(c_token_spelling(preprocess.spelling_base, cast_token), S8("union")) ||
@@ -6760,7 +6951,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_type_token_in_declaration(CPreprocessResult 
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, token)))
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word_token(preprocess, token))
         {
             *token_index_out = index;
             return true;
@@ -7783,6 +7974,23 @@ BUSTER_C_SHARED bool c_parse_type_start(CParseResult* result, CScopeId scope, St
     return entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
 }
 
+// The token form of c_parse_type_start: word tests by interned symbol id,
+// entity lookup through the token's own symbol.
+BUSTER_C_SHARED bool c_parse_type_start_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token)
+{
+    bool starts_type;
+    if (c_parse_type_word_for_dialect_token(preprocess, token) || c_parse_auto_type_word_token(preprocess, token))
+    {
+        starts_type = true;
+    }
+    else
+    {
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+        starts_type = entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+    }
+    return starts_type;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
 {
     CToken token = preprocess.tokens[token_index];
@@ -8144,7 +8352,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
             scan = skipped;
             continue;
         }
-        if (preprocess.tokens[scan].kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[scan])))
+        if (preprocess.tokens[scan].kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word_token(preprocess, preprocess.tokens[scan]))
         {
             if (info->has_auto_type)
             {
@@ -8175,7 +8383,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
                 continue;
             }
             CToken token = preprocess.tokens[scan];
-            if (token.kind != C_TOKEN_IDENTIFIER || (!c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers) &&
+            if (token.kind != C_TOKEN_IDENTIFIER || (!c_parse_type_qualifier_word_token(preprocess, token, &info->qualifiers) &&
                                                       !c_parse_auto_storage_word(c_token_spelling(preprocess.spelling_base, token), info)))
             {
                 info->conflicting_specifier = true;
@@ -8192,12 +8400,12 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
                 continue;
             }
             CToken token = preprocess.tokens[scan];
-            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(preprocess.spelling_base, token), &info->qualifiers))
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word_token(preprocess, token, &info->qualifiers))
             {
                 scan += 1;
                 continue;
             }
-            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, token)))
+            if (token.kind == C_TOKEN_IDENTIFIER && c_parse_auto_type_word_token(preprocess, token))
             {
                 info->conflicting_specifier = true;
                 scan += 1;
@@ -8212,8 +8420,8 @@ BUSTER_C_INTERNAL bool c_parse_auto_declaration_info(CPreprocessResult preproces
             break;
         }
         if (info->name_index < specifier_end && preprocess.tokens[info->name_index].kind == C_TOKEN_IDENTIFIER &&
-            !c_declaration_keyword(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index])) &&
-            !c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[info->name_index]), preprocess.dialect))
+            !c_declaration_keyword_token(preprocess, preprocess.tokens[info->name_index]) &&
+            !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[info->name_index]))
         {
             scan = info->name_index + 1;
             while (scan < specifier_end)
@@ -8974,7 +9182,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const
                         tag_name = true;
                         type_like = true;
                     }
-                    else if (c_parse_type_word_for_dialect(c_token_spelling(preprocess->spelling_base, candidate), preprocess->dialect))
+                    else if (c_parse_type_word_for_dialect_token(*preprocess, candidate))
                     {
                         type_like = true;
                     }
@@ -9067,7 +9275,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
                 tag_name = true;
                 type_name = true;
             }
-            else if (c_parse_type_start(result, scope, c_token_spelling(preprocess->spelling_base, token), preprocess->dialect))
+            else if (c_parse_type_start_token(result, *preprocess, scope, token))
             {
                 type_name = true;
             }
@@ -9661,10 +9869,10 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         }
         u32 declaration_type_start = c_parse_skip_attributes(preprocess, index, body_end);
         if (statement_start && declaration_type_start < body_end && preprocess.tokens[declaration_type_start].kind == C_TOKEN_IDENTIFIER &&
-            c_parse_type_start(result, scope_stack[scope_count - 1], c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_type_start]), preprocess.dialect))
+            c_parse_type_start_token(result, preprocess, scope_stack[scope_count - 1], preprocess.tokens[declaration_type_start]))
         {
-            if (!c_parse_type_word_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_type_start]), preprocess.dialect) &&
-                !c_parse_auto_type_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_type_start])))
+            if (!c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[declaration_type_start]) &&
+                !c_parse_auto_type_word_token(preprocess, preprocess.tokens[declaration_type_start]))
             {
                 c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_type_start);
             }
@@ -10244,7 +10452,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
         CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
-            bool keyword = c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect);
+            bool keyword = c_declaration_keyword_for_dialect_token(preprocess, token);
             if (!delimiter_count && !declarator.seen_equal && !keyword)
             {
                 declarator.name_token = index;
@@ -10264,7 +10472,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
         {
             if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index > start &&
                 preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), preprocess.dialect) &&
+                !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) &&
                 !declarator.seen_equal && declarator.function_name_token == C_ID_UNDERLYING_INVALID)
             {
                 u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
@@ -10353,11 +10561,11 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             {
                 is_typedef |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("typedef"));
                 is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("constexpr"));
-                if (!delimiter_count && !seen_equal && !seen_declarator_comma && !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect))
+                if (!delimiter_count && !seen_equal && !seen_declarator_comma && !c_declaration_keyword_for_dialect_token(preprocess, token))
                 {
                     name_token = index;
                 }
-                else if (name_token == C_ID_UNDERLYING_INVALID && !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, token), preprocess.dialect))
+                else if (name_token == C_ID_UNDERLYING_INVALID && !c_declaration_keyword_for_dialect_token(preprocess, token))
                 {
                     name_token = index;
                 }
@@ -10372,7 +10580,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             {
                 if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
                     preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                    !c_declaration_keyword_for_dialect(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), preprocess.dialect) && !seen_equal &&
+                    !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) && !seen_equal &&
                     function_name_token == C_ID_UNDERLYING_INVALID)
                 {
                     u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;

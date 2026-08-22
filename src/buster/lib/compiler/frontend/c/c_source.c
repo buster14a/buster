@@ -2507,6 +2507,11 @@ BUSTER_C_INTERNAL String8 const c_symbol_classified_extras[] = {
     S8_INITIALIZER("alignof"),       S8_INITIALIZER("constexpr"), S8_INITIALIZER("typeof_unqual"),
     S8_INITIALIZER("typeof"),        S8_INITIALIZER("vector_size"), S8_INITIALIZER("__vector_size"),
     S8_INITIALIZER("__vector_size__"),
+    // The one c_parse_type_word spelling that is not a declaration keyword;
+    // word_bits' constant-time "symbol > predefined_limit is not a word"
+    // answer needs every specifier-predicate spelling in the predefined
+    // range.
+    S8_INITIALIZER("__int128"),
 };
 
 // The spellings behind CSymbolWellKnown: entry N is interned N-th and
@@ -2552,6 +2557,7 @@ enum
 };
 
 BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling);
+BUSTER_C_SHARED u16 c_parse_word_bits_compute(String8 spelling);
 
 BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
 {
@@ -2565,8 +2571,10 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
     memset(table.slots, 0, sizeof(*table.slots) * table.slot_capacity);
     table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    table.word_bits = arena_allocate(arena, u16, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     memset(table.builtin_kinds, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     memset(table.class_bits, 0, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    memset(table.word_bits, 0, sizeof(*table.word_bits) * C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     // The well-known names go in first and in enumerator order, because the
     // passes that compare against them spell the id as the enumerator itself
     // rather than reading it back out of the table.
@@ -2604,6 +2612,7 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
     for (u32 id = 1; id <= table.count; id += 1)
     {
         table.class_bits[id] = c_parse_token_class_compute(table.names[id]);
+        table.word_bits[id] = c_parse_word_bits_compute(table.names[id]);
     }
     return table;
 }

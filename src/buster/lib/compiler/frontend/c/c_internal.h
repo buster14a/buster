@@ -156,6 +156,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_
 }
 BUSTER_C_EXTERN bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect);
+BUSTER_C_EXTERN bool c_parse_type_start_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token);
 typedef struct CSpellingSpace CSpellingSpace;
 struct CSpellingSpace
 {
@@ -228,6 +229,12 @@ struct CSymbolTable
     CSymbolSlot* slots;
     u8* builtin_kinds;
     u8* class_bits;
+    // Specifier-word facts per predefined id (C_WORD_* in c_parse.c), the
+    // same dense shape as class_bits: every spelling any of the specifier
+    // predicates can accept is interned into the predefined range at create
+    // time, so `symbol > predefined_limit` is a constant-time "no" and the
+    // id-keyed load replaces the spelling ladders for interned tokens.
+    u16* word_bits;
     u32 predefined_limit;
     u32 slot_capacity;
     u32 name_capacity;
