@@ -497,6 +497,29 @@ compilation is explicitly enabled.
   the build commands the superbuild echoes ahead of each test block; timing
   rows with no command line in front of them are attributed to numbered
   `unknown:<n>` series rather than merged.
+- **`tools/cache_miss_survey.py`** answers *where the cache misses are*, the
+  data-side counterpart to `tools/branch_miss_survey.py` below. It runs the
+  stage-1 workload under `perf stat` for the hierarchy budget (L1d accesses
+  and misses, how many fills L2 answers, the demand fills that reach DRAM,
+  both TLBs, page faults), then takes one `perf record` per event and ranks
+  symbols by miss share *beside their cycles share*, because the ratio is what
+  separates a symbol that misses because it is big from one that is waiting on
+  memory. Top symbols are broken down by source line through
+  `llvm-symbolizer`, and `--dwarf` adds a sparser DWARF-unwound capture that
+  names the exact `memcpy`/`memset` call sites — worth it here, where a fifth
+  of every miss event has its leaf in libc. Three of its rules are the same
+  ones this section states for `perf`, and the script encodes them so they do
+  not have to be remembered: symbolize `sym+offset` rather than `-F srcline`,
+  keep `--no-inline` on `perf script` (inline expansion costs 170 s against
+  under a second here) and recover inline chains from `llvm-symbolizer`
+  instead, and read a line table as a loop rather than an instruction, since
+  AMD's precise sampling facility (IBS) is system-wide only and the script
+  stays unprivileged. It also documents the trap that frame-pointer unwinding
+  *skips* the caller of a `memcpy`, so an fp callchain names the call site one
+  level out. Run it from the repository root on an idle machine after
+  `./build.sh build --config Release -t ide`; a full `--dwarf` pass takes
+  about 25 seconds and writes its captures and report under
+  `build/cache-miss-survey/`.
 - **The local Release tree is profilable as built.** `BUSTER_DEBUG_INFO` and
   `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so
   `./build.sh build --config Release -t ide` produces a `-O3` binary that
@@ -977,6 +1000,7 @@ Top level:
 | `src/buster/lib/` | Runtime, platform, compiler, assembler, linker, JIT, and retained UI/rendering libraries. |
 | `src/buster/tests/` | In-process unit/module tests. |
 | `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
+| `tools/` | Python generators, scanners, and measurement scripts run by hand; outside the build graph. |
 | `.forgejo/` | Forgejo CI workflows and scripts. |
 | `PERFORMANCE_AUDITS.md` | Index of the append-only measurement history; one line per audit. |
 | `docs/performance-audits/` | One file per audit, named for its id; older entries may describe components that no longer exist. |
