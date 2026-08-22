@@ -2396,6 +2396,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wide_vector_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The narrow end of the same question, which the host answers for its own
+    // convention: single-lane vectors, sub-eightbyte vectors, and 128-bit
+    // integers crossing calls in both directions. The Windows shapes are what
+    // the fixture was written for -- the wine block below runs it at three
+    // models -- but every convention has an answer here worth pinning, and the
+    // exit code names which family disagreed.
+    String8 c_narrow_abi_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-win64-narrow-abi"),
+#if BUSTER_WINDOWS
+                                                                      S8(".exe"));
+#else
+                                                                      S8(""));
+#endif
+    String8 c_narrow_abi_command_line[] = {
+        S8("-o"),
+        c_narrow_abi_executable_path,
+        S8("tests/basic_c_win64_narrow_abi.c"),
+    };
+    CompilerDriverResult c_narrow_abi = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_narrow_abi_command_line)));
+    BUSTER_TEST(arguments, c_narrow_abi.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_narrow_abi.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_narrow_abi_run_arguments[] = {
+            c_narrow_abi_executable_path,
+        };
+        ProcessSpawnResult c_narrow_abi_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_narrow_abi_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_narrow_abi_spawn.handle != 0);
+        if (c_narrow_abi_spawn.handle)
+        {
+            ProcessWaitResult c_narrow_abi_wait = os_process_wait_sync(arguments->arena, c_narrow_abi_spawn);
+            BUSTER_TEST(arguments, c_narrow_abi_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // sizeof over an inline aggregate definition must be rejected, never
     // folded from the expression-type prediction's int guess (see the
     // fixture's header); the assertion is only that no object is produced.
@@ -4026,6 +4063,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // a direct YMM0 result the way clang and MSVC do; the run proves
             // the callee's registers and the caller's expectations agree.
             S8("tests/basic_c_vector_argument_ymm.c"),
+            // The other end of the Win64 width range: single-lane vectors
+            // riding their element's register, sub-eightbyte vectors
+            // returning in XMM0, and __int128 passed by reference and
+            // returned in XMM0. These families used to disagree with clang
+            // in both directions and were only visible when the two sides of
+            // a call came from different compilers.
+            S8("tests/basic_c_win64_narrow_abi.c"),
             // Vectors past 64 bytes: pieced indirect arguments and the
             // model-dependent direct-or-hidden-pointer result, at the host's
             // model here and at the pinned sub-AVX-512 models below.

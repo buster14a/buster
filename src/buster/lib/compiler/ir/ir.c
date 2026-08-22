@@ -2927,12 +2927,25 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         }
                         return value;
                     }
+                    if (convention == IR_ABI_CONVENTION_WIN64_X86_64 && size == 16 && is_result)
+                    {
+                        // Win64 __int128 follows clang (MSVC has none, so
+                        // clang's choice is the de-facto ABI): the argument
+                        // goes by reference like any Win64 value wider than
+                        // eight bytes -- the indirect shape below -- and the
+                        // result comes back by value in XMM0.
+                        value.part_count = 1;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_VECTOR,
+                            .size = 16,
+                        };
+                        return value;
+                    }
                     value.part_count = 1;
                     value.indirect = true;
-                    value.memory = !is_result;
                     value.parts[0] = (IrAbiPart){
-                        .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                        .size = is_result ? 8 : (u32)size,
+                        .abi_class = IR_ABI_CLASS_POINTER,
+                        .size = 8,
                     };
                     return value;
                 }
@@ -2944,25 +2957,44 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                                convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
                 if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
                 {
-                    // Win64 hands a vector over by reference and brings it back
-                    // in a vector register at every width from 8 to 64 bytes, the
-                    // way clang and MSVC return it: XMM0, YMM0, or ZMM0 when the
-                    // model has the register, and split across consecutive
-                    // registers when it does not. The width only decides how many
-                    // registers the result takes, which is the backend's question
-                    // and not this one. Past 64 bytes clang's answer depends on
-                    // the CPU model, which this classification cannot see, so
-                    // wider values keep the model-independent halves here and the
-                    // canonical backend finishes the contract per model: an
-                    // argument's single reference becomes one reference per
-                    // register-sized piece (codegen_canonical_x64_windows_vector_
-                    // argument_pieces) and a result's reference becomes up to
-                    // four direct registers (codegen_canonical_x64_windows_
-                    // vector_result). Below 8 bytes clang's own shapes turn
-                    // erratic (a 4-byte vector rides EAX, a 2-byte one XMM0), so
-                    // that end keeps the reference the two sides of a buster
-                    // build already agree on.
-                    if (!is_result || size < 8 || size > 64)
+                    // Win64 vector shapes follow clang; MSVC has no generic
+                    // vector extension, so clang's answers are the de-facto
+                    // ABI (measured against clang 22 by tests/c_abi_*):
+                    //   - A single-lane vector travels like its scalar
+                    //     element in both directions: integer lanes ride the
+                    //     positional GPR, float lanes the positional XMM
+                    //     register.
+                    //   - A multi-lane vector argument goes by reference to a
+                    //     sixteen-byte-aligned temporary at every width
+                    //     (clang's callee loads it with MOVDQA even below
+                    //     sixteen bytes, so the alignment is contractual).
+                    //   - A multi-lane vector result comes back by value in
+                    //     XMM0, YMM0, or ZMM0 at every width from 2 to 64
+                    //     bytes, split across consecutive registers when the
+                    //     model lacks the wide register -- the backend's
+                    //     question, not this one. Past 64 bytes clang's
+                    //     answer depends on the CPU model, which this
+                    //     classification cannot see -- and the C frontend
+                    //     refuses vector signature types past 64 bytes anyway
+                    //     -- so those stay by reference.
+                    //   - A width past the model's widest vector register
+                    //     keeps the model-independent halves here and lets
+                    //     the canonical backend finish the contract per
+                    //     model: the argument's single reference becomes one
+                    //     reference per register-sized piece
+                    //     (codegen_canonical_x64_windows_vector_argument_pieces)
+                    //     and the result's becomes up to four direct
+                    //     registers (codegen_canonical_x64_windows_vector_result).
+                    IrType* element = ir_type_from_id(&program->types, type->element_type);
+                    if (type->element_count == 1 && element && size <= 8)
+                    {
+                        value.part_count = 1;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = element->kind == IR_TYPE_FLOAT ? IR_ABI_CLASS_VECTOR : IR_ABI_CLASS_INTEGER,
+                            .size = (u32)size,
+                        };
+                    }
+                    else if (!is_result || size > 64)
                     {
                         value.part_count = 1;
                         value.indirect = true;

@@ -352,8 +352,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     // carried by the aggregate machinery over the value's 16-byte slot.
     if (type && type->layout.resolved && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
     {
-        // Win64 has no register pair: a 128-bit integer travels indirectly,
-        // which this subset does not build.
+        // Win64 has no register pair: a 128-bit integer argument travels
+        // indirectly and the result returns by value in XMM0 (clang's
+        // de-facto ABI), neither of which this subset builds.
         if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
         {
             return false;

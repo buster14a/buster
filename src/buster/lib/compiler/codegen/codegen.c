@@ -2949,6 +2949,30 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
     return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
 }
 
+// Whether a Win64 argument rides the positional XMM register the way a scalar
+// float does. A single-lane float vector has the same shape as its element on
+// this convention (clang's de-facto ABI; see the Win64 vector branch of
+// ir_classify_abi_value), so both spellings take the float path at call sites
+// and function entries.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_windows_float_argument(IrProgram* program, IrType* type, u16* bit_width)
+{
+    if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    {
+        *bit_width = (u16)type->bit_width;
+        return true;
+    }
+    if (type && type->kind == IR_TYPE_VECTOR && type->element_count == 1)
+    {
+        IrType* element = ir_type_from_id(&program->types, type->element_type);
+        if (element && element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64))
+        {
+            *bit_width = (u16)element->bit_width;
+            return true;
+        }
+    }
+    return false;
+}
+
 // The canonical x86-64 backend keeps the 80-bit spelling in a sixteen-byte
 // slot: ten semantic bytes followed by six zero bytes.  It is deliberately a
 // byte-level representation here; host long double has a different size and
@@ -4199,7 +4223,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_evex_register(CodegenBuffer* buff
 // false return rather than repeating the size test, so the two cannot drift.
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffer, Target target, u32 vector_register, s32 displacement, u32 size, bool store)
 {
-    if (vector_register >= 8 || (size != 4 && size != 8 && size != 16 && size != 32 && size != 64))
+    if (vector_register >= 8 || (size != 2 && size != 4 && size != 8 && size != 16 && size != 32 && size != 64))
     {
         return false;
     }
@@ -4252,6 +4276,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
     }
     else
     {
+        // Size 2 -- a two-lane byte vector returning in XMM0 -- rides the
+        // four-byte move: every displacement this helper sees is a frame
+        // value slot, and those are padded to eight bytes, so the two bytes
+        // of slack the wider access touches belong to the same value.
         vector_width = 128;
         memory_width = 32;
         mnemonic = S8("MOVSS");
@@ -6417,6 +6445,11 @@ struct CCanonicalEmitter
     u32 frame_base_offset;
     bool save_rbx;
     u32 rbx_save_offset;
+    // Win64 owns RSI as a callee-saved register while the 128-bit integer
+    // vocabulary names it as a scratch, so a Windows function containing one
+    // parks RSI in a frame slot beside the RBX save.
+    bool save_rsi;
+    u32 rsi_save_offset;
     // Buffer position immediately after the last full-width rax store and the
     // frame displacement it wrote. While nothing else has been emitted, rax
     // still holds that slot, so reloading it is a no-op. Any other emission
@@ -6529,15 +6562,22 @@ BUSTER_GLOBAL_LOCAL void c_x64_load_float(CCanonicalEmitter* emitter, u32 regist
 
 BUSTER_GLOBAL_LOCAL void c_x64_restore_rbx(CCanonicalEmitter* emitter)
 {
-    if (!emitter->save_rbx)
+    if (emitter->save_rbx)
     {
-        return;
+        BusterX86MetadataPhysicalOperand restore_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, c_x64_frame_displacement(emitter, emitter->rbx_save_offset)),
+        };
+        (void)codegen_canonical_x64_metadata_emit(emitter->buffer, S8("MOV"), restore_operands, BUSTER_ARRAY_LENGTH(restore_operands));
     }
-    BusterX86MetadataPhysicalOperand restore_operands[2] = {
-        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RBX, 64),
-        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, c_x64_frame_displacement(emitter, emitter->rbx_save_offset)),
-    };
-    (void)codegen_canonical_x64_metadata_emit(emitter->buffer, S8("MOV"), restore_operands, BUSTER_ARRAY_LENGTH(restore_operands));
+    if (emitter->save_rsi)
+    {
+        BusterX86MetadataPhysicalOperand restore_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, c_x64_frame_displacement(emitter, emitter->rsi_save_offset)),
+        };
+        (void)codegen_canonical_x64_metadata_emit(emitter->buffer, S8("MOV"), restore_operands, BUSTER_ARRAY_LENGTH(restore_operands));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void c_a64_load(CCanonicalEmitter* emitter, u32 register_number, IrValueId value_id)
@@ -7061,6 +7101,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 return result;
             }
             x64_rbx_save_offset = (u32)value_bytes + 8;
+            value_bytes += 8;
+        }
+        // The 128-bit integer vocabulary names RSI as its fourth scratch
+        // register. System V owns it as a volatile, but Win64 makes RSI
+        // callee-saved, so a Windows function whose values include a 128-bit
+        // integer parks it in a frame slot the way the RBX save above does.
+        // The scan runs only on this canonical path; a machine-emitted
+        // function never reaches it.
+        bool x64_save_rsi = false;
+        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
+        {
+            for (u32 value_index = 0; value_index < function->value_count && !x64_save_rsi; value_index += 1)
+            {
+                IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+                x64_save_rsi = value_type && value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128;
+            }
+        }
+        u32 x64_rsi_save_offset = 0;
+        if (x64_save_rsi)
+        {
+            if (value_bytes > UINT32_MAX - 8)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+            x64_rsi_save_offset = (u32)value_bytes + 8;
             value_bytes += 8;
         }
         u32* aligned_local_offsets = arena_allocate(arena, u32, function->value_count);
@@ -7720,6 +7786,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                             frame_size - x64_rbx_save_offset) &&
                                unwind_valid;
             }
+            if (x64_save_rsi)
+            {
+                BusterX86MetadataPhysicalOperand save_rsi_operands[2] = {
+                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64,
+                                                           codegen_canonical_x64_rebase_frame_displacement(&buffer, -(s64)x64_rsi_save_offset,
+                                                                                                            canonical_x64_frame_base_offset)),
+                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                };
+                (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_rsi_operands,
+                                                           BUSTER_ARRAY_LENGTH(save_rsi_operands));
+                unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                            CODEGEN_UNWIND_ACTION_SAVE_REGISTER, X64_REGISTER_RSI,
+                                                            frame_size - x64_rsi_save_offset) &&
+                               unwind_valid;
+            }
             descriptor->prolog_size = (u32)buffer.count - descriptor->code_offset;
             if (!unwind_valid || buffer.error != CODEGEN_ERROR_NONE)
             {
@@ -7872,6 +7953,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             .frame_base_offset = canonical_x64_frame_base_offset,
             .save_rbx = x64_save_rbx,
             .rbx_save_offset = x64_rbx_save_offset,
+            .save_rsi = x64_save_rsi,
+            .rsi_save_offset = x64_rsi_save_offset,
             .forwarded_store_end = UINT64_MAX,
             .branch_patches = branch_patches,
             .branch_patch_capacity = branch_patch_capacity,
@@ -8370,22 +8453,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
-                        if (result.abi == CODEGEN_ABI_X86_64_WINDOWS && argument_type && argument_type->kind == IR_TYPE_FLOAT &&
-                            register_index < register_count)
+                        u16 windows_float_width = 0;
+                        if (result.abi == CODEGEN_ABI_X86_64_WINDOWS && register_index < register_count &&
+                            codegen_canonical_x64_windows_float_argument(program, argument_type, &windows_float_width))
                         {
-                            if (argument_type->bit_width != 32 && argument_type->bit_width != 64)
-                            {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                                return result;
-                            }
                             BusterX86MetadataPhysicalOperand float_store_operands[2] = {
-                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, windows_float_width,
                                                                       result_displacement),
-                                codegen_canonical_x64_metadata_vector(register_index, (u16)argument_type->bit_width),
+                                codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
                             };
                             String8 float_features[] = {S8("sse"), S8("sse2")};
                             if (!codegen_canonical_x64_metadata_emit_features(
-                                    &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
+                                    &buffer, windows_float_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
                                     BUSTER_ARRAY_LENGTH(float_store_operands),
                                     (BusterX86MetadataFeatureInput){.names = float_features,
                                                                      .count = BUSTER_ARRAY_LENGTH(float_features)}))
@@ -11513,22 +11592,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
-                            if (result.abi == CODEGEN_ABI_X86_64_WINDOWS && argument_type->kind == IR_TYPE_FLOAT)
+                            u16 windows_float_width = 0;
+                            if (result.abi == CODEGEN_ABI_X86_64_WINDOWS &&
+                                codegen_canonical_x64_windows_float_argument(program, argument_type, &windows_float_width))
                             {
-                                if (register_index >= register_count || (argument_type->bit_width != 32 && argument_type->bit_width != 64))
+                                if (register_index >= register_count)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
                                 BusterX86MetadataPhysicalOperand float_load_operands[2] = {
-                                    codegen_canonical_x64_metadata_vector(register_index, (u16)argument_type->bit_width),
+                                    codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
                                     codegen_canonical_x64_metadata_memory(
-                                        X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                        X64_REGISTER_RBP, windows_float_width,
                                         c_x64_frame_displacement(&emitter, value_offsets[argument.value])),
                                 };
                                 String8 float_features[] = {S8("sse"), S8("sse2")};
                                 if (!codegen_canonical_x64_metadata_emit_features(
-                                        &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
+                                        &buffer, windows_float_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
                                         BUSTER_ARRAY_LENGTH(float_load_operands),
                                         (BusterX86MetadataFeatureInput){.names = float_features,
                                                                          .count = BUSTER_ARRAY_LENGTH(float_features)}))

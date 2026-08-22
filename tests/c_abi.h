@@ -30,10 +30,19 @@
 
 // ZIG_NO_VECTORS strips the whole integer/float vector matrix. Since the
 // System V single-lane-double fix (<1 x double> arguments are MEMORY class
-// like GCC's and clang's, bare returns stay in XMM0) the gated matrix
-// passes cross-compiler against clang in both directions, so pairings no
-// longer need it; it remains available for targets whose vector ABI is
-// still being brought up.
+// like GCC's and clang's, bare returns stay in XMM0) and the Win64 narrow
+// fix below, the gated matrix passes cross-compiler against clang in both
+// directions, so pairings no longer need it; it remains available for
+// targets whose vector ABI is still being brought up.
+//
+// Win64 needed its own answers for everything narrower than one vector
+// register, because MSVC has no generic vector extension and clang's choices
+// are therefore the de-facto ABI: a single-lane vector travels like its
+// scalar element (integer lanes in the positional GPR, float lanes in the
+// positional XMM register), and a multi-lane vector under eight bytes is an
+// indirect argument with a direct XMM0 result. __int128 answers the same way
+// -- indirect argument, XMM0 result. Buster passed all of these by reference
+// in both directions before, which agreed with itself and with nothing else.
 
 #ifndef C_ABI_FULL
 // Non-power-of-two lane counts are rejected as function parameter and return
