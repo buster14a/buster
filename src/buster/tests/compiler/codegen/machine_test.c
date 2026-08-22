@@ -1876,7 +1876,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    MachineFPair tail) { return a + b + c + d + e + f + g + h + tail.left * 2 + tail.right; }\n"
                                   "typedef struct MachinePair2 { long low; long high; } MachinePair2;\n"
                                   "long pair_spill(long a, long b, long c, long d, long e, long f, long g, MachinePair2 tail) {\n"
-                                  "    return a + b + c + d + e + f + g + tail.low * 5 + tail.high; }\n");
+                                  "    return a + b + c + d + e + f + g + tail.low * 5 + tail.high; }\n"
+                                  "long aligned_spot(long x) { _Alignas(64) long cells[8]; cells[0] = x; cells[7] = x * 3;\n"
+                                  "    return cells[0] + cells[7] + (((long)(unsigned long)&cells[0]) & 63); }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4190,6 +4192,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("stack_tail"),
             S8_INITIALIZER("vsum"), S8_INITIALIZER("vec_pass"), S8_INITIALIZER("big_take"),
             S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
+            S8_INITIALIZER("aligned_local"), S8_INITIALIZER("aligned_spot"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4555,7 +4558,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                string_equal(a64_supported_names[name_index], S8("bits")) ||
                                string_equal(a64_supported_names[name_index], S8("union_tail")) ||
                                string_equal(a64_supported_names[name_index], S8("ucvt")) ||
-                               string_equal(a64_supported_names[name_index], S8("udiv")) || is_readp;
+                               string_equal(a64_supported_names[name_index], S8("udiv")) ||
+                               string_equal(a64_supported_names[name_index], S8("aligned_spot")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
                                string_equal(a64_supported_names[name_index], S8("srem")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv"));
