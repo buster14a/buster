@@ -1081,13 +1081,114 @@ struct CLexState
     u64 newline_tokens;
     u32 line_has_code;
     u32 line_has_comment;
+    // Nonzero on the compaction path only: c_lex_scan_one then fast-forwards
+    // its comment and literal scans in 64-byte strides.  The reference path
+    // keeps the byte loops, so the differential gate compares the two.
+    u32 simd_scan;
 };
+
+#if BUSTER_C_LEX_COMPACT
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+{
+    return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
+}
+
+BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lane_mask(u64 count)
+{
+    return count >= 64 ? ~(__mmask64)0 : (__mmask64)((((u64)1) << count) - 1);
+}
+
+// Lanes of a lookahead load that hold a real byte.  The window bounds do not
+// serve: a punctuator or comment delimiter near the window's end is classified
+// from bytes the next window owns, and reading them as zero would mis-spell it.
+BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lookahead_mask(u64 remaining, u64 ahead)
+{
+    return c_lex_lane_mask(remaining > ahead ? remaining - ahead : 0);
+}
+
+// 64-byte-stride forward scans for the escape items the window masks do not
+// model — comments and literals longer than a window (2026-08-10b's largest
+// remaining slice: on this tree half of all lexed bytes are such items, most
+// of them the generated string tables).  Each returns the offset of the first
+// byte c_lex_scan_one's byte loop would have stopped at, or source.length, so
+// the loops keep their exact stop-byte handling and only the plain runs
+// between stops vectorize.  Invalid lanes load as zero, and no scanned-for
+// byte is NUL, so the compares need no separate bounds mask.
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_byte_find(String8 source, u64 offset, char8 target)
+{
+    const __m512i needle = _mm512_set1_epi8((char)target);
+    u64 result = source.length;
+    while (offset < source.length)
+    {
+        __m512i chunk = _mm512_maskz_loadu_epi8(c_lex_lane_mask(source.length - offset), source.pointer + offset);
+        u64 hits = (u64)_mm512_cmpeq_epi8_mask(chunk, needle);
+        if (hits)
+        {
+            result = offset + (u64)__builtin_ctzll(hits);
+            break;
+        }
+        offset += 64;
+    }
+    return result;
+}
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_literal_special_find(String8 source, u64 offset, char8 delimiter)
+{
+    const __m512i delimiter_vector = _mm512_set1_epi8((char)delimiter);
+    const __m512i backslash_vector = _mm512_set1_epi8('\\');
+    const __m512i newline_vector = _mm512_set1_epi8('\n');
+    u64 result = source.length;
+    while (offset < source.length)
+    {
+        __m512i chunk = _mm512_maskz_loadu_epi8(c_lex_lane_mask(source.length - offset), source.pointer + offset);
+        u64 hits = (u64)_mm512_cmpeq_epi8_mask(chunk, delimiter_vector) | (u64)_mm512_cmpeq_epi8_mask(chunk, backslash_vector) |
+                   (u64)_mm512_cmpeq_epi8_mask(chunk, newline_vector);
+        if (hits)
+        {
+            result = offset + (u64)__builtin_ctzll(hits);
+            break;
+        }
+        offset += 64;
+    }
+    return result;
+}
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_block_comment_stop_find(String8 source, u64 offset)
+{
+    const __m512i star_vector = _mm512_set1_epi8('*');
+    const __m512i slash_vector = _mm512_set1_epi8('/');
+    const __m512i newline_vector = _mm512_set1_epi8('\n');
+    u64 result = source.length;
+    while (offset < source.length)
+    {
+        u64 remaining = source.length - offset;
+        __m512i chunk = _mm512_maskz_loadu_epi8(c_lex_lane_mask(remaining), source.pointer + offset);
+        // A star in the last lane pairs with the next chunk's first byte, so
+        // the lookahead load is masked by the file bounds, not the chunk's.
+        __m512i next = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), source.pointer + offset + 1);
+        u64 close = (u64)_mm512_cmpeq_epi8_mask(chunk, star_vector) & (u64)_mm512_cmpeq_epi8_mask(next, slash_vector);
+        u64 hits = close | (u64)_mm512_cmpeq_epi8_mask(chunk, newline_vector);
+        if (hits)
+        {
+            result = offset + (u64)__builtin_ctzll(hits);
+            break;
+        }
+        offset += 64;
+    }
+    return result;
+}
+
+#endif
 
 // One item of the scalar lexer: a whitespace byte, a newline, a comment, or a
 // token, starting at `offset` and returning the offset just past it.  The
 // compaction emitter escapes to this for every shape its masks do not model,
 // so the two paths agree on the hard cases by construction rather than by
-// duplicated reasoning.
+// duplicated reasoning.  Long comment and literal bodies fast-forward in
+// 64-byte strides when the caller is the window pipeline (state->simd_scan);
+// the reference path keeps the byte loops so the gate compares the two.
 BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
 {
     CLexResult* result = state->result;
@@ -1113,6 +1214,12 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
     {
         u64 comment_start = offset;
         offset += 2;
+#if BUSTER_C_LEX_COMPACT
+        if (state->simd_scan)
+        {
+            offset = c_lex_byte_find(translated.source, offset, '\n');
+        }
+#endif
         while (offset < translated.source.length && translated.source.pointer[offset] != '\n')
         {
             offset += 1;
@@ -1132,6 +1239,18 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         state->line_has_comment = 1;
         while (offset < translated.source.length)
         {
+#if BUSTER_C_LEX_COMPACT
+            // Fast-forward to the next stop byte; the checks below then
+            // consume it exactly as the byte loop would have.
+            if (state->simd_scan)
+            {
+                offset = c_lex_block_comment_stop_find(translated.source, offset);
+                if (offset >= translated.source.length)
+                {
+                    break;
+                }
+            }
+#endif
             if (translated.source.pointer[offset] == '*' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
             {
                 offset += 2;
@@ -1169,7 +1288,15 @@ BUSTER_C_INTERNAL u64 c_lex_scan_one(CLexState* state, u64 offset)
         bool terminated = false;
         while (offset < translated.source.length)
         {
+            // The stride scan seeks only this literal's own delimiter where
+            // the shared table also stops at the other quote kind; the loop
+            // treats that byte as plain either way.
+#if BUSTER_C_LEX_COMPACT
+            offset = state->simd_scan ? c_lex_literal_special_find(translated.source, offset, literal_delimiter)
+                                      : c_literal_plain_run_end(translated.source, offset);
+#else
             offset = c_literal_plain_run_end(translated.source, offset);
+#endif
             if (offset >= translated.source.length)
             {
                 break;
@@ -1417,27 +1544,9 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
     c_lex_compact_tables_built = true;
 }
 
-BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
-{
-    return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
-}
-
 BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
 {
     return c_lex_mask_below(high) & ~c_lex_mask_below(low);
-}
-
-BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lane_mask(u64 count)
-{
-    return count >= 64 ? ~(__mmask64)0 : (__mmask64)((((u64)1) << count) - 1);
-}
-
-// Lanes of a lookahead load that hold a real byte.  The window bounds do not
-// serve: a punctuator or comment delimiter near the window's end is classified
-// from bytes the next window owns, and reading them as zero would mis-spell it.
-BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lookahead_mask(u64 remaining, u64 ahead)
-{
-    return c_lex_lane_mask(remaining > ahead ? remaining - ahead : 0);
 }
 
 // Eight finished rows: the compressed start, length, kind and punctuator
@@ -2074,6 +2183,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         }
         else
         {
+            state.simd_scan = 1;
             c_lex_compact(&state);
         }
 #else
