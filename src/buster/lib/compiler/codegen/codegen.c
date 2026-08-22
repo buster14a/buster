@@ -3304,7 +3304,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_va_list_component_count(IrProgram* pro
     return (u32)(type->layout.size / 8);
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)
+bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
     if (type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->bit_width > 64 && type->bit_width <= 128 && type->layout.size <= 16)

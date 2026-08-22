@@ -1079,7 +1079,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 58);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 60);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1855,8 +1855,22 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int variadic_unsupported_first(int first, ...) { __asm__ volatile(\"\");\n"
                                   "    va_list arguments; __builtin_va_start(arguments, first); return __builtin_va_arg(arguments, int); }\n"
                                   "#endif\n");
+    // The AArch64 variadic segment, appended only to the stage-11 source:
+    // the typedef's name alone selects the va_list type, exactly like the
+    // x86-64 segment's. Eleven anonymous parts against eight registers
+    // exercise both the register path and the overflow tail of the
+    // canonical four-word va_list model the machine subset mirrors.
+    String8 machine_c_source_a64_variadic = S8(
+                                  "typedef void *va_list;\n"
+                                  "long vsum(int count, ...) { va_list arguments; long total = 0; __builtin_va_start(arguments, count);\n"
+                                  "    for (int index = 0; index < count; index += 1) { total += __builtin_va_arg(arguments, long); }\n"
+                                  "    __builtin_va_end(arguments); return total; }\n"
+                                  "long vsum_caller(long a, long b) { return vsum(11, a, b, a + b, (long)1, (long)2, (long)3, (long)4,\n"
+                                  "    (long)5, (long)6, (long)7, a - b); }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
+    String8 machine_c_source_stage11 =
+        string_format(arguments->arena, S8("{S8}{S8}"), machine_c_source_base, machine_c_source_a64_variadic);
     String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail,
                                               machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
@@ -4146,7 +4160,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         malformed_fixup.source_offset = 2;
         BUSTER_TEST(arguments, !machine_a64_test_relax_sparse(arguments->arena, 64, &malformed_fixup, 1, &overflow_size));
     }
-    IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
+    IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_stage11, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)
     {
@@ -4164,6 +4178,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("union_tail"), S8_INITIALIZER("locals_array"),
             S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"), S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"),
             S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("stack_tail"),
+            S8_INITIALIZER("vsum"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4485,6 +4500,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool is_readp = string_equal(a64_supported_names[name_index], S8("readp"));
             bool is_many = string_equal(a64_supported_names[name_index], S8("six")) || string_equal(a64_supported_names[name_index], S8("seven"));
             bool is_stack_tail = string_equal(a64_supported_names[name_index], S8("stack_tail"));
+            bool is_vsum = string_equal(a64_supported_names[name_index], S8("vsum"));
             bool is_loop = string_equal(a64_supported_names[name_index], S8("sum_to"));
             bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
                                string_equal(a64_supported_names[name_index], S8("bitnot")) ||
@@ -4570,6 +4586,22 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     memcpy(&machine_call10, &machine_address, sizeof(machine_call10));
                     all_equal &= none_call10(left, right, left + 1, right + 1, left - 2, right - 2, left + 3, right + 3, left ^ right, right - left) ==
                                  machine_call10(left, right, left + 1, right + 1, left - 2, right - 2, left + 3, right + 3, left ^ right, right - left);
+                }
+                else if (is_vsum)
+                {
+                    // The variadic body driven through a non-variadic
+                    // seven-register call form: the anonymous parts sit in
+                    // X1-X6 under both AAPCS64 and the Darwin convention
+                    // precisely because the host compiler does not know
+                    // the callee is variadic, so the register path of the
+                    // four-word va_list model executes on either host. The
+                    // overflow tail stays with the qemu differential.
+                    MachineTestA64Call7* none_call7 = 0;
+                    MachineTestA64Call7* machine_call7 = 0;
+                    memcpy(&none_call7, &none_address, sizeof(none_call7));
+                    memcpy(&machine_call7, &machine_address, sizeof(machine_call7));
+                    all_equal &= none_call7(6, left, right, left + 1, right - 2, left ^ right, right - left) ==
+                                 machine_call7(6, left, right, left + 1, right - 2, left ^ right, right - left);
                 }
                 else if (wide_result)
                 {

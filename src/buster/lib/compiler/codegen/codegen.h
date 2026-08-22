@@ -434,6 +434,10 @@ BUSTER_F_DECL void codegen_prewarm(void);
 BUSTER_F_DECL void codegen_prewarm_for_target(Target target);
 BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);
+// The canonical named-parameter classification the a64 variadic model is
+// defined over; the AArch64 machine selector's VA_START mirrors the
+// canonical emitter's simulation through this exact walk.
+BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);

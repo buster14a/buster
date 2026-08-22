@@ -6,9 +6,12 @@
 // branches, and scalar returns — plus the AAPCS64 signature shapes, calls,
 // symbol addresses, aggregate/array literal construction into frame slots,
 // scalar float bodies (arithmetic, comparison, negation, and conversions
-// over the bit-image model, riding V0/V1 internally), and scalar stack
-// arguments through a fixed outgoing area at the frame bottom. Everything
-// else is an explicit unsupported result, never a silent misselection.
+// over the bit-image model, riding V0/V1 internally), scalar stack
+// arguments through a fixed outgoing area at the frame bottom, and
+// non-Darwin variadic definitions over the canonical four-word va_list
+// model (Darwin's anonymous-arguments-on-stack convention stays
+// canonical). Everything else is an explicit unsupported result, never a
+// silent misselection.
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -19,6 +22,10 @@
 // which keeps the shared placement's grows-down offset convention intact.
 
 #include <buster/lib/compiler/codegen/machine.h>
+// For codegen_canonical_integer_aggregate_parts: the canonical emitter's
+// named-parameter walk is the variadic model's defining simulation, and
+// VA_START must run the exact same one.
+#include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/os.h>
@@ -130,6 +137,7 @@ struct MachineA64Selector
     MachineBuilderStream stack_slots;
     MachineBuilderStream stack_slot_alignments;
     MachineBuilderStream call_targets;
+    MachineBuilderStream va_args;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
@@ -148,6 +156,8 @@ struct MachineA64Selector
     MachineA64ValueShape return_shape;
     // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
     u32 hidden_return_slot;
+    // Frame slot of the 64-byte X0-X7 variadic save area, or UINT32_MAX.
+    u32 va_register_save_slot;
     // The fixed outgoing stack-argument area, appended at the first call
     // that needs one and pinned by placement to the frame bottom, so its
     // base is exactly the stack pointer a call sees.
@@ -1173,6 +1183,238 @@ struct MachineA64CallPlan
     bool direct_call;
     bool returns_value;
 };
+
+BUSTER_GLOBAL_LOCAL u32 machine_a64_va_append_immediate(MachineA64Selector* selector, u64 value)
+{
+    u32 index = selector->immediates.total_count;
+    u64* row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+    *row = value;
+    return index;
+}
+
+// The canonical VA_START simulation, verbatim: every named parameter's
+// integer-aggregate parts count against the one eight-register file —
+// float scalars and HFAs included, unlike the machine placement, whose
+// V-file assignment the canonical va_list model deliberately ignores.
+// Both this selector's callers and the canonical emitter run the same
+// walk, so machine and canonical functions interoperate either way.
+BUSTER_GLOBAL_LOCAL void machine_a64_va_named_cursors(MachineA64Selector* selector, u32* gp_count, u32* stack_parts)
+{
+    *gp_count = 0;
+    *stack_parts = 0;
+    IrType* function_type = ir_type_from_id(&selector->program->types, selector->function->canonical_type);
+    if (!function_type || function_type->kind != IR_TYPE_FUNCTION)
+    {
+        return;
+    }
+    for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
+    {
+        IrTypeId parameter_type_id = function_type->parameter_types[parameter_index];
+        IrType* parameter = ir_type_from_id(&selector->program->types, parameter_type_id);
+        u32 part_count = 1;
+        bool aggregate = codegen_canonical_integer_aggregate_parts(selector->program, parameter_type_id, &part_count);
+        if (aggregate && parameter && parameter->layout.size > 16)
+        {
+            part_count = 1;
+        }
+        if (*gp_count + part_count <= 8)
+        {
+            *gp_count += part_count;
+        }
+        else
+        {
+            *stack_parts += part_count;
+        }
+    }
+}
+
+// Builds the canonical four-word va_list image in the result's frame slot:
+// the byte cursor into the X save area, the overflow pointer sixteen bytes
+// past the frame-pointer pair plus the named stack parts, the save-area
+// address, and a zero end flag.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_start(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    bool selected = false;
+    if (result_slot != UINT32_MAX && selector->va_register_save_slot != UINT32_MAX)
+    {
+        u32 gp_count;
+        u32 stack_parts;
+        machine_a64_va_named_cursors(selector, &gp_count, &stack_parts);
+        u32 cursor_register = machine_a64_synthesize_register(selector);
+        u32 cursor_immediate = machine_a64_va_append_immediate(selector, gp_count * 8u);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, cursor_immediate)},
+                                             .opcode = MACHINE_A64_MOV_RI,
+                                         });
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor_register)},
+                                             .payload = 0,
+                                             .opcode = MACHINE_A64_STORE_FRAME64,
+                                         });
+        u32 overflow_register = machine_a64_synthesize_register(selector);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register),
+                                                          machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X29)},
+                                             .payload = 16u + stack_parts * 8u,
+                                             .opcode = MACHINE_A64_LEA_OFFSET,
+                                         });
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, overflow_register)},
+                                             .payload = 8,
+                                             .opcode = MACHINE_A64_STORE_FRAME64,
+                                         });
+        u32 save_register = machine_a64_synthesize_register(selector);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register),
+                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, selector->va_register_save_slot)},
+                                             .opcode = MACHINE_A64_LEA_FRAME,
+                                         });
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, save_register)},
+                                             .payload = 16,
+                                             .opcode = MACHINE_A64_STORE_FRAME64,
+                                         });
+        u32 zero_register = machine_a64_synthesize_register(selector);
+        u32 zero_immediate = machine_a64_va_append_immediate(selector, 0);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
+                                             .opcode = MACHINE_A64_MOV_RI,
+                                         });
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register)},
+                                             .payload = 24,
+                                             .opcode = MACHINE_A64_STORE_FRAME64,
+                                         });
+        selected = true;
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_copy(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    u32 source_register;
+    bool selected = false;
+    if (result_slot != UINT32_MAX && instruction->operand_count >= 1 && machine_a64_operand_register(selector, instruction->operands[0], &source_register))
+    {
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                             .payload = 32,
+                                             .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
+                                         });
+        selected = true;
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_end(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    // The canonical model's end protocol writes one into the fourth word.
+    // The pointer stores carry no displacement, so the flag address takes
+    // its own add row.
+    u32 source_register;
+    bool selected = false;
+    if (instruction->operand_count >= 1 && machine_a64_operand_register(selector, instruction->operands[0], &source_register))
+    {
+        u32 flag_register = machine_a64_synthesize_register(selector);
+        u32 flag_immediate = machine_a64_va_append_immediate(selector, 1);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flag_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, flag_immediate)},
+                                             .opcode = MACHINE_A64_MOV_RI,
+                                         });
+        u32 address_register = machine_a64_synthesize_register(selector);
+        u32 address_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                               .payload = 24,
+                                                               .opcode = MACHINE_A64_LEA_OFFSET,
+                                                           });
+        machine_a64_define(selector, address_register, address_row);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flag_register)},
+                                             .opcode = MACHINE_A64_STORE_PTR64,
+                                         });
+        selected = true;
+    }
+    return selected;
+}
+
+// Translates the canonical VA_ARG gate into VA_ARG side data: scalars and
+// integer-part aggregates of at most sixteen bytes, every part an
+// eight-byte image read against the one cursor. The canonical emitter
+// errors the module on anything else, so the machine path must fall back
+// on exactly the same set rather than shape a value canonical cannot.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_arg(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    u32 source_register;
+    if (instruction->operand_count >= 1 && instruction->result.value < function->value_count &&
+        machine_a64_operand_register(selector, instruction->operands[0], &source_register))
+    {
+        IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        bool result_is_frame = result_register == UINT32_MAX && result_slot != UINT32_MAX;
+        u32 part_count = 1;
+        bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &part_count);
+        bool shaped = value_type && value_type->layout.resolved && value_type->layout.size && value_type->layout.size <= 16 &&
+                      (aggregate || value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_BOOLEAN ||
+                       value_type->kind == IR_TYPE_POINTER || value_type->kind == IR_TYPE_FLOAT) &&
+                      part_count && part_count <= MACHINE_VA_ARG_PART_LIMIT;
+        if (shaped && result_is_frame == aggregate && (aggregate || part_count == 1))
+        {
+            u32 metadata_index = selector->va_args.total_count;
+            MachineVaArg* metadata_row = (MachineVaArg*)machine_stream_append(selector->arena, &selector->va_args);
+            *metadata_row = (MachineVaArg){
+                .size = (u32)value_type->layout.size,
+                .alignment = 8,
+                .stack_size = part_count * 8u,
+                .part_count = part_count,
+                .result_slot = result_slot,
+                .result_is_frame = result_is_frame,
+                .scalar_size = 8,
+            };
+            for (u32 part_index = 0; part_index < part_count; part_index += 1)
+            {
+                metadata_row->parts[part_index] = (MachineVaArgPart){
+                    .value_offset = part_index * 8u,
+                    .save_offset = part_index * 8u,
+                    .size = 8,
+                };
+            }
+            u32 row_index = machine_a64_select_row(selector, (MachineInstruction){
+                                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
+                                                                              result_is_frame
+                                                                                  ? machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot)
+                                                                                  : machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                                 .payload = metadata_index,
+                                                                 .opcode = MACHINE_A64_VA_ARG,
+                                                             });
+            if (!result_is_frame)
+            {
+                machine_a64_define(selector, result_register, row_index);
+            }
+            selected = true;
+        }
+    }
+    return selected;
+}
 
 // Resolves the call against the callee's signature. Nothing here emits a row,
 // so a plan that fails leaves the row stream untouched.
@@ -2266,6 +2508,18 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         case IR_OPCODE_CALL:
             selected = machine_a64_select_call(selector, instruction, result_register);
             break;
+        case IR_OPCODE_VA_START:
+            selected = machine_a64_select_va_start(selector, instruction);
+            break;
+        case IR_OPCODE_VA_COPY:
+            selected = machine_a64_select_va_copy(selector, instruction);
+            break;
+        case IR_OPCODE_VA_END:
+            selected = machine_a64_select_va_end(selector, instruction);
+            break;
+        case IR_OPCODE_VA_ARG:
+            selected = machine_a64_select_va_arg(selector, instruction, result_register);
+            break;
         case IR_OPCODE_DEBUG_TRAP:
             selected = machine_a64_select_debug_trap(selector);
             break;
@@ -2311,7 +2565,13 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         function->entry.value == 0)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_variadic ||
+        // Darwin's variadic definition ABI places every anonymous argument
+        // on the stack and stays on the canonical path even when the body
+        // ignores its tail; AAPCS64 bodies continue through ordinary
+        // selection, so the first va_* the subset cannot shape (or any
+        // earlier unsupported operation) reports in true IR order.
+        bool variadic_darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && variadic_darwin) ||
             function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
             return result;
@@ -2386,13 +2646,23 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_initialize(&selector.stack_slots, sizeof(u32));
         machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
         machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
+        machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
         MachineBuilderStream line_marks;
         machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
         selector.return_shape = signature_return_shape;
         selector.hidden_return_slot = UINT32_MAX;
+        selector.va_register_save_slot = UINT32_MAX;
         if (signature_return_shape.indirect)
         {
             selector.hidden_return_slot = machine_a64_append_slot(&selector, 8, 8);
+        }
+        if (function_type->is_variadic)
+        {
+            // The canonical non-Darwin model saves X0-X7 into a fixed
+            // 64-byte area; a dedicated frame slot keeps its displacement
+            // in ordinary placement data while VA_SAVE owns the prologue
+            // snapshot itself.
+            selector.va_register_save_slot = machine_a64_append_slot(&selector, 64, 8);
         }
         for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
         {
@@ -2657,6 +2927,16 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     continue;
                 }
                 IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+                if ((instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY) && value_type &&
+                    value_type->kind == IR_TYPE_VA_LIST && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7)
+                {
+                    // va_list is a four-word aggregate in the canonical
+                    // model. Keep the temporary in a regular frame slot so
+                    // STORE/LOAD and VA_COPY reuse the aggregate copy rows.
+                    selector.value_stack_slots[instruction->result.value] =
+                        machine_a64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
+                    continue;
+                }
                 // Float scalars hold their bit image in a general register, and
                 // address producers hold an 8-byte address no matter what their
                 // declared canonical type is.
@@ -2671,7 +2951,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[instruction->result.value] = register_index;
                 }
                 else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                          instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
+                          instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
+                          instruction->opcode == IR_OPCODE_VA_ARG) &&
                          value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                          (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                           ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
@@ -2925,6 +3206,18 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             if (block_index == 0)
             {
+                // The variadic save snapshot reads the still-live incoming
+                // X0-X7, so it precedes every capture row — the captures
+                // also only read the argument registers, but a float
+                // capture's bounce through a general scratch must never
+                // land between the registers and their save.
+                if (selector.va_register_save_slot != UINT32_MAX)
+                {
+                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.va_register_save_slot)},
+                                                          .opcode = MACHINE_A64_VA_SAVE,
+                                                      });
+                }
                 // Capture every incoming argument register at entry, before any
                 // body row can use an argument register as an operand scratch.
                 // Integer parts capture first because float captures scratch
@@ -3134,6 +3427,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
         result.function.call_target_count = selector.call_targets.total_count;
         machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+        result.function.va_args = arena_allocate(arena, MachineVaArg, selector.va_args.total_count);
+        result.function.va_arg_count = selector.va_args.total_count;
+        machine_stream_flatten(&selector.va_args, result.function.va_args);
         result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
         result.function.line_mark_count = line_marks.total_count;
         machine_stream_flatten(&line_marks, result.function.line_marks);
@@ -4324,6 +4620,15 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // tail accesses that may each take the large-offset form.
             capacity64 += ((u64)capacity_row->payload / 8) * 8 + 48;
             break;
+        case MACHINE_A64_VA_SAVE:
+            // Eight stores, each possibly in the large-offset frame form.
+            capacity64 += 8 * 24;
+            break;
+        case MACHINE_A64_VA_ARG:
+            // Two bounded part sequences around the cursor split, each
+            // part possibly storing through the large-offset frame form.
+            capacity64 += 48 + 2u * ((u64)MACHINE_VA_ARG_PART_LIMIT * 32 + 12);
+            break;
         default:
             capacity64 += 12;
         }
@@ -4701,6 +5006,85 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // canonical parameter capture.
                 machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], MACHINE_A64_X29, instruction->payload, 8, false);
                 break;
+            case MACHINE_A64_VA_SAVE:
+            {
+                // The canonical prologue's X0-X7 snapshot, addressed like
+                // any other frame slot: byte k of the slot lives at the
+                // shared grows-down convention's offset minus k.
+                u32 va_save_slot = machine_ref_payload(instruction->operands[0]);
+                for (u32 register_index = 0; register_index < 8; register_index += 1)
+                {
+                    u32 save_offset = machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[va_save_slot] - register_index * 8u);
+                    machine_a64_emit_frame_memory(&encoder, register_index, save_offset, 8, true);
+                }
+            }
+            break;
+            case MACHINE_A64_VA_ARG:
+            {
+                // The canonical register/overflow split, word for word:
+                // X11 carries the byte cursor, X12 the part address, X9
+                // the part data for frame results — a scalar result loads
+                // its fixed destination directly instead.
+                MachineVaArg* metadata = function->va_args + instruction->payload;
+                u32 list = operand_registers[0];
+                u32 increment = metadata->part_count * 8u;
+                u32 limit = 64u - increment;
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X11, list, 0, 8, false);
+                machine_a64_emit(&encoder, 0xf100001fu | ((u32)MACHINE_A64_X11 << 5) | (limit << 10));
+                u32 overflow_patch = encoder.count;
+                machine_a64_emit(&encoder, 0x54000008u);
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X12, list, 16, 8, false);
+                machine_a64_emit(&encoder, 0x8b000000u | ((u32)MACHINE_A64_X11 << 16) | ((u32)MACHINE_A64_X12 << 5) | MACHINE_A64_X12);
+                for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
+                {
+                    if (metadata->result_is_frame)
+                    {
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X9, MACHINE_A64_X12, part_index * 8u, 8, false);
+                        u32 part_offset = machine_a64_frame_offset(
+                            frame_area, placement->stack_slot_offsets[metadata->result_slot] - part_index * 8u);
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, part_offset, 8, true);
+                    }
+                    else
+                    {
+                        machine_a64_emit_pointer_memory(&encoder, operand_registers[1], MACHINE_A64_X12, 0, 8, false);
+                    }
+                }
+                u32 increment_fields[] = {MACHINE_A64_X11, MACHINE_A64_X11, increment};
+                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, increment_fields,
+                                                BUSTER_ARRAY_LENGTH(increment_fields));
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X11, list, 0, 8, true);
+                u32 end_patch = encoder.count;
+                machine_a64_emit(&encoder, 0x14000000u);
+                u32 overflow_offset = encoder.count;
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X12, list, 8, 8, false);
+                for (u32 part_index = 0; part_index < metadata->part_count; part_index += 1)
+                {
+                    if (metadata->result_is_frame)
+                    {
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X9, MACHINE_A64_X12, part_index * 8u, 8, false);
+                        u32 part_offset = machine_a64_frame_offset(
+                            frame_area, placement->stack_slot_offsets[metadata->result_slot] - part_index * 8u);
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X9, part_offset, 8, true);
+                    }
+                    else
+                    {
+                        machine_a64_emit_pointer_memory(&encoder, operand_registers[1], MACHINE_A64_X12, 0, 8, false);
+                    }
+                }
+                u32 overflow_fields[] = {MACHINE_A64_X12, MACHINE_A64_X12, increment};
+                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, overflow_fields,
+                                                BUSTER_ARRAY_LENGTH(overflow_fields));
+                machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X12, list, 8, 8, true);
+                u32 end_offset = encoder.count;
+                if (!encoder.overflow && !encoder.error)
+                {
+                    u32 conditional = 0x54000008u | (((overflow_offset - overflow_patch) / 4) << 5);
+                    memcpy(encoder.bytes + overflow_patch, &conditional, sizeof(conditional));
+                    u32 branch = 0x14000000u | ((end_offset - end_patch) / 4);
+                    memcpy(encoder.bytes + end_patch, &branch, sizeof(branch));
+                }
+            }
+            break;
             case MACHINE_A64_B:
             {
                 MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);

@@ -802,6 +802,27 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
     },
+    [MACHINE_A64_VA_SAVE] = {
+        .name = S8_INITIALIZER("a64_va_save"),
+        .operand_count = 1,
+        // The operand is a frame slot, so no register class is attached.
+        // The row reads the still-live incoming X0-X7 and sits first in the
+        // entry block, before any capture row can disturb them.
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+    },
+    [MACHINE_A64_VA_ARG] = {
+        .name = S8_INITIALIZER("a64_va_arg"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_DEFINE_GENERAL},
+        // The encoder's bounded sequence mirrors the canonical emitter's
+        // register contract: the fixed operands are X10 (list pointer) and
+        // X13 (scalar result); X9 carries part data and X11/X12 the
+        // cursor and part address, so live values must vacate them.
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11) | (1u << MACHINE_A64_X12),
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_A64_X10, MACHINE_A64_X13},
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1028,6 +1049,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_CVT_F32_TO_U64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 29,
     [MACHINE_A64_CVT_F64_TO_U64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 30,
     [MACHINE_A64_LOAD_INCOMING] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 31,
+    [MACHINE_A64_VA_SAVE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 32,
+    [MACHINE_A64_VA_ARG] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 33,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

@@ -580,6 +580,17 @@ typedef enum MachineOpcode
     // caller's outgoing area starts sixteen bytes above it, exactly the
     // canonical parameter capture's base.
     MACHINE_A64_LOAD_INCOMING, // def; payload = X29-relative byte offset
+    // Non-Darwin AArch64 variadic machinery, the canonical emitter's own
+    // model: a four-word va_list [register cursor, overflow pointer,
+    // save-area base, end flag] over a 64-byte X0-X7 save area — floats
+    // and HFAs count against the same file in this model, so no V
+    // registers are saved. VA_SAVE snapshots the incoming X registers
+    // into that area; VA_ARG performs the register/overflow split against
+    // one va_list value, with its payload indexing MachineVaArg side data
+    // and its operand slots fixed to X10 (list pointer) and X13 (scalar
+    // result) beside the X9/X11/X12 sequence scratches.
+    MACHINE_A64_VA_SAVE, // slot ref; payload unused
+    MACHINE_A64_VA_ARG,  // use list pointer, define scalar/slot result
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
