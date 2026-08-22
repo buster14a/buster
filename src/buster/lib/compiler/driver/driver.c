@@ -2450,7 +2450,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (linked.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         goto end;
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
@@ -3058,7 +3059,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (linked.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         goto finish;
     }
     result.object = linked.object;

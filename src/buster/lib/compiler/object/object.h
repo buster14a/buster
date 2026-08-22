@@ -104,6 +104,11 @@ struct ObjectSection
     u32 alignment;
 };
 
+// A replaceable definition: COFF selectany COMDAT (IMAGE_SCN_LNK_COMDAT with
+// a selection other than NODUPLICATES), ELF STB_WEAK, or Mach-O N_WEAK_DEF.
+// The linker keeps the first such definition instead of diagnosing a
+// duplicate, and any non-replaceable definition of the same name wins over
+// every replaceable one regardless of input order.
 typedef struct ObjectSymbol ObjectSymbol;
 struct ObjectSymbol
 {
@@ -113,7 +118,8 @@ struct ObjectSymbol
     u32 section;
     ObjectSymbolKind kind;
     bool global;
-    u8 reserved[3];
+    bool weak;
+    u8 reserved[2];
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

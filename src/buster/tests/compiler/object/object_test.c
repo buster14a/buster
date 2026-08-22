@@ -317,6 +317,99 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
     return (ByteSlice){.pointer = bytes, .length = total_size};
 }
 
+
+// A COFF object built by hand, because COMDAT is the one input shape
+// object_write cannot produce: the writer merges sections by kind, so it has
+// no way to give a constant its own IMAGE_SCN_LNK_COMDAT section.  Four
+// sections cover the reader's three answers — a plain section, a selectany
+// COMDAT, a NODUPLICATES COMDAT, and a COMDAT whose section symbol is missing
+// entirely so its selection is never published.
+enum
+{
+    OBJECT_TEST_COFF_HEADER_SIZE = 20,
+    OBJECT_TEST_COFF_SECTION_SIZE = 40,
+    OBJECT_TEST_COFF_SYMBOL_SIZE = 18,
+    OBJECT_TEST_COFF_SECTION_COUNT = 4,
+    OBJECT_TEST_COFF_SYMBOL_COUNT = 8,
+    OBJECT_TEST_COFF_SECTION_DATA = 4,
+};
+
+BUSTER_GLOBAL_LOCAL void object_test_coff_write_u16(u8* bytes, u64 offset, u16 value)
+{
+    memcpy(bytes + offset, &value, sizeof(value));
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_coff_write_u32(u8* bytes, u64 offset, u32 value)
+{
+    memcpy(bytes + offset, &value, sizeof(value));
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_coff_write_name(u8* bytes, u64 offset, String8 name)
+{
+    memcpy(bytes + offset, name.pointer, name.length);
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_coff_section(u8* bytes, u32 section_index, String8 name, u32 raw_offset, u32 characteristics)
+{
+    u64 section = OBJECT_TEST_COFF_HEADER_SIZE + (u64)section_index * OBJECT_TEST_COFF_SECTION_SIZE;
+    object_test_coff_write_name(bytes, section, name);
+    object_test_coff_write_u32(bytes, section + 16, OBJECT_TEST_COFF_SECTION_DATA);
+    object_test_coff_write_u32(bytes, section + 20, raw_offset);
+    object_test_coff_write_u32(bytes, section + 36, characteristics);
+}
+
+BUSTER_GLOBAL_LOCAL void object_test_coff_symbol(u8* bytes, u64 symbol_table, u32 symbol_index, String8 name, s16 section_number, u8 storage,
+                                                 u8 auxiliary_count)
+{
+    u64 symbol = symbol_table + (u64)symbol_index * OBJECT_TEST_COFF_SYMBOL_SIZE;
+    object_test_coff_write_name(bytes, symbol, name);
+    object_test_coff_write_u16(bytes, symbol + 12, (u16)section_number);
+    bytes[symbol + 16] = storage;
+    bytes[symbol + 17] = auxiliary_count;
+}
+
+// Auxiliary Format 5: the section definition whose Selection byte is the whole
+// point of the COMDAT model.
+BUSTER_GLOBAL_LOCAL void object_test_coff_section_definition(u8* bytes, u64 symbol_table, u32 symbol_index, u8 selection)
+{
+    u64 auxiliary = symbol_table + (u64)symbol_index * OBJECT_TEST_COFF_SYMBOL_SIZE;
+    object_test_coff_write_u32(bytes, auxiliary, OBJECT_TEST_COFF_SECTION_DATA);
+    bytes[auxiliary + 14] = selection;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_comdat_object(Arena* arena)
+{
+    u64 section_data = OBJECT_TEST_COFF_HEADER_SIZE + (u64)OBJECT_TEST_COFF_SECTION_COUNT * OBJECT_TEST_COFF_SECTION_SIZE;
+    u64 symbol_table = section_data + (u64)OBJECT_TEST_COFF_SECTION_COUNT * OBJECT_TEST_COFF_SECTION_DATA;
+    u64 string_table = symbol_table + (u64)OBJECT_TEST_COFF_SYMBOL_COUNT * OBJECT_TEST_COFF_SYMBOL_SIZE;
+    u64 length = string_table + 4;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    object_test_coff_write_u16(bytes, 0, 0x8664);
+    object_test_coff_write_u16(bytes, 2, OBJECT_TEST_COFF_SECTION_COUNT);
+    object_test_coff_write_u32(bytes, 8, (u32)symbol_table);
+    object_test_coff_write_u32(bytes, 12, OBJECT_TEST_COFF_SYMBOL_COUNT);
+    // IMAGE_SCN_ALIGN_4BYTES throughout; CNT_CODE/EXECUTE/READ for .text and
+    // CNT_INITIALIZED_DATA/READ plus IMAGE_SCN_LNK_COMDAT for the constants.
+    u32 text_characteristics = 0x60300020;
+    u32 comdat_characteristics = 0x40301040;
+    object_test_coff_section(bytes, 0, S8(".text"), (u32)section_data, text_characteristics);
+    object_test_coff_section(bytes, 1, S8(".rdata"), (u32)section_data + 4, comdat_characteristics);
+    object_test_coff_section(bytes, 2, S8(".rdata"), (u32)section_data + 8, comdat_characteristics);
+    object_test_coff_section(bytes, 3, S8(".rdata"), (u32)section_data + 12, comdat_characteristics);
+    object_test_coff_symbol(bytes, symbol_table, 0, S8("plain"), 1, 2, 0);
+    object_test_coff_symbol(bytes, symbol_table, 1, S8(".rdata"), 2, 3, 1);
+    object_test_coff_section_definition(bytes, symbol_table, 2, 2);
+    object_test_coff_symbol(bytes, symbol_table, 3, S8("any_one"), 2, 2, 0);
+    object_test_coff_symbol(bytes, symbol_table, 4, S8(".rdata"), 3, 3, 1);
+    object_test_coff_section_definition(bytes, symbol_table, 5, 1);
+    object_test_coff_symbol(bytes, symbol_table, 6, S8("strict1"), 3, 2, 0);
+    object_test_coff_symbol(bytes, symbol_table, 7, S8("pending"), 4, 2, 0);
+    object_test_coff_write_u32(bytes, string_table, 4);
+
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -584,6 +677,78 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, coff_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
         BUSTER_TEST(arguments, coff_roundtrip.relocations[0].addend == -4);
         BUSTER_STRING_TEST(arguments, coff_roundtrip.symbols[coff_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+    }
+    {
+        TemporalArena comdat_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice comdat_bytes = object_test_coff_comdat_object(arguments->arena);
+        ObjectFile comdat = object_read(arguments->arena, comdat_bytes,
+                                        (Target){
+                                            .cpu_arch = CPU_ARCH_X86_64,
+                                            .os = OPERATING_SYSTEM_WINDOWS,
+                                        });
+        BUSTER_TEST(arguments, comdat.error == OBJECT_ERROR_NONE);
+        // Six symbols: the two auxiliary records carry no symbol of their own.
+        BUSTER_TEST(arguments, comdat.symbol_count == 6);
+        if (comdat.error == OBJECT_ERROR_NONE && comdat.symbol_count == 6)
+        {
+            BUSTER_STRING_TEST(arguments, comdat.symbols[0].name, S8("plain"));
+            BUSTER_TEST(arguments, comdat.symbols[0].section == OBJECT_SECTION_TEXT && comdat.symbols[0].global && !comdat.symbols[0].weak);
+            BUSTER_STRING_TEST(arguments, comdat.symbols[2].name, S8("any_one"));
+            BUSTER_TEST(arguments, comdat.symbols[2].section == OBJECT_SECTION_READ_ONLY_DATA && comdat.symbols[2].global && comdat.symbols[2].weak);
+            // The section symbol shares its section's selection, but stays
+            // local, so it never reaches the linker's global arbitration.
+            BUSTER_TEST(arguments, !comdat.symbols[1].global && comdat.symbols[1].weak);
+            BUSTER_STRING_TEST(arguments, comdat.symbols[4].name, S8("strict1"));
+            BUSTER_TEST(arguments, comdat.symbols[4].global && !comdat.symbols[4].weak);
+            BUSTER_TEST(arguments, !comdat.symbols[3].weak);
+            // IMAGE_SCN_LNK_COMDAT with no section symbol to name a selection
+            // stays a hard definition rather than a silently dropped one.
+            BUSTER_STRING_TEST(arguments, comdat.symbols[5].name, S8("pending"));
+            BUSTER_TEST(arguments, comdat.symbols[5].global && !comdat.symbols[5].weak);
+        }
+        arena_set_position(arguments->arena, comdat_scope.position);
+    }
+    {
+        // ELF64 and Mach-O carry the replaceable bit on the wire; COFF cannot,
+        // because expressing it needs a section per COMDAT and the writer
+        // merges sections by kind.
+        TemporalArena weak_scope = arena_begin_temporal(arguments->arena);
+        ObjectSymbol weak_symbols[] = {
+            {.name = S8("object_weak"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .weak = true},
+            {.name = S8("object_strong"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        };
+        ObjectFile weak_object = object;
+        weak_object.symbols = weak_symbols;
+        weak_object.symbol_count = BUSTER_ARRAY_LENGTH(weak_symbols);
+        weak_object.relocations = 0;
+        weak_object.relocation_count = 0;
+        ObjectFormat weak_formats[] = {OBJECT_FORMAT_ELF64, OBJECT_FORMAT_MACH_O64};
+        OperatingSystem weak_systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(weak_formats); index += 1)
+        {
+            ObjectArtifact weak_artifact = object_write(arguments->arena, &weak_object, weak_formats[index]);
+            BUSTER_TEST(arguments, weak_artifact.error == OBJECT_ERROR_NONE);
+            ObjectFile weak_roundtrip = object_read(arguments->arena, weak_artifact.bytes,
+                                                    (Target){
+                                                        .cpu_arch = CPU_ARCH_X86_64,
+                                                        .os = weak_systems[index],
+                                                    });
+            BUSTER_TEST(arguments, weak_roundtrip.error == OBJECT_ERROR_NONE && weak_roundtrip.symbol_count == BUSTER_ARRAY_LENGTH(weak_symbols));
+            if (weak_roundtrip.error == OBJECT_ERROR_NONE && weak_roundtrip.symbol_count == BUSTER_ARRAY_LENGTH(weak_symbols))
+            {
+                bool weak_found = false;
+                bool strong_found = false;
+                for (u32 symbol = 0; symbol < weak_roundtrip.symbol_count; symbol += 1)
+                {
+                    ObjectSymbol* read = weak_roundtrip.symbols + symbol;
+                    weak_found = weak_found || (string_equal(read->name, S8("object_weak")) && read->global && read->weak);
+                    strong_found = strong_found || (string_equal(read->name, S8("object_strong")) && read->global && !read->weak);
+                }
+                BUSTER_TEST(arguments, weak_found);
+                BUSTER_TEST(arguments, strong_found);
+            }
+        }
+        arena_set_position(arguments->arena, weak_scope.position);
     }
     {
         u8 debug_data[] = {0};

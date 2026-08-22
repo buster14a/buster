@@ -1,5 +1,7 @@
 // The linker. Two public steps (link.h): link_objects merges ObjectFiles —
-// section merging, symbol resolution, relocation rebasing — into one
+// section merging, symbol resolution (ObjectSymbol.weak decides which of two
+// definitions survives instead of diagnosing a duplicate), relocation
+// rebasing — into one
 // combined ObjectFile, and link_native_executable lays that file out as a
 // runnable image, dispatching near the bottom to one writer per
 // target/format family: static and dynamic ELF64 for x86-64 and AArch64,
@@ -778,13 +780,23 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 ObjectSymbol* destination = &result.object.symbols[destination_index];
                 bool destination_defined = destination->section != OBJECT_SECTION_UNDEFINED;
                 bool source_defined = source->section != OBJECT_SECTION_UNDEFINED;
-                if (destination_defined && source_defined)
+                // Two definitions collide only when neither is replaceable.
+                // A replaceable definition — COFF selectany COMDAT, ELF weak,
+                // Mach-O N_WEAK_DEF — yields to a strong one whichever side it
+                // arrives on, and to nothing else: among replaceable
+                // definitions the first input wins, which is what keeps the
+                // merge deterministic in the order the driver hands objects
+                // over.  The losing definition keeps its bytes in the merged
+                // section; only the symbol stops naming them.
+                bool duplicate_definition = destination_defined && source_defined;
+                bool source_replaces = duplicate_definition ? destination->weak && !source->weak : !destination_defined && source_defined;
+                if (duplicate_definition && !destination->weak && !source->weak)
                 {
                     result.error = LINK_ERROR_DUPLICATE_SYMBOL;
                     result.symbol = link_string_copy(arena, source->name);
                     return result;
                 }
-                if (!destination_defined && source_defined)
+                if (source_replaces)
                 {
                     if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
                     {

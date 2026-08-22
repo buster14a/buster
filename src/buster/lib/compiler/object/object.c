@@ -8,12 +8,19 @@
 // invalid ObjectFile, never a crash — object_fuzz_test_input keeps that
 // honest.
 //
+// The three formats spell "this definition may be dropped for another one"
+// differently — COFF selectany COMDAT, ELF STB_WEAK, Mach-O N_WEAK_DEF — and
+// all three read into ObjectSymbol.weak, which link_objects arbitrates on.
+// ELF and Mach-O write it back out; COFF cannot, because a COMDAT needs its
+// own section and this model merges sections by kind.
+//
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
 //                                                  and relocation rendering)
 //   object_read_u16 .. object_read_string_checked  checked reading primitives
+//   object_coff_comdat_is_replaceable              COFF COMDAT selection
 //   object_read_elf64, object_read_coff,           the three format readers
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   archives and detection
@@ -3949,13 +3956,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             }
             if (read_ok)
             {
+                // st_info's binding: STB_LOCAL 0, STB_GLOBAL 1, STB_WEAK 2.
+                // Weak counts as global here because it participates in
+                // cross-object resolution; the weak bit says it loses to a
+                // strong definition instead of colliding with it.
+                u8 binding = (u8)(information >> 4);
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
                     .size = size,
                     .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
                     .kind = symbol_type == 2 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
-                    .global = (information >> 4) != 0,
+                    .global = binding != 0,
+                    .weak = binding == 2,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -4284,6 +4297,38 @@ BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u
     };
 }
 
+// COMDAT section selection, from the auxiliary section-definition record of
+// the section symbol (PE/COFF "Auxiliary Format 5").  A section that carries
+// IMAGE_SCN_LNK_COMDAT but whose section symbol has not been seen yet holds
+// OBJECT_COFF_COMDAT_PENDING, which is deliberately not replaceable: an input
+// that orders its symbols against the specification stays a hard duplicate
+// rather than silently dropping a definition.
+enum
+{
+    OBJECT_COFF_SECTION_LINK_COMDAT = 0x00001000,
+    OBJECT_COFF_STORAGE_EXTERNAL = 2,
+    OBJECT_COFF_STORAGE_STATIC = 3,
+    OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
+    OBJECT_COFF_COMDAT_NONE = 0,
+    OBJECT_COFF_COMDAT_NO_DUPLICATES = 1,
+    OBJECT_COFF_COMDAT_ANY = 2,
+    OBJECT_COFF_COMDAT_SAME_SIZE = 3,
+    OBJECT_COFF_COMDAT_EXACT_MATCH = 4,
+    OBJECT_COFF_COMDAT_ASSOCIATIVE = 5,
+    OBJECT_COFF_COMDAT_LARGEST = 6,
+    OBJECT_COFF_COMDAT_PENDING = 0xff,
+};
+
+// Every selection but NODUPLICATES lets the linker keep one definition and
+// drop the rest, so all of them become replaceable definitions.  SAME_SIZE
+// and EXACT_MATCH are not verified and LARGEST takes the first definition
+// rather than the biggest one: sections are merged by kind here, so no
+// per-COMDAT identity survives into the linker to compare or re-pick with.
+BUSTER_GLOBAL_LOCAL bool object_coff_comdat_is_replaceable(u8 selection)
+{
+    return selection >= OBJECT_COFF_COMDAT_ANY && selection <= OBJECT_COFF_COMDAT_LARGEST;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -4348,6 +4393,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     if (read_ok)
     {
         section_bases = arena_allocate(arena, u64, section_count);
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u8), BUSTER_ALIGN_OF(u8)))
+        {
+            read_ok = false;
+        }
+    }
+    u8* section_comdat_selections = 0;
+    if (read_ok)
+    {
+        section_comdat_selections = arena_allocate(arena, u8, section_count);
     }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
@@ -4393,6 +4447,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 {
                     read_ok = false;
                 }
+            }
+            if (read_ok)
+            {
+                section_comdat_selections[section_index] =
+                    characteristics & OBJECT_COFF_SECTION_LINK_COMDAT ? OBJECT_COFF_COMDAT_PENDING : OBJECT_COFF_COMDAT_NONE;
             }
             bool is_thread_local = false;
             if (read_ok)
@@ -4587,6 +4646,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     read_ok = false;
                 }
             }
+            // The section symbol of a COMDAT section precedes every other
+            // symbol that section defines, so one forward pass can publish the
+            // selection before the symbols it governs are built.  The auxiliary
+            // record sits inside the symbol table, which the header check
+            // already bounded.
+            if (read_ok)
+            {
+                if (section_number > 0 && storage == OBJECT_COFF_STORAGE_STATIC && auxiliary_count &&
+                    section_comdat_selections[section_number - 1] == OBJECT_COFF_COMDAT_PENDING)
+                {
+                    section_comdat_selections[section_number - 1] = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
+                }
+            }
             if (read_ok)
             {
                 if (section_number > 0 && section_kinds[(u16)section_number - 1] == UINT32_MAX)
@@ -4654,7 +4726,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             .value = section_number ? symbol_base + value : 0,
                             .section = section_number ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
                             .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
-                            .global = storage == 2 || storage == 105,
+                            .global = storage == OBJECT_COFF_STORAGE_EXTERNAL || storage == OBJECT_COFF_STORAGE_WEAK_EXTERNAL,
+                            .weak = section_number != 0 && object_coff_comdat_is_replaceable(section_comdat_selections[section_index]),
                         };
                         symbol_map[source_index] = destination_index;
                     }
@@ -5712,6 +5785,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     .section = kind == 0x0e ? section_kinds[section_number - 1] : OBJECT_SECTION_UNDEFINED,
                     .kind = function_symbol ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = (symbol_type & 1) != 0,
+                    // N_WEAK_DEF.  Its undefined-side twin N_WEAK_REF (0x0040)
+                    // is a reference, not a definition, so it stays out of the
+                    // linker's definition arbitration.
+                    .weak = kind == 0x0e && (description & 0x0080) != 0,
                 };
                 symbol_map[source_index] = destination_index;
             }
@@ -9130,7 +9207,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
         bool is_thread_local = source->section < object->section_count && (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
                                                                            object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
-        buffer.bytes[offset + 4] = (u8)((source->global ? 0x10 : 0) | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
+        // Binding is gated on global because the symbol table is partitioned
+        // local-then-global and sh_info below counts that split: a local
+        // STB_WEAK entry would contradict it.
+        u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
+        buffer.bytes[offset + 4] = (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
         buffer.bytes[offset + 5] = 0;
         object_write_u16_at(&buffer, offset + 6, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)(source->section + 1));
         object_write_u64_at(&buffer, offset + 8, source->value);
@@ -9632,7 +9713,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         // not synthesize.  Mach-O has no separate defined-function bit; the
         // reader uses the canonical __text section to retain that kind.
         u16 reference_kind = source->section == OBJECT_SECTION_UNDEFINED ? 0 : 2;
-        object_write_u16_at(&buffer, offset + 6, reference_kind);
+        u16 weak_definition = source->section != OBJECT_SECTION_UNDEFINED && source->global && source->weak ? 0x0080 : 0;
+        object_write_u16_at(&buffer, offset + 6, reference_kind | weak_definition);
         object_write_u64_at(&buffer, offset + 8, source->value + (source->section == OBJECT_SECTION_UNDEFINED ? 0 : section_addresses[source->section]));
     }
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)

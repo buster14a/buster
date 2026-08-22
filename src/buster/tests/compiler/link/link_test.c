@@ -1686,6 +1686,85 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, duplicate.error == LINK_ERROR_DUPLICATE_SYMBOL);
         BUSTER_STRING_TEST(arguments, duplicate.symbol, S8("duplicate"));
 
+        // Replaceable definitions — COFF selectany COMDAT, ELF weak, Mach-O
+        // N_WEAK_DEF — resolve instead of colliding.  Two of them keep the
+        // first input; a strong one wins from either side; the losing bytes
+        // stay in the merged section, so only the retained symbol's value
+        // moves.
+        u8 replaceable_text[16] = {0};
+        ObjectSymbol weak_first = {
+            .name = S8("replaceable"),
+            .size = 1,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+            .weak = true,
+        };
+        ObjectSymbol weak_second = weak_first;
+        weak_second.value = 8;
+        ObjectSymbol strong = weak_first;
+        strong.weak = false;
+        strong.value = 4;
+        ByteSlice replaceable_slice = (ByteSlice)BUSTER_ARRAY_TO_SLICE(replaceable_text);
+        ObjectFile weak_pair[] = {
+            link_test_object_make(arguments->arena, target, replaceable_slice, &weak_first, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, replaceable_slice, &weak_second, 1, 0, 0),
+        };
+        LinkObjectResult weak_only = link_objects(arguments->arena, weak_pair, BUSTER_ARRAY_LENGTH(weak_pair), (LinkOptions){0});
+        BUSTER_TEST(arguments, weak_only.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, weak_only.error == LINK_ERROR_NONE && weak_only.object.symbol_count == 1);
+        if (weak_only.error == LINK_ERROR_NONE && weak_only.object.symbol_count == 1)
+        {
+            BUSTER_TEST(arguments, weak_only.object.symbols[0].value == 0 && weak_only.object.symbols[0].weak);
+        }
+        ObjectFile weak_then_strong[] = {
+            link_test_object_make(arguments->arena, target, replaceable_slice, &weak_first, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, replaceable_slice, &strong, 1, 0, 0),
+        };
+        LinkObjectResult strong_last = link_objects(arguments->arena, weak_then_strong, BUSTER_ARRAY_LENGTH(weak_then_strong), (LinkOptions){0});
+        BUSTER_TEST(arguments, strong_last.error == LINK_ERROR_NONE && strong_last.object.symbol_count == 1);
+        if (strong_last.error == LINK_ERROR_NONE && strong_last.object.symbol_count == 1)
+        {
+            // The second object's text follows the first, so the strong
+            // definition keeps its own offset rather than the weak one's.
+            BUSTER_TEST(arguments, !strong_last.object.symbols[0].weak);
+            BUSTER_TEST(arguments, strong_last.object.symbols[0].value == sizeof(replaceable_text) + 4);
+        }
+        ObjectFile strong_then_weak[] = {
+            link_test_object_make(arguments->arena, target, replaceable_slice, &strong, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, replaceable_slice, &weak_second, 1, 0, 0),
+        };
+        LinkObjectResult strong_first = link_objects(arguments->arena, strong_then_weak, BUSTER_ARRAY_LENGTH(strong_then_weak), (LinkOptions){0});
+        BUSTER_TEST(arguments, strong_first.error == LINK_ERROR_NONE && strong_first.object.symbol_count == 1);
+        if (strong_first.error == LINK_ERROR_NONE && strong_first.object.symbol_count == 1)
+        {
+            BUSTER_TEST(arguments, !strong_first.object.symbols[0].weak && strong_first.object.symbols[0].value == 4);
+        }
+        ObjectFile strong_pair[] = {
+            link_test_object_make(arguments->arena, target, replaceable_slice, &strong, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, replaceable_slice, &strong, 1, 0, 0),
+        };
+        LinkObjectResult strong_duplicate = link_objects(arguments->arena, strong_pair, BUSTER_ARRAY_LENGTH(strong_pair), (LinkOptions){0});
+        BUSTER_TEST(arguments, strong_duplicate.error == LINK_ERROR_DUPLICATE_SYMBOL);
+        BUSTER_STRING_TEST(arguments, strong_duplicate.symbol, S8("replaceable"));
+        // A replaceable definition still answers an undefined reference.
+        ObjectSymbol replaceable_reference = {
+            .name = S8("replaceable"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        };
+        ObjectFile reference_then_weak[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, &replaceable_reference, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, replaceable_slice, &weak_first, 1, 0, 0),
+        };
+        LinkObjectResult resolved = link_objects(arguments->arena, reference_then_weak, BUSTER_ARRAY_LENGTH(reference_then_weak), (LinkOptions){0});
+        BUSTER_TEST(arguments, resolved.error == LINK_ERROR_NONE && resolved.object.symbol_count == 1);
+        if (resolved.error == LINK_ERROR_NONE && resolved.object.symbol_count == 1)
+        {
+            BUSTER_TEST(arguments, resolved.object.symbols[0].section == OBJECT_SECTION_TEXT && resolved.object.symbols[0].weak);
+        }
+
         ObjectSymbol empty_name = {
             .section = OBJECT_SECTION_UNDEFINED,
             .kind = OBJECT_SYMBOL_FUNCTION,
