@@ -11008,6 +11008,33 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                             return result;
                                         }
                                         u8 reg = registers[register_index++];
+                                        // Scalars classify through this branch
+                                        // too; the de-facto System V contract
+                                        // clang's callers implement widens a
+                                        // sub-32-bit integer argument to 32
+                                        // bits, and callees exist that read
+                                        // the widened register directly.
+                                        // Aggregate parts stay raw eightbytes.
+                                        bool narrow_scalar = argument_abi.part_count == 1 && argument_type &&
+                                                             (argument_type->kind == IR_TYPE_BOOLEAN ||
+                                                              (argument_type->kind == IR_TYPE_INTEGER &&
+                                                               (argument_type->bit_width == 8 || argument_type->bit_width == 16)));
+                                        if (narrow_scalar)
+                                        {
+                                            u16 source_width = argument_type->kind == IR_TYPE_INTEGER ? (u16)argument_type->bit_width : 8;
+                                            bool sign_extend = argument_type->kind == IR_TYPE_INTEGER && argument_type->is_signed;
+                                            BusterX86MetadataPhysicalOperand extend_load_operands[2] = {
+                                                codegen_canonical_x64_metadata_gpr((X64Register)reg, 32),
+                                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, source_width, displacement),
+                                            };
+                                            if (!codegen_canonical_x64_metadata_emit(&buffer, sign_extend ? S8("MOVSX") : S8("MOVZX"),
+                                                                                       extend_load_operands, BUSTER_ARRAY_LENGTH(extend_load_operands)))
+                                            {
+                                                result.error = buffer.error;
+                                                return result;
+                                            }
+                                            continue;
+                                        }
                                         BusterX86MetadataPhysicalOperand integer_load_operands[2] = {
                                             codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
                                             codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, displacement),
@@ -11076,6 +11103,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 part_index = 0; part_index < call_argument->part_count; part_index += 1)
                             {
                                 u8 reg = registers[register_index++];
+                                // The de-facto contract clang's callers
+                                // implement widens sub-32-bit integer
+                                // arguments to 32 bits; callees exist that
+                                // read the widened register directly.
+                                IrType* scalar_type = call_argument->type;
+                                bool narrow_scalar = !call_argument->aggregate && call_argument->part_count == 1 && scalar_type &&
+                                                     (scalar_type->kind == IR_TYPE_BOOLEAN ||
+                                                      (scalar_type->kind == IR_TYPE_INTEGER &&
+                                                       (scalar_type->bit_width == 8 || scalar_type->bit_width == 16)));
+                                if (narrow_scalar)
+                                {
+                                    u16 source_width = scalar_type->kind == IR_TYPE_INTEGER ? (u16)scalar_type->bit_width : 8;
+                                    bool sign_extend = scalar_type->kind == IR_TYPE_INTEGER && scalar_type->is_signed;
+                                    BusterX86MetadataPhysicalOperand extend_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr((X64Register)reg, 32),
+                                        codegen_canonical_x64_metadata_memory(
+                                            X64_REGISTER_RBP, source_width, c_x64_frame_displacement(&emitter, value_offsets[argument.value])),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, sign_extend ? S8("MOVSX") : S8("MOVZX"), extend_load_operands,
+                                                                               BUSTER_ARRAY_LENGTH(extend_load_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
+                                    continue;
+                                }
                                 BusterX86MetadataPhysicalOperand integer_load_operands[2] = {
                                     codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
                                     codegen_canonical_x64_metadata_memory(
