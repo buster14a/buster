@@ -56,6 +56,7 @@ keep current.
 - [`2026-08-22T120206Z`](docs/performance-audits/2026-08-22T120206Z.md) — stream preprocessed tokens into their final array instead of staging ranges that never coalesced
 - [`2026-08-22T120959Z`](docs/performance-audits/2026-08-22T120959Z.md) — attribute the include amplification per header, then drop guard-shaped re-includes unread
 - [`2026-08-22T114019Z`](docs/performance-audits/2026-08-22T114019Z.md) — take five cache and branch-miss leads, and measure two more that do not pay
+- [`2026-08-22T124313Z`](docs/performance-audits/2026-08-22T124313Z.md) — the AArch64 machine backend's third installment — array/aggregate literals, scalar float bodies, and scalar stack arguments, in three gated commits
 - [`2026-08-22T091548Z`](docs/performance-audits/2026-08-22T091548Z.md) — take the three cache-miss leads: the promoted-member memset, the selector's per-value prepass, and the linker's image copy
 - [`2026-08-22T091007Z`](docs/performance-audits/2026-08-22T091007Z.md) — the source-map searches take the dword vocabulary: vpcmpud answers a span of sixteen keys with no branch
 - [`2026-08-22T084855Z`](docs/performance-audits/2026-08-22T084855Z.md) — survey the stage-1 cache misses: one per-value prepass, one per-field-access memset, and the copy sites that own a fifth of them
