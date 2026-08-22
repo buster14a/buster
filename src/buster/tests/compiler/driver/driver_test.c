@@ -2438,6 +2438,46 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The same fixture again at pinned CPU models, compile-only. The rows
+    // above take the host's model, so they cannot promise the metadata
+    // resolve keeps carrying the exact shapes a 32-byte part asks for at a
+    // given model: one ymm VMOVDQU where the model tops out at ymm (haswell),
+    // and the same ymm move on a model that also owns zmm (znver5). SysV
+    // returns the part in YMM0 directly; Win64 classifies the same result
+    // direct since the widening in ir_classify_abi_value, so both targets
+    // must reach an object at both models through both pipelines.
+    {
+        String8 c_ymm_model_targets[] = {S8("x86_64-linux"), S8("x86_64-pc-windows-msvc")};
+        String8 c_ymm_model_names[] = {S8("haswell"), S8("znver5")};
+        String8 c_ymm_model_flags[] = {S8("-march=haswell"), S8("-march=znver5")};
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(c_ymm_model_targets) * BUSTER_ARRAY_LENGTH(c_ymm_model_names) * 2; row += 1)
+        {
+            u32 target_index = row >> 2;
+            u32 model_index = (row >> 1) & 1;
+            u32 canonical = row & 1;
+            TemporalArena c_ymm_model_temporary = scratch_begin(&arguments->arena, 1);
+            String8 c_ymm_model_path = buster_test_temporary_path(
+                c_ymm_model_temporary.arena, S8("buster-c-vector-ymm-model"),
+                string_format(c_ymm_model_temporary.arena, S8("-{S8}-{S8}-{u32}.o"), c_ymm_model_targets[target_index], c_ymm_model_names[model_index],
+                              canonical));
+            String8 c_ymm_model_command_line[] = {
+                canonical ? S8("-fno-register-allocator") : S8("-fregister-allocator=fast"),
+                S8("-c"),
+                S8("-target"),
+                c_ymm_model_targets[target_index],
+                c_ymm_model_flags[model_index],
+                S8("-o"),
+                c_ymm_model_path,
+                S8("tests/basic_c_vector_argument_ymm.c"),
+            };
+            CompilerDriverResult c_ymm_model = compiler_driver_execute_invocation(
+                c_ymm_model_temporary.arena,
+                compiler_driver_parse_arguments(c_ymm_model_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_model_command_line)));
+            BUSTER_TEST(arguments, c_ymm_model.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, c_ymm_model.has_object);
+            scratch_end(c_ymm_model_temporary);
+        }
+    }
     String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),
 #if BUSTER_WINDOWS
                                                                           S8(".exe"));
@@ -3823,32 +3863,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("tests/basic_c_vector.c"),
             S8("tests/basic_c_simd.c"),
             S8("tests/basic_c_wide_vector_argument.c"),
+            // Returns 32-byte vectors by value, which Win64 now classifies as
+            // a direct YMM0 result the way clang and MSVC do; the run proves
+            // the callee's registers and the caller's expectations agree.
+            S8("tests/basic_c_vector_argument_ymm.c"),
         };
         for (u32 fixture_index = 0; wine_available && fixture_index < BUSTER_ARRAY_LENGTH(wine_fixtures); fixture_index += 1)
         {
-            String8 wine_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-windows-run"),
-                                                                      string_format(arguments->arena, S8("-{u32}.exe"), fixture_index));
+            // Each -g build and link is a full pipeline run on the invocation
+            // arena; releasing it per fixture keeps the block's footprint at
+            // one build instead of the fixture count.
+            TemporalArena wine_temporary = scratch_begin(&arguments->arena, 1);
+            String8 wine_executable_path = buster_test_temporary_path(wine_temporary.arena, S8("buster-c-windows-run"),
+                                                                      string_format(wine_temporary.arena, S8("-{u32}.exe"), fixture_index));
             String8 wine_build_command_line[] = {
                 S8("-g"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=native"), S8("-o"), wine_executable_path, wine_fixtures[fixture_index],
             };
             CompilerDriverResult wine_build = compiler_driver_execute_invocation(
-                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_build_command_line)));
+                wine_temporary.arena, compiler_driver_parse_arguments(wine_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_build_command_line)));
             BUSTER_TEST(arguments, wine_build.error == COMPILER_DRIVER_ERROR_NONE);
-            if (wine_build.error != COMPILER_DRIVER_ERROR_NONE)
+            if (wine_build.error == COMPILER_DRIVER_ERROR_NONE)
             {
-                continue;
+                String8 wine_run_arguments[] = {
+                    S8("wine"),
+                    wine_executable_path,
+                };
+                ProcessSpawnResult wine_run =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+                BUSTER_TEST(arguments, wine_run.handle != 0);
+                if (wine_run.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(wine_temporary.arena, wine_run).result == PROCESS_RESULT_SUCCESS);
+                }
             }
-            String8 wine_run_arguments[] = {
-                S8("wine"),
-                wine_executable_path,
-            };
-            ProcessSpawnResult wine_run =
-                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
-            BUSTER_TEST(arguments, wine_run.handle != 0);
-            if (wine_run.handle)
-            {
-                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, wine_run).result == PROCESS_RESULT_SUCCESS);
-            }
+            scratch_end(wine_temporary);
         }
     }
 #endif
