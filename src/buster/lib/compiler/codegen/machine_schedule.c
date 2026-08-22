@@ -185,6 +185,8 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
         case MACHINE_A64_CVT_F64_TO_U64:
         case MACHINE_A64_VLOAD_FRAME:
         case MACHINE_A64_VSTORE_FRAME:
+        case MACHINE_A64_VLOAD_FRAME_SIZED:
+        case MACHINE_A64_VSTORE_FRAME_SIZED:
         case MACHINE_A64_VARITH:
             result = true;
             break;

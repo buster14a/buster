@@ -921,6 +921,19 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
         .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
     },
+    [MACHINE_A64_VLOAD_FRAME_SIZED] = {
+        .name = S8_INITIALIZER("a64_vload_frame_sized"),
+        .operand_count = 1,
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 1,
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
+    },
+    [MACHINE_A64_VSTORE_FRAME_SIZED] = {
+        .name = S8_INITIALIZER("a64_vstore_frame_sized"),
+        .operand_count = 1,
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1160,6 +1173,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
     [MACHINE_A64_STACK_ALLOCATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 43,
     [MACHINE_A64_SWITCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 44,
+    [MACHINE_A64_VLOAD_FRAME_SIZED] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 45,
+    [MACHINE_A64_VSTORE_FRAME_SIZED] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 46,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

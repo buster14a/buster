@@ -1109,7 +1109,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 71);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 73);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1931,7 +1931,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    case 0: return value * 3;\n"
                                   "    case 1: return value - 7;\n"
                                   "    case 2: return value ^ 0x55;\n"
-                                  "    default: return value + 11; } }\n");
+                                  "    default: return value + 11; } }\n"
+                                  "typedef unsigned char MachineV8 __attribute__((vector_size(8)));\n"
+                                  "MachineV8 v8_pass(MachineV8 value) { return value; }\n"
+                                  "typedef unsigned char MachineV2 __attribute__((vector_size(2)));\n"
+                                  "MachineV2 v2_make(int a) { return (MachineV2){ (unsigned char)a, (unsigned char)(a + 3) }; }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4247,7 +4251,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("aligned_spot"), S8_INITIALIZER("vlit_make"),
             S8_INITIALIZER("vquad_add"), S8_INITIALIZER("vf4_scale"), S8_INITIALIZER("amix"),
-            S8_INITIALIZER("vla_fill"), S8_INITIALIZER("pick4"),
+            S8_INITIALIZER("vla_fill"), S8_INITIALIZER("pick4"), S8_INITIALIZER("v8_pass"), S8_INITIALIZER("v2_make"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4547,6 +4551,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         // the entry captures and the return load on both conventions.
         typedef MachineTestA64VLit MachineTestA64CallVQuad(MachineTestA64VLit, MachineTestA64VLit);
         typedef MachineTestA64V4 MachineTestA64CallVF4(MachineTestA64V4, MachineTestA64V4);
+        // Sub-sixteen-byte short vectors ride the low bytes of V0 in and
+        // out under AAPCS64 and the Darwin convention alike, so the sized
+        // V transfers execute natively on either host.
+        typedef u8 MachineTestA64V8 __attribute__((vector_size(8)));
+        typedef MachineTestA64V8 MachineTestA64CallV8(MachineTestA64V8);
+        typedef u8 MachineTestA64V2 __attribute__((vector_size(2)));
+        typedef MachineTestA64V2 MachineTestA64CallV2(s32);
         // Matches the corpus MachineBig3 layout: a twenty-four-byte
         // composite passes indirectly behind a caller-side copy that the
         // host compiler stages, identically under both conventions.
@@ -4615,6 +4626,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool is_vlit_make = string_equal(a64_supported_names[name_index], S8("vlit_make"));
             bool is_vquad_add = string_equal(a64_supported_names[name_index], S8("vquad_add"));
             bool is_vf4_scale = string_equal(a64_supported_names[name_index], S8("vf4_scale"));
+            bool is_v8_pass = string_equal(a64_supported_names[name_index], S8("v8_pass"));
+            bool is_v2_make = string_equal(a64_supported_names[name_index], S8("v2_make"));
             bool is_big_take = string_equal(a64_supported_names[name_index], S8("big_take"));
             bool is_fpair_tail = string_equal(a64_supported_names[name_index], S8("fpair_tail"));
             bool is_pair_spill = string_equal(a64_supported_names[name_index], S8("pair_spill"));
@@ -4777,6 +4790,33 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     MachineTestA64V4 none_vector = none_callvf(value_probe, scale_probe);
                     MachineTestA64V4 machine_vector = machine_callvf(value_probe, scale_probe);
                     for (u32 lane = 0; lane < 4; lane += 1)
+                    {
+                        all_equal &= none_vector[lane] == machine_vector[lane];
+                    }
+                }
+                else if (is_v8_pass)
+                {
+                    MachineTestA64CallV8* none_callv8 = 0;
+                    MachineTestA64CallV8* machine_callv8 = 0;
+                    memcpy(&none_callv8, &none_address, sizeof(none_callv8));
+                    memcpy(&machine_callv8, &machine_address, sizeof(machine_callv8));
+                    MachineTestA64V8 probe_vector = {(u8)left, (u8)right, (u8)(left + 1), (u8)(right + 2), (u8)(left ^ right), 7, 8, (u8)(right - left)};
+                    MachineTestA64V8 none_vector = none_callv8(probe_vector);
+                    MachineTestA64V8 machine_vector = machine_callv8(probe_vector);
+                    for (u32 lane = 0; lane < 8; lane += 1)
+                    {
+                        all_equal &= none_vector[lane] == machine_vector[lane];
+                    }
+                }
+                else if (is_v2_make)
+                {
+                    MachineTestA64CallV2* none_callv2 = 0;
+                    MachineTestA64CallV2* machine_callv2 = 0;
+                    memcpy(&none_callv2, &none_address, sizeof(none_callv2));
+                    memcpy(&machine_callv2, &machine_address, sizeof(machine_callv2));
+                    MachineTestA64V2 none_vector = none_callv2((s32)left);
+                    MachineTestA64V2 machine_vector = machine_callv2((s32)left);
+                    for (u32 lane = 0; lane < 2; lane += 1)
                     {
                         all_equal &= none_vector[lane] == machine_vector[lane];
                     }

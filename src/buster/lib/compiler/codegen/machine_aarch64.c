@@ -266,19 +266,20 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
     IrAbiValue abi = ir_type_abi_value(program, type_id, ir_abi_convention_for_target(target), use);
     if (type->kind == IR_TYPE_VECTOR && !abi.indirect && !abi.memory && abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR)
     {
-        // A short vector rides one whole V register; the value itself is
-        // slot-backed and only the ABI edges touch the vector file. The
-        // eight-byte short-vector form stays canonical until the corpus
-        // grows one.
-        if (abi.parts[0].size != 16)
+        // A short vector rides one V register — the whole register for
+        // the sixteen-byte form, the low bytes for anything smaller — and
+        // the value itself is slot-backed with only the ABI edges
+        // touching the vector file. Sizes without a sized FP transfer
+        // encoding (the non-power-of-two lane counts) stay canonical.
+        if (abi.parts[0].size != 1 && abi.parts[0].size != 2 && abi.parts[0].size != 4 && abi.parts[0].size != 8 && abi.parts[0].size != 16)
         {
             return false;
         }
         *shape = (MachineA64ValueShape){
             .part_is_float = {1},
-            .part_sizes = {16},
+            .part_sizes = {(u8)abi.parts[0].size},
             .part_count = 1,
-            .byte_size = 16,
+            .byte_size = (abi.parts[0].size + 7u) & ~7u,
             .aggregate = true,
             .vector = true,
         };
@@ -335,6 +336,30 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
     }
     *shape = built;
     return true;
+}
+
+// One V-register frame transfer row for a vector shape's ABI edge: the q
+// form for sixteen bytes, the sized form carrying its log2 in the payload
+// otherwise. The shape gate has already restricted part sizes to
+// 1/2/4/8/16.
+BUSTER_GLOBAL_LOCAL MachineInstruction machine_a64_vector_transfer_row(MachineA64ValueShape* shape, u32 slot, u32 vector_register, bool store)
+{
+    u32 size = shape->part_sizes[0];
+    MachineInstruction row = {
+        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+        .payload = vector_register << 24,
+    };
+    if (size == 16)
+    {
+        row.opcode = (u16)(store ? MACHINE_A64_VSTORE_FRAME : MACHINE_A64_VLOAD_FRAME);
+    }
+    else
+    {
+        u32 size_log2 = size == 1 ? 0 : size == 2 ? 1u : size == 4 ? 2u : 3u;
+        row.payload |= size_log2 << 28;
+        row.opcode = (u16)(store ? MACHINE_A64_VSTORE_FRAME_SIZED : MACHINE_A64_VLOAD_FRAME_SIZED);
+    }
+    return row;
 }
 
 // Consecutive-register assignment per class: integer parts take the next
@@ -1933,13 +1958,11 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         }
         if (shape->vector)
         {
-            // The whole sixteen-byte image loads straight from the value's
-            // slot into its V argument register; no general register moves.
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, plan->argument_slots[argument_index])},
-                                                 .payload = next_float << 24,
-                                                 .opcode = MACHINE_A64_VLOAD_FRAME,
-                                             });
+            // The vector image loads straight from the value's slot into
+            // its V argument register — the whole register or its low
+            // bytes per the shape's size; no general register moves.
+            machine_a64_select_row(selector,
+                                   machine_a64_vector_transfer_row(shape, plan->argument_slots[argument_index], next_float, false));
             continue;
         }
         if (shape->aggregate)
@@ -2012,11 +2035,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_receive_call_result(MachineA64Selector* sel
         received = result_slot != UINT32_MAX;
         if (received)
         {
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot)},
-                                                 .payload = 0,
-                                                 .opcode = MACHINE_A64_VSTORE_FRAME,
-                                             });
+            machine_a64_select_row(selector, machine_a64_vector_transfer_row(&plan->return_shape, result_slot, 0, true));
         }
     }
     else if (plan->return_shape.aggregate)
@@ -2970,19 +2989,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_return(MachineA64Selector* selector,
         }
         else if (selector->return_shape.vector)
         {
-            // The whole sixteen-byte image loads from the value's slot into
-            // V0, the vector analog of the scalar X0 move.
+            // The vector image loads from the value's slot into V0 — the
+            // whole register or its low bytes per the shape's size — the
+            // vector analog of the scalar X0 move.
             u32 value_slot = instruction->operands[0].value < function->value_count
                                  ? selector->value_stack_slots[instruction->operands[0].value]
                                  : UINT32_MAX;
             selected = value_slot != UINT32_MAX;
             if (selected)
             {
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                     .payload = 0,
-                                                     .opcode = MACHINE_A64_VLOAD_FRAME,
-                                                 });
+                machine_a64_select_row(selector, machine_a64_vector_transfer_row(&selector->return_shape, value_slot, 0, false));
             }
         }
         else if (selector->return_shape.aggregate)
@@ -4018,8 +4034,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         }
                         if (shape->vector)
                         {
-                            // The whole incoming V register stores straight
-                            // into the value's slot; no general scratch is
+                            // The incoming V register image stores straight
+                            // into the value's slot — whole or low bytes
+                            // per the shape's size; no general scratch is
                             // touched, so the float pass carries it beside
                             // the FMOV captures.
                             if (float_pass)
@@ -4030,11 +4047,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                     machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
                                     break;
                                 }
-                                machine_a64_select_row(&selector, (MachineInstruction){
-                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
-                                                                      .payload = next_float << 24,
-                                                                      .opcode = MACHINE_A64_VSTORE_FRAME,
-                                                                  });
+                                machine_a64_select_row(&selector, machine_a64_vector_transfer_row(shape, slot, next_float, true));
                             }
                             continue;
                         }
@@ -4793,6 +4806,27 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_vector_frame_memory(MachineA64Encoder*
     machine_a64_emit(encoder, (store ? 0x3d800000u : 0x3dc00000u) | ((offset / 16) << 10) | (base_register << 5) | vector_register);
 }
 
+// The sized sibling: a scalar FP transfer of 1/2/4/8 bytes through the V
+// register's low bytes, with the same X16 fallback for offsets outside
+// the scaled unsigned form.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_vector_frame_memory_sized(MachineA64Encoder* encoder, u32 vector_register, u32 offset, u32 size_log2, bool store)
+{
+    u32 base_register = MACHINE_A64_X28;
+    u32 scale = 1u << size_log2;
+    if (offset % scale || offset / scale > A64_IMM12_MAX)
+    {
+        machine_a64_emit_immediate(encoder, MACHINE_A64_X16, offset);
+        machine_a64_emit(encoder, 0x8b000000 | (MACHINE_A64_X16 << 16) | (base_register << 5) | MACHINE_A64_X16);
+        base_register = MACHINE_A64_X16;
+        offset = 0;
+    }
+    u32 word = size_log2 == 0   ? (store ? 0x3d000000u : 0x3d400000u)
+               : size_log2 == 1 ? (store ? 0x7d000000u : 0x7d400000u)
+               : size_log2 == 2 ? (store ? 0xbd000000u : 0xbd400000u)
+                                : (store ? 0xfd000000u : 0xfd400000u);
+    machine_a64_emit(encoder, word | ((offset / scale) << 10) | (base_register << 5) | vector_register);
+}
+
 // Sized memory operation through a pointer register with a scaled unsigned
 // immediate offset, for the aggregate copy loops; an offset outside the
 // imm12 form is an encode error, which falls the function back whole.
@@ -5494,7 +5528,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             break;
         case MACHINE_A64_VLOAD_FRAME:
         case MACHINE_A64_VSTORE_FRAME:
-            // One q transfer, possibly behind the X16 materialize-and-add.
+        case MACHINE_A64_VLOAD_FRAME_SIZED:
+        case MACHINE_A64_VSTORE_FRAME_SIZED:
+            // One V transfer, possibly behind the X16 materialize-and-add.
             capacity64 += 24;
             break;
         case MACHINE_A64_VA_ARG:
@@ -5908,6 +5944,18 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     frame_area, placement->stack_slot_offsets[vector_slot] - (instruction->payload & 0x00ffffffu));
                 machine_a64_emit_vector_frame_memory(&encoder, instruction->payload >> 24, vector_offset,
                                                      instruction->opcode == MACHINE_A64_VSTORE_FRAME);
+            }
+            break;
+            case MACHINE_A64_VLOAD_FRAME_SIZED:
+            case MACHINE_A64_VSTORE_FRAME_SIZED:
+            {
+                // The sized payload adds the transfer's size log2 above
+                // the fixed V register.
+                u32 sized_slot = machine_ref_payload(instruction->operands[0]);
+                u32 sized_offset = machine_a64_frame_offset(
+                    frame_area, placement->stack_slot_offsets[sized_slot] - (instruction->payload & 0x00ffffffu));
+                machine_a64_emit_vector_frame_memory_sized(&encoder, (instruction->payload >> 24) & 0xfu, sized_offset, instruction->payload >> 28,
+                                                           instruction->opcode == MACHINE_A64_VSTORE_FRAME_SIZED);
             }
             break;
             case MACHINE_A64_VARITH:

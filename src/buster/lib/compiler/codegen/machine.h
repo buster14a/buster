@@ -638,6 +638,14 @@ typedef enum MachineOpcode
     // each case constant materializes in reserved X17, equality branches
     // to the case block, and the tail branch takes the default edge.
     MACHINE_A64_SWITCH, // use condition, default block ref; payload = first case, flags = case count
+    // Sized V-register frame transfers for the sub-sixteen-byte short
+    // vectors (AAPCS64 hands them the low bytes of a V register): the
+    // payload packs the size log2 and the fixed V identity above the byte
+    // offset into the slot (offset | v << 24 | size_log2 << 28), sizes
+    // 1/2/4/8. Sixteen-byte vectors keep the unsized q rows. Both ride
+    // the scheduler's float-state chain like their q siblings.
+    MACHINE_A64_VLOAD_FRAME_SIZED,  // slot ref source
+    MACHINE_A64_VSTORE_FRAME_SIZED, // slot ref destination
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
