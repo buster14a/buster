@@ -16027,11 +16027,9 @@ void zig_med_struct_mixed(struct MedStructMixed);
 struct MedStructMixed zig_ret_med_struct_mixed();
 
 void zig_small_packed_struct(uint8_t);
-#ifndef ZIG_NO_INT128_SHIFTS
 #ifndef ZIG_NO_I128
 void zig_big_packed_struct(__int128);
 #endif
-#endif // ZIG_NO_INT128_SHIFTS
 
 struct SplitStructInts {
     uint64_t a;
@@ -16148,7 +16146,6 @@ void run_c_tests(void) {
 #endif
 #endif
 
-#ifndef ZIG_NO_INT128_SHIFTS
 #ifndef ZIG_NO_I128
     {
         __int128 s = 0;
@@ -16157,7 +16154,6 @@ void run_c_tests(void) {
         zig_big_packed_struct(s);
     }
 #endif
-#endif // ZIG_NO_INT128_SHIFTS
 
     {
         uint8_t s = 0;
@@ -16434,7 +16430,6 @@ void c_small_packed_struct(uint8_t x) {
     assert_or_panic(((x >> 6) & 0x3) == 3);
 }
 
-#ifndef ZIG_NO_INT128_SHIFTS
 #ifndef ZIG_NO_I128
 __int128 c_ret_big_packed_struct(void) {
     __int128 s = 0;
@@ -16448,7 +16443,6 @@ void c_big_packed_struct(__int128 x) {
     assert_or_panic(((x >> 64) & 0xFFFFFFFFFFFFFFFF) == 2);
 }
 #endif
-#endif // ZIG_NO_INT128_SHIFTS
 
 struct SplitStructMixed c_ret_split_struct_mixed(void) {
     struct SplitStructMixed s = {

@@ -1024,6 +1024,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_binary(MachineA64Selector* selector,
         IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
         if (machine_a64_type_is_scalar_register(operand_type))
         {
+            // `wide` folds every width above 32 into the 64-bit rows, which
+            // would wrap a 128-bit shift's amount modulo 64 and drop every
+            // other operation's high half. The scalar-register guard above
+            // (size <= 8) is what keeps 128-bit operands off this table, and
+            // no 128-bit producer (argument, load, cast, constant, call)
+            // selects either, so such functions fall back whole to the
+            // canonical emitter, which owns the 128-bit pair lowerings.
             bool wide = machine_a64_type_is_64_bit(program, operand_type_id);
             u16 arithmetic = 0;
             switch (instruction->binary_operation)

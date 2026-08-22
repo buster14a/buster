@@ -666,7 +666,7 @@ static void test_small_packed_struct(void)
     assert_or_panic(((s2 >> 6) & 0x3) == 3);
 }
 
-#if !defined(ZIG_NO_I128) && !defined(ZIG_NO_INT128_SHIFTS)
+#ifndef ZIG_NO_I128
 void c_big_packed_struct(__int128);
 __int128 c_ret_big_packed_struct(void);
 
@@ -687,7 +687,7 @@ static void test_big_packed_struct(void)
     assert_or_panic(((s2 >> 0) & 0xFFFFFFFFFFFFFFFF) == 1);
     assert_or_panic(((s2 >> 64) & 0xFFFFFFFFFFFFFFFF) == 2);
 }
-#endif // ZIG_NO_I128 && ZIG_NO_INT128_SHIFTS
+#endif // ZIG_NO_I128
 
 typedef struct
 {
@@ -1373,7 +1373,7 @@ int main(void)
     test_big_union();
     test_med_struct_mixed();
     test_small_packed_struct();
-#if !defined(ZIG_NO_I128) && !defined(ZIG_NO_INT128_SHIFTS)
+#ifndef ZIG_NO_I128
     test_big_packed_struct();
 #endif
     test_split_struct_ints();

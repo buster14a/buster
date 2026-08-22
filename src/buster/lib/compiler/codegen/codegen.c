@@ -6362,9 +6362,23 @@ BUSTER_GLOBAL_LOCAL void c_a64_load(CCanonicalEmitter* emitter, u32 register_num
     (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, emitter->value_offsets[value_id.value], 8, false, false);
 }
 
+// The second eightbyte of a 128-bit integer's sixteen-byte slot, the AArch64
+// spelling of c_x64_load_high/c_x64_store_high_rdx. Only call these for
+// values whose canonical type is 128 bits wide; a narrower value's slot does
+// not extend past its first eightbyte.
+BUSTER_GLOBAL_LOCAL void c_a64_load_high(CCanonicalEmitter* emitter, u32 register_number, IrValueId value_id)
+{
+    (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, emitter->value_offsets[value_id.value] + 8, 8, false, false);
+}
+
 BUSTER_GLOBAL_LOCAL void c_a64_store(CCanonicalEmitter* emitter, u32 register_number, u32 result_offset)
 {
     (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, result_offset, 8, true, false);
+}
+
+BUSTER_GLOBAL_LOCAL void c_a64_store_high(CCanonicalEmitter* emitter, u32 register_number, u32 result_offset)
+{
+    (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, result_offset + 8, 8, true, false);
 }
 
 // One generation of the whole module -- globals, functions and global assembly
@@ -9023,8 +9037,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     truncate_operands[1] = codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32);
                                     truncate_operand_count = 2;
                                 }
-                                if (truncate_operand_count && !codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), truncate_operands,
-                                                                                                     truncate_operand_count))
+                                // MOVZX has no 32-to-32 form; the plain MOV
+                                // already zeroes the upper doubleword.
+                                if (truncate_operand_count &&
+                                    !codegen_canonical_x64_metadata_emit(&buffer, target_type->bit_width == 32 ? S8("MOV") : S8("MOVZX"),
+                                                                          truncate_operands, truncate_operand_count))
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -14302,6 +14319,58 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
+                        bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
+                        if (target_integer128)
+                        {
+                            if (source_type->kind != IR_TYPE_INTEGER)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            // x9 already holds the source's low eightbyte. A
+                            // narrower source is widened in place first, then
+                            // the second eightbyte is its sign or zero fill;
+                            // a 128-bit source carries its own high half
+                            // through unchanged.
+                            if (source_integer128)
+                            {
+                                c_a64_load_high(&emitter, 10, instruction->operands[0]);
+                            }
+                            else if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND)
+                            {
+                                u32 narrow_sign_extend = source_type->bit_width == 8    ? 0x93401d29
+                                                         : source_type->bit_width == 16 ? 0x93403d29
+                                                         : source_type->bit_width == 32 ? 0x93407d29
+                                                                                        : 0;
+                                if (narrow_sign_extend)
+                                {
+                                    codegen_emit_u32(&buffer, narrow_sign_extend);
+                                }
+                                codegen_emit_u32(&buffer, 0x937ffd2a); // asr x10, x9, #63
+                            }
+                            else
+                            {
+                                u32 narrow_zero_extend = source_type->bit_width == 8    ? 0x53001d29
+                                                         : source_type->bit_width == 16 ? 0x53003d29
+                                                         : source_type->bit_width == 32 ? 0x2a0903e9
+                                                                                        : 0;
+                                if (narrow_zero_extend)
+                                {
+                                    codegen_emit_u32(&buffer, narrow_zero_extend);
+                                }
+                                codegen_emit_u32(&buffer, 0xaa1f03ea); // mov x10, xzr
+                            }
+                            c_a64_store(&emitter, 9, result_offset);
+                            c_a64_store_high(&emitter, 10, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        if (source_integer128 && target_type->kind != IR_TYPE_INTEGER)
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
                         if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND && source_type->kind == IR_TYPE_INTEGER)
                         {
                             u32 sign_extend = source_type->bit_width == 8    ? 0x93401d29
@@ -14653,6 +14722,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, 0xf2e00009 | ((u32)((immediate >> 48) & 0xffff) << 5));
                         }
                         c_a64_store(&emitter, 9, result_offset);
+                        IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && constant_type && constant_type->kind == IR_TYPE_INTEGER &&
+                            constant_type->bit_width == 128)
+                        {
+                            // The second eightbyte of a 128-bit constant, the
+                            // same selection the x86-64 canonical emitter
+                            // makes: an explicit second immediate when the
+                            // frontend recorded one, otherwise the negated
+                            // low half's sign fill.
+                            u64 immediate_high = instruction->immediate_count > 1 ? instruction->immediates[1]
+                                                 : instruction->immediate_is_negative ? UINT64_MAX
+                                                                                      : 0;
+                            a64_emit_constant_compact(&buffer, 9, immediate_high);
+                            c_a64_store_high(&emitter, 9, result_offset);
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_START)
                     {
@@ -15293,6 +15377,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
+                        if (type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+                        {
+                            // Pair forms over x9:x10; the 64-bit rows below
+                            // would drop the high half. Count-leading/trailing
+                            // zeros stay diagnosed rather than truncated.
+                            c_a64_load_high(&emitter, 10, instruction->operands[0]);
+                            if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
+                            {
+                                codegen_emit_u32(&buffer, 0xeb0903e9); // negs x9, x9
+                                codegen_emit_u32(&buffer, 0xda0a03ea); // ngc x10, x10
+                            }
+                            else if (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT)
+                            {
+                                codegen_emit_u32(&buffer, 0xaa2903e9); // mvn x9, x9
+                                codegen_emit_u32(&buffer, 0xaa2a03ea); // mvn x10, x10
+                            }
+                            else
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            c_a64_store(&emitter, 9, result_offset);
+                            c_a64_store_high(&emitter, 10, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         u32 operation =
                             instruction->unary_operation == IR_UNARY_INTEGER_NEGATE                 ? (type && type->bit_width > 32 ? 0xcb0903e9 : 0x4b0903e9)
                             : instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT          ? (type && type->bit_width > 32 ? 0xaa2903e9 : 0x2a2903e9)
@@ -15377,6 +15487,166 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, width == 32 ? 0x1e212000 : 0x1e612000);
                             codegen_emit_u32(&buffer, 0x1a9f07e9 | ((condition ^ 1) << 12));
                             c_a64_store(&emitter, 9, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        if (operand_type_value && operand_type_value->kind == IR_TYPE_INTEGER && operand_type_value->bit_width == 128)
+                        {
+                            // 128-bit integers ride the pair x9:x10 (left) and
+                            // x11:x12 (right), low eightbyte first, with x13
+                            // and x14 as scratch. The variable shifts are
+                            // branchless CSEL composites: the emitter places
+                            // no labels inside one IR row, and LSLV/LSRV/ASRV
+                            // wrap their amount modulo 64 only in lanes the
+                            // CSEL then discards. The `mvn` spelling of
+                            // 63 - amount keeps the amount-zero case exact.
+                            // Shift amounts read only the right operand's low
+                            // eightbyte, because the frontend may keep a
+                            // shift's right operand at its promoted width and
+                            // a narrow value's slot has no second eightbyte.
+                            // 128-bit division and remainder stay diagnosed:
+                            // the 64-bit rows below would truncate them
+                            // silently, and nothing in the tree divides
+                            // 128-bit integers at runtime.
+                            IrBinaryOperation operation128 = instruction->binary_operation;
+                            bool shift128 = operation128 == IR_BINARY_SHIFT_LEFT || operation128 == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+                                            operation128 == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+                            c_a64_load(&emitter, 9, instruction->operands[0]);
+                            c_a64_load_high(&emitter, 10, instruction->operands[0]);
+                            c_a64_load(&emitter, 11, instruction->operands[1]);
+                            if (!shift128)
+                            {
+                                c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                            }
+                            bool store_pair = true;
+                            switch (operation128)
+                            {
+                            case IR_BINARY_INTEGER_ADD:
+                                codegen_emit_u32(&buffer, 0xab0b0129); // adds x9, x9, x11
+                                codegen_emit_u32(&buffer, 0x9a0c014a); // adc x10, x10, x12
+                                break;
+                            case IR_BINARY_INTEGER_SUBTRACT:
+                                codegen_emit_u32(&buffer, 0xeb0b0129); // subs x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xda0c014a); // sbc x10, x10, x12
+                                break;
+                            case IR_BINARY_INTEGER_MULTIPLY:
+                                // hi = umulh(lo, lo') + lo * hi' + hi * lo';
+                                // the truncated product is signedness-blind.
+                                codegen_emit_u32(&buffer, 0x9bcb7d2d); // umulh x13, x9, x11
+                                codegen_emit_u32(&buffer, 0x9b0c352d); // madd x13, x9, x12, x13
+                                codegen_emit_u32(&buffer, 0x9b0b354a); // madd x10, x10, x11, x13
+                                codegen_emit_u32(&buffer, 0x9b0b7d29); // mul x9, x9, x11
+                                break;
+                            case IR_BINARY_INTEGER_BITWISE_AND:
+                                codegen_emit_u32(&buffer, 0x8a0b0129); // and x9, x9, x11
+                                codegen_emit_u32(&buffer, 0x8a0c014a); // and x10, x10, x12
+                                break;
+                            case IR_BINARY_INTEGER_BITWISE_OR:
+                                codegen_emit_u32(&buffer, 0xaa0b0129); // orr x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xaa0c014a); // orr x10, x10, x12
+                                break;
+                            case IR_BINARY_INTEGER_BITWISE_XOR:
+                                codegen_emit_u32(&buffer, 0xca0b0129); // eor x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xca0c014a); // eor x10, x10, x12
+                                break;
+                            case IR_BINARY_SHIFT_LEFT:
+                                codegen_emit_u32(&buffer, 0x2a2b03ed); // mvn w13, w11
+                                codegen_emit_u32(&buffer, 0xd341fd2e); // lsr x14, x9, #1
+                                codegen_emit_u32(&buffer, 0x9acd25ce); // lsrv x14, x14, x13
+                                codegen_emit_u32(&buffer, 0x9acb214a); // lslv x10, x10, x11
+                                codegen_emit_u32(&buffer, 0xaa0e014a); // orr x10, x10, x14
+                                codegen_emit_u32(&buffer, 0x7101016d); // subs w13, w11, #64
+                                codegen_emit_u32(&buffer, 0x9acd212e); // lslv x14, x9, x13
+                                codegen_emit_u32(&buffer, 0x9a8aa1ca); // csel x10, x14, x10, ge
+                                codegen_emit_u32(&buffer, 0x9acb2129); // lslv x9, x9, x11
+                                codegen_emit_u32(&buffer, 0x9a89a3e9); // csel x9, xzr, x9, ge
+                                break;
+                            case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
+                                codegen_emit_u32(&buffer, 0x2a2b03ed); // mvn w13, w11
+                                codegen_emit_u32(&buffer, 0xd37ff94e); // lsl x14, x10, #1
+                                codegen_emit_u32(&buffer, 0x9acd21ce); // lslv x14, x14, x13
+                                codegen_emit_u32(&buffer, 0x9acb2529); // lsrv x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xaa0e0129); // orr x9, x9, x14
+                                codegen_emit_u32(&buffer, 0x7101016d); // subs w13, w11, #64
+                                codegen_emit_u32(&buffer, 0x9acd254e); // lsrv x14, x10, x13
+                                codegen_emit_u32(&buffer, 0x9a89a1c9); // csel x9, x14, x9, ge
+                                codegen_emit_u32(&buffer, 0x9acb254a); // lsrv x10, x10, x11
+                                codegen_emit_u32(&buffer, 0x9a8aa3ea); // csel x10, xzr, x10, ge
+                                break;
+                            case IR_BINARY_SIGNED_SHIFT_RIGHT:
+                                codegen_emit_u32(&buffer, 0x2a2b03ed); // mvn w13, w11
+                                codegen_emit_u32(&buffer, 0xd37ff94e); // lsl x14, x10, #1
+                                codegen_emit_u32(&buffer, 0x9acd21ce); // lslv x14, x14, x13
+                                codegen_emit_u32(&buffer, 0x9acb2529); // lsrv x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xaa0e0129); // orr x9, x9, x14
+                                codegen_emit_u32(&buffer, 0x7101016d); // subs w13, w11, #64
+                                codegen_emit_u32(&buffer, 0x9acd294e); // asrv x14, x10, x13
+                                codegen_emit_u32(&buffer, 0x9a89a1c9); // csel x9, x14, x9, ge
+                                codegen_emit_u32(&buffer, 0x9acb294e); // asrv x14, x10, x11
+                                codegen_emit_u32(&buffer, 0x937ffd4d); // asr x13, x10, #63
+                                codegen_emit_u32(&buffer, 0x9a8ea1aa); // csel x10, x13, x14, ge
+                                break;
+                            case IR_BINARY_INTEGER_EQUAL:
+                            case IR_BINARY_INTEGER_NOT_EQUAL:
+                                codegen_emit_u32(&buffer, 0xca0b0129); // eor x9, x9, x11
+                                codegen_emit_u32(&buffer, 0xca0c014a); // eor x10, x10, x12
+                                codegen_emit_u32(&buffer, 0xaa0a0129); // orr x9, x9, x10
+                                codegen_emit_u32(&buffer, 0xf100013f); // cmp x9, #0
+                                codegen_emit_u32(&buffer, operation128 == IR_BINARY_INTEGER_EQUAL ? 0x1a9f17e9 : 0x1a9f07e9); // cset w9
+                                store_pair = false;
+                                break;
+                            case IR_BINARY_SIGNED_LESS:
+                            case IR_BINARY_SIGNED_LESS_EQUAL:
+                            case IR_BINARY_SIGNED_GREATER:
+                            case IR_BINARY_SIGNED_GREATER_EQUAL:
+                            case IR_BINARY_UNSIGNED_LESS:
+                            case IR_BINARY_UNSIGNED_LESS_EQUAL:
+                            case IR_BINARY_UNSIGNED_GREATER:
+                            case IR_BINARY_UNSIGNED_GREATER_EQUAL:
+                            {
+                                // cmp low, then sbcs high: N/V carry the
+                                // signed answer and C the unsigned one, but Z
+                                // reflects the high subtraction alone, so the
+                                // Z-consuming conditions are unusable here.
+                                // LESS_EQUAL and GREATER therefore compare
+                                // with the operands swapped and answer with
+                                // the Z-free conditions of the mirrored
+                                // relation.
+                                bool swapped128 = operation128 == IR_BINARY_SIGNED_GREATER || operation128 == IR_BINARY_SIGNED_LESS_EQUAL ||
+                                                  operation128 == IR_BINARY_UNSIGNED_GREATER || operation128 == IR_BINARY_UNSIGNED_LESS_EQUAL;
+                                codegen_emit_u32(&buffer, swapped128 ? 0xeb09017f : 0xeb0b013f); // cmp x11, x9 / cmp x9, x11
+                                codegen_emit_u32(&buffer, swapped128 ? 0xfa0a019f : 0xfa0c015f); // sbcs xzr, x12, x10 / sbcs xzr, x10, x12
+                                u32 condition_set;
+                                switch (operation128)
+                                {
+                                case IR_BINARY_SIGNED_LESS:
+                                case IR_BINARY_SIGNED_GREATER:
+                                    condition_set = 0x1a9fa7e9; // cset w9, lt
+                                    break;
+                                case IR_BINARY_SIGNED_LESS_EQUAL:
+                                case IR_BINARY_SIGNED_GREATER_EQUAL:
+                                    condition_set = 0x1a9fb7e9; // cset w9, ge
+                                    break;
+                                case IR_BINARY_UNSIGNED_LESS:
+                                case IR_BINARY_UNSIGNED_GREATER:
+                                    condition_set = 0x1a9f27e9; // cset w9, lo
+                                    break;
+                                default:
+                                    condition_set = 0x1a9f37e9; // cset w9, hs
+                                }
+                                codegen_emit_u32(&buffer, condition_set);
+                                store_pair = false;
+                            }
+                            break;
+                            default:
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            c_a64_store(&emitter, 9, result_offset);
+                            if (store_pair)
+                            {
+                                c_a64_store_high(&emitter, 10, result_offset);
+                            }
                             instruction_id = instruction->next;
                             continue;
                         }
