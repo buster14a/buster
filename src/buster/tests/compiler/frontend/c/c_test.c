@@ -2616,28 +2616,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
                                                    "int v = ONE; // used\n"),
                                                 (CPreprocessOptions){0});
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, preprocess.source_lexed.files == 1);
-    BUSTER_TEST(arguments, preprocess.source_unique.files == 1);
-    BUSTER_TEST(arguments, preprocess.source_lexed.bytes == 35);
-    BUSTER_TEST(arguments, preprocess.source_unique.bytes == preprocess.source_lexed.bytes);
-    BUSTER_TEST(arguments, preprocess.source_lexed.lines == 2);
-    BUSTER_TEST(arguments, preprocess.source_lexed.code_lines == 2);
-    BUSTER_TEST(arguments, preprocess.source_lexed.comments == 1);
-    BUSTER_TEST(arguments, preprocess.source_lexed.mixed_lines == 1);
-    c_test_source_metrics_partitions(arguments, &result, preprocess.source_lexed);
-    c_test_source_metrics_partitions(arguments, &result, preprocess.source_unique);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.files == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_unique.files == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.bytes == 35);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_unique.bytes == c_preprocess_detail(preprocess)->source_lexed.bytes);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.lines == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.code_lines == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.comments == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->source_lexed.mixed_lines == 1);
+    c_test_source_metrics_partitions(arguments, &result, c_preprocess_detail(preprocess)->source_lexed);
+    c_test_source_metrics_partitions(arguments, &result, c_preprocess_detail(preprocess)->source_unique);
 
     // The other side of the frontend: the directive and the comment are gone,
     // ONE expanded once, and `int v = 1 ;` is what the parser receives. The
     // end marker is in token_count but not in the measured token total.
     BUSTER_TEST(arguments, preprocess.token_count == 6);
-    BUSTER_TEST(arguments, preprocess.preprocessed.tokens == 5);
-    BUSTER_TEST(arguments, preprocess.preprocessed.bytes == 7);
-    BUSTER_TEST(arguments, preprocess.preprocessed.definitions == 1);
-    BUSTER_TEST(arguments, preprocess.preprocessed.expansions == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.tokens == 5);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.bytes == 7);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.definitions == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.expansions == 1);
     // Every translated file lands in the spelling space, plus the prelude and
     // anything preprocessing synthesized.
-    BUSTER_TEST(arguments, preprocess.preprocessed.spelling_bytes >= preprocess.source_lexed.translated_bytes);
+    BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.spelling_bytes >= c_preprocess_detail(preprocess)->source_lexed.translated_bytes);
 
     // An unreferenced macro is defined but never expanded, and a function-like
     // macro used twice expands twice.
@@ -2648,8 +2648,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
                                                    "int b = TWICE(2);\n"),
                                                 (CPreprocessOptions){0});
     BUSTER_TEST(arguments, expansions.diagnostic_count == 0);
-    BUSTER_TEST(arguments, expansions.preprocessed.definitions == 2);
-    BUSTER_TEST(arguments, expansions.preprocessed.expansions == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(expansions)->preprocessed.definitions == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(expansions)->preprocessed.expansions == 2);
     return result;
 }
 
@@ -3204,11 +3204,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, guarded.diagnostic_count == 0);
     BUSTER_TEST(arguments, guarded.token_count == 2);
     c_test_preprocessed_token(arguments, &result, guarded, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
-    BUSTER_TEST(arguments, guarded.source_lexed.files == 2);
-    BUSTER_TEST(arguments, guarded.source_unique.files == 2);
-    BUSTER_TEST(arguments, guarded.lexed_file_count == 2);
-    BUSTER_TEST(arguments, guarded.lexed_files[0].lex_count == 1);
-    BUSTER_TEST(arguments, guarded.lexed_files[1].lex_count == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(guarded)->source_lexed.files == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(guarded)->source_unique.files == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(guarded)->lexed_file_count == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(guarded)->lexed_files[0].lex_count == 1);
+    BUSTER_TEST(arguments, c_preprocess_detail(guarded)->lexed_files[1].lex_count == 1);
     // Undefining the guard macro re-arms the header: the suppression tests
     // the macro at each inclusion, so the third include is lexed again and
     // the macro it defines comes back.
@@ -3224,8 +3224,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, unguarded.diagnostic_count == 0);
     BUSTER_TEST(arguments, unguarded.token_count == 2);
     c_test_preprocessed_token(arguments, &result, unguarded, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("41"));
-    BUSTER_TEST(arguments, unguarded.source_lexed.files == 3);
-    BUSTER_TEST(arguments, unguarded.source_unique.files == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(unguarded)->source_lexed.files == 3);
+    BUSTER_TEST(arguments, c_preprocess_detail(unguarded)->source_unique.files == 2);
     // A token after the guard's #endif breaks the whole-file shape, so the
     // header is re-lexed at every inclusion and its declaration repeats.
     CPreprocessResult partial_guard = c_preprocess(arguments->arena,
@@ -3236,8 +3236,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                                                    });
     BUSTER_TEST(arguments, partial_guard.diagnostic_count == 0);
     BUSTER_TEST(arguments, partial_guard.token_count == 7);
-    BUSTER_TEST(arguments, partial_guard.source_lexed.files == 3);
-    BUSTER_TEST(arguments, partial_guard.source_unique.files == 2);
+    BUSTER_TEST(arguments, c_preprocess_detail(partial_guard)->source_lexed.files == 3);
+    BUSTER_TEST(arguments, c_preprocess_detail(partial_guard)->source_unique.files == 2);
     CPreprocessResult builtin_headers = c_preprocess(arguments->arena,
                                                      S8("#include <stdbool.h>\n"
                                                         "#include <stdalign.h>\n"
@@ -5662,7 +5662,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
         found_shift |= string_equal(entity->name, S8("SIZEOF_SHIFT")) && entity->constant_value == 16384;
         found_word |= string_equal(entity->name, S8("SIZEOF_WORD")) && entity->constant_value == 2;
         found_point |= string_equal(entity->name, S8("SIZEOF_POINT")) && entity->constant_value == 8;
-        found_pointer |= string_equal(entity->name, S8("SIZEOF_POINTER")) && entity->constant_value == tokens.data_layout.pointer.size;
+        found_pointer |= string_equal(entity->name, S8("SIZEOF_POINTER")) && entity->constant_value == c_preprocess_detail(tokens)->data_layout.pointer.size;
         found_array |= string_equal(entity->name, S8("SIZEOF_ARRAY")) && entity->constant_value == 6;
         found_align |= string_equal(entity->name, S8("SIZEOF_ALIGN")) && entity->constant_value == 4;
         found_derived |= string_equal(entity->name, S8("SIZEOF_DERIVED")) && entity->constant_value == 10;

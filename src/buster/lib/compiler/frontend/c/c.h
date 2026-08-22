@@ -310,6 +310,35 @@ struct CPreprocessedMetrics
     u64 definitions;
 };
 
+// The facts a translation unit consults a handful of times, held out of the
+// row every frontend call carries. CPreprocessResult is passed by value
+// through the parser and the IR lowering — roughly a hundred and fifty
+// by-value parameters, one copy per type-parse frame push, one per constant
+// initializer — and these six members were 548 of its 712 bytes while the hot
+// paths read only `tokens`, `spelling_base`, `target` and `dialect`. The data
+// layout is read three times per compile and the measurement tables only by
+// `-v` reporting and `-fsource-metrics=`, so they ride one pointer instead of
+// every copy.
+//
+// Null for hand-built results (the token-space literals the integer-constant
+// evaluator takes); `c_preprocess_detail` reads those as the all-zero block
+// their inline members used to be.
+typedef struct CPreprocessDetail CPreprocessDetail;
+struct CPreprocessDetail
+{
+    TargetDataLayout data_layout;
+    // Every file the preprocessor lexed, summed twice: once per inclusion,
+    // and once per distinct path. A header with neither #pragma once nor a
+    // recognized whole-file include guard is re-read and re-lexed at every
+    // #include, so their ratio is the translation unit's include
+    // amplification, and `lexed_files` attributes it per path.
+    CSourceMetrics source_lexed;
+    CSourceMetrics source_unique;
+    CSourceFileMetrics* lexed_files;
+    CPreprocessedMetrics preprocessed;
+    u32 lexed_file_count;
+};
+
 typedef struct CLexResult CLexResult;
 struct CLexResult
 {
@@ -471,27 +500,27 @@ struct CPreprocessResult
     // Sorted (token index, alignment) spans replacing a per-token field;
     // null with count 0 for hand-built results, which query as alignment 0.
     CPackAlignment* pack_changes;
+    // The data layout and the measurement tables; see CPreprocessDetail for
+    // why they are not members here. Null for hand-built results.
+    CPreprocessDetail* detail;
     Target target;
-    TargetDataLayout data_layout;
-    // Every file the preprocessor lexed, summed twice: once per inclusion,
-    // and once per distinct path. A header with neither #pragma once nor a
-    // recognized whole-file include guard is re-read and re-lexed at every
-    // #include, so their ratio is the translation unit's include
-    // amplification, and `lexed_files` attributes it per path.
-    CSourceMetrics source_lexed;
-    CSourceMetrics source_unique;
-    CSourceFileMetrics* lexed_files;
-    CPreprocessedMetrics preprocessed;
     u64 token_count;
     u64 diagnostic_count;
     u64 error_count;
     u64 warning_count;
     u64 diagnostic_capacity;
     u32 file_count;
-    u32 lexed_file_count;
     CPreprocessDialect dialect;
     u32 pack_change_count;
 };
+
+// Hand-built results carry no detail block and read as an all-zero one, which
+// is exactly what their inline members held before the split.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CPreprocessDetail const* c_preprocess_detail(CPreprocessResult preprocess)
+{
+    static CPreprocessDetail const c_preprocess_detail_empty = {0};
+    return preprocess.detail ? preprocess.detail : &c_preprocess_detail_empty;
+}
 
 typedef u32 CIdUnderlying;
 

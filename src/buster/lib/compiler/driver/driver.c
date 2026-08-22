@@ -2218,11 +2218,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
     // what it read is worth knowing.
-    result.source_lexed = preprocess.source_lexed;
-    result.source_unique = preprocess.source_unique;
-    result.lexed_files = preprocess.lexed_files;
-    result.lexed_file_count = preprocess.lexed_file_count;
-    result.preprocessed = preprocess.preprocessed;
+    CPreprocessDetail const* preprocess_detail = c_preprocess_detail(preprocess);
+    result.source_lexed = preprocess_detail->source_lexed;
+    result.source_unique = preprocess_detail->source_unique;
+    result.lexed_files = preprocess_detail->lexed_files;
+    result.lexed_file_count = preprocess_detail->lexed_file_count;
+    result.preprocessed = preprocess_detail->preprocessed;
     for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
     {
         compiler_driver_append_warning(warnings, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);

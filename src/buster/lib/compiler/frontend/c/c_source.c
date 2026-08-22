@@ -3672,7 +3672,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             }
         }
         expansion_count += 1;
-        result->preprocessed.expansions += 1;
+        result->detail->preprocessed.expansions += 1;
         if (expansion_count > expansion_limit)
         {
             c_preprocess_diagnostic_push(arena, result, token.location, C_DIAGNOSTIC_MACRO_EXPANSION_LIMIT, S8("macro expansion limit exceeded"));
@@ -5758,13 +5758,19 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     CPreprocessResult result = {
         .target = options.target,
-        .data_layout = options.data_layout,
         .dialect = options.dialect,
     };
     if (!arena)
     {
         return result;
     }
+    // The detail block outlives this call in the caller's arena: the result is
+    // returned and then copied by value all the way down the frontend, and
+    // every copy shares this one block.
+    result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+    *result.detail = (CPreprocessDetail){
+        .data_layout = options.data_layout,
+    };
     // The spelling space lives in its own commit-on-demand arena so its
     // offsets stay contiguous under one base without stealing reserve from
     // the caller's arena; the result carries the arena so a caller that
@@ -5817,12 +5823,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                               });
     CLexResult root_lex = c_lex_space(arena, space, source);
     CSourceMetricsFileSet metrics_files = {0};
-    c_source_metrics_add(&result.source_lexed, &root_lex.metrics);
+    c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
         u32 root_row = c_source_metrics_file_row(arena, &metrics_files, options.source_path);
         if (metrics_files.rows[root_row].lex_count == 0)
         {
-            c_source_metrics_add(&result.source_unique, &root_lex.metrics);
+            c_source_metrics_add(&result.detail->source_unique, &root_lex.metrics);
         }
         metrics_files.rows[root_row].translated_bytes = root_lex.metrics.translated_bytes;
         metrics_files.rows[root_row].lex_count += 1;
@@ -6467,7 +6473,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     c_preprocess_define_directive(arena, symbol_table, lex, &token_index, &first_macro, &last_macro, &result, directive_location);
                     // Directives reached, not macros surviving: a header
                     // included twice defines its macros twice.
-                    result.preprocessed.definitions += 1;
+                    result.detail->preprocessed.definitions += 1;
                 }
                 else if (active && c_token_spelling_equal(base, directive, S8("undef")))
                 {
@@ -6561,11 +6567,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                             // zeroes; its path was already counted by the
                             // inclusion that did the lexing, and its
                             // attribution row keeps that lex count.
-                            c_source_metrics_add(&result.source_lexed, &include_lex.metrics);
+                            c_source_metrics_add(&result.detail->source_lexed, &include_lex.metrics);
                             u32 include_row = c_source_metrics_file_row(arena, &metrics_files, include_path);
                             if (metrics_files.rows[include_row].lex_count == 0)
                             {
-                                c_source_metrics_add(&result.source_unique, &include_lex.metrics);
+                                c_source_metrics_add(&result.detail->source_unique, &include_lex.metrics);
                             }
                             if (!include_once)
                             {
@@ -6780,16 +6786,16 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.pack_change_count = pack_changes.count;
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
-    result.preprocessed.tokens = output_count;
+    result.detail->preprocessed.tokens = output_count;
     for (u64 token_index = 0; token_index < output_count; token_index += 1)
     {
-        result.preprocessed.bytes += c_token_length(space->base, result.tokens[token_index]);
+        result.detail->preprocessed.bytes += c_token_length(space->base, result.tokens[token_index]);
     }
-    result.preprocessed.spelling_bytes = space->used;
+    result.detail->preprocessed.spelling_bytes = space->used;
     result.files = file_table.files;
     result.file_count = file_table.count;
-    result.lexed_files = metrics_files.rows;
-    result.lexed_file_count = metrics_files.count;
+    result.detail->lexed_files = metrics_files.rows;
+    result.detail->lexed_file_count = metrics_files.count;
     // The map was append-only while the stream was built; sort it once so
     // recovery can binary-search. Only #line splits append out of order, so
     // the insertion pass is effectively linear.

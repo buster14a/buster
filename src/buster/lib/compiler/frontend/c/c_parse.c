@@ -1012,8 +1012,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         bool operand_resolved = operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index == close;
                         if (operand_resolved && pointer_type)
                         {
-                            operand_size = preprocess.data_layout.pointer.size;
-                            operand_alignment = preprocess.data_layout.pointer.alignment;
+                            operand_size = c_preprocess_detail(preprocess)->data_layout.pointer.size;
+                            operand_alignment = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
                         }
                         else if (operand_resolved && operand_type.value < type_count && resolved[operand_type.value])
                         {
