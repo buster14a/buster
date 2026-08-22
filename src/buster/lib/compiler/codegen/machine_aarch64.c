@@ -1323,7 +1323,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
 
     bool selected = false;
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-    if (result_register != UINT32_MAX && symbol && !(instruction->opcode == IR_OPCODE_GLOBAL && symbol->is_thread_local))
+    bool thread_local_global = symbol && instruction->opcode == IR_OPCODE_GLOBAL && symbol->is_thread_local;
+    // ELF local-exec thread locals resolve through tpidr_el0 plus the
+    // TPREL add pair; Darwin's tlv-call model stays canonical.
+    bool thread_local_supported =
+        selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID;
+    if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
+    {
+        u32 target_index = selector->call_targets.total_count;
+        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+        *target_row = instruction->symbol;
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = target_index,
+                                                       .opcode = MACHINE_A64_LEA_TLS,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if (result_register != UINT32_MAX && symbol && !thread_local_global)
     {
         if (instruction->opcode == IR_OPCODE_FUNCTION && selector->direct_call_uses[instruction->result.value] == 1)
         {
@@ -5394,6 +5412,14 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // part possibly storing through the large-offset frame form.
             capacity64 += 48 + 2u * ((u64)MACHINE_VA_ARG_PART_LIMIT * 32 + 12);
             break;
+        case MACHINE_A64_ATOMIC_RMW:
+            // ld(a)xr, operation, st(l)xr, cbnz.
+            capacity64 += 16;
+            break;
+        case MACHINE_A64_ATOMIC_CAS:
+            // ld(a)xr, cmp, b.ne, st(l)xr, cbnz, clrex.
+            capacity64 += 24;
+            break;
         default:
             capacity64 += 12;
         }
@@ -6092,6 +6118,30 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 };
                 machine_a64_emit(&encoder, 0);
                 machine_a64_emit(&encoder, 0);
+            }
+            break;
+            case MACHINE_A64_LEA_TLS:
+            {
+                // The canonical ELF local-exec sequence with the destination
+                // free: mrs tpidr_el0, then the TPREL_HI12/LO12 add pair,
+                // each add carrying its own thread-local call site.
+                u32 tls_destination = operand_registers[0];
+                machine_a64_emit(&encoder, 0xd53bd040u | tls_destination);
+                MachineCallSite* tls_high_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *tls_high_site = (MachineCallSite){
+                    .code_offset = encoder.count,
+                    .target = instruction->payload,
+                    .is_thread_local = 1,
+                };
+                machine_a64_emit(&encoder, 0x91400000u | (tls_destination << 5) | tls_destination);
+                MachineCallSite* tls_low_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *tls_low_site = (MachineCallSite){
+                    .code_offset = encoder.count,
+                    .target = instruction->payload,
+                    .is_thread_local = 1,
+                    .thread_local_low = 1,
+                };
+                machine_a64_emit(&encoder, 0x91000000u | (tls_destination << 5) | tls_destination);
             }
             break;
             default:

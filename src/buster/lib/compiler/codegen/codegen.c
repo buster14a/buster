@@ -7491,10 +7491,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .kind = (u8)(encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
-                                                                                         : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
+                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local
+                                                     ? (encoded.call_sites[site_index].thread_local_low
+                                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
+                                                            : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
+                                                     : encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
+                                                                                               : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                                     .aarch64 = encoded.call_sites[site_index].absolute == 0,
                                     .absolute = encoded.call_sites[site_index].absolute != 0,
+                                    .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
+                                    .thread_local_low = encoded.call_sites[site_index].thread_local_low != 0,
                                 };
                             }
                             buffer.count += encoded.byte_count;

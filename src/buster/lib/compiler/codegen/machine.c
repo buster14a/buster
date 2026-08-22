@@ -894,6 +894,12 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_atomic_fence"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
+    [MACHINE_A64_LEA_TLS] = {
+        .name = S8_INITIALIZER("a64_lea_tls"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1130,6 +1136,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_ATOMIC_RMW] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 39,
     [MACHINE_A64_ATOMIC_CAS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 40,
     [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
+    [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

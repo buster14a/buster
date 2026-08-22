@@ -3552,16 +3552,22 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         ByteSlice executable = c_thread_local_aarch64.native_link.executable;
         bool machine_matches = executable.length >= 20 && executable.pointer[18] == 183 && executable.pointer[19] == 0;
+        // A resolved local-exec sequence is the TPREL_HI12 add (shifted
+        // form, usually #0) followed by the TPREL_LO12 add with a nonzero
+        // resolved immediate, both on one register; the register is the
+        // canonical emitter's x9 or whatever the machine path allocated,
+        // so the probe matches the pair's form rather than one fixed word.
         bool found_thread_pointer_add = false;
-        static u8 const thread_pointer_add[] = {
-            0x29,
-            0x41,
-            0x00,
-            0x91,
-        };
-        for (u64 byte_index = 0; byte_index + sizeof(thread_pointer_add) <= executable.length; byte_index += 1)
+        for (u64 byte_index = 0; byte_index + 8 <= executable.length; byte_index += 4)
         {
-            if (memcmp(executable.pointer + byte_index, thread_pointer_add, sizeof(thread_pointer_add)) == 0)
+            u32 high_word = 0;
+            u32 low_word = 0;
+            memcpy(&high_word, executable.pointer + byte_index, sizeof(high_word));
+            memcpy(&low_word, executable.pointer + byte_index + 4, sizeof(low_word));
+            u32 destination = high_word & 31u;
+            if ((high_word & 0xffc00000u) == 0x91400000u && ((high_word >> 5) & 31u) == destination &&
+                (low_word & 0xffc00000u) == 0x91000000u && ((low_word >> 5) & 31u) == destination && (low_word & 31u) == destination &&
+                ((low_word >> 10) & 0xfffu) != 0)
             {
                 found_thread_pointer_add = true;
                 break;

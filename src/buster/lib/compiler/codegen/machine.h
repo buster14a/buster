@@ -625,6 +625,11 @@ typedef enum MachineOpcode
     // (acquire << 4) | size
     MACHINE_A64_ATOMIC_CAS,
     MACHINE_A64_ATOMIC_FENCE, // dmb ish
+    // ELF local-exec thread-local address: mrs tpidr_el0 plus the
+    // TPREL_HI12/LO12 add pair, the canonical emitter's own sequence with
+    // the destination register free. Linux/Android targets only — Darwin
+    // thread locals keep the canonical tlv-call path.
+    MACHINE_A64_LEA_TLS, // def; payload = call-target index
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1313,9 +1318,12 @@ struct MachineCallSite
     u32 code_offset;
     u32 target;
     u32 absolute;
-    // The patched field resolves thread-locally (x86-64 TPOFF); the module
-    // relocation row carries the flag through unchanged.
+    // The patched field resolves thread-locally (x86-64 TPOFF, AArch64
+    // TPREL); the module relocation row carries the flag through
+    // unchanged.
     u32 is_thread_local;
+    // AArch64 TPREL pairs: distinguishes the LO12 add from the HI12 one.
+    u32 thread_local_low;
 };
 
 typedef struct MachineEncodeResult MachineEncodeResult;
