@@ -3249,6 +3249,14 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
     }
     IrGlobal* result = module->globals + module->global_count++;
     *result = global;
+    // Counted here because this is where a global's relocations enter the
+    // module and they are still hot from being written; the alternative is
+    // every consumer of label provenance rediscovering the answer by walking
+    // the whole global table per query.
+    for (u32 relocation_index = 0; global.relocations && relocation_index < global.relocation_count; relocation_index += 1)
+    {
+        module->label_address_relocation_count += global.relocations[relocation_index].is_label_address ? 1 : 0;
+    }
     return result;
 }
 

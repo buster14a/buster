@@ -3146,7 +3146,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     instruction.result = place;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[place.value].definition = id;
-    for (u32 global_index = 0; global_index < builder->module->global_count; global_index += 1)
+    // Label provenance only exists when some global's initializer took the
+    // address of a block label, and the module counts those as they are added.
+    // Without the count this walks every global in the module per emitted
+    // global place — quadratic in the module's globals, and 2,46% of the
+    // compile's L1d misses at 9,6x its cycles share in the cache-miss survey
+    // of 2026-08-22T125406Z — to reach a `break` that changes nothing.
+    for (u32 global_index = 0; builder->module->label_address_relocation_count && global_index < builder->module->global_count; global_index += 1)
     {
         IrGlobal* global = builder->module->globals + global_index;
         if (global->symbol.value != symbol.value)

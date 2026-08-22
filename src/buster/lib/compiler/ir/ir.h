@@ -606,6 +606,13 @@ struct IrModule
     u32 assembly_capacity;
     u32 lowered_function_count;
     u32 rejected_function_count;
+    // How many relocations across `globals` take a block label's address — the
+    // `&&label` of a computed goto reaching a static initializer.
+    // `ir_module_add_global` counts them as each global arrives, so a consumer
+    // asking "can any global give this symbol label provenance?" answers no
+    // without walking the global table; the count is zero for every
+    // translation unit without such an initializer, which is nearly all.
+    u32 label_address_relocation_count;
 };
 
 typedef struct IrProgram IrProgram;
