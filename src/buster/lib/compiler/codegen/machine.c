@@ -912,6 +912,15 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .clobber_mask = 1u << MACHINE_A64_X9,
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_A64_X10, MACHINE_A64_X9},
     },
+    // The compare chain's case scratch is reserved X17, outside every
+    // allocatable file, so no clobber mask is needed.
+    [MACHINE_A64_SWITCH] = {
+        .name = S8_INITIALIZER("a64_switch"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1150,6 +1159,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
     [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
     [MACHINE_A64_STACK_ALLOCATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 43,
+    [MACHINE_A64_SWITCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 44,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

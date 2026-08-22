@@ -64,6 +64,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .copy_opcode = MACHINE_A64_MOV_RR,
     .constant_opcode = MACHINE_A64_MOV_RI,
     .indirect_call_opcode = MACHINE_A64_CALL_INDIRECT,
+    .switch_opcode = MACHINE_A64_SWITCH,
     .float_bridge_opcode = MACHINE_A64_FMOV_TO_VEC,
     .indirect_call_register = MACHINE_A64_X16,
     .float_bridge_register = MACHINE_A64_X9,
@@ -154,6 +155,7 @@ struct MachineA64Selector
     MachineBuilderStream stack_slot_alignments;
     MachineBuilderStream call_targets;
     MachineBuilderStream va_args;
+    MachineBuilderStream switch_cases;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
@@ -2890,6 +2892,38 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* select
     return selected;
 }
 
+// The canonical compare chain over the shared switch-case side table,
+// mirroring the x86-64 selector: one terminator row whose payload indexes
+// the first case and whose flags carry the count; the encoder expands the
+// chain with each branch fixed up like any block edge.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    u32 condition_register;
+    bool selected = false;
+    if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
+        instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
+    {
+        u32 first_case = selector->switch_cases.total_count;
+        for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
+        {
+            MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
+            *case_row = (MachineSwitchCase){
+                .value = instruction->immediates[case_index],
+                .target_block = instruction->targets[case_index].value,
+            };
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register),
+                                                          machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[instruction->target_count - 1].value)},
+                                             .payload = first_case,
+                                             .opcode = MACHINE_A64_SWITCH,
+                                             .flags = (u16)instruction->immediate_count,
+                                         });
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_unreachable(MachineA64Selector* selector)
 {
     // Control never reaches this terminator; brk keeps the block
@@ -3141,6 +3175,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         case IR_OPCODE_BRANCH_IF:
             selected = machine_a64_select_branch_if(selector, instruction);
             break;
+        case IR_OPCODE_SWITCH:
+            selected = machine_a64_select_switch(selector, instruction);
+            break;
         case IR_OPCODE_UNREACHABLE:
             selected = machine_a64_select_unreachable(selector);
             break;
@@ -3254,6 +3291,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
         machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
         machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
+        machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
         MachineBuilderStream line_marks;
         machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
         selector.return_shape = signature_return_shape;
@@ -4226,6 +4264,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
+        result.function.switch_cases = arena_allocate(arena, MachineSwitchCase, selector.switch_cases.total_count ? selector.switch_cases.total_count : 1);
+        result.function.switch_case_count = selector.switch_cases.total_count;
+        machine_stream_flatten(&selector.switch_cases, result.function.switch_cases);
         if (selector.outgoing_slot != UINT32_MAX)
         {
             // The area was appended at the first call that needed one and
@@ -5474,6 +5515,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // probe loop.
             capacity64 += 80;
             break;
+        case MACHINE_A64_SWITCH:
+            // Per case: the X17 materialization, the compare, and a
+            // conditional edge that may relax long; then the default
+            // transfer.
+            capacity64 += (u64)capacity_row->flags * (20 + MACHINE_A64_LONG_CONDITIONAL_BYTES) + MACHINE_A64_LONG_BRANCH_BYTES;
+            break;
         default:
             capacity64 += 12;
         }
@@ -5951,6 +5998,49 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // dmb ish, the canonical thread-fence word.
                 machine_a64_emit(&encoder, 0xd5033bbfu);
                 break;
+            case MACHINE_A64_SWITCH:
+            {
+                // The canonical compare chain: each case constant
+                // materializes in reserved X17 (never allocatable, so the
+                // condition cannot live there), equality branches to the
+                // case block through the ordinary fixup machinery, and
+                // the tail branch takes the default edge.
+                u32 switch_condition = operand_registers[0];
+                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                {
+                    MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X17, case_row->value);
+                    machine_a64_emit(&encoder, 0xeb11001fu | (switch_condition << 5));
+                    MachineA64BranchFixup* case_fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+                    *case_fixup = (MachineA64BranchFixup){
+                        .patch_offset = encoder.count,
+                        .block = case_row->target_block,
+                        .opcode = A64_OPCODE_B_COND,
+                        .condition = 0,
+                    };
+                    machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                       .operands = {
+                                                           {.kind = A64_MC_OPERAND_PC_RELATIVE},
+                                                           {.value = 0, .kind = A64_MC_OPERAND_IMMEDIATE},
+                                                       },
+                                                       .opcode = A64_OPCODE_B_COND,
+                                                       .operand_count = 2,
+                                                   });
+                }
+                MachineA64BranchFixup* default_fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+                *default_fixup = (MachineA64BranchFixup){
+                    .patch_offset = encoder.count,
+                    .block = machine_ref_payload(instruction->operands[1]),
+                    .opcode = A64_OPCODE_B,
+                    .condition = 0xff,
+                };
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                   .opcode = A64_OPCODE_B,
+                                                   .operand_count = 1,
+                                               });
+            }
+            break;
             case MACHINE_A64_STACK_ALLOCATE:
             {
                 // The canonical page-probed loop verbatim: align the X9

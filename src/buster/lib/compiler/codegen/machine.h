@@ -634,6 +634,10 @@ typedef enum MachineOpcode
     // on its fixed X9/X10 pair: X9 carries the byte count in (destroyed
     // by the loop), X10 the aligned result pointer out.
     MACHINE_A64_STACK_ALLOCATE, // def result (X10), use size (X9); payload = alignment
+    // The canonical compare chain over the shared switch-case side table:
+    // each case constant materializes in reserved X17, equality branches
+    // to the case block, and the tail branch takes the default edge.
+    MACHINE_A64_SWITCH, // use condition, default block ref; payload = first case, flags = case count
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

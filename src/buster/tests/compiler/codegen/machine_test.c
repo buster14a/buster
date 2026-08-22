@@ -1109,7 +1109,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 70);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 71);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1926,7 +1926,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    for (long i = 0; i < lanes; i += 1) { cells[i] = i * 3 + count; }\n"
                                   "    long total = 0;\n"
                                   "    for (long i = 0; i < lanes; i += 1) { total += cells[i]; }\n"
-                                  "    return total; }\n");
+                                  "    return total; }\n"
+                                  "long pick4(long value) { switch (value & 3) {\n"
+                                  "    case 0: return value * 3;\n"
+                                  "    case 1: return value - 7;\n"
+                                  "    case 2: return value ^ 0x55;\n"
+                                  "    default: return value + 11; } }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4242,7 +4247,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("aligned_spot"), S8_INITIALIZER("vlit_make"),
             S8_INITIALIZER("vquad_add"), S8_INITIALIZER("vf4_scale"), S8_INITIALIZER("amix"),
-            S8_INITIALIZER("vla_fill"),
+            S8_INITIALIZER("vla_fill"), S8_INITIALIZER("pick4"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4624,7 +4629,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                string_equal(a64_supported_names[name_index], S8("udiv")) ||
                                string_equal(a64_supported_names[name_index], S8("aligned_spot")) ||
                                string_equal(a64_supported_names[name_index], S8("amix")) ||
-                               string_equal(a64_supported_names[name_index], S8("vla_fill")) || is_readp;
+                               string_equal(a64_supported_names[name_index], S8("vla_fill")) ||
+                               string_equal(a64_supported_names[name_index], S8("pick4")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
                                string_equal(a64_supported_names[name_index], S8("srem")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv"));
