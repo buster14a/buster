@@ -13188,6 +13188,84 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end);
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+// A declarator inside a type name spells a function two ways: `int (void)` is
+// the function type itself, and `int (*)(void)` a pointer to one. Both carry
+// the same parameter list, so it is read here for either shape and the caller
+// adds the pointers. The list is a prototype -- an empty one is the
+// unprototyped `int ()`, which sizes and lowers the same way.
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* builder, IrTypeId return_type, u32 parameters_open, u32 parameters_close)
+{
+    IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, parameters_close - parameters_open);
+    u32 parameter_count = 0;
+    bool variadic = false;
+    bool valid = true;
+    u32 parameter_start = parameters_open + 1;
+    u32 depth = 0;
+    for (u32 parameter_end = parameter_start; valid && parameter_end <= parameters_close; parameter_end += 1)
+    {
+        bool at_end = parameter_end == parameters_close;
+        CToken token = builder->preprocess.tokens[parameter_end];
+        if (!at_end && (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET)))
+        {
+            depth += 1;
+        }
+        else if (!at_end && (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)) &&
+                 depth)
+        {
+            depth -= 1;
+        }
+        if (!at_end && (depth || !c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)))
+        {
+            continue;
+        }
+        u32 parameter_token_count = parameter_end - parameter_start;
+        if (at_end && !parameter_token_count && parameter_start == parameters_open + 1)
+        {
+            break;
+        }
+        bool void_list = !parameter_count && at_end && parameter_token_count == 1 &&
+                         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[parameter_start]), S8("void"));
+        if (!parameter_token_count || (void_list && parameter_start != parameters_open + 1))
+        {
+            valid = false;
+            break;
+        }
+        if (parameter_token_count == 1 && c_token_is_punctuator(&builder->preprocess.tokens[parameter_start], C_PUNCTUATOR_ELLIPSIS))
+        {
+            variadic = true;
+        }
+        else if (!void_list)
+        {
+            IrTypeId parameter = c_ir_type_name_parameter(builder, parameter_start, parameter_end);
+            if (parameter.value == IR_ID_UNDERLYING_INVALID)
+            {
+                valid = false;
+                break;
+            }
+            parameter_types[parameter_count++] = parameter;
+        }
+        parameter_start = parameter_end + 1;
+    }
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    if (valid)
+    {
+        result = ir_program_add_type(builder->program, (IrType){
+                                                           .name = S8("C function"),
+                                                           .element_type = IR_TYPE_ID_INVALID,
+                                                           .return_type = return_type,
+                                                           .layout = {.size = builder->program->data_layout.pointer.size,
+                                                                      .alignment = builder->program->data_layout.pointer.alignment,
+                                                                      .resolved = true},
+                                                           .kind = IR_TYPE_FUNCTION,
+                                                           .parameter_types = parameter_types,
+                                                           .parameter_count = parameter_count,
+                                                           .calling_convention = IR_CALLING_CONVENTION_C,
+                                                           .is_variadic = variadic,
+                                                       });
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
 {
     u32 index = start;
@@ -13197,11 +13275,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
         .array_bound = C_ARRAY_BOUND_INVALID,
     };
     IrTypeId type = c_ir_type_name_prefix(builder, start, end, &index, &qualifiers);
-    if (type.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return type;
-    }
-    if (allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    // An unresolved prefix is already the whole answer: it leaves `index`
+    // unwritten, so neither declarator shape below nor the suffix may run.
+    bool done = type.value == IR_ID_UNDERLYING_INVALID;
+    if (!done && allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         u32 pointer_index = index + 1;
@@ -13223,75 +13300,29 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
         if (pointer_count && pointer_index == pointer_close && parameters_open < end && parameters_close + 1 == end &&
             c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
-            IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, parameters_close - parameters_open);
-            u32 parameter_count = 0;
-            bool variadic = false;
-            u32 parameter_start = parameters_open + 1;
-            u32 depth = 0;
-            for (u32 parameter_end = parameter_start; parameter_end <= parameters_close; parameter_end += 1)
-            {
-                bool at_end = parameter_end == parameters_close;
-                CToken token = builder->preprocess.tokens[parameter_end];
-                if (!at_end && (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET)))
-                {
-                    depth += 1;
-                }
-                else if (!at_end &&
-                         (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)) && depth)
-                {
-                    depth -= 1;
-                }
-                if (!at_end && (depth || !c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)))
-                {
-                    continue;
-                }
-                u32 parameter_token_count = parameter_end - parameter_start;
-                if (at_end && !parameter_token_count && parameter_start == parameters_open + 1)
-                {
-                    break;
-                }
-                bool void_list = !parameter_count && at_end && parameter_token_count == 1 &&
-                                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[parameter_start]), S8("void"));
-                if (!parameter_token_count || (void_list && parameter_start != parameters_open + 1))
-                {
-                    return IR_TYPE_ID_INVALID;
-                }
-                if (parameter_token_count == 1 && c_token_is_punctuator(&builder->preprocess.tokens[parameter_start], C_PUNCTUATOR_ELLIPSIS))
-                {
-                    variadic = true;
-                }
-                else if (!void_list)
-                {
-                    IrTypeId parameter = c_ir_type_name_parameter(builder, parameter_start, parameter_end);
-                    if (parameter.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return IR_TYPE_ID_INVALID;
-                    }
-                    parameter_types[parameter_count++] = parameter;
-                }
-                parameter_start = parameter_end + 1;
-            }
-            type = ir_program_add_type(builder->program, (IrType){
-                                                               .name = S8("C function"),
-                                                               .element_type = IR_TYPE_ID_INVALID,
-                                                               .return_type = type,
-                                                               .layout = {.size = builder->program->data_layout.pointer.size,
-                                                                          .alignment = builder->program->data_layout.pointer.alignment,
-                                                                          .resolved = true},
-                                                               .kind = IR_TYPE_FUNCTION,
-                                                               .parameter_types = parameter_types,
-                                                               .parameter_count = parameter_count,
-                                                               .calling_convention = IR_CALLING_CONVENTION_C,
-                                                               .is_variadic = variadic,
-                                                           });
-            while (pointer_count--)
+            type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
+            while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
             {
                 type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+                pointer_count -= 1;
             }
-            return type;
+            done = true;
+        }
+        else if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
+        {
+            // The declarator's only parenthesized group is the parameter list,
+            // so the type name is the function type itself. Without this shape
+            // the suffix below rejected the whole type name, and sizeof over it
+            // fell back to the prediction's int guess -- 4, where GNU folds 1.
+            type = c_ir_type_name_function_type(builder, type, index, pointer_close);
+            done = true;
         }
     }
-    return c_ir_type_name_suffix(builder, type, index, end);
+    if (!done)
+    {
+        type = c_ir_type_name_suffix(builder, type, index, end);
+    }
+    return type;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
@@ -13337,10 +13368,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
     return index == end ? type : IR_TYPE_ID_INVALID;
 }
 
+// A parameter is a type name in its own right, function declarators included:
+// `int (*)(void)` and the `int (void)` that C adjusts to it are both legal
+// there, so the query allows the declarator shapes and the adjustment to
+// pointer-to-function happens here. Refusing them left the enclosing type name
+// unresolved, which is how `sizeof(int (*)(int (*)(void)))` reached the
+// prediction's int guess.
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     IrTypeId type = IR_TYPE_ID_INVALID;
-    c_ir_query_type_name(builder, start, end, false, &type);
+    c_ir_query_type_name(builder, start, end, true, &type);
+    IrType* value = ir_type_from_id(&builder->program->types, type);
+    if (value && value->kind == IR_TYPE_FUNCTION)
+    {
+        type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+    }
     return type;
 }
 
@@ -15459,6 +15501,15 @@ BUSTER_C_INTERNAL u64 c_ir_sizeof_operand_size(IrType* value)
     return value->kind == IR_TYPE_FUNCTION ? 1 : value->layout.size;
 }
 
+// _Alignof over a function has no answer both compilers agree on — clang folds
+// 4 where gcc folds 1 — so the alignment exits report the 1 that goes with the
+// size fold above, not the pointer alignment the IR function type's layout
+// carries for its other consumers.
+BUSTER_C_INTERNAL u32 c_ir_sizeof_operand_alignment(IrType* value)
+{
+    return value->kind == IR_TYPE_FUNCTION ? 1 : value->layout.alignment;
+}
+
 // Does this operand name an object whose array type never mapped to an IR
 // type? A bound that did not fold and an array still incomplete at the end of
 // the unit are the two ways to get there, and neither has a knowable size.
@@ -15648,7 +15699,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                     *size_out = c_ir_sizeof_operand_size(value);
                     if (alignment_out)
                     {
-                        *alignment_out = value->layout.alignment;
+                        *alignment_out = c_ir_sizeof_operand_alignment(value);
                     }
                     return true;
                 }
@@ -15674,7 +15725,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 *size_out = c_ir_sizeof_operand_size(expression);
                 if (alignment_out)
                 {
-                    *alignment_out = expression->layout.alignment;
+                    *alignment_out = c_ir_sizeof_operand_alignment(expression);
                 }
                 return true;
             }
@@ -15775,7 +15826,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             *size_out = c_ir_sizeof_operand_size(value);
             if (alignment_out)
             {
-                *alignment_out = value->layout.alignment;
+                *alignment_out = c_ir_sizeof_operand_alignment(value);
             }
             return true;
         }
@@ -16514,7 +16565,7 @@ c_ir_expression_core_loop:
             u32 literal_alignment = 0;
             if (operand && operand->layout.resolved)
             {
-                value = is_sizeof ? c_ir_sizeof_operand_size(operand) : operand->layout.alignment;
+                value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
             }
             else if (!is_sizeof && literal_end != UINT32_MAX &&
                      c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
@@ -29920,8 +29971,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     IrType* type = ir_type_from_id(&builder->program->types, type_id);
                     if (!type || !type->layout.resolved) return false;
-                    size = type->layout.size;
-                    alignment = type->layout.alignment;
+                    size = c_ir_sizeof_operand_size(type);
+                    alignment = c_ir_sizeof_operand_alignment(type);
                 }
                 else if (!c_ir_query_sizeof(builder, operand_start, operand_end, &size, &alignment))
                 {
@@ -30960,8 +31011,8 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
                 IrType* value = ir_type_from_id(&program->types, type);
                 if (value && value->layout.resolved)
                 {
-                    operand_size = value->layout.size;
-                    operand_alignment = value->layout.alignment;
+                    operand_size = c_ir_sizeof_operand_size(value);
+                    operand_alignment = c_ir_sizeof_operand_alignment(value);
                     operand_resolved = true;
                 }
                 else if (type.value == IR_ID_UNDERLYING_INVALID)

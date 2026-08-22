@@ -5731,6 +5731,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
     return result;
 }
 
+// A type name may spell a function -- `int(void)` -- not just a pointer to one
+// -- `int (*)(void)`. The type-name resolution accepted only the pointer
+// declarator, so a bare function declarator left the whole type name unresolved
+// and sizeof over it fell back to the prediction's int guess, folding 4 where
+// GNU folds 1 (tests/basic_c_sizeof_function_designator.c is the runtime
+// fixture). The array bounds below are where a misfolded size shows in the IR.
+// The variadic spelling `int(int, ...)` is covered in the runtime fixture's
+// expression position instead: an ellipsis anywhere inside a declarator marks
+// it variadic (c_parser_scan_declarator), so a file-scope bound holding one
+// loses the object it declares -- a gap that predates the function type name
+// and takes the pointer spelling `int (*)(int, ...)` down with it.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef int NamedFunction(void);\n"
+                                               "static unsigned char spelled_function[sizeof(int(void))];\n"
+                                               "static unsigned char spelled_unprototyped[sizeof(int()) + 1];\n"
+                                               "static unsigned char spelled_typedef[sizeof(NamedFunction) + 3];\n"
+                                               "static unsigned char spelled_pointer[sizeof(int (*)(void))];\n"
+                                               "static unsigned char spelled_parameter[sizeof(int (*)(int(void)))];\n"
+                                               "static unsigned char spelled_function_parameter[sizeof(int(int (*)(void))) + 4];\n"
+                                               "unsigned int spelled_probe(void)\n"
+                                               "{ return (unsigned int)(sizeof(int(void)) + spelled_function[0] + spelled_pointer[0]); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("sizeof-function-type-name.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        // Every bound is `sizeof(...) + <its index>`, so one table walk names
+        // both the global and the count its sizeof must have folded to.
+        struct
+        {
+            String8 name;
+            u64 element_count;
+        } expected[] = {
+            {S8("spelled_function"), 1},
+            {S8("spelled_unprototyped"), 2},
+            {S8("spelled_typedef"), 4},
+            {S8("spelled_pointer"), ir.program->data_layout.pointer.size},
+            {S8("spelled_parameter"), ir.program->data_layout.pointer.size},
+            {S8("spelled_function_parameter"), 5},
+        };
+        for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+        {
+            IrType* global_type = 0;
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+                if (symbol && string_equal(symbol->link_name, expected[expected_index].name))
+                {
+                    global_type = ir_type_from_id(&ir.program->types, global->type);
+                }
+            }
+            BUSTER_TEST(arguments, global_type && global_type->kind == IR_TYPE_ARRAY);
+            BUSTER_TEST(arguments, global_type && global_type->element_count == expected[expected_index].element_count);
+            BUSTER_TEST(arguments, global_type && global_type->layout.resolved && global_type->layout.size == expected[expected_index].element_count);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 /* Function-body sizeof over an expression operand must fold through the resolved
    operand types with the usual arithmetic conversions, never through the
    type-prediction guess: narrow operands promote to int, shifts keep the promoted
@@ -9256,6 +9328,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
+    c_test_result_add(&result, c_test_sizeof_function_type_name(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
