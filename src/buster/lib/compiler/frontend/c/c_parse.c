@@ -9,9 +9,10 @@
 //   list is split into a record per declarator, each keeping the shared
 //   specifiers in token_start/token_count and its own declarator segment in
 //   declarator_start/declarator_count.
-// - c_analyze_semantics sizes its tables from a token census, then builds
-//   the CParseResult the lowering stage consumes: interned types, entities,
-//   scopes, and diagnostics.
+// - c_analyze_semantics sizes its tables from a token census
+//   (c_parse_token_census, vectorized), then builds the CParseResult the
+//   lowering stage consumes: interned types, entities, scopes, and
+//   diagnostics.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -58,6 +59,15 @@
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_bind_function_body                    binds body identifiers to
 //                                                 entities, indexes scopes
+//   c_parse_token_census_reference,               the token-shape census that
+//   c_parse_token_census                          sizes c_analyze_semantics'
+//                                                 tables: a vpermt2b
+//                                                 projection of kind,
+//                                                 punctuator and symbol byte
+//                                                 out of the 12-byte rows,
+//                                                 then masked compares, with
+//                                                 the scalar reference kept
+//                                                 as the differential gate
 //   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
 
 #include "c_internal.h"
@@ -11272,6 +11282,318 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 }
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 
+// The census of token shapes that sizes every table c_analyze_semantics
+// allocates: each counter below becomes one array's capacity, so all nine are
+// upper bounds that must come out exactly as c_parse_token_census_reference
+// computes them. The vector path is a throughput change and nothing else.
+typedef struct CTokenCensus CTokenCensus;
+struct CTokenCensus
+{
+    u32 identifier_count;
+    u32 semicolon_count;
+    u32 comma_count;
+    u32 declarator_list_comma_count;
+    u32 open_parenthesis_count;
+    u32 open_bracket_count;
+    u32 open_brace_count;
+    u32 for_count;
+    u32 maximum_delimiter_depth;
+};
+
+// The scalar reference, and the definition of the answer. An optimized
+// non-unity build with the 512-bit vocabulary available calls it from
+// neither arm below, hence BUSTER_UNUSED_DECL. c_parse_token_census
+// runs this whenever the 512-bit vocabulary is unavailable, and
+// c_parse_token_census_differential in the tests runs both and compares all
+// nine counters.
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+{
+    u32 brace_depth = 0;
+    u32 delimiter_depth = 0;
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            census->identifier_count += 1;
+            census->for_count += c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR);
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+        {
+            census->semicolon_count += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            census->comma_count += 1;
+            // An upper bound on the declarations a file-scope declarator list
+            // adds, since each split declarator becomes its own CDeclaration.
+            // Only brace depth gates it: c_parse_ast diagnoses every brace
+            // imbalance and c_analyze_semantics returns before this capacity is
+            // used, while a stray '(' inside a function body goes undiagnosed
+            // and would hide the file-scope commas that follow it. Counting
+            // parameter-list and attribute commas here is the price of a bound
+            // that can only ever be too large.
+            census->declarator_list_comma_count += brace_depth == 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            census->open_parenthesis_count += 1;
+            delimiter_depth += 1;
+            census->maximum_delimiter_depth = BUSTER_MAX(census->maximum_delimiter_depth, delimiter_depth);
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            census->open_bracket_count += 1;
+            delimiter_depth += 1;
+            census->maximum_delimiter_depth = BUSTER_MAX(census->maximum_delimiter_depth, delimiter_depth);
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            census->open_brace_count += 1;
+            brace_depth += 1;
+            delimiter_depth += 1;
+            census->maximum_delimiter_depth = BUSTER_MAX(census->maximum_delimiter_depth, delimiter_depth);
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            brace_depth -= brace_depth != 0 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+            delimiter_depth -= delimiter_depth != 0;
+        }
+    }
+}
+
+#if BUSTER_SIMD_512
+
+// The census reads two of CToken's twelve bytes -- kind and punctuator, at
+// offsets 10 and 11 -- so a compare over a chunk of raw rows spends 64 lanes
+// to classify the 5,33 tokens that fit in it. lcm(12, 64) = 192 bytes = 16
+// tokens, so one fixed pair of vpermt2b index vectors gathers a chosen field
+// of sixteen tokens out of three chunks: byte offsets below 128 come from the
+// (chunk 0, chunk 1) pair addressed directly, the rest from the
+// (chunk 1, chunk 2) pair addressed 64 lower. Projected into tiles, each pure
+// count is one compare, one popcount and one add over 64 tokens.
+//
+// A change to CToken's field order would silently mis-gather rather than fail
+// to build, so the offsets the tables encode are stated as checks.
+BUSTER_CT_CHECK(sizeof(CToken) == 12);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, kind) == 10);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, punctuator) == 11);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, symbol) == 4);
+
+// The lanes below `lane`, which mask64_prefix would also spell. It is open
+// coded because `lane` always comes from mask64_first_set of a non-zero mask
+// and so is below 64, which makes mask64_prefix's `count >= 64` arm dead --
+// and because that arm is what `ide cc` miscompiles: for
+// `count >= 64 ? ~(u64)0 : ((u64)1 << count) - 1` it predicts the
+// conditional's type as s32, allocates an i32 result slot and truncates both
+// 64-bit arms into it, so every count in [32, 64) comes back sign-extended to
+// ~0. Only the self-hosted stages are affected; see the audit of
+// 2026-08-22T220912Z.
+#define c_parse_census_lanes_below(lane) ((Mask64)(((Mask64)1 << (lane)) - 1))
+
+#define C_PARSE_CENSUS_GROUP_TOKENS 16
+// Tokens projected before the counting pass reads them back. Three tiles of
+// this size stay in L1 beside the rows being gathered, and the padding keeps
+// the counting pass reading whole 64-lane windows.
+#define C_PARSE_CENSUS_TILE_TOKENS 2048
+#define C_PARSE_CENSUS_TILE_BYTES (C_PARSE_CENSUS_TILE_TOKENS + 64)
+
+// Lanes each permute fills: kind and punctuator split after token 9, whose
+// field bytes are the last below 128; the symbol byte of token 10 is still at
+// 124, so its stream splits one token later.
+#define C_PARSE_CENSUS_LOW_LANES UINT64_C(0x03ff)
+#define C_PARSE_CENSUS_HIGH_LANES UINT64_C(0xfc00)
+#define C_PARSE_CENSUS_SYMBOL_LOW_LANES UINT64_C(0x07ff)
+#define C_PARSE_CENSUS_SYMBOL_HIGH_LANES UINT64_C(0xf800)
+#define C_PARSE_CENSUS_GROUP_LANES UINT64_C(0xffff)
+
+// Source byte of each projected field, per output lane: 12 * token + offset
+// for the low pair, less 64 for the high pair, which starts at chunk 1.
+BUSTER_C_INTERNAL const u8 c_parse_census_kind_low[64] = {10, 22, 34, 46, 58, 70, 82, 94, 106, 118};
+BUSTER_C_INTERNAL const u8 c_parse_census_kind_high[64] = {[10] = 66, 78, 90, 102, 114, 126};
+BUSTER_C_INTERNAL const u8 c_parse_census_punctuator_low[64] = {11, 23, 35, 47, 59, 71, 83, 95, 107, 119};
+BUSTER_C_INTERNAL const u8 c_parse_census_punctuator_high[64] = {[10] = 67, 79, 91, 103, 115, 127};
+BUSTER_C_INTERNAL const u8 c_parse_census_symbol_low[64] = {4, 16, 28, 40, 52, 64, 76, 88, 100, 112, 124};
+BUSTER_C_INTERNAL const u8 c_parse_census_symbol_high[64] = {[11] = 72, 84, 96, 108, 120};
+
+#endif
+
+// Nine counters over the preprocessed token stream. Seven are pure counts and
+// fall out of masked compares; the two that carry state across tokens --
+// maximum_delimiter_depth and the count of commas at brace depth 0 -- cannot
+// be counted lanewise, so they replay the reference's depth arithmetic,
+// clamps included, over the set bits of the delimiter masks the counting pass
+// already produced. That is 23% of tokens rather than all of them, and the
+// commas inside each brace-depth-0 span arrive as a popcount of the comma
+// mask rather than a visit per comma.
+//
+// The scalar fallback is the reference rather than this kernel run through
+// simd.h's fallback: without 512-bit lanes every simd512_load here would be a
+// 64-iteration byte loop, which is the case AGENTS.md means by a different
+// algorithm being worth writing.
+BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+{
+#if BUSTER_SIMD_512
+    u8 kinds[C_PARSE_CENSUS_TILE_BYTES];
+    u8 punctuators[C_PARSE_CENSUS_TILE_BYTES];
+    u8 symbol_bytes[C_PARSE_CENSUS_TILE_BYTES];
+    Simd512 kind_low_indices = simd512_load(c_parse_census_kind_low);
+    Simd512 kind_high_indices = simd512_load(c_parse_census_kind_high);
+    Simd512 punctuator_low_indices = simd512_load(c_parse_census_punctuator_low);
+    Simd512 punctuator_high_indices = simd512_load(c_parse_census_punctuator_high);
+    Simd512 symbol_low_indices = simd512_load(c_parse_census_symbol_low);
+    Simd512 symbol_high_indices = simd512_load(c_parse_census_symbol_high);
+    Simd512 identifier_kind = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+    Simd512 semicolon = simd512_splat((u8)C_PUNCTUATOR_SEMICOLON);
+    Simd512 comma = simd512_splat((u8)C_PUNCTUATOR_COMMA);
+    Simd512 open_parenthesis = simd512_splat((u8)C_PUNCTUATOR_LEFT_PARENTHESIS);
+    Simd512 open_bracket = simd512_splat((u8)C_PUNCTUATOR_LEFT_BRACKET);
+    Simd512 open_brace = simd512_splat((u8)C_PUNCTUATOR_LEFT_BRACE);
+    Simd512 close_parenthesis = simd512_splat((u8)C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    Simd512 close_bracket = simd512_splat((u8)C_PUNCTUATOR_RIGHT_BRACKET);
+    Simd512 close_brace = simd512_splat((u8)C_PUNCTUATOR_RIGHT_BRACE);
+    Simd512 for_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_FOR);
+    Simd512 uninterned_symbol = simd512_splat(0);
+    u32 brace_depth = 0;
+    u32 delimiter_depth = 0;
+    u32 maximum_depth = 0;
+    // Commas in stream order, and the count standing when the open
+    // brace-depth-0 span began; their difference is that span's contribution.
+    u64 comma_total = 0;
+    u64 depth_zero_comma_base = 0;
+    for (u32 tile_base = 0; tile_base < token_count; tile_base += C_PARSE_CENSUS_TILE_TOKENS)
+    {
+        u32 tile_tokens = BUSTER_MIN(C_PARSE_CENSUS_TILE_TOKENS, token_count - tile_base);
+        u32 projected = 0;
+        while (projected + C_PARSE_CENSUS_GROUP_TOKENS <= tile_tokens)
+        {
+            const u8* rows = (const u8*)(preprocess.tokens + tile_base + projected);
+            Simd512 chunk0 = simd512_load(rows);
+            Simd512 chunk1 = simd512_load(rows + 64);
+            Simd512 chunk2 = simd512_load(rows + 128);
+            Simd512 kind_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_LOW_LANES, chunk0, kind_low_indices, chunk1),
+                                            simd512_permute2_byte(C_PARSE_CENSUS_HIGH_LANES, chunk1, kind_high_indices, chunk2));
+            Simd512 punctuator_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_LOW_LANES, chunk0, punctuator_low_indices, chunk1),
+                                                  simd512_permute2_byte(C_PARSE_CENSUS_HIGH_LANES, chunk1, punctuator_high_indices, chunk2));
+            Simd512 symbol_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
+                                              simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
+            simd512_store_masked(kinds + projected, C_PARSE_CENSUS_GROUP_LANES, kind_group);
+            simd512_store_masked(punctuators + projected, C_PARSE_CENSUS_GROUP_LANES, punctuator_group);
+            simd512_store_masked(symbol_bytes + projected, C_PARSE_CENSUS_GROUP_LANES, symbol_group);
+            projected += C_PARSE_CENSUS_GROUP_TOKENS;
+        }
+        while (projected < tile_tokens)
+        {
+            CToken token = preprocess.tokens[tile_base + projected];
+            kinds[projected] = token.kind;
+            punctuators[projected] = token.punctuator;
+            symbol_bytes[projected] = (u8)token.symbol;
+            projected += 1;
+        }
+        // Pad to a whole window. Kind 0 is C_TOKEN_INVALID and punctuator 0 is
+        // C_PUNCTUATOR_NONE, so a padding lane matches no class and no tail
+        // mask is needed anywhere below.
+        u32 padded = (tile_tokens + 63) & ~UINT32_C(63);
+        while (projected < padded)
+        {
+            kinds[projected] = 0;
+            punctuators[projected] = 0;
+            symbol_bytes[projected] = 0;
+            projected += 1;
+        }
+        for (u32 window = 0; window < padded; window += 64)
+        {
+            Simd512 kind_lanes = simd512_load(kinds + window);
+            Simd512 punctuator_lanes = simd512_load(punctuators + window);
+            Mask64 identifiers = simd512_equal_byte(kind_lanes, identifier_kind);
+            Mask64 semicolons = simd512_equal_byte(punctuator_lanes, semicolon);
+            Mask64 commas = simd512_equal_byte(punctuator_lanes, comma);
+            Mask64 open_parentheses = simd512_equal_byte(punctuator_lanes, open_parenthesis);
+            Mask64 open_brackets = simd512_equal_byte(punctuator_lanes, open_bracket);
+            Mask64 open_braces = simd512_equal_byte(punctuator_lanes, open_brace);
+            Mask64 close_braces = simd512_equal_byte(punctuator_lanes, close_brace);
+            Mask64 opens = mask64_or(mask64_or(open_parentheses, open_brackets), open_braces);
+            Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(punctuator_lanes, close_parenthesis),
+                                                simd512_equal_byte(punctuator_lanes, close_bracket)),
+                                      close_braces);
+            census->identifier_count += mask64_count(identifiers);
+            census->semicolon_count += mask64_count(semicolons);
+            census->comma_count += mask64_count(commas);
+            census->open_parenthesis_count += mask64_count(open_parentheses);
+            census->open_bracket_count += mask64_count(open_brackets);
+            census->open_brace_count += mask64_count(open_braces);
+            // `for` is one interned id, so its low symbol byte is the filter,
+            // and the zero byte admits the uninterned tokens whose answer is
+            // the spelling fallback. The two together leave a few thousand
+            // candidates in a million identifiers, each then answered by the
+            // predicate the reference calls.
+            Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
+            Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol),
+                                                                      simd512_equal_byte(symbol_lanes, uninterned_symbol)));
+            for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
+            {
+                u32 lane = mask64_first_set(remaining);
+                census->for_count +=
+                    c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tile_base + window + lane], C_SYMBOL_WELL_KNOWN_FOR);
+            }
+            u64 window_comma_base = comma_total;
+            comma_total += mask64_count(commas);
+            for (Mask64 remaining = mask64_or(opens, closes); remaining; remaining &= remaining - 1)
+            {
+                u32 lane = mask64_first_set(remaining);
+                if ((opens >> lane) & 1)
+                {
+                    delimiter_depth += 1;
+                    maximum_depth = BUSTER_MAX(maximum_depth, delimiter_depth);
+                    if ((open_braces >> lane) & 1)
+                    {
+                        if (!brace_depth)
+                        {
+                            census->declarator_list_comma_count +=
+                                (u32)(window_comma_base + mask64_count(mask64_and(commas, c_parse_census_lanes_below(lane))) - depth_zero_comma_base);
+                        }
+                        brace_depth += 1;
+                    }
+                }
+                else
+                {
+                    if (brace_depth && ((close_braces >> lane) & 1))
+                    {
+                        brace_depth -= 1;
+                        if (!brace_depth)
+                        {
+                            depth_zero_comma_base = window_comma_base + mask64_count(mask64_and(commas, c_parse_census_lanes_below(lane)));
+                        }
+                    }
+                    delimiter_depth -= delimiter_depth != 0;
+                }
+            }
+        }
+    }
+    // The span still open at end of stream. When a brace is unclosed there is
+    // none, and the reference counted nothing more either.
+    if (!brace_depth)
+    {
+        census->declarator_list_comma_count += (u32)(comma_total - depth_zero_comma_base);
+    }
+    census->maximum_delimiter_depth = maximum_depth;
+#if !BUSTER_OPTIMIZE
+    // The differential gate. Unoptimized builds recompute the census the
+    // reference way and require all nine counters to agree, which puts the
+    // check on every translation unit the suite compiles rather than on a
+    // hand-written list of token streams -- every fixture, every header of
+    // the include closure, and the whole unity unit when the Debug tree
+    // compiles it. Release pays nothing.
+    CTokenCensus reference_census = {0};
+    c_parse_token_census_reference(preprocess, token_count, &reference_census);
+    BUSTER_CHECK(memcmp(&reference_census, census, sizeof(reference_census)) == 0);
+#endif
+#else
+    c_parse_token_census_reference(preprocess, token_count, census);
+#endif
+}
+
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
     CParseResult result = {
@@ -11293,68 +11615,17 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         return result;
     }
     u32 token_count = (u32)preprocess.token_count;
-    u32 identifier_count = 0;
-    u32 semicolon_count = 0;
-    u32 comma_count = 0;
-    u32 declarator_list_comma_count = 0;
-    u32 open_parenthesis_count = 0;
-    u32 open_bracket_count = 0;
-    u32 open_brace_count = 0;
-    u32 for_count = 0;
-    u32 brace_depth = 0;
-    u32 type_delimiter_depth = 0;
-    u32 maximum_delimiter_depth = 0;
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
-    {
-        CToken token = preprocess.tokens[token_index];
-        if (token.kind == C_TOKEN_IDENTIFIER)
-        {
-            identifier_count += 1;
-            for_count += c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR);
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-        {
-            semicolon_count += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-        {
-            comma_count += 1;
-            // An upper bound on the declarations a file-scope declarator list
-            // adds, since each split declarator becomes its own CDeclaration.
-            // Only brace depth gates it: c_parse_ast diagnoses every brace
-            // imbalance and c_analyze_semantics returns before this capacity is
-            // used, while a stray '(' inside a function body goes undiagnosed
-            // and would hide the file-scope commas that follow it. Counting
-            // parameter-list and attribute commas here is the price of a bound
-            // that can only ever be too large.
-            declarator_list_comma_count += brace_depth == 0;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            open_parenthesis_count += 1;
-            type_delimiter_depth += 1;
-            maximum_delimiter_depth = BUSTER_MAX(maximum_delimiter_depth, type_delimiter_depth);
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            open_bracket_count += 1;
-            type_delimiter_depth += 1;
-            maximum_delimiter_depth = BUSTER_MAX(maximum_delimiter_depth, type_delimiter_depth);
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-        {
-            open_brace_count += 1;
-            brace_depth += 1;
-            type_delimiter_depth += 1;
-            maximum_delimiter_depth = BUSTER_MAX(maximum_delimiter_depth, type_delimiter_depth);
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            brace_depth -= brace_depth != 0 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
-            type_delimiter_depth -= type_delimiter_depth != 0;
-        }
-    }
+    CTokenCensus census = {0};
+    c_parse_token_census(preprocess, token_count, &census);
+    u32 identifier_count = census.identifier_count;
+    u32 semicolon_count = census.semicolon_count;
+    u32 comma_count = census.comma_count;
+    u32 declarator_list_comma_count = census.declarator_list_comma_count;
+    u32 open_parenthesis_count = census.open_parenthesis_count;
+    u32 open_bracket_count = census.open_bracket_count;
+    u32 open_brace_count = census.open_brace_count;
+    u32 for_count = census.for_count;
+    u32 maximum_delimiter_depth = census.maximum_delimiter_depth;
     if (maximum_delimiter_depth > (UINT32_MAX - 64) / 8 || token_count == UINT32_MAX)
     {
         return result;
