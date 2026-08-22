@@ -2443,6 +2443,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // Vector arguments narrower than a vector register, and a vector spilled
+    // to the stack ahead of a register argument. Both shapes were silently
+    // wrong on AArch64 and no fixture executed them: the canonical emitter had
+    // no sized transfer for one- and two-byte parts and left the parameter
+    // slot zero, and the machine callee's stack read-backs could land on an
+    // argument register whose own capture had not run yet. Run through both
+    // pipelines, like the ymm fixture above.
+    for (u32 short_vector_mode = 0; short_vector_mode < 2; short_vector_mode += 1)
+    {
+        String8 c_short_vector_path = buster_test_temporary_path(
+            arguments->arena, short_vector_mode ? S8("buster-c-vector-short-canonical") : S8("buster-c-vector-short"), S8(""));
+        String8 c_short_vector_command_line[] = {
+            short_vector_mode ? S8("-fno-register-allocator") : S8("-fregister-allocator=fast"),
+            S8("-o"),
+            c_short_vector_path,
+            S8("tests/basic_c_vector_argument_short.c"),
+        };
+        CompilerDriverResult c_short_vector = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_short_vector_command_line)));
+        BUSTER_TEST(arguments, c_short_vector.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_short_vector.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_short_vector_arguments[] = {
+                c_short_vector_path,
+            };
+            ProcessSpawnResult c_short_vector_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_short_vector_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, c_short_vector_spawn.handle != 0);
+            if (c_short_vector_spawn.handle)
+            {
+                ProcessWaitResult c_short_vector_wait = os_process_wait_sync(arguments->arena, c_short_vector_spawn);
+                BUSTER_TEST(arguments, c_short_vector_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     // The same fixture again at pinned CPU models, compile-only. The rows
     // above take the host's model, so they cannot promise the metadata
     // resolve keeps carrying the exact shapes a 32-byte part asks for at a

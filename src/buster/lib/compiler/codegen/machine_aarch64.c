@@ -3983,9 +3983,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                           .opcode = MACHINE_A64_STORE_FRAME64,
                                                       });
                 }
-                for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
+                for (u32 capture_pass = 0; capture_pass < 3 && selector.supported; capture_pass += 1)
                 {
                     bool float_pass = capture_pass == 1;
+                    bool stack_pass = capture_pass == 2;
                     for (u32 argument_index = 0; argument_index < function_type->parameter_count; argument_index += 1)
                     {
                         u32 argument_value = selector.argument_values[argument_index];
@@ -3997,38 +3998,50 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         MachineA64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
                         u32 next_integer = parameter_placement->first_integer;
                         u32 next_float = parameter_placement->first_float;
+                        // Stack read-backs run in a pass of their own, after
+                        // every register capture. They read only the frame, so
+                        // deferring them is always sound — and by then the
+                        // incoming argument registers are dead, so the fresh
+                        // vregs the read-backs define are free to land
+                        // anywhere. Interleaved in argument order they were
+                        // not: the integer file stays OPEN behind a
+                        // stack-spilled vector or HFA, so a stack argument can
+                        // precede a register one, and a bounce vreg placed on
+                        // that register destroyed the argument before its own
+                        // capture row ran (fast/quality wrong answer,
+                        // mir-stack and canonical correct — the allocator-layer
+                        // signature).
+                        if (stack_pass != (parameter_placement->on_stack != 0))
+                        {
+                            continue;
+                        }
                         if (parameter_placement->on_stack && shape->aggregate && !shape->indirect)
                         {
                             // A stack-passed aggregate, HFA, or vector: its
                             // eightbyte images read back from the caller's
-                            // outgoing area into the value's slot during the
-                            // integer pass — the loads touch no argument
-                            // register of either class.
-                            if (!float_pass)
+                            // outgoing area into the value's slot.
+                            u32 slot = selector.value_stack_slots[argument_value];
+                            if (slot == UINT32_MAX)
                             {
-                                u32 slot = selector.value_stack_slots[argument_value];
-                                if (slot == UINT32_MAX)
-                                {
-                                    machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
-                                    break;
-                                }
-                                for (u32 part_index = 0; part_index < shape->byte_size / 8; part_index += 1)
-                                {
-                                    u32 incoming_register = machine_a64_synthesize_register(&selector);
-                                    u32 incoming_row = machine_a64_select_row(
-                                        &selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
-                                                       .payload = 16u + ((u32)parameter_placement->first_stack_part + part_index) * 8u,
-                                                       .opcode = MACHINE_A64_LOAD_INCOMING,
-                                                   });
-                                    machine_a64_define(&selector, incoming_register, incoming_row);
-                                    machine_a64_select_row(&selector, (MachineInstruction){
-                                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
-                                                                          .payload = part_index * 8u,
-                                                                          .opcode = MACHINE_A64_STORE_FRAME64,
-                                                                      });
-                                }
+                                machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                break;
+                            }
+                            for (u32 part_index = 0; part_index < shape->byte_size / 8; part_index += 1)
+                            {
+                                u32 incoming_register = machine_a64_synthesize_register(&selector);
+                                u32 incoming_row = machine_a64_select_row(
+                                    &selector, (MachineInstruction){
+                                                   .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
+                                                   .payload = 16u + ((u32)parameter_placement->first_stack_part + part_index) * 8u,
+                                                   .opcode = MACHINE_A64_LOAD_INCOMING,
+                                               });
+                                machine_a64_define(&selector, incoming_register, incoming_row);
+                                machine_a64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
+                                                                      .payload = part_index * 8u,
+                                                                      .opcode = MACHINE_A64_STORE_FRAME64,
+                                                                  });
                             }
                             continue;
                         }
