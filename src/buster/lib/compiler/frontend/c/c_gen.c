@@ -16,7 +16,13 @@
 //   a CIrBodyTask list; c_ir_lower_expression_core_step evaluates
 //   expressions shunting-yard style over value and operator stacks. A new
 //   construct means a new frame kind, its step, its push adapter, and a
-//   dispatch case.
+//   dispatch case. A push site whose child kind is statically known may run
+//   the child's step directly and consume a completion in place (a
+//   suspension always resumes through the dispatch loop), and the
+//   BODY/BODY_ASSIGNMENT_STATEMENT steps self-loop over their own resumes;
+//   the direct-run edge set must stay acyclic — in particular the prepare
+//   steps and PREPARED_CALL never direct-run the EXPRESSION children they
+//   push, or expression nesting would recurse on the C stack.
 // - CIrQueryMachine answers compile-time questions the walk hits
 //   mid-expression — sizeof, type names, array bounds, offsetof, type
 //   prediction, null-pointer-constant tests (the c_ir_query_* entry
@@ -15741,6 +15747,95 @@ BUSTER_C_INTERNAL void c_ir_expression_core_save(CIrLowerFrame* frame, IrValueId
     state->expect_operand = expect_operand;
 }
 
+// Shared by the ROOT_UPDATE resume arm of c_ir_lower_expression_core_step
+// and its off-loop direct run: consume the place child in
+// machine->child_result and finish the frame with the increment's value.
+BUSTER_C_INTERNAL void c_ir_lower_expression_core_root_update_resume(CIntegerIrBuilder* builder, CIrExpressionCoreState* state)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    IrValueId place = machine->child_result.value;
+    CToken update = builder->preprocess.tokens[state->pending_start];
+    if (!machine->child_result.success || place.value >= builder->function->value_count)
+    {
+        if (!builder->failure_message.length)
+        {
+            builder->failure_message = S8("increment or decrement operand is not a modifiable place");
+        }
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    }
+    else
+    {
+        IrTypeId type = builder->function->values[place.value].canonical_type;
+        IrSourceRange source = c_ir_token_source_range(builder, update);
+        IrType* place_type = ir_type_from_id(&builder->program->types, type);
+        IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
+        IrValueId value = previous.value < builder->function->value_count
+                              ? c_ir_emit_increment(builder, place, type, previous, update, state->pending_prefix)
+                              : IR_VALUE_ID_INVALID;
+        if (value.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
+        {
+            builder->failure_message = S8("could not apply increment or decrement");
+        }
+        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+    }
+}
+
+// Shared by the PREFIX_UPDATE/POSTFIX_UPDATE/IDENTIFIER_PLACE resume arm of
+// c_ir_lower_expression_core_step and its off-loop direct runs: consume the
+// successful place child in machine->child_result, load through it and apply
+// any adjacent update, and append the value. *index_out receives the operand
+// walk position to continue from. Returns false when the frame was finished
+// with a failure and the step must return.
+BUSTER_C_INTERNAL bool c_ir_lower_expression_core_consume_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state,
+                                                                   IrValueId* values, u32* value_count, u32* index_out)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    u32 end = frame->as.expression_core.end;
+    u32 index = state->index;
+    bool appended = false;
+    IrValueId place = machine->child_result.value;
+    IrValueId value = IR_VALUE_ID_INVALID;
+    if (place.value < builder->function->value_count)
+    {
+        IrTypeId type = builder->function->values[place.value].canonical_type;
+        IrType* place_type = ir_type_from_id(&builder->program->types, type);
+        CToken token = builder->preprocess.tokens[state->pending_start];
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE || frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE)
+        {
+            value = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
+            value = c_ir_emit_increment(builder, place, type, value, token,
+                                        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE);
+        }
+        else
+        {
+            u32 consumed = state->pending_end - 1;
+            bool postfix = consumed + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_PLUS_PLUS) ||
+                                                  c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_MINUS_MINUS));
+            value = place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix))
+                        ? place
+                        : c_ir_emit_load_place(builder, place, type, source);
+            if (value.value != IR_ID_UNDERLYING_INVALID && postfix)
+            {
+                value = c_ir_emit_increment(builder, place, type, value, builder->preprocess.tokens[consumed + 1], false);
+                consumed += 1;
+                index = consumed + 1;
+            }
+        }
+    }
+    if (value.value == IR_ID_UNDERLYING_INVALID)
+    {
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    }
+    else
+    {
+        values[(*value_count)++] = value;
+        *index_out = index;
+        appended = true;
+    }
+    return appended;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -15760,29 +15855,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     bool expect_operand;
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE)
     {
-        IrValueId place = machine->child_result.value;
-        CToken update = builder->preprocess.tokens[state->pending_start];
-        if (!machine->child_result.success || place.value >= builder->function->value_count)
-        {
-            if (!builder->failure_message.length)
-            {
-                builder->failure_message = S8("increment or decrement operand is not a modifiable place");
-            }
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        IrTypeId type = builder->function->values[place.value].canonical_type;
-        IrSourceRange source = c_ir_token_source_range(builder, update);
-        IrType* place_type = ir_type_from_id(&builder->program->types, type);
-        IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
-        IrValueId value = previous.value < builder->function->value_count
-                              ? c_ir_emit_increment(builder, place, type, previous, update, state->pending_prefix)
-                              : IR_VALUE_ID_INVALID;
-        if (value.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
-        {
-            builder->failure_message = S8("could not apply increment or decrement");
-        }
-        c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+        c_ir_lower_expression_core_root_update_resume(builder, state);
         return;
     }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE ||
@@ -15823,44 +15896,10 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
             goto c_ir_expression_core_loop;
         }
-        IrValueId place = machine->child_result.value;
-        if (place.value >= builder->function->value_count)
+        if (!c_ir_lower_expression_core_consume_place(builder, frame, state, values, &value_count, &index))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        IrTypeId type = builder->function->values[place.value].canonical_type;
-        IrType* place_type = ir_type_from_id(&builder->program->types, type);
-        CToken token = builder->preprocess.tokens[state->pending_start];
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        IrValueId value = IR_VALUE_ID_INVALID;
-        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE || frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE)
-        {
-            value = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
-            value = c_ir_emit_increment(builder, place, type, value, token,
-                                        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE);
-        }
-        else
-        {
-            u32 consumed = state->pending_end - 1;
-            bool postfix = consumed + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_PLUS_PLUS) ||
-                                                  c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_MINUS_MINUS));
-            value = place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix))
-                        ? place
-                        : c_ir_emit_load_place(builder, place, type, source);
-            if (value.value != IR_ID_UNDERLYING_INVALID && postfix)
-            {
-                value = c_ir_emit_increment(builder, place, type, value, builder->preprocess.tokens[consumed + 1], false);
-                consumed += 1;
-                index = consumed + 1;
-            }
-        }
-        if (value.value == IR_ID_UNDERLYING_INVALID)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
-        }
-        values[value_count++] = value;
         expect_operand = false;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         goto c_ir_expression_core_loop;
@@ -16020,10 +16059,23 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         state->pending_start = prefix_place_update ? start : end - 1;
         state->pending_prefix = prefix_place_update;
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE;
+        // Run the place now, off the dispatch loop: a place suspends only
+        // under a runtime VLA subscript, so its result is almost always
+        // consumed here (the resume arm above, inlined) without the loop's
+        // child dispatch and this frame's re-dispatch. A suspension resumes
+        // through the loop unchanged.
+        u32 place_mark = machine->frame_count;
         if (!c_ir_lower_place_frame_push(builder, update_operand_start, update_operand_end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
+        c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+        if (machine->frame_count != place_mark || machine->failed)
+        {
+            return;
+        }
+        c_ir_lower_expression_core_root_update_resume(builder, state);
         return;
     }
     u32 capacity = end - start + 1;
@@ -16056,11 +16108,31 @@ c_ir_expression_core_loop:
                                       operand_end, expect_operand);
             state->pending_start = index;
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_PREFIX_UPDATE;
+            // Run the place now, off the dispatch loop (the resume arm above,
+            // inlined); a suspension resumes through the loop unchanged.
+            u32 place_mark = machine->frame_count;
             if (!c_ir_lower_place_frame_push(builder, index + 1, operand_end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
-            return;
+            c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+            if (machine->frame_count != place_mark || machine->failed)
+            {
+                return;
+            }
+            if (!machine->child_result.success)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            if (!c_ir_lower_expression_core_consume_place(builder, frame, state, values, &value_count, &index))
+            {
+                return;
+            }
+            expect_operand = false;
+            frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+            goto c_ir_expression_core_loop;
         }
         if (expect_operand && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
         {
@@ -16110,11 +16182,32 @@ c_ir_expression_core_loop:
                                           operation_count, operand_end, expect_operand);
                 state->pending_start = operand_end - 1;
                 frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_POSTFIX_UPDATE;
+                // Run the place now, off the dispatch loop (the resume arm
+                // above, inlined); a suspension resumes through the loop
+                // unchanged.
+                u32 place_mark = machine->frame_count;
                 if (!c_ir_lower_place_frame_push(builder, index, operand_end - 1))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
                 }
-                return;
+                c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+                if (machine->frame_count != place_mark || machine->failed)
+                {
+                    return;
+                }
+                if (!machine->child_result.success)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                if (!c_ir_lower_expression_core_consume_place(builder, frame, state, values, &value_count, &index))
+                {
+                    return;
+                }
+                expect_operand = false;
+                frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+                goto c_ir_expression_core_loop;
             }
         }
         if (expect_operand && token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_offsetof")) && index + 4 < end &&
@@ -16494,11 +16587,32 @@ c_ir_expression_core_loop:
                     state->pending_start = index;
                     state->pending_end = place_end;
                     frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE;
+                    // Run the place now, off the dispatch loop (the resume
+                    // arm above, inlined); a suspension resumes through the
+                    // loop unchanged.
+                    u32 place_mark = machine->frame_count;
                     if (!c_ir_lower_place_frame_push(builder, index, place_end))
                     {
                         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
                     }
-                    return;
+                    c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+                    if (machine->frame_count != place_mark || machine->failed)
+                    {
+                        return;
+                    }
+                    if (!machine->child_result.success)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    if (!c_ir_lower_expression_core_consume_place(builder, frame, state, values, &value_count, &index))
+                    {
+                        return;
+                    }
+                    expect_operand = false;
+                    frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+                    goto c_ir_expression_core_loop;
                 }
                 else if (local)
                 {
@@ -17725,34 +17839,55 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
 BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder);
 BUSTER_C_INTERNAL bool c_ir_activate_cleanup(CIntegerIrBuilder* builder, CEntityId entity_id, IrSourceRange source);
 
-BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+// The request helpers run the pushed child now, off the dispatch loop, and
+// return true when it completed: the advance loop in
+// c_ir_lower_assignment_statement_step then re-enters the CHILD arm as a
+// self-loop instead of a dispatch round trip. A suspension returns false and
+// resumes through the loop unchanged.
+BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                               CIrLowerAssignmentStatementState* state,
                                                                               CIrLowerAssignmentStatementContinuation continuation, u32 start,
                                                                               u32 end)
 {
+    CIrLowerMachine* machine = &builder->lower_machine;
     state->continuation = continuation;
     state->temporary_mark = builder->temporary_arena->position;
     frame->stage = C_IR_LOWER_STAGE_CHILD;
-    c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                       .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                       .as.expression =
-                                           {
-                                               .start = start,
-                                               .end = end,
-                                           },
-                                   });
+    u32 request_mark = machine->frame_count;
+    bool completed = false;
+    if (c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                           .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                           .as.expression =
+                                               {
+                                                   .start = start,
+                                                   .end = end,
+                                               },
+                                       }))
+    {
+        c_ir_lower_expression_step(builder);
+        completed = machine->frame_count == request_mark && !machine->failed;
+    }
+    return completed;
 }
 
-BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                          CIrLowerAssignmentStatementState* state, u32 start, u32 end)
 {
+    CIrLowerMachine* machine = &builder->lower_machine;
     state->continuation = C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT;
     state->temporary_mark = builder->temporary_arena->position;
     frame->stage = C_IR_LOWER_STAGE_CHILD;
-    c_ir_lower_place_frame_push(builder, start, end);
+    u32 request_mark = machine->frame_count;
+    bool completed = false;
+    if (c_ir_lower_place_frame_push(builder, start, end))
+    {
+        c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+        completed = machine->frame_count == request_mark && !machine->failed;
+    }
+    return completed;
 }
 
-BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* builder)
+BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
@@ -17765,19 +17900,19 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
         if (!machine->child_result.success)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION)
         {
             c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT)
         {
             if (!builder->function->values)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                return false;
             }
             IrValueId left = machine->child_result.value;
             IrValue* left_value = left.value < builder->function->value_count ? builder->function->values + left.value : 0;
@@ -17796,7 +17931,7 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
                         current_block->last_instruction.value != definition_id.value || builder->last_instruction.value != definition_id.value)
                     {
                         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                        return;
+                        return false;
                     }
                     IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
                     if (builder->previous_instruction_known)
@@ -17814,7 +17949,7 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
                         if (cursor.value != definition_id.value)
                         {
                             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                            return;
+                            return false;
                         }
                     }
                     if (previous.value == IR_ID_UNDERLYING_INVALID)
@@ -17869,12 +18004,11 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
             if (state->place.value >= builder->function->value_count)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                return false;
             }
             state->type = builder->function->values[state->place.value].canonical_type;
-            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_RIGHT,
+            return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_RIGHT,
                                                                state->assignment + 1, state->end);
-            return;
         }
         if (state->continuation == C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT)
         {
@@ -17884,12 +18018,11 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
             if (state->place.value >= builder->function->value_count)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                return false;
             }
             state->type = builder->function->values[state->place.value].canonical_type;
-            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_RIGHT, state->close + 2,
+            return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_RIGHT, state->close + 2,
                                                                state->end);
-            return;
         }
         IrValueId value = machine->child_result.value;
         CToken assignment = builder->preprocess.tokens[state->assignment];
@@ -17904,7 +18037,7 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
             success = c_ir_emit_compound_assignment(builder, state->place, state->type, state->operation, value, source, 0, 0);
         }
         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
-        return;
+        return false;
     }
 
     u32 start = state->start;
@@ -17975,16 +18108,15 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
                 if (direct_index_base.value >= builder->function->value_count)
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    return;
+                    return false;
                 }
                 state->base = direct_index_base;
                 state->assignment = close + 1;
                 state->close = close;
                 state->operation = operation;
                 state->simple = simple;
-                c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT,
+                return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT,
                                                                    direct_index_open + 1, close);
-                return;
             }
         }
     }
@@ -18038,23 +18170,25 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
         if (assignment_index == start || assignment_index + 1 >= end)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         state->assignment = assignment_index;
         state->operation = assignment_operation;
         state->simple = simple_assignment;
         state->left_value_start = builder->function->value_count;
         bool expression_place = assignment_index != start + 1 || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER;
+        bool left_completed;
         if (expression_place)
         {
-            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT, start,
-                                                               assignment_index);
+            left_completed = c_ir_lower_assignment_statement_request_expression(builder, frame, state,
+                                                                                C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT, start,
+                                                                                assignment_index);
         }
         else
         {
-            c_ir_lower_assignment_statement_request_place(builder, frame, state, start, assignment_index);
+            left_completed = c_ir_lower_assignment_statement_request_place(builder, frame, state, start, assignment_index);
         }
-        return;
+        return left_completed;
     }
 
     if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET))
@@ -18063,7 +18197,7 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
         if (close == UINT32_MAX || close == start + 2 || close + 2 >= end)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         CToken assignment = builder->preprocess.tokens[close + 1];
         CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
@@ -18080,15 +18214,14 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
         if ((!simple && !compound) || base.value == IR_ID_UNDERLYING_INVALID)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         state->base = base;
         state->assignment = close + 1;
         state->close = close;
         state->operation = operation;
         state->simple = simple;
-        c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
-        return;
+        return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
     }
     if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end &&
         (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_DOT) ||
@@ -18120,15 +18253,14 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
         if (place.value >= builder->function->value_count)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         state->place = place;
         state->type = builder->function->values[place.value].canonical_type;
         state->assignment = start + 3;
         state->operation = operation;
         state->simple = simple;
-        c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_FIELD_RIGHT, start + 4, end);
-        return;
+        return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_FIELD_RIGHT, start + 4, end);
     }
     if (first.kind == C_TOKEN_IDENTIFIER && start + 2 == end &&
         (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_PLUS_PLUS) ||
@@ -18142,14 +18274,14 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
                                                    c_token_is_punctuator(&update, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
                                                    c_ir_token_source_range(builder, update), 0, 0);
         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
-        return;
+        return false;
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
         if (start + 2 != end || builder->preprocess.tokens[start + 1].kind != C_TOKEN_IDENTIFIER)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            return false;
         }
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start + 1));
         IrValueId one = c_ir_emit_integer_value(builder, 1, false, first);
@@ -18158,7 +18290,7 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
                                                    c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
                                                    c_ir_token_source_range(builder, first), 0, 0);
         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
-        return;
+        return false;
     }
     if (first.kind == C_TOKEN_IDENTIFIER && start + 2 < end)
     {
@@ -18175,18 +18307,30 @@ BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* b
             if (place.value >= builder->function->value_count)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                return false;
             }
             state->place = place;
             state->type = local ? local->type : builder->function->values[place.value].canonical_type;
             state->assignment = start + 1;
             state->operation = operation;
             state->simple = simple;
-            c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_IDENTIFIER_RIGHT, start + 2, end);
-            return;
+            return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_IDENTIFIER_RIGHT, start + 2, end);
         }
     }
-    c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+    return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+}
+
+// Each advance runs the stage machine to a child request or the finish; the
+// request helpers run the child off the dispatch loop and report whether it
+// completed, so a completed child re-enters the CHILD arm here as a
+// self-loop instead of resuming through a dispatch round trip.
+BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* builder)
+{
+    bool stepping = true;
+    while (stepping)
+    {
+        stepping = c_ir_lower_assignment_statement_advance(builder);
+    }
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
@@ -25086,10 +25230,45 @@ BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder)
     CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_BODY && frame->as.body.state);
     CIrLowerBodyState* state = frame->as.body.state;
-    bool success = c_ir_lower_body_advance(builder, state);
-    if (!state->yielded)
+    bool stepping = true;
+    while (stepping)
     {
-        c_ir_lower_frame_finish(builder, success, state->result);
+        bool success = c_ir_lower_body_advance(builder, state);
+        if (!state->yielded)
+        {
+            c_ir_lower_frame_finish(builder, success, state->result);
+            stepping = false;
+        }
+        else if (machine->failed)
+        {
+            stepping = false;
+        }
+        else
+        {
+            // Run the yielded child now, off the dispatch loop, when its kind
+            // is in the acyclic direct-run set; a completion loops the
+            // statement walk here without a dispatch round trip, and a
+            // suspension resumes through the loop unchanged.
+            u32 yield_mark = machine->frame_count - 1;
+            switch (machine->frames[yield_mark].kind)
+            {
+                case C_IR_LOWER_FRAME_EXPRESSION:
+                    c_ir_lower_expression_step(builder);
+                    break;
+                case C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT:
+                    c_ir_lower_assignment_statement_step(builder);
+                    break;
+                case C_IR_LOWER_FRAME_CONDITION:
+                    c_ir_lower_condition_step(builder);
+                    break;
+                case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
+                    c_ir_lower_compound_literal_step(builder, machine->frames + yield_mark);
+                    break;
+                default:
+                    break;
+            }
+            stepping = machine->frame_count == yield_mark && !machine->failed;
+        }
     }
 }
 
