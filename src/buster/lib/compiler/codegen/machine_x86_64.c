@@ -3493,12 +3493,25 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             }
             if (!float_pass)
             {
+                u32 target_register = machine_x64_argument_register(plan->windows_call, next_integer);
+                // The copy must stay the copy opcode: the allocators stage a
+                // copy-into-physical's source in that same register, which is
+                // the invariant keeping argument staging clobber-free. The
+                // widening then runs in place, physical to physical, where
+                // the allocator has nothing left to decide.
                 machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                   machine_x64_argument_register(plan->windows_call, next_integer)),
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, target_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
-                                                     .opcode = shape->scalar_extend_opcode ? shape->scalar_extend_opcode : MACHINE_X64_MOV_RR,
+                                                     .opcode = MACHINE_X64_MOV_RR,
                                                  });
+                if (shape->scalar_extend_opcode)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, target_register),
+                                                                      machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, target_register)},
+                                                         .opcode = shape->scalar_extend_opcode,
+                                                     });
+                }
             }
         }
     }
