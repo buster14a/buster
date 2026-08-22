@@ -37,6 +37,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-22f`](docs/performance-audits/2026-08-22f.md) — no lever in the intern probe loop or the entity scope walk: both hash tables measured at their floor, and one nearby branch measured on four trees and rejected
 - [`2026-08-22e`](docs/performance-audits/2026-08-22e.md) — give the x86 selector's prepasses a row layout and a candidate list instead of five more walks of the instruction list
 - [`2026-08-22d`](docs/performance-audits/2026-08-22d.md) — hotspot 6 of the branch-miss survey: punctuator ladders, and the two per-token predicates hiding behind them
 - [`2026-08-22c`](docs/performance-audits/2026-08-22c.md) — classify the IR delimiter index from the punctuator id, and keep the two delimiter walks apart
