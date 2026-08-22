@@ -256,7 +256,10 @@ def generate_enum_sizeof_unit(rng, unit_index):
     body.append("    sink((u64)sizeof(enum %s));\n" % enum_tag)
     use = rng.randint(0, 3)
     if use == 0:
-        globals_parts.append("static char %s_pad[%s > 0 ? %s : 1];\n" % (prefix, name1, name1))
+        # Clamped: an enumerator can reach 1<<30, and gigabyte pads only
+        # exercise the linker's large-data layout (an already-recorded open
+        # finding), drowning the enum-value signal this family is for.
+        globals_parts.append("static char %s_pad[%s > 0 && %s < 65536 ? %s : 1];\n" % (prefix, name1, name1, name1))
         body.append("    sink((u64)sizeof(%s_pad));\n" % prefix)
     elif use == 1:
         globals_parts.append("static const int %s_table[] = { %s, %s, %s + %s };\n" % (prefix, name0, name1, name0, name1))
