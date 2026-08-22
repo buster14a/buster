@@ -894,6 +894,13 @@ struct CTokenPositionIndex
 {
     u32* vector_size_positions;
     u32* alignas_positions;
+    // Ascending positions of every identifier token directly followed by a
+    // ':' punctuator — the necessary condition c_ir_named_label_at tests
+    // before its out-of-line proof. Label-table sizing and dead-code label
+    // scans enumerate these instead of re-asking the condition of every
+    // body token; the population includes ternary and bit-field colons, so
+    // consumers still run the proof per candidate.
+    u32* label_candidate_positions;
     // Per token: the position of the matching closer for every opening
     // (/[/{ whose whole group is properly nested across all three delimiter
     // kinds, else UINT32_MAX. A mismatched closer unmatches everything still
@@ -901,6 +908,7 @@ struct CTokenPositionIndex
     u32* matching_delimiters;
     u32 vector_size_count;
     u32 alignas_count;
+    u32 label_candidate_count;
     bool built;
 };
 

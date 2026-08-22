@@ -120,6 +120,7 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
 BUSTER_C_EXTERN u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index);
 BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
 BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* arena);
+BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                     String8 name, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_result_reserve_types(CParseResult* result, u32 additional);

@@ -1451,6 +1451,14 @@ struct CIntegerIrBuilder
     CIrWideFloatCache* wide_float_cache;
     u32* prepared_call_indices;
     u32* matching_delimiters;
+    // Borrowed from the parse position index when it is built: ascending
+    // positions of every identifier-then-colon token pair, the necessary
+    // condition of c_ir_named_label_at. label_candidates_valid distinguishes
+    // "no labels anywhere" from "no index"; only the latter falls back to
+    // scanning every body token.
+    u32 const* label_candidate_positions;
+    u32 label_candidate_count;
+    bool label_candidates_valid;
     u32 prepared_call_count;
     u32 prepared_call_capacity;
     u32 body_token_start;
@@ -22744,19 +22752,77 @@ BUSTER_C_INTERNAL bool c_ir_static_assert_expression_range(CIntegerIrBuilder* bu
     return *expression_start_out < *expression_end_out;
 }
 
+// First index into the builder's label-candidate positions whose token
+// position is >= position; label_candidate_count when none is.
+BUSTER_C_INTERNAL u32 c_ir_label_candidate_lower_bound(CIntegerIrBuilder* builder, u32 position)
+{
+    u32 low = 0;
+    u32 high = builder->label_candidate_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (builder->label_candidate_positions[middle] < position)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     CDeclaration declaration = state->declaration;
     u32 body_end = declaration.body_start + declaration.body_token_count;
     u32 label_capacity = 0;
-    for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
+    // Sizing and filling the label table ask c_ir_named_label_at's question;
+    // the position index already recorded every token that can answer yes,
+    // so both runs enumerate those candidates instead of every body token.
+    u32 candidate_cursor = builder->label_candidates_valid ? c_ir_label_candidate_lower_bound(builder, declaration.body_start) : 0;
+    if (builder->label_candidates_valid)
     {
-        label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
+        for (u32 candidate = candidate_cursor; candidate < builder->label_candidate_count; candidate += 1)
+        {
+            u32 index = builder->label_candidate_positions[candidate];
+            if (index >= body_end)
+            {
+                break;
+            }
+            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
+        }
+    }
+    else
+    {
+        for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
+        {
+            label_capacity += c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
+        }
     }
     state->labels = arena_allocate(builder->scratch_arena, CIrLabel, label_capacity ? label_capacity : 1);
     state->label_count = 0;
     for (u32 index = declaration.body_start; index + 1 < body_end; index += 1)
     {
+        if (builder->label_candidates_valid)
+        {
+            if (candidate_cursor >= builder->label_candidate_count)
+            {
+                break;
+            }
+            u32 candidate_position = builder->label_candidate_positions[candidate_cursor];
+            if (candidate_position >= body_end)
+            {
+                break;
+            }
+            candidate_cursor += 1;
+            index = candidate_position;
+            if (index + 1 >= body_end)
+            {
+                break;
+            }
+        }
         CToken token = builder->preprocess.tokens[index];
         bool named_label = c_ir_named_label_at(&builder->preprocess, declaration.body_start, index, body_end);
         if (!named_label)
@@ -23259,13 +23325,39 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         {
             if (builder->function->blocks[builder->current_block.value].terminated)
             {
-                while (index + 1 < task.end)
+                // Dead code after a terminator matters only if a label makes
+                // it reachable again, so this hop goes candidate to candidate
+                // rather than token to token; the not-found landing spot is
+                // task.end - 1, exactly where the scalar scan stopped.
+                if (builder->label_candidates_valid)
                 {
-                    if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end))
+                    u32 found = task.end;
+                    for (u32 candidate = c_ir_label_candidate_lower_bound(builder, index); candidate < builder->label_candidate_count;
+                         candidate += 1)
                     {
-                        break;
+                        u32 position = builder->label_candidate_positions[candidate];
+                        if (position + 1 >= task.end)
+                        {
+                            break;
+                        }
+                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end))
+                        {
+                            found = position;
+                            break;
+                        }
                     }
-                    index += 1;
+                    index = found < task.end ? found : task.end - 1;
+                }
+                else
+                {
+                    while (index + 1 < task.end)
+                    {
+                        if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end))
+                        {
+                            break;
+                        }
+                        index += 1;
+                    }
                 }
                 if (index + 1 >= task.end)
                 {
@@ -30519,6 +30611,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     // Scopes are final here, so every builder copy of this parse result can
     // answer c_parse_scope_for_token by descent instead of a full scope scan.
     c_parse_index_scope_children(&parse, temporary_arena);
+    // The token stream is final too: the position index's one classifying
+    // pass replaces the per-body label scans below, so force it now rather
+    // than letting the first body pay the build.
+    c_parse_position_index_ensure(&parse, preprocess);
+    bool label_candidates_valid = parse.position_index && parse.position_index->built;
+    u32 const* label_candidate_positions = label_candidates_valid ? parse.position_index->label_candidate_positions : 0;
+    u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
     CIrQueryMachine queries = {
         .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
         .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
@@ -32108,6 +32207,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .matching_delimiters = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .label_candidate_positions = label_candidate_positions,
+            .label_candidate_count = label_candidate_count,
+            .label_candidates_valid = label_candidates_valid,
             .prepared_call_capacity = prepared_call_capacity ? (u32)prepared_call_capacity : 1,
             .body_token_start = declaration.body_start,
             .body_token_count = declaration.body_token_count,

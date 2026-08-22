@@ -262,6 +262,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     u32 stack_count = 0;
     u32 vector_size_capacity = 0;
     u32 alignas_capacity = 0;
+    u32 label_candidate_capacity = 0;
     // One pass over the token stream for all three products.  The identifier
     // classification used to run twice, once to count and once to fill, and
     // the delimiter match was a third walk: together 3,55% of the stage-1
@@ -281,6 +282,14 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
             if (token_class & C_TOKEN_CLASS_ALIGNAS)
             {
                 c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, &alignas_capacity, (u32)token_index);
+            }
+            // The next token is one line of this cache at most, and reading
+            // its punctuator here spares the body-lowering loops a re-scan of
+            // every token for the same identifier-then-colon shape.
+            if (token_index + 1 < preprocess.token_count && preprocess.tokens[token_index + 1].punctuator == C_PUNCTUATOR_COLON)
+            {
+                c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
+                                              &label_candidate_capacity, (u32)token_index);
             }
             continue;
         }
@@ -314,6 +323,16 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     }
     scratch_end(temporary);
     index->built = true;
+}
+
+// Build the position index now if the parse never forced it, so a consumer
+// outside the parser (body lowering) can read its populations directly.
+BUSTER_C_SHARED void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess)
+{
+    if (result->position_index && !result->position_index->built)
+    {
+        c_parse_position_index_build(result, preprocess);
+    }
 }
 
 // Matching closer for the opening delimiter at open, or UINT32_MAX; see
