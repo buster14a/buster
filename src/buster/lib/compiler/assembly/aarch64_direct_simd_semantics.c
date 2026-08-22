@@ -491,11 +491,17 @@ bool buster_a64_direct_simd_find_source_digest(u64 source_digest, u32* row_index
 
 static BusterA64DirectSIMDGeneratedArrangementBinding const* buster_a64_direct_simd_generated_binding(u32 row_index, u32 operand_index)
 {
+    BusterA64DirectSIMDGeneratedArrangementBinding const* result;
     if (row_index >= BUSTER_A64_DIRECT_SIMD_ROW_COUNT || operand_index >= BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
     {
-        return 0;
+        result = 0;
     }
-    return &buster_a64_direct_simd_generated_arrangement_bindings[row_index][operand_index];
+    else
+    {
+        result = &buster_a64_direct_simd_generated_arrangement_bindings[row_index][operand_index];
+    }
+
+    return result;
 }
 
 bool buster_a64_direct_simd_arrangement_binding(u32 row_index, u32 operand_index, BusterA64DirectSIMDArrangementBinding* result)
@@ -1179,83 +1185,83 @@ static bool buster_a64_direct_simd_symbol_matches(BusterA64SemanticString text, 
 static bool buster_a64_direct_simd_infer_assembly_arrangement(BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticOperand operand,
                                                               BusterA64DirectSIMDArrangement* arrangement)
 {
-    if (!arrangement || operand_index >= form.operand_count)
+    if (arrangement && operand_index < form.operand_count)
     {
-        return false;
-    }
-    u32 ordinal = 0;
-    for (u32 index = 0; index < operand_index; index += 1)
-    {
-        BusterA64SemanticOperand previous = {0};
-        if (!buster_a64_semantic_operand(form.operand_first + index, &previous))
+        u32 ordinal = 0;
+        for (u32 index = 0; index < operand_index; index += 1)
         {
+            BusterA64SemanticOperand previous = {0};
+            if (!buster_a64_semantic_operand(form.operand_first + index, &previous))
+            {
+                return false;
+            }
+            if (buster_a64_direct_simd_semantic_equal(previous.symbol, operand.symbol))
+            {
+                ordinal += 1;
+            }
+        }
+        u32 occurrence = 0;
+        for (u32 offset = 0; offset + operand.symbol.length <= form.assembly.length; offset += 1)
+        {
+            if (!buster_a64_direct_simd_symbol_matches(form.assembly, offset, operand.symbol))
+            {
+                continue;
+            }
+            if (occurrence != ordinal)
+            {
+                occurrence += 1;
+                continue;
+            }
+            if (offset > 0)
+            {
+                char8 prefix = buster_a64_semantic_string_byte(form.assembly, offset - 1);
+                if (prefix == 'B' || prefix == 'H' || prefix == 'S' || prefix == 'D')
+                {
+                    *arrangement = prefix == 'B'   ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B
+                                   : prefix == 'H' ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H
+                                   : prefix == 'S' ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S
+                                                   : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+                    return true;
+                }
+            }
+            u32 suffix_offset = offset + operand.symbol.length;
+            if (suffix_offset < form.assembly.length && buster_a64_semantic_string_byte(form.assembly, suffix_offset) == '.')
+            {
+                u32 end = suffix_offset + 1;
+                while (end < form.assembly.length)
+                {
+                    char8 byte = buster_a64_semantic_string_byte(form.assembly, end);
+                    if (byte == ',' || byte == ' ' || byte == '}' || byte == '\t')
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                if (end > suffix_offset + 1)
+                {
+                    String8 suffix = {0};
+                    /* The semantic string pool is immutable; point into it only
+                     * after translating through a bounded local buffer. */
+                    char8 buffer[8] = {0};
+                    u32 length = end - suffix_offset - 1;
+                    if (length < BUSTER_ARRAY_LENGTH(buffer))
+                    {
+                        for (u32 index = 0; index < length; index += 1)
+                        {
+                            buffer[index] = buster_a64_semantic_string_byte(form.assembly, suffix_offset + 1 + index);
+                        }
+                        suffix = (String8){buffer, length};
+                        if (buster_a64_direct_simd_arrangement_from_string(suffix, arrangement))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
             return false;
         }
-        if (buster_a64_direct_simd_semantic_equal(previous.symbol, operand.symbol))
-        {
-            ordinal += 1;
-        }
     }
-    u32 occurrence = 0;
-    for (u32 offset = 0; offset + operand.symbol.length <= form.assembly.length; offset += 1)
-    {
-        if (!buster_a64_direct_simd_symbol_matches(form.assembly, offset, operand.symbol))
-        {
-            continue;
-        }
-        if (occurrence != ordinal)
-        {
-            occurrence += 1;
-            continue;
-        }
-        if (offset > 0)
-        {
-            char8 prefix = buster_a64_semantic_string_byte(form.assembly, offset - 1);
-            if (prefix == 'B' || prefix == 'H' || prefix == 'S' || prefix == 'D')
-            {
-                *arrangement = prefix == 'B'   ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B
-                               : prefix == 'H' ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H
-                               : prefix == 'S' ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S
-                                               : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
-                return true;
-            }
-        }
-        u32 suffix_offset = offset + operand.symbol.length;
-        if (suffix_offset < form.assembly.length && buster_a64_semantic_string_byte(form.assembly, suffix_offset) == '.')
-        {
-            u32 end = suffix_offset + 1;
-            while (end < form.assembly.length)
-            {
-                char8 byte = buster_a64_semantic_string_byte(form.assembly, end);
-                if (byte == ',' || byte == ' ' || byte == '}' || byte == '\t')
-                {
-                    break;
-                }
-                end += 1;
-            }
-            if (end > suffix_offset + 1)
-            {
-                String8 suffix = {0};
-                /* The semantic string pool is immutable; point into it only
-                 * after translating through a bounded local buffer. */
-                char8 buffer[8] = {0};
-                u32 length = end - suffix_offset - 1;
-                if (length < BUSTER_ARRAY_LENGTH(buffer))
-                {
-                    for (u32 index = 0; index < length; index += 1)
-                    {
-                        buffer[index] = buster_a64_semantic_string_byte(form.assembly, suffix_offset + 1 + index);
-                    }
-                    suffix = (String8){buffer, length};
-                    if (buster_a64_direct_simd_arrangement_from_string(suffix, arrangement))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
+
     return false;
 }
 

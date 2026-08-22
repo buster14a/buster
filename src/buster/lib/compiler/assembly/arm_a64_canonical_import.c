@@ -903,40 +903,42 @@ static void arm_a64_layout_clear(ArmA64Layout* layout)
 
 static void arm_a64_layout_apply_value(ArmA64Layout* layout, u32 bit, String8 value, String8 field, bool overlay)
 {
-    if (bit >= 32) return;
-    value = arm_a64_trim(value);
-    if (!value.length)
+    if (bit < 32)
     {
-        /* Encoding cells are a sparse overlay over the class regdiagram.  An
-           empty cell carries no new fixed value.  A named empty cell denotes
-           the source field carried by the base box (the historical XML form
-           used by BIC/ORR and similar split encodings), while an unnamed cell
-           inherits the base bit exactly. */
-        if (!overlay)
+        value = arm_a64_trim(value);
+        if (!value.length)
         {
-            layout->bits[bit].kind = field.length ? ARM_A64_BIT_FIELD : ARM_A64_BIT_UNRESOLVED;
+            /* Encoding cells are a sparse overlay over the class regdiagram.  An
+               empty cell carries no new fixed value.  A named empty cell denotes
+               the source field carried by the base box (the historical XML form
+               used by BIC/ORR and similar split encodings), while an unnamed cell
+               inherits the base bit exactly. */
+            if (!overlay)
+            {
+                layout->bits[bit].kind = field.length ? ARM_A64_BIT_FIELD : ARM_A64_BIT_UNRESOLVED;
+                layout->bits[bit].field = field;
+            }
+            else if (field.length && layout->bits[bit].kind == ARM_A64_BIT_UNRESOLVED)
+            {
+                layout->bits[bit].kind = ARM_A64_BIT_FIELD;
+                layout->bits[bit].field = field;
+            }
+            return;
+        }
+        if (value.length == 1 && (value.pointer[0] == '0' || value.pointer[0] == '1'))
+        {
+            layout->bits[bit].kind = ARM_A64_BIT_FIXED;
+            layout->bits[bit].value = (u8)(value.pointer[0] - '0');
+            layout->bits[bit].field = (String8){0};
+        }
+        else
+        {
+            layout->bits[bit].kind = ARM_A64_BIT_UNRESOLVED;
+            /* Keep the named field even when the cell is an x/constraint.  The
+               mask remains unresolved, while the functional field identity is
+               retained for later operand semantics (for example BTI.op2). */
             layout->bits[bit].field = field;
         }
-        else if (field.length && layout->bits[bit].kind == ARM_A64_BIT_UNRESOLVED)
-        {
-            layout->bits[bit].kind = ARM_A64_BIT_FIELD;
-            layout->bits[bit].field = field;
-        }
-        return;
-    }
-    if (value.length == 1 && (value.pointer[0] == '0' || value.pointer[0] == '1'))
-    {
-        layout->bits[bit].kind = ARM_A64_BIT_FIXED;
-        layout->bits[bit].value = (u8)(value.pointer[0] - '0');
-        layout->bits[bit].field = (String8){0};
-    }
-    else
-    {
-        layout->bits[bit].kind = ARM_A64_BIT_UNRESOLVED;
-        /* Keep the named field even when the cell is an x/constraint.  The
-           mask remains unresolved, while the functional field identity is
-           retained for later operand semantics (for example BTI.op2). */
-        layout->bits[bit].field = field;
     }
 }
 
@@ -1142,8 +1144,17 @@ static bool arm_a64_layout_self_test(void)
     {
         if (layout.bits[15 - offset].kind != ARM_A64_BIT_FIELD) return false;
     }
-    if (layout.bits[29].kind != ARM_A64_BIT_FIELD || layout.bits[29].field.length != 2 || layout.bits[29].field.pointer[0] != 'R') return false;
-    return layout.bits[28].kind == ARM_A64_BIT_UNRESOLVED;
+    bool result;
+    if (layout.bits[29].kind != ARM_A64_BIT_FIELD || layout.bits[29].field.length != 2 || layout.bits[29].field.pointer[0] != 'R')
+    {
+        result = false;
+    }
+    else
+    {
+        result = layout.bits[28].kind == ARM_A64_BIT_UNRESOLVED;
+    }
+
+    return result;
 }
 
 static String8 arm_a64_slice_normalize(Arena* arena, String8 text)
@@ -1742,8 +1753,17 @@ static bool arm_a64_feature_parser_self_test(void)
     memcpy(nested + cursor, atom.pointer, atom.length);
     cursor += (u32)atom.length;
     for (u32 depth = 0; depth < 65; depth += 1) nested[cursor++] = ')';
-    if (arm_a64_feature_expression_allowed((String8){.pointer = nested, .length = cursor})) return false;
-    return true;
+    bool result;
+    if (arm_a64_feature_expression_allowed((String8){.pointer = nested, .length = cursor}))
+    {
+        result = false;
+    }
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 static void arm_a64_collect_fields(Arena* arena, ArmA64CanonicalRow* row, ArmA64Layout layout)

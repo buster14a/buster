@@ -479,18 +479,25 @@ static bool buster_a64_semantic_validate_program_operand(BusterA64SemanticGenera
     if (!operand || operand->kind > BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_LITERAL ||
         !buster_a64_semantic_program_slice(operand->high, operand->low, operand->width) || operand->reserved != 0) return false;
     BusterA64SemanticString ignored;
-    if (!buster_a64_semantic_string_offset(operand->text_offset, &ignored)) return false;
-    if (operand->kind == BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_FIELD)
+    bool result;
+    if (!buster_a64_semantic_string_offset(operand->text_offset, &ignored))
     {
-        return buster_a64_semantic_program_string(operand->field_offset, &ignored, true) &&
-               (operand->high != UINT16_MAX || operand->width == 0);
+        result = false;
     }
-    if (operand->kind == BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_ARRANGEMENT)
+    else if (operand->kind == BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_FIELD)
     {
-        return operand->high == UINT16_MAX && operand->low == UINT16_MAX && operand->width == 0 &&
-               operand->field_offset == UINT32_MAX && ignored.length != 0;
+        result = buster_a64_semantic_program_string(operand->field_offset, &ignored, true) && (operand->high != UINT16_MAX || operand->width == 0);
     }
-    return operand->high == UINT16_MAX && operand->low == UINT16_MAX && operand->width == 0 && operand->field_offset == UINT32_MAX;
+    else if (operand->kind == BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_ARRANGEMENT)
+    {
+        result = operand->high == UINT16_MAX && operand->low == UINT16_MAX && operand->width == 0 && operand->field_offset == UINT32_MAX && ignored.length != 0;
+    }
+    else
+    {
+        result = operand->high == UINT16_MAX && operand->low == UINT16_MAX && operand->width == 0 && operand->field_offset == UINT32_MAX;
+    }
+
+    return result;
 }
 
 static bool buster_a64_semantic_validate_program_instruction(u32 id)

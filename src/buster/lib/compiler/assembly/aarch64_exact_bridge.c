@@ -189,10 +189,15 @@ bool a64_exact_emit(A64ExactFormKey key, u32 const* normalized_fields, u32 field
         return false;
     }
     BusterAarch64CanonicalFormInfo form = {0};
-    if (!buster_aarch64_canonical_form(key.form_index, &form) || form.arm_row_digest != key.row_digest ||
-        field_count != form.field_count)
+    bool result;
+    if (!buster_aarch64_canonical_form(key.form_index, &form) || form.arm_row_digest != key.row_digest || field_count != form.field_count)
     {
-        return false;
+        result = false;
     }
-    return buster_aarch64_canonical_raw_encode(key.form_index, normalized_fields, field_count, word);
+    else
+    {
+        result = buster_aarch64_canonical_raw_encode(key.form_index, normalized_fields, field_count, word);
+    }
+
+    return result;
 }

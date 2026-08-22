@@ -104,8 +104,17 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_pool_range_valid(u32 offset, u32 
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_bytes_equal(String8 left, String8 right)
 {
-    if (left.length != right.length || (!left.pointer && left.length) || (!right.pointer && right.length)) return false;
-    return left.length == 0 || memcmp(left.pointer, right.pointer, (size_t)left.length) == 0;
+    bool result;
+    if (left.length != right.length || (!left.pointer && left.length) || (!right.pointer && right.length))
+    {
+        result = false;
+    }
+    else
+    {
+        result = left.length == 0 || memcmp(left.pointer, right.pointer, (size_t)left.length) == 0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_aarch64_syntax_ascii_fold(u8 value)
@@ -126,8 +135,17 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_ascii_bytes_equal(String8 left, S
 
 BUSTER_GLOBAL_LOCAL String8 buster_aarch64_syntax_pool_string(u32 offset, u32 length)
 {
-    if (!buster_aarch64_syntax_pool_range_valid(offset, length)) return (String8){0};
-    return (String8){.pointer = (char8*)(buster_aarch64_syntax_generated_string_pool + offset), .length = length};
+    String8 result;
+    if (!buster_aarch64_syntax_pool_range_valid(offset, length))
+    {
+        result = (String8){0};
+    }
+    else
+    {
+        result = (String8){.pointer = (char8*)(buster_aarch64_syntax_generated_string_pool + offset), .length = length};
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_aarch64_syntax_base64_value(char8 character)
@@ -317,8 +335,17 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_valid(u32 index)
 {
     if (index >= BUSTER_AARCH64_SYNTAX_GENERATED_ROW_COUNT) return false;
     BusterAarch64SyntaxGeneratedRow row = {0};
-    if (!buster_aarch64_syntax_generated_row_at(index, &row)) return false;
-    return buster_aarch64_syntax_generated_row_fields_valid(row);
+    bool result;
+    if (!buster_aarch64_syntax_generated_row_at(index, &row))
+    {
+        result = false;
+    }
+    else
+    {
+        result = buster_aarch64_syntax_generated_row_fields_valid(row);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_fields_valid(BusterAarch64SyntaxGeneratedRow row)
@@ -730,18 +757,21 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_branch_range(BusterAarch64SyntaxN
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_has_implicit_separator(String8 input, u64 cursor)
 {
-    if (!input.pointer || cursor > input.length) return false;
-    for (u64 index = cursor; index < input.length && input.pointer[index] != '}'; index += 1)
+    if (input.pointer && cursor <= input.length)
     {
-        if (input.pointer[index] == '<')
+        for (u64 index = cursor; index < input.length && input.pointer[index] != '}'; index += 1)
         {
-            while (index < input.length && input.pointer[index] != '>') index += 1;
-        }
-        else if (input.pointer[index] == '|')
-        {
-            return true;
+            if (input.pointer[index] == '<')
+            {
+                while (index < input.length && input.pointer[index] != '>') index += 1;
+            }
+            else if (input.pointer[index] == '|')
+            {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -978,23 +1008,24 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_process_node(BusterAarch64S
         u32 first = 0;
         u32 count = 0;
         u32 total = 0;
-        if (!buster_aarch64_syntax_branch_range(node, 0, &first, &count, &total) || !total ||
-            !buster_aarch64_syntax_match_record_choice(machine, index, 0)) return false;
-        if (total > 1)
+        if (buster_aarch64_syntax_branch_range(node, 0, &first, &count, &total) && total && buster_aarch64_syntax_match_record_choice(machine, index, 0))
         {
-            if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
-            machine->backtracks[machine->backtrack_count++] = (BusterAarch64SyntaxMatchBacktrack){
-                .kind = BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ALT,
-                .cursor = machine->cursor,
-                .capture_count = machine->capture_count,
-                .choice_count = machine->choice_count - 1,
-                .task_count = machine->task_count,
-                .node_index = index,
-                .next_branch = 1,
-                .branch_count = total,
-            };
+            if (total > 1)
+            {
+                if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
+                machine->backtracks[machine->backtrack_count++] = (BusterAarch64SyntaxMatchBacktrack){
+                    .kind = BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ALT,
+                    .cursor = machine->cursor,
+                    .capture_count = machine->capture_count,
+                    .choice_count = machine->choice_count - 1,
+                    .task_count = machine->task_count,
+                    .node_index = index,
+                    .next_branch = 1,
+                    .branch_count = total,
+                };
+            }
+            return buster_aarch64_syntax_match_push_children_reverse(machine, first, count);
         }
-        return buster_aarch64_syntax_match_push_children_reverse(machine, first, count);
     }
     return false;
 }
@@ -1140,8 +1171,17 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_branch(BusterAarch64SyntaxP
     u32 first = 0;
     u32 count = 0;
     u32 total = 0;
-    if (!buster_aarch64_syntax_branch_range(node, branch, &first, &count, &total) || branch >= total) return false;
-    return buster_aarch64_syntax_print_push_children_reverse(machine, first, count);
+    bool result;
+    if (!buster_aarch64_syntax_branch_range(node, branch, &first, &count, &total) || branch >= total)
+    {
+        result = false;
+    }
+    else
+    {
+        result = buster_aarch64_syntax_print_push_children_reverse(machine, first, count);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_process_node(BusterAarch64SyntaxPrintMachine* machine, u32 index,

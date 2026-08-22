@@ -7,8 +7,17 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_CONTROL_SEMANTIC_GENERATED_ROW_COUNT == BUSTER_AA
 
 BUSTER_GLOBAL_LOCAL BusterAarch64ControlSemanticRecord const* a64_control_row(u32 row)
 {
-    if (row >= BUSTER_AARCH64_CONTROL_SEMANTIC_ROW_COUNT) return 0;
-    return buster_aarch64_control_semantic_generated_rows + row;
+    BusterAarch64ControlSemanticRecord const* result;
+    if (row >= BUSTER_AARCH64_CONTROL_SEMANTIC_ROW_COUNT)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_aarch64_control_semantic_generated_rows + row;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_control_string_valid(BusterAarch64ControlString string)
@@ -31,8 +40,17 @@ bool buster_aarch64_control_semantic_string(BusterAarch64ControlString string, S
 
 u8 buster_aarch64_control_semantic_string_byte(BusterAarch64ControlString string, u32 index)
 {
-    if (!a64_control_string_valid(string) || index >= string.length) return 0;
-    return buster_aarch64_control_semantic_string_pool[string.offset + index];
+    u8 result;
+    if (!a64_control_string_valid(string) || index >= string.length)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_aarch64_control_semantic_string_pool[string.offset + index];
+    }
+
+    return result;
 }
 
 u32 buster_aarch64_control_condition_count(void)
@@ -79,12 +97,21 @@ BUSTER_GLOBAL_LOCAL bool a64_control_operand_schema_matches(BusterAarch64Control
         if (value.value != 31 && value.register31_role != BUSTER_AARCH64_CONTROL_REGISTER31_NONE) return false;
         return true;
     }
+    bool result;
     if (schema.kind == BUSTER_AARCH64_CONTROL_OPERAND_PC_RELATIVE)
     {
-        return value.width == 64;
+        result = value.width == 64;
     }
-    if (schema.width && schema.width != value.width) return false;
-    return value.value >= schema.minimum && value.value <= schema.maximum;
+    else if (schema.width && schema.width != value.width)
+    {
+        result = false;
+    }
+    else
+    {
+        result = value.value >= schema.minimum && value.value <= schema.maximum;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_control_pc_encode(BusterAarch64ControlPcRelative pc, s64 displacement, u32 word, u32* result)
@@ -93,25 +120,27 @@ BUSTER_GLOBAL_LOCAL bool a64_control_pc_encode(BusterAarch64ControlPcRelative pc
         displacement >= pc.minimum && displacement <= pc.maximum)
     {
         u32 immediate = 0;
-        if (!a64_signed_scaled_immediate_encode(displacement, pc.bits, pc.scale_log2, &immediate)) return false;
-        switch ((BusterAarch64ControlPcRelativeLayout)pc.layout)
+        if (a64_signed_scaled_immediate_encode(displacement, pc.bits, pc.scale_log2, &immediate))
         {
-        case BUSTER_AARCH64_CONTROL_PC_IMM26:
-            *result = (word & ~UINT32_C(0x03ffffff)) | immediate;
-            return true;
-        case BUSTER_AARCH64_CONTROL_PC_IMM19:
-            *result = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
-            return true;
-        case BUSTER_AARCH64_CONTROL_PC_IMM14:
-            *result = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
-            return true;
-        case BUSTER_AARCH64_CONTROL_PC_ADRP:
-        case BUSTER_AARCH64_CONTROL_PC_ADR:
-            *result = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3u) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
-            return true;
-        case BUSTER_AARCH64_CONTROL_PC_NONE:
-        case BUSTER_AARCH64_CONTROL_PC_COUNT:
-            break;
+            switch ((BusterAarch64ControlPcRelativeLayout)pc.layout)
+            {
+            case BUSTER_AARCH64_CONTROL_PC_IMM26:
+                *result = (word & ~UINT32_C(0x03ffffff)) | immediate;
+                return true;
+            case BUSTER_AARCH64_CONTROL_PC_IMM19:
+                *result = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
+                return true;
+            case BUSTER_AARCH64_CONTROL_PC_IMM14:
+                *result = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
+                return true;
+            case BUSTER_AARCH64_CONTROL_PC_ADRP:
+            case BUSTER_AARCH64_CONTROL_PC_ADR:
+                *result = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3u) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+                return true;
+            case BUSTER_AARCH64_CONTROL_PC_NONE:
+            case BUSTER_AARCH64_CONTROL_PC_COUNT:
+                break;
+            }
         }
     }
 

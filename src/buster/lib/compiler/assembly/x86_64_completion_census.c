@@ -833,9 +833,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_control_prefix_shape(BusterX86Met
     }
     if (query.operand_count != 1 || !buster_x86_completion_string_contains(pattern, S8("CET_NO_TRACK"))) return false;
     BusterX86MetadataPhysicalOperand operand = query.operands[0];
+    bool result;
     if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
-        return operand.width == 64 && operand.memory.address_size == 64 && !operand.memory.vsib && !operand.memory.has_segment;
-    return operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER && operand.width == 64;
+    {
+        result = operand.width == 64 && operand.memory.address_size == 64 && !operand.memory.vsib && !operand.memory.has_segment;
+    }
+    else
+    {
+        result = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER && operand.width == 64;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_control_project_source(

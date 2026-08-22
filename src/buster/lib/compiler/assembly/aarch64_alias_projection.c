@@ -19,11 +19,17 @@ static bool alias_string_equal(String8 left, String8 right)
 
 static String8 alias_generated_string(u32 offset, u32 length)
 {
+    String8 result;
     if (offset >= BUSTER_A64_ALIAS_PROJECTION_STRING_POOL_SIZE || length > BUSTER_A64_ALIAS_PROJECTION_STRING_POOL_SIZE - offset)
     {
-        return (String8){0};
+        result = (String8){0};
     }
-    return (String8){(char8*)buster_a64_alias_projection_string_pool + offset, length};
+    else
+    {
+        result = (String8){(char8*)buster_a64_alias_projection_string_pool + offset, length};
+    }
+
+    return result;
 }
 
 static bool alias_row_generated(u32 ordinal, BusterA64AliasGeneratedRow const** result)
@@ -303,16 +309,21 @@ static bool alias_operand_value_supported(BusterA64SemanticOperand operand, Bust
 
 static bool alias_target_valid(Target target)
 {
+    bool result;
     if (target.cpu_arch != CPU_ARCH_AARCH64 || !target_cpu_features_are_valid(target))
     {
-        return false;
+        result = false;
     }
-    if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
+    else if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
     {
-        return true;
+        result = true;
     }
-    return target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 &&
-           target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    else
+    {
+        result = target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 && target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    }
+
+    return result;
 }
 
 static bool alias_target_word_matches(Target target, u32 canonical_index, u64 target_digest, u32 word)

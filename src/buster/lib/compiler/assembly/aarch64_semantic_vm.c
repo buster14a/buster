@@ -34,9 +34,21 @@
 static u64
 buster_a64_semantic_vm_width_mask(u8 width)
 {
-    if (width == 0) return 0;
-    if (width >= 64) return UINT64_MAX;
-    return (UINT64_C(1) << width) - 1;
+    u64 result;
+    if (width == 0)
+    {
+        result = 0;
+    }
+    else if (width >= 64)
+    {
+        result = UINT64_MAX;
+    }
+    else
+    {
+        result = (UINT64_C(1) << width) - 1;
+    }
+
+    return result;
 }
 
 static u32
@@ -96,15 +108,33 @@ buster_a64_semantic_vm_semantic_executable_count(void)
 u8
 buster_a64_semantic_vm_row_coverage(u32 form_id)
 {
-    if (form_id >= BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT) return 0;
-    return buster_a64_semantic_vm_row_coverage_table[form_id];
+    u8 result;
+    if (form_id >= BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_a64_semantic_vm_row_coverage_table[form_id];
+    }
+
+    return result;
 }
 
 u8
 buster_a64_semantic_vm_row_gap_reason(u32 form_id)
 {
-    if (form_id >= BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT) return 0;
-    return buster_a64_semantic_vm_row_gap_reason_table[form_id];
+    u8 result;
+    if (form_id >= BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_a64_semantic_vm_row_gap_reason_table[form_id];
+    }
+
+    return result;
 }
 
 BusterA64SemanticVMValue
@@ -118,11 +148,17 @@ buster_a64_semantic_vm_value_unsigned(u64 value, u8 width)
 {
     /* A typed value is never implicitly narrowed.  Callers that intend to
      * extract a bit pattern must mask it before constructing the value. */
+    BusterA64SemanticVMValue result;
     if (width == 0 || width > 64 || (width < 64 && (value & ~buster_a64_semantic_vm_width_mask(width)) != 0))
-        return buster_a64_semantic_vm_value_invalid();
-    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_UNSIGNED_INTEGER,
-                                     .width = width,
-                                     .payload = value};
+    {
+        result = buster_a64_semantic_vm_value_invalid();
+    }
+    else
+    {
+        result = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_UNSIGNED_INTEGER, .width = width, .payload = value};
+    }
+
+    return result;
 }
 
 BusterA64SemanticVMValue
@@ -166,10 +202,17 @@ buster_a64_semantic_vm_value_gpr(u32 number, u8 width, bool sp, bool zr)
 BusterA64SemanticVMValue
 buster_a64_semantic_vm_value_condition(u32 condition)
 {
-    if (condition > 15) return buster_a64_semantic_vm_value_invalid();
-    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_CONDITION,
-                                     .width = 4,
-                                     .payload = condition};
+    BusterA64SemanticVMValue result;
+    if (condition > 15)
+    {
+        result = buster_a64_semantic_vm_value_invalid();
+    }
+    else
+    {
+        result = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_CONDITION, .width = 4, .payload = condition};
+    }
+
+    return result;
 }
 
 static bool
@@ -770,11 +813,17 @@ buster_a64_semantic_vm_atom_matches(BusterA64SemanticValueAtom atom, BusterA64Se
         if (!buster_a64_semantic_vm_value_uint(actual, &actual_value) || actual.width < width) return false;
         return (actual_value & mask) == (value & mask);
     }
+    bool result;
     if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_ENUM)
     {
-        return actual.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION && buster_a64_semantic_vm_value_equal_text(actual, atom.text);
+        result = actual.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION && buster_a64_semantic_vm_value_equal_text(actual, atom.text);
     }
-    return false;
+    else
+    {
+        result = false;
+    }
+
+    return result;
 }
 
 static bool
@@ -969,9 +1018,17 @@ buster_a64_semantic_vm_apply_program(u32 form_id, u32 transform_id, BusterA64Sem
         generated->program_count == 0 || generated->program_count > 4)
         return BUSTER_A64_SEMANTIC_VM_STATUS_UNSUPPORTED;
     BusterA64SemanticTransform transform = {0};
+    BusterA64SemanticVMStatus result;
     if (!buster_a64_semantic_transform(transform_id, &transform) || transform.program_count != generated->program_count)
-        return BUSTER_A64_SEMANTIC_VM_STATUS_BOUNDS;
-    return buster_a64_semantic_vm_eval_typed_program(form_id, fields, false, transform_id, transform.program_count, output);
+    {
+        result = BUSTER_A64_SEMANTIC_VM_STATUS_BOUNDS;
+    }
+    else
+    {
+        result = buster_a64_semantic_vm_eval_typed_program(form_id, fields, false, transform_id, transform.program_count, output);
+    }
+
+    return result;
 }
 
 // Materializes `instruction.constant` at `instruction.width` (zero meaning the

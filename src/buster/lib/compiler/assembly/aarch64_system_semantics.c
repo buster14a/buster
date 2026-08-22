@@ -9,8 +9,17 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_SCHEMA_VERSION == 2u);
 
 BUSTER_GLOBAL_LOCAL BusterAarch64SystemGeneratedRow const* a64_system_generated_row(u32 row)
 {
-    if (row >= BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_ROW_COUNT) return 0;
-    return buster_aarch64_system_generated_rows + row;
+    BusterAarch64SystemGeneratedRow const* result;
+    if (row >= BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_ROW_COUNT)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_aarch64_system_generated_rows + row;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BusterAarch64SystemString a64_system_string_from_generated(BusterAarch64SystemGeneratedString string)
@@ -38,8 +47,17 @@ bool buster_aarch64_system_semantic_string(BusterAarch64SystemString string, Str
 
 u8 buster_aarch64_system_semantic_string_byte(BusterAarch64SystemString string, u32 index)
 {
-    if (!a64_system_string_valid(string) || index >= string.length) return 0;
-    return buster_aarch64_system_generated_string_pool[string.offset + index];
+    u8 result;
+    if (!a64_system_string_valid(string) || index >= string.length)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = buster_aarch64_system_generated_string_pool[string.offset + index];
+    }
+
+    return result;
 }
 
 u32 buster_aarch64_system_semantic_count(void)
@@ -49,8 +67,17 @@ u32 buster_aarch64_system_semantic_count(void)
 
 BUSTER_GLOBAL_LOCAL u32 a64_system_field_max(u8 width)
 {
-    if (!width || width > 31) return width == 32 ? UINT32_MAX : 0;
-    return (UINT32_C(1) << width) - 1;
+    u32 result;
+    if (!width || width > 31)
+    {
+        result = width == 32 ? UINT32_MAX : 0;
+    }
+    else
+    {
+        result = (UINT32_C(1) << width) - 1;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_system_field_schema(u32 row, u32 field, BusterAarch64SystemFieldSchema* result)
@@ -176,9 +203,17 @@ bool buster_aarch64_system_op0_decode(u32 o0, u32* op0)
 
 BUSTER_GLOBAL_LOCAL bool a64_system_target_is_m1_profile(Target target)
 {
-    if (target.cpu_model == CPU_MODEL_A64_APPLE_M1) return true;
-    return target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 &&
-           target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    bool result;
+    if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
+    {
+        result = true;
+    }
+    else
+    {
+        result = target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 && target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    }
+
+    return result;
 }
 
 bool buster_aarch64_system_semantic_target_supported(Target target)
@@ -410,8 +445,17 @@ bool buster_aarch64_system_semantic_decode(Target target, u32 word, BusterAarch6
             row_index = row;
         }
     }
-    if (row_index == UINT32_MAX) return false;
-    return buster_aarch64_system_semantic_decode_form(target, row_index, word, instruction);
+    bool result;
+    if (row_index == UINT32_MAX)
+    {
+        result = false;
+    }
+    else
+    {
+        result = buster_aarch64_system_semantic_decode_form(target, row_index, word, instruction);
+    }
+
+    return result;
 }
 
 u32 buster_aarch64_system_semantic_fixed_canonical_count(void)

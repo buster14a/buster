@@ -295,8 +295,17 @@ bool aarch64_system_register_name_is_eligible(String8 name, Aarch64SystemRegiste
     if (mode != AARCH64_SYSTEM_REGISTER_MODE_READ && mode != AARCH64_SYSTEM_REGISTER_MODE_WRITE && mode != AARCH64_SYSTEM_REGISTER_MODE_READ_WRITE)
         return false;
     Aarch64SystemRegisterLookup lookup = {0};
-    if (!aarch64_system_register_lookup_name(name, &lookup) && !aarch64_system_register_lookup_expanded_name(name, &lookup)) return false;
-    return (lookup.mode & mode) == mode;
+    bool result;
+    if (!aarch64_system_register_lookup_name(name, &lookup) && !aarch64_system_register_lookup_expanded_name(name, &lookup))
+    {
+        result = false;
+    }
+    else
+    {
+        result = (lookup.mode & mode) == mode;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_decimal(String8 text, u32* value)
