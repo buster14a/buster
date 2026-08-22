@@ -186,6 +186,16 @@ static int condition_position_negated(void)
     return take(!(conditions++ ? 1 : 0));
 }
 
+// A nested call whose argument is a parenthesized control group: the
+// argument expression of the outer call pushes its own control-expression
+// prepass over a range containing the already-prepared group, which must
+// jump past it rather than rescan its interior and run the condition again.
+static int nested_call_prepared_group(int value)
+{
+    conditions = 0;
+    return take(take(((conditions++ ? 0 : 0) || make(value))));
+}
+
 // Both directions of every shape share one failure code, so the exit status
 // names the shape rather than the symptom.
 static int check(int (*shape)(int, int), int not_taken_result, int taken_result, int code)
@@ -326,6 +336,11 @@ int main(void)
     if (condition_position_negated() != 1 || conditions != 1)
     {
         return 23;
+    }
+    before = calls;
+    if (nested_call_prepared_group(1) != 1 || conditions != 1 || calls != before + 1)
+    {
+        return 24;
     }
     return 0;
 }

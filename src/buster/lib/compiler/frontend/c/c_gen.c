@@ -8737,9 +8737,20 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         }
         bool parentheses = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         bool brackets = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET);
+        CIrPreparedControlExpression* recorded = parentheses || brackets ? c_ir_prepared_control_expression_find(builder, index) : 0;
+        if (recorded)
+        {
+            // A group an earlier prepass already prepared has run its whole
+            // interior once. A nested prepass — the one a call-argument
+            // expression pushes over a range that contains the group — must
+            // jump past it, not step inside: rescanning the interior records
+            // an inner group a second time and runs its side effects again
+            // (tests/basic_c_conditional_operand.c, the nested-call shape).
+            frame->as.prepare_control.index = recorded->close_index + 1;
+            continue;
+        }
         if ((!parentheses && !brackets) ||
-            (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER) ||
-            c_ir_prepared_control_expression_find(builder, index))
+            (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER))
         {
             continue;
         }
