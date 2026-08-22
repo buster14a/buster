@@ -1079,7 +1079,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 45);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 57);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -4160,6 +4160,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("udiv"),    S8_INITIALIZER("shl"),    S8_INITIALIZER("sar"),    S8_INITIALIZER("shr"),
             S8_INITIALIZER("local_pair"), S8_INITIALIZER("kagg_take"), S8_INITIALIZER("big_make"),
             S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("union_tail"), S8_INITIALIZER("locals_array"),
+            S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"), S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"),
+            S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4342,13 +4344,23 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, a64_call_selected.supported);
             BUSTER_TEST(arguments, a64_call_selected.function.call_target_count >= 2);
         }
+        // Float bodies now select through the FARITH/FCMP rows; label
+        // addresses are the current explicit unsupported representative.
         IrFunction* a64_float_function = machine_test_ir_function_find(machine_a64_module, S8("fadd"));
         BUSTER_TEST(arguments, a64_float_function != 0);
         if (a64_float_function)
         {
             MachineSelectResult a64_float_selected =
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_float_function, machine_a64_target);
-            BUSTER_TEST(arguments, !a64_float_selected.supported);
+            BUSTER_TEST(arguments, a64_float_selected.supported);
+        }
+        IrFunction* a64_goto_function = machine_test_ir_function_find(machine_a64_module, S8("goto_probe"));
+        BUSTER_TEST(arguments, a64_goto_function != 0);
+        if (a64_goto_function)
+        {
+            MachineSelectResult a64_goto_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_goto_function, machine_a64_target);
+            BUSTER_TEST(arguments, !a64_goto_selected.supported);
         }
         // An aggregate literal built and passed onward: kagg's call keeps it
         // out of the raw-copy execution list, so it is asserted as selection
@@ -4456,6 +4468,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                string_equal(a64_supported_names[name_index], S8("arr_lit")) ||
                                string_equal(a64_supported_names[name_index], S8("bits")) ||
                                string_equal(a64_supported_names[name_index], S8("union_tail")) ||
+                               string_equal(a64_supported_names[name_index], S8("ucvt")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
                                string_equal(a64_supported_names[name_index], S8("srem")) ||

@@ -4,9 +4,11 @@
 // casts, unary and binary arithmetic including divides and shifts,
 // comparisons, direct locals and pointer dereference, member addresses,
 // branches, and scalar returns — plus the AAPCS64 signature shapes, calls,
-// symbol addresses, and aggregate/array literal construction into frame
-// slots. Everything else is an explicit unsupported result, never a
-// silent misselection.
+// symbol addresses, aggregate/array literal construction into frame slots,
+// and scalar float bodies (arithmetic, comparison, negation, and
+// conversions over the bit-image model, riding V0/V1 internally).
+// Everything else is an explicit unsupported result, never a silent
+// misselection.
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -552,6 +554,66 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_constant(MachineA64Selector* selecto
     return selected;
 }
 
+// Integer-to-float mirrors the canonical emitter: a narrower signed source
+// sign-extends first, an unsigned one is already zero-extended in the
+// register model, and the 64-bit scvtf/ucvtf carries every case.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_integer_to_float(MachineA64Selector* selector, IrInstruction* instruction, IrType* cast_target_type,
+                                                                  u32 source_bits, u32 source_register, u32 result_register)
+{
+    bool selected = false;
+    bool cast_signed = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    bool convertible = cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
+                       (cast_target_type->bit_width == 32 || cast_target_type->bit_width == 64) && source_bits;
+    if (convertible)
+    {
+        u32 extended_register = source_register;
+        if (cast_signed && source_bits < 64)
+        {
+            u16 extend_opcode = (u16)(source_bits == 8 ? MACHINE_A64_SXTB : source_bits == 16 ? MACHINE_A64_SXTH : MACHINE_A64_SXTW);
+            extended_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, extended_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                 .opcode = extend_opcode,
+                                             });
+        }
+        u16 convert_opcode = (u16)(cast_signed ? (cast_target_type->bit_width == 64 ? MACHINE_A64_CVT_I64_TO_F64 : MACHINE_A64_CVT_I64_TO_F32)
+                                               : (cast_target_type->bit_width == 64 ? MACHINE_A64_CVT_U64_TO_F64 : MACHINE_A64_CVT_U64_TO_F32));
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, extended_register)},
+                                                       .opcode = convert_opcode,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
+// Float-to-integer mirrors the canonical emitter: fcvtzs/fcvtzu always
+// convert to the full 64-bit register, and narrower declared targets keep
+// that image exactly like the canonical x9 store.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_float_to_integer(MachineA64Selector* selector, IrInstruction* instruction, IrType* source_type,
+                                                                  u32 source_register, u32 result_register)
+{
+    bool selected = false;
+    bool to_unsigned = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+    bool convertible = source_type && source_type->kind == IR_TYPE_FLOAT && (source_type->bit_width == 32 || source_type->bit_width == 64);
+    if (convertible)
+    {
+        u16 convert_opcode = (u16)(to_unsigned ? (source_type->bit_width == 64 ? MACHINE_A64_CVT_F64_TO_U64 : MACHINE_A64_CVT_F32_TO_U64)
+                                               : (source_type->bit_width == 64 ? MACHINE_A64_CVT_F64_TO_I64 : MACHINE_A64_CVT_F32_TO_I64));
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                       .opcode = convert_opcode,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -564,56 +626,85 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
         IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
         IrType* cast_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
         u32 source_bits = machine_a64_scalar_bit_width(source_type);
-        u16 opcode = 0;
-        switch (instruction->conversion_operation)
+        if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
         {
-            break;
-        case IR_CONVERSION_IDENTITY:
-        case IR_CONVERSION_INTEGER_REINTERPRET:
-        case IR_CONVERSION_POINTER_REINTERPRET:
-        case IR_CONVERSION_INTEGER_TO_POINTER:
-            opcode = MACHINE_A64_MOV_RR;
-            break;
-        case IR_CONVERSION_INTEGER_TRUNCATE:
-        case IR_CONVERSION_POINTER_TO_INTEGER:
-        {
-            // The register model keeps every value zero-extended to 64
-            // bits, so a narrowing cast must actually clear the discarded
-            // top bits.
-            u32 destination_bits = machine_a64_scalar_bit_width(cast_target_type);
-            opcode = (u16)(destination_bits == 8    ? MACHINE_A64_UXTB
-                           : destination_bits == 16 ? MACHINE_A64_UXTH
-                           : destination_bits == 32 ? MACHINE_A64_MOV32_RR
-                           : destination_bits == 64 ? MACHINE_A64_MOV_RR
-                                                    : 0);
+            bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
+            bool shaped = source_type && source_type->kind == IR_TYPE_FLOAT &&
+                          source_type->bit_width == (extend ? 32u : 64u) && cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
+                          cast_target_type->bit_width == (extend ? 64u : 32u);
+            if (shaped)
+            {
+                u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                               .opcode = (u16)(extend ? MACHINE_A64_CVT_F32_TO_F64 : MACHINE_A64_CVT_F64_TO_F32),
+                                                           });
+                machine_a64_define(selector, result_register, row);
+                selected = true;
+            }
         }
-        break;
-        case IR_CONVERSION_INTEGER_SIGN_EXTEND:
-            opcode = (u16)(source_bits == 8    ? MACHINE_A64_SXTB
-                           : source_bits == 16 ? MACHINE_A64_SXTH
-                           : source_bits == 32 ? MACHINE_A64_SXTW
-                           : source_bits == 64 ? MACHINE_A64_MOV_RR
-                                               : 0);
-            break;
-        case IR_CONVERSION_INTEGER_ZERO_EXTEND:
-            opcode = (u16)(source_bits == 8    ? MACHINE_A64_UXTB
-                           : source_bits == 16 ? MACHINE_A64_UXTH
-                           : source_bits == 32 ? MACHINE_A64_MOV32_RR
-                           : source_bits == 64 ? MACHINE_A64_MOV_RR
-                                               : 0);
-            break;
-        default:
-            opcode = 0;
-        }
-        if (opcode)
+        else if (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                 instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)
         {
-            u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                           .opcode = opcode,
-                                                       });
-            machine_a64_define(selector, result_register, row);
-            selected = true;
+            selected = machine_a64_select_cast_integer_to_float(selector, instruction, cast_target_type, source_bits, source_register, result_register);
+        }
+        else if (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                 instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER)
+        {
+            selected = machine_a64_select_cast_float_to_integer(selector, instruction, source_type, source_register, result_register);
+        }
+        else
+        {
+            u16 opcode = 0;
+            switch (instruction->conversion_operation)
+            {
+            case IR_CONVERSION_IDENTITY:
+            case IR_CONVERSION_INTEGER_REINTERPRET:
+            case IR_CONVERSION_POINTER_REINTERPRET:
+            case IR_CONVERSION_INTEGER_TO_POINTER:
+                opcode = MACHINE_A64_MOV_RR;
+                break;
+            case IR_CONVERSION_INTEGER_TRUNCATE:
+            case IR_CONVERSION_POINTER_TO_INTEGER:
+            {
+                // The register model keeps every value zero-extended to 64
+                // bits, so a narrowing cast must actually clear the discarded
+                // top bits.
+                u32 destination_bits = machine_a64_scalar_bit_width(cast_target_type);
+                opcode = (u16)(destination_bits == 8    ? MACHINE_A64_UXTB
+                               : destination_bits == 16 ? MACHINE_A64_UXTH
+                               : destination_bits == 32 ? MACHINE_A64_MOV32_RR
+                               : destination_bits == 64 ? MACHINE_A64_MOV_RR
+                                                        : 0);
+            }
+            break;
+            case IR_CONVERSION_INTEGER_SIGN_EXTEND:
+                opcode = (u16)(source_bits == 8    ? MACHINE_A64_SXTB
+                               : source_bits == 16 ? MACHINE_A64_SXTH
+                               : source_bits == 32 ? MACHINE_A64_SXTW
+                               : source_bits == 64 ? MACHINE_A64_MOV_RR
+                                                   : 0);
+                break;
+            case IR_CONVERSION_INTEGER_ZERO_EXTEND:
+                opcode = (u16)(source_bits == 8    ? MACHINE_A64_UXTB
+                               : source_bits == 16 ? MACHINE_A64_UXTH
+                               : source_bits == 32 ? MACHINE_A64_MOV32_RR
+                               : source_bits == 64 ? MACHINE_A64_MOV_RR
+                                                   : 0);
+                break;
+            default:
+                opcode = 0;
+            }
+            if (opcode)
+            {
+                u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                               .opcode = opcode,
+                                                           });
+                machine_a64_define(selector, result_register, row);
+                selected = true;
+            }
         }
     }
     return selected;
@@ -654,6 +745,34 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_unary(MachineA64Selector* selector, 
                                                        });
             machine_a64_define(selector, result_register, row);
             selected = true;
+        }
+        else if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
+        {
+            // The canonical path negates the bit image on the integer side —
+            // materialize the sign mask and XOR — so no float row exists to
+            // port. The 32-bit EOR keeps the f32 image zero-extended.
+            IrType* operand_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+            if (operand_type && operand_type->kind == IR_TYPE_FLOAT && (operand_type->bit_width == 32 || operand_type->bit_width == 64))
+            {
+                bool wide_float = operand_type->bit_width == 64;
+                u32 mask_immediate = selector->immediates.total_count;
+                u64* mask_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                *mask_row = wide_float ? 0x8000000000000000ull : 0x80000000ull;
+                u32 mask_register = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
+                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, mask_immediate)},
+                                                     .opcode = MACHINE_A64_MOV_RI,
+                                                 });
+                u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                               .opcode = (u16)(wide_float ? MACHINE_A64_EOR64 : MACHINE_A64_EOR32),
+                                                           });
+                machine_a64_define(selector, result_register, row);
+                selected = true;
+            }
         }
     }
     return selected;
@@ -802,6 +921,65 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_binary(MachineA64Selector* selector,
                     machine_a64_define(selector, result_register, row);
                     selected = true;
                 }
+            }
+        }
+        else if (operand_type && operand_type->kind == IR_TYPE_FLOAT && (operand_type->bit_width == 32 || operand_type->bit_width == 64))
+        {
+            // Scalar float arithmetic and comparison over the bit-image
+            // model. The compare conditions follow fcmp's flag encoding for
+            // unordered-false C semantics — MI/LS for less/less-equal, GT/GE
+            // for greater/greater-equal — exactly the canonical emitter's
+            // table, so NaN needs no separate repair rows.
+            u32 float_wide_bit = operand_type->bit_width == 64 ? 0x100u : 0;
+            u32 arith_selector = UINT32_MAX;
+            u32 compare_condition = UINT32_MAX;
+            switch (instruction->binary_operation)
+            {
+            case IR_BINARY_FLOAT_ADD:
+                arith_selector = 0;
+                break;
+            case IR_BINARY_FLOAT_SUBTRACT:
+                arith_selector = 1;
+                break;
+            case IR_BINARY_FLOAT_MULTIPLY:
+                arith_selector = 2;
+                break;
+            case IR_BINARY_FLOAT_DIVIDE:
+                arith_selector = 3;
+                break;
+            case IR_BINARY_FLOAT_EQUAL:
+                compare_condition = 0x0;
+                break;
+            case IR_BINARY_FLOAT_NOT_EQUAL:
+                compare_condition = 0x1;
+                break;
+            case IR_BINARY_FLOAT_LESS:
+                compare_condition = 0x4;
+                break;
+            case IR_BINARY_FLOAT_LESS_EQUAL:
+                compare_condition = 0x9;
+                break;
+            case IR_BINARY_FLOAT_GREATER:
+                compare_condition = 0xc;
+                break;
+            case IR_BINARY_FLOAT_GREATER_EQUAL:
+                compare_condition = 0xa;
+                break;
+            default:
+                break;
+            }
+            if (arith_selector != UINT32_MAX || compare_condition != UINT32_MAX)
+            {
+                u32 row = machine_a64_select_row(
+                    selector, (MachineInstruction){
+                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                  .payload = (arith_selector != UINT32_MAX ? arith_selector : compare_condition) | float_wide_bit,
+                                  .opcode = (u16)(arith_selector != UINT32_MAX ? MACHINE_A64_FARITH : MACHINE_A64_FCMP_SET),
+                              });
+                machine_a64_define(selector, result_register, row);
+                selected = true;
             }
         }
     }
@@ -4355,6 +4533,70 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
                                                   instruction->payload);
                 break;
+            case MACHINE_A64_FARITH:
+            {
+                // Bridge both bit images into the canonical float scratches
+                // V0/V1, run the arithmetic, bridge the result back out. The
+                // fadd/fsub/fmul/fdiv base words are the canonical emitter's
+                // (Rd=0, Rn=0, Rm=1); the wide bit selects the d-form, and a
+                // scalar s-form write zeroes the upper vector bits, which is
+                // what keeps the returned f32 image zero-extended.
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
+                u32 arith_selector = instruction->payload & 0xffu;
+                u32 arith_word = arith_selector == 0   ? 0x1e212800u
+                                 : arith_selector == 1 ? 0x1e213800u
+                                 : arith_selector == 2 ? 0x1e210800u
+                                                       : 0x1e211800u;
+                if (instruction->payload & 0x100u)
+                {
+                    arith_word |= 0x00400000u;
+                }
+                machine_a64_emit(&encoder, arith_word);
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_FROM_VEC, operand_registers[0], 0, 0, 0);
+            }
+            break;
+            case MACHINE_A64_FCMP_SET:
+                // fcmp through V0/V1, then the same w-form cset the integer
+                // compares use; the payload condition already encodes the
+                // unordered-false C semantics.
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
+                machine_a64_emit(&encoder, (instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u);
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_CSET, operand_registers[0], 0, 0, instruction->payload & 0xfu);
+                break;
+            case MACHINE_A64_CVT_F32_TO_F64:
+            case MACHINE_A64_CVT_F64_TO_F32:
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
+                machine_a64_emit(&encoder, instruction->opcode == MACHINE_A64_CVT_F32_TO_F64 ? 0x1e22c000u : 0x1e624000u);
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_FROM_VEC, operand_registers[0], 0, 0, 0);
+                break;
+            case MACHINE_A64_CVT_I64_TO_F32:
+            case MACHINE_A64_CVT_I64_TO_F64:
+            case MACHINE_A64_CVT_U64_TO_F32:
+            case MACHINE_A64_CVT_U64_TO_F64:
+            {
+                // scvtf/ucvtf read the general source directly (Rn), land in
+                // V0, and the result bridges back as a bit image.
+                bool convert_signed = instruction->opcode == MACHINE_A64_CVT_I64_TO_F32 || instruction->opcode == MACHINE_A64_CVT_I64_TO_F64;
+                bool to_f64 = instruction->opcode == MACHINE_A64_CVT_I64_TO_F64 || instruction->opcode == MACHINE_A64_CVT_U64_TO_F64;
+                machine_a64_emit(&encoder, (convert_signed ? 0x9e220000u : 0x9e230000u) | (to_f64 ? 0x00400000u : 0u) | ((u32)operand_registers[1] << 5));
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_FROM_VEC, operand_registers[0], 0, 0, 0);
+            }
+            break;
+            case MACHINE_A64_CVT_F32_TO_I64:
+            case MACHINE_A64_CVT_F64_TO_I64:
+            case MACHINE_A64_CVT_F32_TO_U64:
+            case MACHINE_A64_CVT_F64_TO_U64:
+            {
+                // fcvtzs/fcvtzu write the full 64-bit general destination
+                // (Rd) from V0, exactly the canonical x9 image.
+                bool to_unsigned = instruction->opcode == MACHINE_A64_CVT_F32_TO_U64 || instruction->opcode == MACHINE_A64_CVT_F64_TO_U64;
+                bool from_f64 = instruction->opcode == MACHINE_A64_CVT_F64_TO_I64 || instruction->opcode == MACHINE_A64_CVT_F64_TO_U64;
+                machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
+                machine_a64_emit(&encoder, (to_unsigned ? 0x9e390000u : 0x9e380000u) | (from_f64 ? 0x00400000u : 0u) | (u32)operand_registers[0]);
+            }
+            break;
             case MACHINE_A64_B:
             {
                 MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);

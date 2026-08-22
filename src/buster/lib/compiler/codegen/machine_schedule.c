@@ -171,6 +171,18 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
         case MACHINE_X64_MOVQ_FROM_XMM:
         case MACHINE_A64_FMOV_TO_VEC:
         case MACHINE_A64_FMOV_FROM_VEC:
+        case MACHINE_A64_FARITH:
+        case MACHINE_A64_FCMP_SET:
+        case MACHINE_A64_CVT_F32_TO_F64:
+        case MACHINE_A64_CVT_F64_TO_F32:
+        case MACHINE_A64_CVT_I64_TO_F32:
+        case MACHINE_A64_CVT_I64_TO_F64:
+        case MACHINE_A64_CVT_F32_TO_I64:
+        case MACHINE_A64_CVT_F64_TO_I64:
+        case MACHINE_A64_CVT_U64_TO_F32:
+        case MACHINE_A64_CVT_U64_TO_F64:
+        case MACHINE_A64_CVT_F32_TO_U64:
+        case MACHINE_A64_CVT_F64_TO_U64:
             result = true;
             break;
         default:

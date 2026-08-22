@@ -551,6 +551,30 @@ typedef enum MachineOpcode
     // ldr-literal over a branch over an absolute eight-byte relocation.
     // The payload indexes call_targets.
     MACHINE_A64_LEA_SYMBOL, // def
+    // Scalar float operations, the x86-64 FARITH/FCMP analog: float values
+    // travel as IEEE bit patterns in general registers and slots exactly
+    // like the canonical path, and each row rides V0/V1 internally — the
+    // canonical emitter's own float scratches, outside every allocatable
+    // file. FARITH payload: low byte selects the operation (0 add,
+    // 1 subtract, 2 multiply, 3 divide), bit 8 the 64-bit form. FCMP_SET
+    // payload: low nibble is the cset condition in fcmp's flag encoding
+    // (EQ/NE/MI/LS/GT/GE — unordered-false C semantics), bit 8 the 64-bit
+    // compare.
+    MACHINE_A64_FARITH,         // def, use, use
+    MACHINE_A64_FCMP_SET,       // def, use, use
+    MACHINE_A64_CVT_F32_TO_F64, // def, use
+    MACHINE_A64_CVT_F64_TO_F32,
+    MACHINE_A64_CVT_I64_TO_F32,
+    MACHINE_A64_CVT_I64_TO_F64,
+    MACHINE_A64_CVT_F32_TO_I64,
+    MACHINE_A64_CVT_F64_TO_I64,
+    // AArch64 converts unsigned 64-bit integers directly (ucvtf/fcvtzu),
+    // so the unsigned rows are single conversions rather than the x86-64
+    // branchy sequences, and clobber no general scratch.
+    MACHINE_A64_CVT_U64_TO_F32,
+    MACHINE_A64_CVT_U64_TO_F64,
+    MACHINE_A64_CVT_F32_TO_U64,
+    MACHINE_A64_CVT_F64_TO_U64,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
