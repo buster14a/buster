@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-22T120206Z`](docs/performance-audits/2026-08-22T120206Z.md) — stream preprocessed tokens into their final array instead of staging ranges that never coalesced
 - [`2026-08-22T114019Z`](docs/performance-audits/2026-08-22T114019Z.md) — take five cache and branch-miss leads, and measure two more that do not pay
 - [`2026-08-22T091548Z`](docs/performance-audits/2026-08-22T091548Z.md) — take the three cache-miss leads: the promoted-member memset, the selector's per-value prepass, and the linker's image copy
 - [`2026-08-22T091007Z`](docs/performance-audits/2026-08-22T091007Z.md) — the source-map searches take the dword vocabulary: vpcmpud answers a span of sixteen keys with no branch
