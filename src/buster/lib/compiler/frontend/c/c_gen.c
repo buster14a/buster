@@ -1519,7 +1519,12 @@ struct CIntegerIrBuilder
     // label-address relocations). Everything else skips the whole apparatus,
     // which keeps the per-function label-metadata side table empty.
     bool label_metadata_enabled;
-    u8 reserved[1];
+    // Whether the four store-tracking arrays above hold their empty state.
+    // They are sized with the function but cleared on the first store that
+    // tracks label metadata, because the clear is three passes over
+    // 9 bytes per lowering slot and the apparatus stays off for every body
+    // without an address-of-label.
+    bool label_metadata_store_cleared;
 };
 
 BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 length);
@@ -2526,6 +2531,16 @@ BUSTER_C_INTERNAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* bu
     {
         return true;
     }
+    if (!builder->label_metadata_store_cleared && builder->label_metadata_store_valid && builder->label_place_head && builder->label_place_next)
+    {
+        // First tracked store in this function: the arrays were sized with the
+        // body but never cleared, because a body without an address-of-label
+        // never reaches this line.
+        memset(builder->label_metadata_store_valid, 0, sizeof(*builder->label_metadata_store_valid) * builder->label_metadata_store_capacity);
+        memset(builder->label_place_head, 0xff, sizeof(*builder->label_place_head) * builder->label_metadata_store_capacity);
+        memset(builder->label_place_next, 0xff, sizeof(*builder->label_place_next) * builder->label_metadata_store_capacity);
+        builder->label_metadata_store_cleared = true;
+    }
     if (builder->label_metadata_store_capacity < builder->function->value_capacity)
     {
         u32 old_capacity = builder->label_metadata_store_capacity;
@@ -2572,6 +2587,10 @@ BUSTER_C_INTERNAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* bu
         builder->label_place_head = place_head;
         builder->label_place_next = place_next;
         builder->label_metadata_store_capacity = new_capacity;
+        // The three memsets above leave the grown arrays in the same empty
+        // state the lazy clear produces, so a later call must not clear them
+        // again over the state this one is about to write.
+        builder->label_metadata_store_cleared = true;
     }
     IrValueId root = place;
     u64 offset = 0;
@@ -31736,11 +31755,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
             builder.matching_delimiters[token_offset] = UINT32_MAX;
         }
-        memset(builder.label_metadata_store_valid, 0, sizeof(*builder.label_metadata_store_valid) * (u32)lowering_capacity);
-        // Empty buckets; label_place_indexed_count starts at zero so the first
-        // store in this function files every value it finds.
-        memset(builder.label_place_head, 0xff, sizeof(*builder.label_place_head) * (u32)lowering_capacity);
-        memset(builder.label_place_next, 0xff, sizeof(*builder.label_place_next) * (u32)lowering_capacity);
+        // The label-metadata store arrays are sized here but cleared by the
+        // first store that tracks label metadata: only a body containing an
+        // address-of-label enables the apparatus, and clearing them per
+        // function zeroed 9 bytes per lowering slot for every function in the
+        // translation unit — 2,46% of the compile's DRAM fills in the
+        // cache-miss survey of 2026-08-22T125406Z.  label_place_indexed_count
+        // starts at zero so the first store still files every value it finds.
         bool delimiters_valid = c_ir_build_delimiter_index(&builder);
         if (!delimiters_valid)
         {
