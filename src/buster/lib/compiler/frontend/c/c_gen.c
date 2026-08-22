@@ -24668,6 +24668,14 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
         }
         else
         {
+            // Only the root body task has no continuation, so this is the end
+            // of the function body: a non-void function whose final block is
+            // still reachable. Every statement lowered fine, so the stale
+            // failure_token_index would blame whichever token a sub-lowering
+            // recorded last; point at the closing brace instead, which is
+            // where control actually falls off.
+            builder->failure_message = S8("control reaches the end of a non-void function");
+            builder->failure_token_index = task.end;
             return false;
         }
     }

@@ -6230,6 +6230,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
                                 S8("int strict_range(int value) { switch (value) { case 1 ... 2: return 0; } return 1; }\n"), C_PREPROCESS_DIALECT_C23,
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                 S8("in function 'strict_range': GNU case ranges are only available in GNU dialects"));
+    {
+        // Control falling off the end of a non-void function must be blamed on
+        // the closing brace, not on whichever token a sub-lowering recorded
+        // last (this fixture used to be diagnosed at the '1' on line 5).
+        CPreprocessResult falls_off_tokens = c_preprocess(control_flow_temporary.arena,
+                                                          S8("int falls_off(int value) {\n"
+                                                             "    if (value) {\n"
+                                                             "        return 1;\n"
+                                                             "    }\n"
+                                                             "    value = value + 1;\n"
+                                                             "}\n"),
+                                                          (CPreprocessOptions){0});
+        CParseResult falls_off_parse = c_parse(control_flow_temporary.arena, falls_off_tokens);
+        BUSTER_TEST(arguments, falls_off_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, falls_off_parse.diagnostic_count == 0);
+        CIRLowerResult falls_off_ir =
+            c_lower_to_ir(control_flow_temporary.arena, S8("falls-off.c"), falls_off_tokens, falls_off_parse, target_native);
+        BUSTER_TEST(arguments, falls_off_ir.diagnostic_count == 1);
+        if (falls_off_ir.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_STRING_TEST(arguments, falls_off_ir.diagnostics[0].message,
+                               S8("in function 'falls_off': control reaches the end of a non-void function"));
+            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].location.line == 6);
+            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].location.column == 1);
+        }
+    }
     CPreprocessResult goto_tokens = c_preprocess(control_flow_temporary.arena,
                                                  S8("int jump(int value) {\n"
                                                     "    goto target;\n"
