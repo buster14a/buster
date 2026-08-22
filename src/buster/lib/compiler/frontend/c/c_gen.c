@@ -14783,6 +14783,30 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
                 type = builder->signatures[declaration_index].return_type;
                 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             }
+            else if (declaration_index != UINT32_MAX && declaration_index < builder->parse.declaration_count)
+            {
+                // No signatures exist while the type-mapping fixed point
+                // evaluates array bounds, and a bound like
+                // `char buffer[sizeof(helper())]` that fails here classifies
+                // the local as a VLA — which a static local then rejects.
+                // Resolve the declared return type through the parse
+                // declaration instead; an unmapped return type still fails,
+                // deferring the bound to a later mapping round rather than
+                // guessing.
+                CDeclaration* function_declaration = &builder->parse.declarations[declaration_index];
+                if (function_declaration->type.value < builder->parse.type_count)
+                {
+                    CType* function_type = &builder->parse.types[function_declaration->type.value];
+                    if (function_type->kind == C_TYPE_FUNCTION && function_type->return_type.value < builder->parse.type_count)
+                    {
+                        type = builder->c_type_ir_map[function_type->return_type.value];
+                    }
+                }
+                if (type.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                }
+            }
         }
         if (close >= end)
         {
