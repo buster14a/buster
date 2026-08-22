@@ -52,7 +52,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[67];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[68];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);

@@ -2600,7 +2600,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__const"),       S8_INITIALIZER("__const__"), S8_INITIALIZER("__volatile"),     S8_INITIALIZER("__volatile__"),
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
-    S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"),
+    S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -2614,11 +2614,6 @@ BUSTER_C_INTERNAL String8 const c_symbol_classified_extras[] = {
     S8_INITIALIZER("alignof"),       S8_INITIALIZER("constexpr"), S8_INITIALIZER("typeof_unqual"),
     S8_INITIALIZER("typeof"),        S8_INITIALIZER("vector_size"), S8_INITIALIZER("__vector_size"),
     S8_INITIALIZER("__vector_size__"),
-    // The one c_parse_type_word spelling that is not a declaration keyword;
-    // word_bits' constant-time "symbol > predefined_limit is not a word"
-    // answer needs every specifier-predicate spelling in the predefined
-    // range.
-    S8_INITIALIZER("__int128"),
 };
 
 // The spellings behind CSymbolWellKnown: entry N is interned N-th and
