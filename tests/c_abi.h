@@ -28,20 +28,14 @@
 // upstream only exercises them on a handful of targets anyway.
 #define ZIG_NO_BOOL_VECTORS
 
-// ZIG_NO_VECTORS strips the whole integer/float vector matrix. A pairing
-// that compiles the two sides with different compilers needs it for now:
-// same-compiler runs pass the gated matrix, but against clang on System V
-// the small and wide shapes still diverge (survey 2026-08-22, per element
-// size and lane count) — 4-byte vectors mismatch in both directions,
-// f32x1/u32x1/f64x1 and every 32- and 64-byte shape mismatch when this
-// compiler is the caller. 8- and 16-byte vectors already interoperate.
-// Everything outside the vector matrix passes cross-compiler in both
-// directions.
+// ZIG_NO_VECTORS strips the whole integer/float vector matrix. Since the
+// System V single-lane-double fix (<1 x double> arguments are MEMORY class
+// like GCC's and clang's, bare returns stay in XMM0) the gated matrix
+// passes cross-compiler against clang in both directions, so pairings no
+// longer need it; it remains available for targets whose vector ABI is
+// still being brought up.
 
 #ifndef C_ABI_FULL
-// Vectors smaller than four bytes fail codegen on x86-64 (the open SysV
-// tiny-vector work).
-#define ZIG_NO_TINY_VECTORS
 // Non-power-of-two lane counts are rejected as function parameter and return
 // types.
 #define ZIG_NO_NON_POW2_VECTORS

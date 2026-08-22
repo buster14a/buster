@@ -3550,11 +3550,13 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
             return CODEGEN_ERROR_UNSUPPORTED_ABI;
         }
         // SysV puts both a scalar f80 and the canonical single-f80 aggregate
-        // in a sixteen-byte, sixteen-aligned memory slot.  The aggregate is
-        // marked here so the normal stack-copy path does not mistake it for
-        // an unsupported register aggregate.
+        // in a sixteen-byte, sixteen-aligned memory slot.  Any memory-class
+        // aggregate (an f80 wrapper, or one whose walk hit a MEMORY field such
+        // as a single-lane double vector) is marked here so the normal
+        // stack-copy path does not mistake it for an unsupported register
+        // aggregate.
         bool f80_memory = f80_x87_shape && argument_abi.memory && type->layout.size == 16;
-        if (f80_memory && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
+        if (argument_abi.memory && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
         {
             aggregate = true;
         }
@@ -3594,8 +3596,12 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
             .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory && argument_in_registers,
         };
         u64 argument_stack_parts = 0;
-        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && f80_memory)
+        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.memory)
         {
+            // The classifier already sent this argument to memory — an f80
+            // slot, a single-lane double vector, or an aggregate the SysV
+            // walk gave a MEMORY class — so it always lives in the outgoing
+            // area regardless of how many registers remain.
             call_argument.on_stack = true;
             argument_stack_parts = call_argument.stack_part_count;
         }
@@ -7974,8 +7980,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
-                            bool prior_memory = prior_aggregate && prior_type && prior_type->layout.size > 16 &&
-                                                result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
+                            bool prior_memory = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && prior_type &&
+                                                (prior_aggregate_abi.memory || (prior_aggregate && prior_type->layout.size > 16));
                             if (prior_aggregate && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                             {
                                 prior_parts = 1;
@@ -7988,7 +7994,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 u32 prior_alignment =
                                     result.abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(prior_type) : 8;
-                                prior_stack_bytes = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, prior_alignment) + (u64)prior_parts * 8;
+                                // A memory-class value's stack image is its own
+                                // rounded size; its part count may be the one
+                                // register it never actually takes.
+                                u64 prior_stack_image = prior_memory && prior_type->layout.resolved ? ((prior_type->layout.size + 7) & ~(u64)7)
+                                                                                                    : (u64)prior_parts * 8;
+                                prior_stack_bytes = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, prior_alignment) + prior_stack_image;
                             }
                         }
                         u32 part_count = 1;
@@ -8010,6 +8021,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 part_count = argument_aggregate_abi.part_count;
                             }
+                        }
+                        IrType* memory_aggregate_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (argument_aggregate_abi.memory && memory_aggregate_type &&
+                            (memory_aggregate_type->kind == IR_TYPE_STRUCT || memory_aggregate_type->kind == IR_TYPE_UNION ||
+                             memory_aggregate_type->kind == IR_TYPE_ARRAY))
+                        {
+                            // A memory-class aggregate (one whose SysV walk hit a
+                            // MEMORY field) reads back from the incoming stack
+                            // area like any other stack aggregate.
+                            aggregate = true;
                         }
                         bool windows_indirect = result.abi == CODEGEN_ABI_X86_64_WINDOWS && argument_aggregate_abi.indirect;
                         IrType* argument_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -8118,9 +8139,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         // a vector register on a target that has one that wide.
                         // The IR ABI and the target between them have already
                         // said which of the two this is, so the size heuristic
-                        // only speaks when they did not.
-                        bool system_v_memory = aggregate && argument_type && argument_type->layout.size > 16 &&
-                                               result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && !system_v_register_aggregate;
+                        // only speaks when they did not. A memory class from
+                        // the classifier (a single-lane double vector, or an
+                        // aggregate whose walk hit a MEMORY field) is
+                        // authoritative at any size.
+                        bool system_v_memory = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && !system_v_register_aggregate &&
+                                               (argument_aggregate_abi.memory ||
+                                                (aggregate && argument_type && argument_type->layout.size > 16));
                         if (system_v_register_aggregate)
                         {
                             for (u32 part = 0; part < argument_aggregate_abi.part_count; part += 1)

@@ -2708,6 +2708,19 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || (type->kind == IR_TYPE_VECTOR && type->layout.size >= 8)
                                        ? IR_ABI_CLASS_FLOAT
                                        : IR_ABI_CLASS_INTEGER;
+            if (type->kind == IR_TYPE_VECTOR && type->layout.size == 8 && type->element_count == 1)
+            {
+                // A single-lane double vector field carries GCC's and clang's
+                // MEMORY class for <1 x double> into the aggregate: the whole
+                // value goes to memory in both directions (clang returns the
+                // wrapping struct through a hidden pointer even though the bare
+                // vector returns in XMM0).
+                IrType* element = ir_type_from_id(&program->types, type->element_type);
+                if (element && element->kind == IR_TYPE_FLOAT && element->bit_width == 64)
+                {
+                    abi_class = IR_ABI_CLASS_MEMORY;
+                }
+            }
             bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
                           type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
             if (!scalar)
@@ -3006,6 +3019,27 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     value.part_count = 1;
                     value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
                     return value;
+                }
+                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !is_result && size == 8 && type->element_count == 1)
+                {
+                    // GCC passes a single-lane double vector argument in memory
+                    // (an MMX-era shape that survived into the de-facto ABI) and
+                    // clang follows; the bare value still returns in XMM0, so
+                    // only the argument direction leaves the vector default. A
+                    // wrapping aggregate goes to memory in both directions
+                    // instead, which the aggregate walk models by giving the
+                    // field a MEMORY class.
+                    IrType* element = ir_type_from_id(&program->types, type->element_type);
+                    if (element && element->kind == IR_TYPE_FLOAT && element->bit_width == 64)
+                    {
+                        value.part_count = 1;
+                        value.memory = true;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_MEMORY,
+                            .size = (u32)size,
+                        };
+                        return value;
+                    }
                 }
                 value.part_count = 1;
                 value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
