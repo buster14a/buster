@@ -3216,6 +3216,32 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_value_in_registers(CodegenCan
     return true;
 }
 
+// Whether a result travels in the registers its classification named, rather
+// than in the single register the scalar path below loads it into. SystemV
+// names every part of every result that way. Win64 names one part, and only a
+// vector one has to come through here: its integer and floating-point results
+// already have a path that carries their width, and a vector part is the only
+// one that can be wider than the register the psABI picked for it.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_result_in_abi_parts(CodegenCanonicalAbiValue const* value, CodegenAbi abi)
+{
+    bool result = false;
+    if (value->part_count && !value->indirect && !value->memory)
+    {
+        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+        {
+            result = true;
+        }
+        else if (abi == CODEGEN_ABI_X86_64_WINDOWS)
+        {
+            for (u32 part_index = 0; part_index < value->part_count; part_index += 1)
+            {
+                result |= value->parts[part_index].abi_class == IR_ABI_CLASS_VECTOR;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool is_result,
                                                                              bool variadic_argument)
 {
@@ -11147,7 +11173,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 instruction_id = instruction->next;
                                 continue;
                             }
-                            if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && call_return_abi.part_count && !call_return_abi.indirect && !call_return_abi.memory)
+                            if (codegen_canonical_x64_result_in_abi_parts(&call_return_abi, result.abi))
                             {
                                 u32 integer_index = 0;
                                 u32 float_index = 0;
@@ -13339,8 +13365,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 aggregate_return = true;
                                 return_parts = aggregate_return_abi.part_count;
                             }
-                            if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && aggregate_return_abi.part_count && !aggregate_return_abi.indirect &&
-                                !aggregate_return_abi.memory)
+                            if (codegen_canonical_x64_result_in_abi_parts(&aggregate_return_abi, result.abi))
                             {
                                 u32 integer_index = 0;
                                 u32 float_index = 0;

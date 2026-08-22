@@ -3796,6 +3796,62 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_simd_cross.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, c_simd_cross.has_object);
     }
+    // Every cross row above stops at an object file, and a calling-convention
+    // defect is the one kind that survives that: a vector returned in the wrong
+    // register assembles, links, and only disagrees when something calls it.
+    // Where wine is installed the Windows target can be run for real instead.
+    // The build takes the host's own model, so the code is what this machine
+    // executes and the 512-bit body is compiled in exactly when the host has
+    // the registers for it -- the default model the loop above uses would
+    // preprocess that body away. Wine is optional: a host without it skips the
+    // block, and a Windows host already runs these fixtures natively.
+#if !BUSTER_WINDOWS
+    if (target_native.cpu_arch == CPU_ARCH_X86_64)
+    {
+        ProcessSpawnOptions wine_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+        };
+        String8 wine_probe_arguments[] = {
+            S8("wine"),
+            S8("--version"),
+        };
+        ProcessSpawnResult wine_probe =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_probe_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+        bool wine_available = wine_probe.handle && os_process_wait_sync(arguments->arena, wine_probe).result == PROCESS_RESULT_SUCCESS;
+        String8 wine_fixtures[] = {
+            S8("tests/basic_c_vector.c"),
+            S8("tests/basic_c_simd.c"),
+            S8("tests/basic_c_wide_vector_argument.c"),
+        };
+        for (u32 fixture_index = 0; wine_available && fixture_index < BUSTER_ARRAY_LENGTH(wine_fixtures); fixture_index += 1)
+        {
+            String8 wine_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-windows-run"),
+                                                                      string_format(arguments->arena, S8("-{u32}.exe"), fixture_index));
+            String8 wine_build_command_line[] = {
+                S8("-g"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=native"), S8("-o"), wine_executable_path, wine_fixtures[fixture_index],
+            };
+            CompilerDriverResult wine_build = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_build_command_line)));
+            BUSTER_TEST(arguments, wine_build.error == COMPILER_DRIVER_ERROR_NONE);
+            if (wine_build.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                continue;
+            }
+            String8 wine_run_arguments[] = {
+                S8("wine"),
+                wine_executable_path,
+            };
+            ProcessSpawnResult wine_run =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+            BUSTER_TEST(arguments, wine_run.handle != 0);
+            if (wine_run.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, wine_run).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+#endif
 
     String8 c_conversions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conversions"), S8(""));
     String8 c_conversions_command_line[] = {

@@ -2895,6 +2895,16 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                            convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
             if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
             {
+                // Win64 hands a vector over by reference and brings an 8- or
+                // 16-byte one back in XMM0. Wider results stay indirect here
+                // even though clang returns them directly in YMM0/ZMM0: the
+                // canonical x64 emitter has no 256-bit register move for a
+                // result part (a 32-byte part fails to compile on the SysV
+                // side today for the same reason), so a direct answer at
+                // those widths would stop the module from compiling rather
+                // than change which registers carry it. Buster's caller and
+                // callee agree on the reference, so this is a cross-compiler
+                // interop gap at 32/64 bytes, not a miscompile.
                 if (!is_result || (size != 8 && size != 16))
                 {
                     value.part_count = 1;
