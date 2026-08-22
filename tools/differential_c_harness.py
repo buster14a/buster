@@ -542,13 +542,16 @@ VECTOR_ELEMENTS = [
     ("double", 8, True),
 ]
 
-VECTOR_BYTES = [16, 32, 64]
+# 1/2/4-byte vectors ride general-purpose registers on SysV (the GCC
+# deviation clang follows); 8 bytes up rides XMM/YMM/ZMM. Keep both regimes
+# in the draw so the classification boundary stays covered.
+VECTOR_BYTES = [1, 2, 4, 8, 16, 32, 64]
 
 
 def generate_union_vector_unit(rng, unit_index):
     prefix = "uv%d" % unit_index
     element_spelling, element_size, element_is_float = rng.choice(VECTOR_ELEMENTS)
-    vector_bytes = rng.choice(VECTOR_BYTES)
+    vector_bytes = rng.choice([size for size in VECTOR_BYTES if size >= element_size])
     lane_count = vector_bytes // element_size
     vector_type = "%s_V" % prefix
     storage_type = "%s_Storage" % prefix

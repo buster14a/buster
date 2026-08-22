@@ -2681,7 +2681,13 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                 classes[first + 1] = ir_system_v_abi_class_merge(classes[first + 1], IR_ABI_CLASS_X87_UP);
                 continue;
             }
-            IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER;
+            // GCC and clang deviate from a literal psABI reading for vectors
+            // smaller than an eightbyte: a 1-, 2- or 4-byte vector is INTEGER
+            // wherever it sits, so a struct wrapping one rides a
+            // general-purpose register exactly as the bare vector does.
+            IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || (type->kind == IR_TYPE_VECTOR && type->layout.size >= 8)
+                                       ? IR_ABI_CLASS_FLOAT
+                                       : IR_ABI_CLASS_INTEGER;
             bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
                           type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
             if (!scalar)
@@ -2959,6 +2965,16 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     .abi_class = IR_ABI_CLASS_MEMORY,
                     .size = (u32)size,
                 };
+                return value;
+            }
+            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size < 8)
+            {
+                // GCC passes 1-, 2- and 4-byte vectors in general-purpose
+                // registers and clang follows, so INTEGER is the convention
+                // here; it is also what lets the canonical emitter carry the
+                // part, whose vector moves start at four bytes.
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
                 return value;
             }
             value.part_count = 1;

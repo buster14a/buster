@@ -1689,6 +1689,96 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, vector_frame_displacements_valid);
         }
     }
+    // A 1-, 2- or 4-byte vector rides a general-purpose register on System V:
+    // GCC deviates from a literal psABI reading for vectors smaller than an
+    // eightbyte and clang follows, so INTEGER is the convention, bare or
+    // wrapped in a struct. It is also what makes these compile at all -- the
+    // canonical emitter's vector moves start at four bytes, so an SSE-classed
+    // two-byte part reported CODEGEN_ERROR_UNSUPPORTED_ABI from every caller.
+    // Eight bytes up stays SSE, and AAPCS64 keeps its vector classes.
+    String8 tiny_vector_c_source = S8(
+        "typedef signed char V1 __attribute__((vector_size(1)));\n"
+        "typedef signed char V2 __attribute__((vector_size(2)));\n"
+        "typedef signed char V4 __attribute__((vector_size(4)));\n"
+        "typedef signed char V8 __attribute__((vector_size(8)));\n"
+        "typedef float F1 __attribute__((vector_size(4)));\n"
+        "typedef struct TinyWrap { V2 lanes; } TinyWrap;\n"
+        "static V1 tiny_one(V1 value) { return value + value; }\n"
+        "static V2 tiny_identity(V2 value) { return value; }\n"
+        "static V4 tiny_four(V4 value) { return value; }\n"
+        "static F1 tiny_float(F1 value) { return value + value; }\n"
+        "static V8 wide_eight(V8 value) { return value; }\n"
+        "static TinyWrap tiny_wrap(TinyWrap value) { value.lanes += value.lanes; return value; }\n"
+        "V2 tiny_calls(V2 value) {\n"
+        "    TinyWrap wrapped = { value };\n"
+        "    wrapped = tiny_wrap(wrapped);\n"
+        "    V1 one_value = { 3 };\n"
+        "    V1 one = tiny_one(one_value);\n"
+        "    V4 four_value = { 1, 2, 3, 4 };\n"
+        "    V4 four = tiny_four(four_value);\n"
+        "    F1 float_value = { 1.5f };\n"
+        "    F1 floated = tiny_float(float_value);\n"
+        "    V8 eight_value = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+        "    V8 eight = wide_eight(eight_value);\n"
+        "    V2 result = tiny_identity(wrapped.lanes);\n"
+        "    result[0] += one[0] + four[2] + (signed char)floated[0];\n"
+        "    result[1] += eight[5];\n"
+        "    return result;\n"
+        "}\n");
+    Target tiny_vector_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    CPreprocessResult tiny_vector_tokens = c_preprocess(arguments->arena, tiny_vector_c_source, (CPreprocessOptions){0});
+    CParseResult tiny_vector_parse = c_parse(arguments->arena, tiny_vector_tokens);
+    CIRLowerResult tiny_vector_ir =
+        c_lower_to_ir(arguments->arena, S8("system-v-tiny-vector.c"), tiny_vector_tokens, tiny_vector_parse, tiny_vector_target);
+    BUSTER_TEST(arguments, tiny_vector_tokens.error_count == 0);
+    BUSTER_TEST(arguments, tiny_vector_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, tiny_vector_ir.diagnostic_count == 0);
+    if (tiny_vector_ir.program)
+    {
+        IrProgram* tiny_vector_program = tiny_vector_ir.program;
+        CodegenModule tiny_vector_module = codegen_generate_canonical_module(arguments->arena, tiny_vector_program, tiny_vector_program->modules,
+                                                                              tiny_vector_target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, tiny_vector_module.error == CODEGEN_ERROR_NONE);
+        u32 tiny_vector_class_count = 0;
+        u32 wide_vector_class_count = 0;
+        for (u32 type_index = 0; type_index < tiny_vector_program->types.count; type_index += 1)
+        {
+            IrType* type = tiny_vector_program->types.types + type_index;
+            if (type->kind != IR_TYPE_VECTOR || !type->layout.resolved)
+            {
+                continue;
+            }
+            IrAbiValue argument_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+            IrAbiValue result_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+            IrAbiValue aapcs_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+            BUSTER_TEST(arguments, argument_abi.part_count == 1 && !argument_abi.indirect && !argument_abi.memory);
+            BUSTER_TEST(arguments, result_abi.part_count == 1 && !result_abi.indirect && !result_abi.memory);
+            BUSTER_TEST(arguments, argument_abi.parts[0].size == (u32)type->layout.size);
+            IrAbiClass expected_class = type->layout.size < 8 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_VECTOR;
+            BUSTER_TEST(arguments, argument_abi.parts[0].abi_class == expected_class);
+            BUSTER_TEST(arguments, result_abi.parts[0].abi_class == expected_class);
+            BUSTER_TEST(arguments, aapcs_abi.part_count == 1 && aapcs_abi.parts[0].abi_class == IR_ABI_CLASS_VECTOR);
+            tiny_vector_class_count += type->layout.size < 8;
+            wide_vector_class_count += type->layout.size >= 8;
+        }
+        BUSTER_TEST(arguments, tiny_vector_class_count >= 4);
+        BUSTER_TEST(arguments, wide_vector_class_count >= 1);
+        for (u32 type_index = 0; type_index < tiny_vector_program->types.count; type_index += 1)
+        {
+            IrType* type = tiny_vector_program->types.types + type_index;
+            if (type->kind != IR_TYPE_STRUCT || !string_equal(type->name, S8("TinyWrap")))
+            {
+                continue;
+            }
+            IrAbiValue wrap_abi = ir_type_abi_value(tiny_vector_program, type->id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+            BUSTER_TEST(arguments, wrap_abi.part_count == 1 && !wrap_abi.indirect && !wrap_abi.memory);
+            BUSTER_TEST(arguments, wrap_abi.parts[0].abi_class == IR_ABI_CLASS_INTEGER && wrap_abi.parts[0].size == 2);
+        }
+    }
     String8 static_aggregate_c_source = S8(
         "typedef struct LargeAggregate { char padding[1024 * 1024]; int first; int second; } LargeAggregate;\n"
         "static LargeAggregate global_aggregate;\n"
