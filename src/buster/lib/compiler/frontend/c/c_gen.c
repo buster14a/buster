@@ -76,13 +76,39 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 
         .length = (u32)length,
     };
 }
-BUSTER_C_INTERNAL bool c_declaration_has_token(CPreprocessResult preprocess, CDeclaration declaration, String8 spelling)
+// Which members of `interesting` — a union of C_SYMBOL_WELL_KNOWN_BIT values
+// — appear among a declaration's pre-body tokens, answered in one pass: an
+// interned identifier contributes a shift and a mask against the id the
+// token already carries, and only a token the intern pass never saw
+// (pasted, synthesized, or test-built) falls back to the spelling ladder,
+// so a missed path costs speed and never correctness. Every spelling the
+// callers ask about is identifier-shaped, so non-identifier tokens cannot
+// match and are skipped without materializing their spelling.
+BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess, CDeclaration declaration, u64 interesting)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
-    bool result = false;
-    for (u32 index = declaration.token_start; index < end && !result; index += 1)
+    u64 result = 0;
+    for (u32 index = declaration.token_start; index < end; index += 1)
     {
-        result = string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling);
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            if (token.symbol)
+            {
+                result |= token.symbol < 64 ? interesting & (1ull << token.symbol) : 0;
+            }
+            else
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+                for (u64 remaining = interesting; remaining; remaining &= remaining - 1)
+                {
+                    if (string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]))
+                    {
+                        result |= remaining & (0 - remaining);
+                    }
+                }
+            }
+        }
     }
 
     return result;
@@ -95,8 +121,8 @@ BUSTER_C_INTERNAL String8 c_declaration_section_name(Arena* arena, CPreprocessRe
     {
         CToken token = preprocess.tokens[index];
         if (token.kind != C_TOKEN_IDENTIFIER ||
-            (!string_equal(c_token_spelling(preprocess.spelling_base, token), S8("section")) &&
-             !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__section__"))) ||
+            !c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(SECTION) | C_SYMBOL_WELL_KNOWN_BIT(SECTION_GNU)) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
             !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
@@ -122,7 +148,8 @@ BUSTER_C_INTERNAL String8 c_declaration_link_name(Arena* arena, CPreprocessResul
     {
         CToken token = preprocess.tokens[index];
         if (token.kind != C_TOKEN_IDENTIFIER ||
-            (!string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) && !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) && !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))) ||
+            !c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
             !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
@@ -31866,12 +31893,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 first = declaration;
             }
-            bool is_extern = c_declaration_has_token(preprocess, *declaration, S8("extern"));
+            u64 specifiers = c_declaration_well_known_set(preprocess, *declaration,
+                                                          C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) |
+                                                          C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) |
+                                                          C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+            bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
-            internal |= c_declaration_has_token(preprocess, *declaration, S8("static")) || declaration->is_constexpr;
-            is_thread_local |= c_declaration_has_token(preprocess, *declaration, S8("__thread")) ||
-                               c_declaration_has_token(preprocess, *declaration, S8("_Thread_local")) ||
-                               c_declaration_has_token(preprocess, *declaration, S8("thread_local"));
+            internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 || declaration->is_constexpr;
+            is_thread_local |= (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) |
+                                              C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))) != 0;
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;
@@ -31987,7 +32017,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 definition = declaration;
             }
-            internal |= c_declaration_has_token(preprocess, *declaration, S8("static"));
+            internal |= c_declaration_well_known_set(preprocess, *declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         }
         IrTypeId type = c_type_ir_map[entity->type.value];
         IrType* type_value = ir_type_from_id(&program->types, type);
@@ -32034,7 +32064,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 definition = declaration;
             }
-            internal |= c_declaration_has_token(preprocess, *declaration, S8("static"));
+            internal |= c_declaration_well_known_set(preprocess, *declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         }
         IrTypeId type = c_type_ir_map[entity->type.value];
         IrType* type_value = ir_type_from_id(&program->types, type);
@@ -32078,9 +32108,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 first = declaration;
             }
-            bool is_extern = c_declaration_has_token(preprocess, *declaration, S8("extern"));
+            u64 specifiers = c_declaration_well_known_set(preprocess, *declaration,
+                                                          C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_SYMBOL_WELL_KNOWN_BIT(STATIC));
+            bool is_extern = (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)) != 0;
             bool initialized = c_ir_declaration_initializer_range(preprocess, *declaration, &(u32){0}, &(u32){0});
-            internal |= c_declaration_has_token(preprocess, *declaration, S8("static"));
+            internal |= (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;
@@ -32153,8 +32185,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .initializer_kind = IR_GLOBAL_INITIALIZER_NONE,
             .alignment = object_alignment,
             .is_read_only = definition->is_constexpr || c_ir_c_type_is_read_only(&constant_builder, definition->type),
-            .is_thread_local =
-                c_declaration_has_token(preprocess, *definition, S8("_Thread_local")) || c_declaration_has_token(preprocess, *definition, S8("__thread")),
+            .is_thread_local = c_declaration_well_known_set(preprocess, *definition,
+                                                            C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL) | C_SYMBOL_WELL_KNOWN_BIT(THREAD_GNU)) != 0,
         };
         constant_builder.failure_message = (String8){0};
         constant_builder.failure_token_index = UINT32_MAX;
@@ -32228,15 +32260,21 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        if (declaration.kind != C_DECLARATION_FUNCTION || declaration.entity.value >= parse.entity_count ||
-            c_declaration_has_token(preprocess, declaration, S8("static")))
+        if (declaration.kind != C_DECLARATION_FUNCTION || declaration.entity.value >= parse.entity_count)
         {
             continue;
         }
-        bool inline_specified = c_declaration_has_token(preprocess, declaration, S8("inline")) ||
-                                c_declaration_has_token(preprocess, declaration, S8("__inline")) ||
-                                c_declaration_has_token(preprocess, declaration, S8("__inline__"));
-        if (!inline_specified || c_declaration_has_token(preprocess, declaration, S8("extern")))
+        u64 specifiers = c_declaration_well_known_set(preprocess, declaration,
+                                                      C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(EXTERN) |
+                                                      C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) |
+                                                      C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT));
+        if (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC))
+        {
+            continue;
+        }
+        bool inline_specified = (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) |
+                                               C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT))) != 0;
+        if (!inline_specified || (specifiers & C_SYMBOL_WELL_KNOWN_BIT(EXTERN)))
         {
             entity_external_definition[declaration.entity.value] = true;
         }
@@ -32252,7 +32290,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             entity_function_declarations[declaration.entity.value] = declaration_index;
         }
-        bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
+        bool internal = c_declaration_well_known_set(preprocess, declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool referenced_outside_body = declaration.entity.value < parse.entity_count && function_referenced_outside[declaration.entity.value];
         if ((!internal && !inline_definition) || referenced_outside_body)
@@ -32390,7 +32428,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             };
             continue;
         }
-        bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
+        bool internal = c_declaration_well_known_set(preprocess, declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         if ((internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index] &&
             !c_declaration_section_name(arena, preprocess, declaration).length)
@@ -32458,7 +32496,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
-        bool internal = c_declaration_has_token(preprocess, declaration, S8("static"));
+        bool internal = c_declaration_well_known_set(preprocess, declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         if ((internal || inline_definition) && !function_needed[declaration_index] &&
             !c_declaration_section_name(arena, preprocess, declaration).length)
