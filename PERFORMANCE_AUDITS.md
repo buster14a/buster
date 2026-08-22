@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-22T122232Z`](docs/performance-audits/2026-08-22T122232Z.md) — the two 2026-08-08g-era stage-1 leads re-derived: the specifier-word ladders move to the interned symbol id, and the 2-byte token record is recorded dead
 - [`2026-08-22T120206Z`](docs/performance-audits/2026-08-22T120206Z.md) — stream preprocessed tokens into their final array instead of staging ranges that never coalesced
 - [`2026-08-22T120959Z`](docs/performance-audits/2026-08-22T120959Z.md) — attribute the include amplification per header, then drop guard-shaped re-includes unread
 - [`2026-08-22T114019Z`](docs/performance-audits/2026-08-22T114019Z.md) — take five cache and branch-miss leads, and measure two more that do not pay
