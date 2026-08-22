@@ -4406,6 +4406,16 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
     f64 fraction_scale = 1.0;
     bool fraction = false;
     bool saw_digit = false;
+    // The integer view of a decimal literal: every digit absorbed into a u64
+    // mantissa plus a power of ten. When the whole spelling fits — mantissa
+    // under 2^53, scale within the exactly representable 1e22 — one multiply
+    // or divide of two exact doubles is correctly rounded (Clinger's fast
+    // path), where the digit-by-digit accumulation below drifts by an ulp
+    // (its running fraction scales 0.1, 0.01, ... are themselves rounded).
+    u64 mantissa = 0;
+    s64 mantissa_scale = 0;
+    s64 fraction_digits = 0;
+    bool mantissa_exact = true;
     while (index < spelling.length)
     {
         u8 byte = spelling.pointer[index];
@@ -4441,12 +4451,39 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
         {
             value = value * (f64)base + (f64)digit;
         }
+        if (!hexadecimal)
+        {
+            if (fraction)
+            {
+                fraction_digits += 1;
+            }
+            if (mantissa <= (UINT64_MAX - 9) / 10)
+            {
+                mantissa = mantissa * 10 + digit;
+            }
+            else
+            {
+                // A digit the mantissa cannot absorb: an integer digit still
+                // scales the value by ten; a dropped zero keeps the mantissa
+                // exact either way.
+                if (!fraction)
+                {
+                    mantissa_scale += 1;
+                }
+                else
+                {
+                    fraction_digits -= 1;
+                }
+                mantissa_exact &= digit == 0;
+            }
+        }
         index += 1;
     }
     if (!saw_digit)
     {
         return false;
     }
+    s64 explicit_exponent = 0;
     if (index < spelling.length)
     {
         index += 1;
@@ -4472,6 +4509,7 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
         {
             return false;
         }
+        explicit_exponent = negative ? -(s64)exponent : (s64)exponent;
         f64 factor = 1.0;
         f64 power = hexadecimal ? 2.0 : 10.0;
         while (exponent)
@@ -4487,6 +4525,23 @@ BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8*
             }
         }
         value = negative ? value / factor : value * factor;
+    }
+    if (!hexadecimal && mantissa_exact && mantissa < ((u64)1 << 53))
+    {
+        static f64 const powers_of_ten[23] = {
+            1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+            1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+        };
+        s64 decimal_exponent = mantissa_scale - fraction_digits + explicit_exponent;
+        if (decimal_exponent >= -22 && decimal_exponent <= 22)
+        {
+            value = decimal_exponent >= 0 ? (f64)mantissa * powers_of_ten[decimal_exponent] : (f64)mantissa / powers_of_ten[-decimal_exponent];
+        }
+        // Outside the window the accumulated value stands; it can be an ulp
+        // off, which only literals with many digits or large exponents reach.
+        // (A later f suffix narrows the correctly rounded double, so a float
+        // literal can still land an ulp from direct decimal-to-f32 rounding
+        // in adversarial cases; those need digits this path already excludes.)
     }
     *value_out = value;
     return true;
