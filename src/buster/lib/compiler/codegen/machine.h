@@ -607,6 +607,24 @@ typedef enum MachineOpcode
     // allocatable file; ordering between the row and its chunk loads and
     // store comes from the scheduler's float-state chain.
     MACHINE_A64_VARITH, // payload = (lane_log2 << 8) | operation
+    // AArch64 atomics, the canonical emitter's own shapes. Loads and
+    // stores are single ldar/stlr words over ordinary operands (emitted
+    // at every memory order — stronger than relaxed asks for, and what
+    // keeps the row count at one); the read-modify-write and
+    // compare-exchange loops are constrained bounded sequences on the
+    // canonical X9-X13 register palette, declared through
+    // fixed_register_mask exactly like VA_ARG.
+    MACHINE_A64_ATOMIC_LOAD,  // def result, use address; payload = size
+    MACHINE_A64_ATOMIC_STORE, // use address, use value; payload = size
+    // def old (X9), use address (X10), use operand (X11); X12/X13
+    // clobbered; payload = (operation << 8) | (release << 5) |
+    // (acquire << 4) | size
+    MACHINE_A64_ATOMIC_RMW,
+    // def old (X9), use address (X10), use expected (X12), use desired
+    // (X11); X13 clobbered, NZCV defined; payload = (release << 5) |
+    // (acquire << 4) | size
+    MACHINE_A64_ATOMIC_CAS,
+    MACHINE_A64_ATOMIC_FENCE, // dmb ish
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

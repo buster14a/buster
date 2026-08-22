@@ -1109,7 +1109,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 63);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 68);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1913,7 +1913,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "MachineVLit vlit_make(int a, int b) { return (MachineVLit){ a, b, a + b, a - b }; }\n"
                                   "MachineVLit vquad_add(MachineVLit left, MachineVLit right) { return left + right; }\n"
                                   "typedef float MachineVF4 __attribute__((vector_size(16)));\n"
-                                  "MachineVF4 vf4_scale(MachineVF4 value, MachineVF4 scale) { return value * scale; }\n");
+                                  "MachineVF4 vf4_scale(MachineVF4 value, MachineVF4 scale) { return value * scale; }\n"
+                                  "unsigned long amix(unsigned long start, unsigned long delta) { _Atomic unsigned long cell = start;\n"
+                                  "    unsigned long added = __c11_atomic_fetch_add(&cell, delta, __ATOMIC_ACQ_REL);\n"
+                                  "    unsigned long swapped = __c11_atomic_exchange(&cell, added ^ delta, __ATOMIC_SEQ_CST);\n"
+                                  "    unsigned long expected = added ^ delta;\n"
+                                  "    unsigned long won = (unsigned long)__c11_atomic_compare_exchange_strong(&cell, &expected, swapped + 3, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE);\n"
+                                  "    __c11_atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
+                                  "    __c11_atomic_store(&cell, swapped - added, __ATOMIC_RELEASE);\n"
+                                  "    return added * 3 + swapped + won + __c11_atomic_load(&cell, __ATOMIC_ACQUIRE); }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4228,7 +4236,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("vsum"), S8_INITIALIZER("vec_pass"), S8_INITIALIZER("big_take"),
             S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("aligned_spot"), S8_INITIALIZER("vlit_make"),
-            S8_INITIALIZER("vquad_add"), S8_INITIALIZER("vf4_scale"),
+            S8_INITIALIZER("vquad_add"), S8_INITIALIZER("vf4_scale"), S8_INITIALIZER("amix"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4608,7 +4616,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                string_equal(a64_supported_names[name_index], S8("union_tail")) ||
                                string_equal(a64_supported_names[name_index], S8("ucvt")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv")) ||
-                               string_equal(a64_supported_names[name_index], S8("aligned_spot")) || is_readp;
+                               string_equal(a64_supported_names[name_index], S8("aligned_spot")) ||
+                               string_equal(a64_supported_names[name_index], S8("amix")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
                                string_equal(a64_supported_names[name_index], S8("srem")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv"));

@@ -2584,6 +2584,171 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_array(MachineA64Selector* selector, 
     return selected;
 }
 
+// The canonical emitter's C11 mapping: acquire folds in consume and both
+// halves of acquire-release/sequential, release the other half.
+BUSTER_GLOBAL_LOCAL bool machine_a64_memory_order_acquires(u8 memory_order)
+{
+    return memory_order == IR_MEMORY_ORDER_CONSUME || memory_order == IR_MEMORY_ORDER_ACQUIRE || memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+           memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_memory_order_releases(u8 memory_order)
+{
+    return memory_order == IR_MEMORY_ORDER_RELEASE || memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE || memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+}
+
+// Scalar atomic load: the place's address into a fresh register, one
+// ldar-family word into the result. Every memory order takes the acquire
+// form — stronger than relaxed asks for, and what keeps the row count at
+// one. Aggregate results are slot-backed and never reach here (no result
+// register), exactly the canonical rejection.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
+    IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+    u64 size = loaded_type && loaded_type->layout.resolved ? loaded_type->layout.size : 0;
+    if (result_register != UINT32_MAX && (size == 1 || size == 2 || size == 4 || size == 8) && instruction->operand_count >= 1)
+    {
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                           .payload = (u32)size,
+                                                           .opcode = MACHINE_A64_ATOMIC_LOAD,
+                                                       });
+            machine_a64_define(selector, result_register, row);
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    u32 value_register;
+    if (instruction->operand_count >= 2 && instruction->operands[1].value < function->value_count &&
+        machine_a64_operand_register(selector, instruction->operands[1], &value_register))
+    {
+        IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+        u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
+        if (size == 1 || size == 2 || size == 4 || size == 8)
+        {
+            u32 address_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+            if (selected)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_A64_ATOMIC_STORE,
+                                                 });
+            }
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_read_modify_write(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
+    IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
+    u64 size = value_type && value_type->layout.resolved ? value_type->layout.size : 0;
+    // The canonical shape gate: integers always, pointers for the additive
+    // pair, booleans and pointers for exchange.
+    bool pointer_arithmetic = value_type && value_type->kind == IR_TYPE_POINTER &&
+                              (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
+    bool kind_supported = value_type && (value_type->kind == IR_TYPE_INTEGER || pointer_arithmetic ||
+                                         (instruction->atomic_operation == IR_ATOMIC_EXCHANGE &&
+                                          (value_type->kind == IR_TYPE_BOOLEAN || value_type->kind == IR_TYPE_POINTER)));
+    u32 operand_register;
+    if (result_register != UINT32_MAX && kind_supported && (size == 1 || size == 2 || size == 4 || size == 8) &&
+        instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT && instruction->operand_count >= 2 &&
+        machine_a64_operand_register(selector, instruction->operands[1], &operand_register))
+    {
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            u32 payload = (u32)instruction->atomic_operation << 8 |
+                          (machine_a64_memory_order_releases(instruction->memory_order) ? 0x20u : 0) |
+                          (machine_a64_memory_order_acquires(instruction->memory_order) ? 0x10u : 0) | (u32)size;
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_register)},
+                                                           .payload = payload,
+                                                           .opcode = MACHINE_A64_ATOMIC_RMW,
+                                                       });
+            machine_a64_define(selector, result_register, row);
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_compare_exchange(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
+    IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
+    u64 size = value_type && value_type->layout.resolved ? value_type->layout.size : 0;
+    u32 expected_register;
+    u32 desired_register;
+    if (result_register != UINT32_MAX && value_type && (value_type->kind == IR_TYPE_INTEGER || value_type->kind == IR_TYPE_POINTER) &&
+        (size == 1 || size == 2 || size == 4 || size == 8) && instruction->operand_count >= 3 &&
+        machine_a64_operand_register(selector, instruction->operands[1], &expected_register) &&
+        machine_a64_operand_register(selector, instruction->operands[2], &desired_register))
+    {
+        u32 address_register = machine_a64_synthesize_register(selector);
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+        if (selected)
+        {
+            // The canonical acquire fold takes the failure order into
+            // account as well; consume and sequential count, a plain
+            // acquire-release failure order cannot occur.
+            bool acquire = machine_a64_memory_order_acquires(instruction->memory_order) ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_CONSUME ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_ACQUIRE ||
+                           instruction->failure_memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+            u32 payload = (machine_a64_memory_order_releases(instruction->memory_order) ? 0x20u : 0) | (acquire ? 0x10u : 0) | (u32)size;
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, expected_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, desired_register)},
+                                                           .payload = payload,
+                                                           .opcode = MACHINE_A64_ATOMIC_CAS,
+                                                       });
+            machine_a64_define(selector, result_register, row);
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    // Signal fences and relaxed thread fences emit nothing, exactly like
+    // the canonical path.
+    if (!instruction->atomic_signal_fence && instruction->memory_order != IR_MEMORY_ORDER_RELAXED)
+    {
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .opcode = MACHINE_A64_ATOMIC_FENCE,
+                                         });
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector, IrInstruction* instruction)
 {
     machine_a64_select_row(selector, (MachineInstruction){
@@ -2895,6 +3060,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             break;
         case IR_OPCODE_STORE:
             selected = machine_a64_select_store(selector, instruction);
+            break;
+        case IR_OPCODE_ATOMIC_LOAD:
+            selected = machine_a64_select_atomic_load(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_ATOMIC_STORE:
+            selected = machine_a64_select_atomic_store(selector, instruction);
+            break;
+        case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+            selected = machine_a64_select_atomic_read_modify_write(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+            selected = machine_a64_select_atomic_compare_exchange(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_ATOMIC_FENCE:
+            selected = machine_a64_select_atomic_fence(selector, instruction);
             break;
         case IR_OPCODE_BRANCH:
             selected = machine_a64_select_branch(selector, instruction);
@@ -5625,6 +5805,72 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, varith_word);
             }
             break;
+            case MACHINE_A64_ATOMIC_LOAD:
+            case MACHINE_A64_ATOMIC_STORE:
+            {
+                // One ldar/stlr-family word, the canonical
+                // a64_emit_atomic_pointer encoding; the low payload byte
+                // carries the access size.
+                u32 atomic_size = instruction->payload & 0xffu;
+                u32 atomic_size_bits = atomic_size == 2 ? 0x40000000u : atomic_size == 4 ? 0x80000000u : atomic_size == 8 ? 0xc0000000u : 0;
+                bool atomic_is_store = instruction->opcode == MACHINE_A64_ATOMIC_STORE;
+                u32 atomic_data = operand_registers[atomic_is_store ? 1 : 0];
+                u32 atomic_address = operand_registers[atomic_is_store ? 0 : 1];
+                machine_a64_emit(&encoder, (atomic_is_store ? 0x089ffc00u : 0x08dffc00u) | atomic_size_bits | (atomic_address << 5) | atomic_data);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_RMW:
+            {
+                // The canonical exclusive loop on its fixed palette:
+                //   retry: ld(a)xr x9, [x10]
+                //          <op>    x12, x9, x11
+                //          st(l)xr w13, x12, [x10]
+                //          cbnz    w13, retry
+                // The operation words are the canonical emitter's, computing
+                // x12 from x9 and x11 directly.
+                u32 rmw_size = instruction->payload & 0xfu;
+                u32 rmw_size_bits = rmw_size == 2 ? 0x40000000u : rmw_size == 4 ? 0x80000000u : rmw_size == 8 ? 0xc0000000u : 0;
+                bool rmw_wide = rmw_size == 8;
+                u32 rmw_operation = (instruction->payload >> 8) & 0xffu;
+                machine_a64_emit(&encoder, ((instruction->payload & 0x10u) ? 0x085ffc00u : 0x085f7c00u) | rmw_size_bits | (MACHINE_A64_X10 << 5) |
+                                               MACHINE_A64_X9);
+                u32 rmw_word = rmw_operation == IR_ATOMIC_ADD           ? (rmw_wide ? 0x8b0b012cu : 0x0b0b012cu)
+                               : rmw_operation == IR_ATOMIC_SUBTRACT    ? (rmw_wide ? 0xcb0b012cu : 0x4b0b012cu)
+                               : rmw_operation == IR_ATOMIC_BITWISE_AND ? (rmw_wide ? 0x8a0b012cu : 0x0a0b012cu)
+                               : rmw_operation == IR_ATOMIC_BITWISE_OR  ? (rmw_wide ? 0xaa0b012cu : 0x2a0b012cu)
+                               : rmw_operation == IR_ATOMIC_BITWISE_XOR ? (rmw_wide ? 0xca0b012cu : 0x4a0b012cu)
+                                                                        : (rmw_wide ? 0xaa0b03ecu : 0x2a0b03ecu);
+                machine_a64_emit(&encoder, rmw_word);
+                machine_a64_emit(&encoder, ((instruction->payload & 0x20u) ? 0x0800fc00u : 0x08007c00u) | rmw_size_bits | (MACHINE_A64_X13 << 16) |
+                                               (MACHINE_A64_X10 << 5) | MACHINE_A64_X12);
+                machine_a64_emit(&encoder, 0x35000000u | (0x7fffdu << 5) | MACHINE_A64_X13);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_CAS:
+            {
+                // The canonical compare-exchange loop:
+                //   retry: ld(a)xr x9, [x10]
+                //          cmp     x9, x12
+                //          b.ne    done
+                //          st(l)xr w13, x11, [x10]
+                //          cbnz    w13, retry
+                //   done:  clrex
+                u32 cas_size = instruction->payload & 0xfu;
+                u32 cas_size_bits = cas_size == 2 ? 0x40000000u : cas_size == 4 ? 0x80000000u : cas_size == 8 ? 0xc0000000u : 0;
+                machine_a64_emit(&encoder, ((instruction->payload & 0x10u) ? 0x085ffc00u : 0x085f7c00u) | cas_size_bits | (MACHINE_A64_X10 << 5) |
+                                               MACHINE_A64_X9);
+                machine_a64_emit(&encoder, cas_size == 8 ? 0xeb0c013fu : 0x6b0c013fu);
+                machine_a64_emit(&encoder, 0x54000061u);
+                machine_a64_emit(&encoder, ((instruction->payload & 0x20u) ? 0x0800fc00u : 0x08007c00u) | cas_size_bits | (MACHINE_A64_X13 << 16) |
+                                               (MACHINE_A64_X10 << 5) | MACHINE_A64_X11);
+                machine_a64_emit(&encoder, 0x35000000u | (0x7fffcu << 5) | MACHINE_A64_X13);
+                machine_a64_emit(&encoder, 0xd5033f5fu);
+            }
+            break;
+            case MACHINE_A64_ATOMIC_FENCE:
+                // dmb ish, the canonical thread-fence word.
+                machine_a64_emit(&encoder, 0xd5033bbfu);
+                break;
             case MACHINE_A64_VA_SAVE:
             {
                 // The canonical prologue's X0-X7 snapshot, addressed like

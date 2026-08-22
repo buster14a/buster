@@ -854,6 +854,46 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 0,
         .operand_info = {0},
     },
+    // The atomic rows follow the x86-64 precedent: SIDE_EFFECTS makes
+    // every one a scheduler barrier, which is at least as strong as the
+    // ordering the memory-order operand asks for.
+    [MACHINE_A64_ATOMIC_LOAD] = {
+        .name = S8_INITIALIZER("a64_atomic_load"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_ATOMIC_STORE] = {
+        .name = S8_INITIALIZER("a64_atomic_store"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    // The exclusive loops run on the canonical emitter's fixed register
+    // palette: X9 old value, X10 address, X11 operand/desired, X12
+    // scratch/expected, X13 status — the same registers VA_ARG already
+    // reserves through its own row contract.
+    [MACHINE_A64_ATOMIC_RMW] = {
+        .name = S8_INITIALIZER("a64_atomic_rmw"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X12) | (1u << MACHINE_A64_X13),
+        .fixed_register_mask = 0x7, .fixed_registers = {MACHINE_A64_X9, MACHINE_A64_X10, MACHINE_A64_X11},
+    },
+    [MACHINE_A64_ATOMIC_CAS] = {
+        .name = S8_INITIALIZER("a64_atomic_cas"),
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
+        .clobber_mask = 1u << MACHINE_A64_X13,
+        .fixed_register_mask = 0xf, .fixed_registers = {MACHINE_A64_X9, MACHINE_A64_X10, MACHINE_A64_X12, MACHINE_A64_X11},
+    },
+    [MACHINE_A64_ATOMIC_FENCE] = {
+        .name = S8_INITIALIZER("a64_atomic_fence"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1085,6 +1125,11 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_VLOAD_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 34,
     [MACHINE_A64_VSTORE_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 35,
     [MACHINE_A64_VARITH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 36,
+    [MACHINE_A64_ATOMIC_LOAD] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 37,
+    [MACHINE_A64_ATOMIC_STORE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 38,
+    [MACHINE_A64_ATOMIC_RMW] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 39,
+    [MACHINE_A64_ATOMIC_CAS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 40,
+    [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
