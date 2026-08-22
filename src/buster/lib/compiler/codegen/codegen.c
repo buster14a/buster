@@ -14780,8 +14780,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 continue;
                             }
+                            // The integer-file bound only guards integer parts:
+                            // a float or HFA argument rides the V file, whose
+                            // own placement counter already bounded it, so an
+                            // exhausted X file must not veto it here.
                             if (!argument_type || ((argument_type->kind == IR_TYPE_STRUCT || argument_type->kind == IR_TYPE_UNION) && !aggregate) ||
-                                register_index + part_count > 8)
+                                (argument_type->kind != IR_TYPE_FLOAT && !argument_hfa && register_index + part_count > 8))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;

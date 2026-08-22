@@ -5,10 +5,10 @@
 // comparisons, direct locals and pointer dereference, member addresses,
 // branches, and scalar returns — plus the AAPCS64 signature shapes, calls,
 // symbol addresses, aggregate/array literal construction into frame slots,
-// and scalar float bodies (arithmetic, comparison, negation, and
-// conversions over the bit-image model, riding V0/V1 internally).
-// Everything else is an explicit unsupported result, never a silent
-// misselection.
+// scalar float bodies (arithmetic, comparison, negation, and conversions
+// over the bit-image model, riding V0/V1 internally), and scalar stack
+// arguments through a fixed outgoing area at the frame bottom. Everything
+// else is an explicit unsupported result, never a silent misselection.
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -24,8 +24,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
-// Supported argument-list length: eight integer register slots.
-#define MACHINE_A64_MAX_ARGUMENTS 8
+// Supported argument-list length: the register files plus the scalar
+// stack tail the subset stages, matching the x86-64 selector's cap.
+#define MACHINE_A64_MAX_ARGUMENTS 24
 
 // Frames whose x28 save offset no longer fits the scaled 8-byte store stay
 // on the canonical path; the exact prologue-cursor accounting in the module
@@ -87,13 +88,18 @@ struct MachineA64ValueShape
 };
 
 // One argument's placement: its shape's parts in consecutive per-class
-// registers, integer parts from X0 and float parts from V0. The subset
-// carries no stack arguments — placement fails instead.
+// registers, integer parts from X0 and float parts from V0 — or, for a
+// scalar past its register file, one eight-byte stack part at the
+// canonical caller's sequential offsets. Aggregate and HFA stack
+// arguments stay outside the subset; placement fails instead.
 typedef struct MachineA64ArgumentPlacement MachineA64ArgumentPlacement;
 struct MachineA64ArgumentPlacement
 {
     u16 first_integer;
     u16 first_float;
+    u16 first_stack_part;
+    u8 on_stack;
+    u8 reserved;
 };
 
 // A conditional branch whose condition chain folded into the branch: the
@@ -142,6 +148,11 @@ struct MachineA64Selector
     MachineA64ValueShape return_shape;
     // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
     u32 hidden_return_slot;
+    // The fixed outgoing stack-argument area, appended at the first call
+    // that needs one and pinned by placement to the frame bottom, so its
+    // base is exactly the stack pointer a call sees.
+    u32 outgoing_slot;
+    u32 outgoing_bytes;
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
     u32* virtual_register_definitions;
@@ -248,12 +259,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
 }
 
 // Consecutive-register assignment per class: integer parts take the next
-// X argument register, float parts the next V register. AAPCS64 stack
-// arguments stay outside the subset, so overflow fails the placement
-// instead of spilling to the outgoing area.
-BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape, u32* integer_count, u32* float_count,
+// X argument register, float parts the next V register. A scalar past its
+// register file takes the next sequential eight-byte stack part — the
+// exact simulation the canonical caller and parameter capture both run,
+// including its quirk that integer overflow does not close the file for a
+// later narrower argument. Aggregate and HFA overflow stays outside the
+// subset, so those fail the placement instead of spilling.
+BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape, u32* integer_count, u32* float_count, u32* stack_part_count,
                                                     MachineA64ArgumentPlacement* placement)
 {
+    bool placed = true;
     u32 integer_parts = 0;
     u32 float_parts = 0;
     for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
@@ -261,17 +276,26 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         integer_parts += shape->part_is_float[part_index] == 0;
         float_parts += shape->part_is_float[part_index] != 0;
     }
-    if (*integer_count + integer_parts > 8 || *float_count + float_parts > 8)
-    {
-        return false;
-    }
     *placement = (MachineA64ArgumentPlacement){
         .first_integer = (u16)*integer_count,
         .first_float = (u16)*float_count,
     };
-    *integer_count += integer_parts;
-    *float_count += float_parts;
-    return true;
+    if (*integer_count + integer_parts <= 8 && *float_count + float_parts <= 8)
+    {
+        *integer_count += integer_parts;
+        *float_count += float_parts;
+    }
+    else if (shape->part_count == 1 && !shape->aggregate)
+    {
+        placement->on_stack = 1;
+        placement->first_stack_part = (u16)*stack_part_count;
+        *stack_part_count += 1;
+    }
+    else
+    {
+        placed = false;
+    }
+    return placed;
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_a64_scalar_bit_width(IrType* type)
@@ -1143,6 +1167,7 @@ struct MachineA64CallPlan
     u32 argument_slots[MACHINE_A64_MAX_ARGUMENTS];
     MachineA64ValueShape return_shape;
     u32 argument_count;
+    u32 stack_part_count;
     u32 callee_register;
     u32 indirect_result_slot;
     bool direct_call;
@@ -1217,7 +1242,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
             planned = machine_a64_value_shape(program, argument_type_id, selector->target, IR_ABI_USE_ARGUMENT, plan->argument_shapes + argument_index) &&
-                      machine_a64_place_argument(plan->argument_shapes + argument_index, &call_integer_count, &call_float_count,
+                      machine_a64_place_argument(plan->argument_shapes + argument_index, &call_integer_count, &call_float_count, &plan->stack_part_count,
                                                  plan->argument_placements + argument_index);
             if (planned)
             {
@@ -1240,6 +1265,33 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
 // outside the argument file.
 BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* selector, MachineA64CallPlan* plan)
 {
+    // Outgoing stack parts write into the frame's own area first — its base
+    // is where a call's stack pointer already points, so the stores are
+    // ordinary frame stores and the stack pointer never moves. Scalar parts
+    // only: each is one eight-byte image at its sequential offset, exactly
+    // the canonical caller's layout.
+    if (plan->stack_part_count)
+    {
+        u32 call_outgoing_bytes = (plan->stack_part_count * 8u + 15u) & ~15u;
+        if (selector->outgoing_slot == UINT32_MAX)
+        {
+            selector->outgoing_slot = machine_a64_append_slot(selector, call_outgoing_bytes, 16);
+        }
+        selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, call_outgoing_bytes);
+        for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
+        {
+            MachineA64ArgumentPlacement* argument_placement = plan->argument_placements + argument_index;
+            if (argument_placement->on_stack)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
+                                                     .payload = (u32)argument_placement->first_stack_part * 8u,
+                                                     .opcode = MACHINE_A64_STORE_FRAME64,
+                                                 });
+            }
+        }
+    }
     if (plan->return_shape.indirect)
     {
         u32 result_pointer_register = machine_a64_synthesize_register(selector);
@@ -1259,6 +1311,11 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         MachineA64ValueShape* shape = plan->argument_shapes + argument_index;
         u32 next_integer = plan->argument_placements[argument_index].first_integer;
         u32 next_float = plan->argument_placements[argument_index].first_float;
+        if (plan->argument_placements[argument_index].on_stack)
+        {
+            // Already written into the outgoing area above.
+            continue;
+        }
         if (shape->aggregate)
         {
             for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
@@ -2261,8 +2318,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // The AAPCS64 shape gate: every parameter and the return value must
         // classify to register parts — integer scalars, float scalars,
-        // one-or-two-part register aggregates, HFAs — or an indirect result.
-        // Indirect and stack arguments stay canonical.
+        // one-or-two-part register aggregates, HFAs — an indirect result,
+        // or a scalar stack argument. Indirect arguments and aggregate/HFA
+        // stack arguments stay canonical.
         IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
         bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
         MachineA64ValueShape signature_return_shape = {0};
@@ -2274,12 +2332,13 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         MachineA64ArgumentPlacement signature_parameter_placements[MACHINE_A64_MAX_ARGUMENTS] = {0};
         u32 signature_integer_count = 0;
         u32 signature_float_count = 0;
+        u32 signature_stack_part_count = 0;
         for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
             if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target, IR_ABI_USE_ARGUMENT,
                                          signature_parameter_shapes + parameter_index) ||
                 !machine_a64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
-                                            signature_parameter_placements + parameter_index))
+                                            &signature_stack_part_count, signature_parameter_placements + parameter_index))
             {
                 return result;
             }
@@ -2291,6 +2350,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             .builder = machine_function_builder_begin(arena),
             .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
             .value_stack_slots = arena_allocate(arena, u32, function->value_count),
+            .outgoing_slot = UINT32_MAX,
             .supported = true,
             .failed_opcode = IR_OPCODE_COUNT,
         };
@@ -2941,6 +3001,30 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                             }
                             continue;
                         }
+                        if (parameter_placement->on_stack)
+                        {
+                            // A scalar stack parameter reads its eight-byte
+                            // image from the caller's outgoing area during
+                            // the integer pass — the load touches no
+                            // argument register of either class.
+                            if (!float_pass)
+                            {
+                                u32 incoming_register = selector.value_virtual_registers[argument_value];
+                                if (incoming_register == UINT32_MAX)
+                                {
+                                    machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                    break;
+                                }
+                                u32 incoming_row =
+                                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
+                                                                          .payload = 16u + (u32)parameter_placement->first_stack_part * 8u,
+                                                                          .opcode = MACHINE_A64_LOAD_INCOMING,
+                                                                      });
+                                machine_a64_define(&selector, incoming_register, incoming_row);
+                            }
+                            continue;
+                        }
                         bool scalar_float = shape->part_is_float[0] != 0;
                         if (scalar_float != float_pass)
                         {
@@ -3039,6 +3123,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
+        if (selector.outgoing_slot != UINT32_MAX)
+        {
+            // The area was appended at the first call that needed one and
+            // may have grown at a later call; publish the final size.
+            result.function.outgoing_slot = selector.outgoing_slot;
+            result.function.outgoing_bytes = selector.outgoing_bytes;
+            result.function.stack_slot_sizes[selector.outgoing_slot] = selector.outgoing_bytes;
+        }
         result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
         result.function.call_target_count = selector.call_targets.total_count;
         machine_stream_flatten(&selector.call_targets, result.function.call_targets);
@@ -4397,10 +4489,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                            : instruction->opcode == MACHINE_A64_STORE_FRAME16 ? 2u
                            : instruction->opcode == MACHINE_A64_STORE_FRAME32 ? 4u
                                                                               : 8u;
-                machine_a64_emit_frame_memory(
-                    &encoder, operand_registers[1],
-                    machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] - instruction->payload),
-                    size, true);
+                // The outgoing area's base is the stack pointer a call sees,
+                // which is X28 itself: the shared placement pins its offset
+                // at frame_size, but the a64 frame area extends past that by
+                // the callee-saved save words, so the slot is addressed
+                // directly rather than through the top-relative mapping.
+                u32 store_slot = machine_ref_payload(instruction->operands[0]);
+                u32 store_offset = function->outgoing_bytes && store_slot == function->outgoing_slot
+                                       ? instruction->payload
+                                       : machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[store_slot] - instruction->payload);
+                machine_a64_emit_frame_memory(&encoder, operand_registers[1], store_offset, size, true);
             }
             break;
             case MACHINE_A64_LOAD_PTR8:
@@ -4597,6 +4695,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, (to_unsigned ? 0x9e390000u : 0x9e380000u) | (from_f64 ? 0x00400000u : 0u) | (u32)operand_registers[0]);
             }
             break;
+            case MACHINE_A64_LOAD_INCOMING:
+                // The payload already carries the X29-relative byte offset,
+                // sixteen bytes past the frame-pointer pair like the
+                // canonical parameter capture.
+                machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], MACHINE_A64_X29, instruction->payload, 8, false);
+                break;
             case MACHINE_A64_B:
             {
                 MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);

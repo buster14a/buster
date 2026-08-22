@@ -1079,7 +1079,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 57);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 58);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1812,7 +1812,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "MachineWideUnsigned u64_to_u128(unsigned long v) { return (MachineWideUnsigned)v; }\n"
                                   "MachineWideSigned i64_to_i128(long v) { return (MachineWideSigned)v; }\n"
                                   "int variadic_named(int first, ...) { return first; }\n"
-                                  "int variadic_named_caller(int first) { return variadic_named(first, 22, 3.5); }\n");
+                                  "int variadic_named_caller(int first) { return variadic_named(first, 22, 3.5); }\n"
+                                  "long stack_tail(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j) { return a * 2 + b + c + d + e + f + g + h + i * 3 + j * 5; }\n"
+                                  "long call_stack_tail(long x) { return stack_tail(x, 2, 3, 4, 5, 6, 7, 8, x + 9, 10); }\n");
     String8 machine_c_source_i128 = S8(
                                   "MachineWideSigned i8_to_i128(signed char v) { return (MachineWideSigned)v; }\n"
                                   "MachineWideUnsigned u8_to_u128(unsigned char v) { return (MachineWideUnsigned)v; }\n"
@@ -4161,7 +4163,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("local_pair"), S8_INITIALIZER("kagg_take"), S8_INITIALIZER("big_make"),
             S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("union_tail"), S8_INITIALIZER("locals_array"),
             S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"), S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"),
-            S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"),
+            S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("stack_tail"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4373,6 +4375,26 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_kagg_function, machine_a64_target);
             BUSTER_TEST(arguments, a64_kagg_selected.supported);
         }
+        // Stack-argument callers: call_stack_tail spills the ninth and tenth
+        // long into the outgoing area, and nine spills its ninth double —
+        // both call-bearing or float-signatured, so selection coverage only.
+        IrFunction* a64_stack_caller_function = machine_test_ir_function_find(machine_a64_module, S8("call_stack_tail"));
+        BUSTER_TEST(arguments, a64_stack_caller_function != 0);
+        if (a64_stack_caller_function)
+        {
+            MachineSelectResult a64_stack_caller_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_stack_caller_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_stack_caller_selected.supported);
+            BUSTER_TEST(arguments, a64_stack_caller_selected.function.outgoing_bytes == 16);
+        }
+        IrFunction* a64_nine_function = machine_test_ir_function_find(machine_a64_module, S8("nine"));
+        BUSTER_TEST(arguments, a64_nine_function != 0);
+        if (a64_nine_function)
+        {
+            MachineSelectResult a64_nine_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_nine_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_nine_selected.supported);
+        }
         // Module wiring: MIR_STACK on the AArch64 target routes the subset
         // through the machine path and counts the rest.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
@@ -4416,6 +4438,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         typedef s64 MachineTestA64Call2(s64, s64);
         typedef s64 MachineTestA64Call7(s64, s64, s64, s64, s64, s64, s64);
         typedef s64 MachineTestA64Call3(s64, s64, s64);
+        typedef s64 MachineTestA64Call10(s64, s64, s64, s64, s64, s64, s64, s64, s64, s64);
         // Matches the corpus Big layout; returned through the X8 hidden
         // pointer, which the host compiler stages for a struct-returning
         // call — identical under AAPCS64 and the Darwin convention.
@@ -4461,6 +4484,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool is_writep = string_equal(a64_supported_names[name_index], S8("writep"));
             bool is_readp = string_equal(a64_supported_names[name_index], S8("readp"));
             bool is_many = string_equal(a64_supported_names[name_index], S8("six")) || string_equal(a64_supported_names[name_index], S8("seven"));
+            bool is_stack_tail = string_equal(a64_supported_names[name_index], S8("stack_tail"));
             bool is_loop = string_equal(a64_supported_names[name_index], S8("sum_to"));
             bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
                                string_equal(a64_supported_names[name_index], S8("bitnot")) ||
@@ -4535,6 +4559,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     s32 none_result = (s32)none_call7(left, right, left + 1, right + 1, left - 2, right - 2, left + 3);
                     s32 machine_result = (s32)machine_call7(left, right, left + 1, right + 1, left - 2, right - 2, left + 3);
                     all_equal &= none_result == machine_result;
+                }
+                else if (is_stack_tail)
+                {
+                    // Ten arguments: the ninth and tenth travel through the
+                    // caller's outgoing stack area on AAPCS64.
+                    MachineTestA64Call10* none_call10 = 0;
+                    MachineTestA64Call10* machine_call10 = 0;
+                    memcpy(&none_call10, &none_address, sizeof(none_call10));
+                    memcpy(&machine_call10, &machine_address, sizeof(machine_call10));
+                    all_equal &= none_call10(left, right, left + 1, right + 1, left - 2, right - 2, left + 3, right + 3, left ^ right, right - left) ==
+                                 machine_call10(left, right, left + 1, right + 1, left - 2, right - 2, left + 3, right + 3, left ^ right, right - left);
                 }
                 else if (wide_result)
                 {

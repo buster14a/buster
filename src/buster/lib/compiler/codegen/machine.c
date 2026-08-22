@@ -723,6 +723,14 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_fmov_to_vec"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        // The declared bridge register: FAST forces the source operand into
+        // X9 on the general path, exactly like the x86-64 RAX bridge — and
+        // the clobber is also what keeps this row out of the simple-row
+        // lane, whose free-register picks know nothing about the argument
+        // registers an ABI staging sequence has already placed. Without it
+        // a rematerialized float image could land on a staged X register
+        // between the integer staging rows and the call.
+        .clobber_mask = 1u << MACHINE_A64_X9,
     },
     [MACHINE_A64_FMOV_FROM_VEC] = {
         .name = S8_INITIALIZER("a64_fmov_from_vec"),
@@ -789,6 +797,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE("a64_cvt_u64_to_f64"),
     [MACHINE_A64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE("a64_cvt_f32_to_u64"),
     [MACHINE_A64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE("a64_cvt_f64_to_u64"),
+    [MACHINE_A64_LOAD_INCOMING] = {
+        .name = S8_INITIALIZER("a64_load_incoming"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1014,6 +1027,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_CVT_U64_TO_F64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 28,
     [MACHINE_A64_CVT_F32_TO_U64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 29,
     [MACHINE_A64_CVT_F64_TO_U64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 30,
+    [MACHINE_A64_LOAD_INCOMING] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 31,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

@@ -575,6 +575,11 @@ typedef enum MachineOpcode
     MACHINE_A64_CVT_U64_TO_F64,
     MACHINE_A64_CVT_F32_TO_U64,
     MACHINE_A64_CVT_F64_TO_U64,
+    // Incoming stack argument read: an eight-byte load at the payload's
+    // X29-relative byte offset. The frame-pointer pair sits at X29, so the
+    // caller's outgoing area starts sixteen bytes above it, exactly the
+    // canonical parameter capture's base.
+    MACHINE_A64_LOAD_INCOMING, // def; payload = X29-relative byte offset
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
