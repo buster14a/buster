@@ -2473,10 +2473,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_array(MachineA64Selector* selector, 
     // Element-by-element construction into the value's slot at scaled
     // offsets; the frontend materializes every element including the
     // zero tail, so position times element size covers the object.
+    // Vector literals share the shape exactly — the canonical emitter
+    // lowers both kinds through the same per-element copy loop, and a
+    // vector's lanes are always 1/2/4/8-byte scalars the member write
+    // stores sized.
     bool selected = false;
     IrType* type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
     u32 slot = selector->value_stack_slots[instruction->result.value];
-    if (type && type->kind == IR_TYPE_ARRAY && slot != UINT32_MAX)
+    if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && slot != UINT32_MAX)
     {
         IrType* element_type = ir_type_from_id(&program->types, type->element_type);
         u64 element_size = element_type && element_type->layout.resolved ? element_type->layout.size : 0;
