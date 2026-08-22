@@ -45,40 +45,36 @@ struct ObjectBuffer
 
 BUSTER_GLOBAL_LOCAL void object_buffer_write(ObjectBuffer* buffer, void const* source, u64 size)
 {
-    if (buffer->error != OBJECT_ERROR_NONE)
+    if (buffer->error == OBJECT_ERROR_NONE)
     {
-        return;
+        if (size)
+        {
+            if (size > buffer->capacity - buffer->count)
+            {
+                buffer->error = OBJECT_ERROR_CAPACITY;
+                return;
+            }
+            memcpy(buffer->bytes + buffer->count, source, size);
+            buffer->count += size;
+        }
     }
-    if (!size)
-    {
-        return;
-    }
-    if (size > buffer->capacity - buffer->count)
-    {
-        buffer->error = OBJECT_ERROR_CAPACITY;
-        return;
-    }
-    memcpy(buffer->bytes + buffer->count, source, size);
-    buffer->count += size;
 }
 
 BUSTER_GLOBAL_LOCAL void object_buffer_zero(ObjectBuffer* buffer, u64 size)
 {
-    if (buffer->error != OBJECT_ERROR_NONE)
+    if (buffer->error == OBJECT_ERROR_NONE)
     {
-        return;
+        if (size)
+        {
+            if (size > buffer->capacity - buffer->count)
+            {
+                buffer->error = OBJECT_ERROR_CAPACITY;
+                return;
+            }
+            memset(buffer->bytes + buffer->count, 0, size);
+            buffer->count += size;
+        }
     }
-    if (!size)
-    {
-        return;
-    }
-    if (size > buffer->capacity - buffer->count)
-    {
-        buffer->error = OBJECT_ERROR_CAPACITY;
-        return;
-    }
-    memset(buffer->bytes + buffer->count, 0, size);
-    buffer->count += size;
 }
 
 BUSTER_GLOBAL_LOCAL void object_buffer_align(ObjectBuffer* buffer, u64 alignment)
@@ -252,37 +248,35 @@ BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocat
     if (patch && !(place & 3))
     {
         u64 address = 0;
-        if (!object_address_addend(target, addend, &address))
+        if (object_address_addend(target, addend, &address))
         {
-            return false;
-        }
-        u32 instruction = 0;
-        memcpy(&instruction, patch, sizeof(instruction));
-        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
-        {
-            if (!object_mach_page21_instruction_valid(instruction))
+            u32 instruction = 0;
+            memcpy(&instruction, patch, sizeof(instruction));
+            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
             {
-                return false;
+                if (!object_mach_page21_instruction_valid(instruction))
+                {
+                    return false;
+                }
+                u32 patched = 0;
+                if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+                {
+                    return false;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+                return true;
             }
-            u32 patched = 0;
-            if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
             {
-                return false;
+                u32 shift = 0;
+                if (object_mach_pageoff12_shift(instruction, &shift) && !((address & 0xfff) & ((1u << shift) - 1)))
+                {
+                    instruction &= ~(UINT32_C(0xfff) << 10);
+                    instruction |= (u32)((address & 0xfff) >> shift) << 10;
+                    memcpy(patch, &instruction, sizeof(instruction));
+                    return true;
+                }
             }
-            memcpy(patch, &patched, sizeof(patched));
-            return true;
-        }
-        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-        {
-            u32 shift = 0;
-            if (!object_mach_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
-            {
-                return false;
-            }
-            instruction &= ~(UINT32_C(0xfff) << 10);
-            instruction |= (u32)((address & 0xfff) >> shift) << 10;
-            memcpy(patch, &instruction, sizeof(instruction));
-            return true;
         }
     }
 
@@ -330,19 +324,18 @@ struct ObjectAssemblyBuffer
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append(ObjectAssemblyBuffer* buffer, const char8* bytes, u64 count)
 {
-    if (buffer->error)
+    if (!buffer->error)
     {
-        return;
-    }
-    if (count > buffer->capacity - buffer->count)
-    {
-        buffer->error = true;
-        return;
-    }
-    if (count)
-    {
-        memcpy(buffer->bytes + buffer->count, bytes, count);
-        buffer->count += count;
+        if (count > buffer->capacity - buffer->count)
+        {
+            buffer->error = true;
+            return;
+        }
+        if (count)
+        {
+            memcpy(buffer->bytes + buffer->count, bytes, count);
+            buffer->count += count;
+        }
     }
 }
 
@@ -3331,11 +3324,17 @@ BUSTER_GLOBAL_LOCAL bool object_reader_arena_can_allocate_bytes(Arena* arena, u6
 
 BUSTER_GLOBAL_LOCAL bool object_reader_arena_can_allocate_count(Arena* arena, u64 count, u64 element_size, u64 alignment)
 {
+    bool result;
     if (element_size && count > UINT64_MAX / element_size)
     {
-        return false;
+        result = false;
     }
-    return object_reader_arena_can_allocate_bytes(arena, count * element_size, alignment);
+    else
+    {
+        result = object_reader_arena_can_allocate_bytes(arena, count * element_size, alignment);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_reader_section_sizes_valid(Arena* arena, u64 const* sizes)
@@ -4950,149 +4949,148 @@ bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offse
             descriptor->prolog_size = 4;
             return valid;
         }
-        if (target.cpu_arch != CPU_ARCH_AARCH64 || function_size % 4)
+        if (target.cpu_arch == CPU_ARCH_AARCH64 && !(function_size % 4))
         {
-            return false;
-        }
-        u32 mode = encoding & 0x0f000000;
-        if (mode == 0x02000000)
-        {
-            if (encoding & 0x00000fff)
+            u32 mode = encoding & 0x0f000000;
+            if (mode == 0x02000000)
+            {
+                if (encoding & 0x00000fff)
+                {
+                    return false;
+                }
+                u32 expected_stack = ((encoding & 0x00fff000) >> 12) * 16;
+                u32 stack_size = 0;
+                u32 cursor = 0;
+                while (stack_size < expected_stack && cursor + 4 <= function_size)
+                {
+                    u32 instruction = 0;
+                    memcpy(&instruction, code + cursor, sizeof(instruction));
+                    if ((instruction & UINT32_C(0xff8003ff)) != UINT32_C(0xd10003ff))
+                    {
+                        return false;
+                    }
+                    u32 amount = (instruction >> 10) & 0xfff;
+                    if (instruction & (1u << 22))
+                    {
+                        amount <<= 12;
+                    }
+                    if (!amount || amount > expected_stack - stack_size)
+                    {
+                        return false;
+                    }
+                    cursor += 4;
+                    stack_size += amount;
+                    if (!object_mach_compact_action_append(descriptor, ACTION_CAPACITY, cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
+                    {
+                        return false;
+                    }
+                }
+                descriptor->prolog_size = cursor;
+                return stack_size == expected_stack;
+            }
+            if (mode != 0x04000000 || (encoding & 0x00000f00) || (encoding & 0x000000e0))
             {
                 return false;
             }
-            u32 expected_stack = ((encoding & 0x00fff000) >> 12) * 16;
+            u32 expected_pairs = encoding & 0x1f;
+            u32 seen_pairs = 0;
             u32 stack_size = 0;
             u32 cursor = 0;
-            while (stack_size < expected_stack && cursor + 4 <= function_size)
+            bool frame_pair = false;
+            while (cursor + 4 <= function_size)
             {
                 u32 instruction = 0;
                 memcpy(&instruction, code + cursor, sizeof(instruction));
-                if ((instruction & UINT32_C(0xff8003ff)) != UINT32_C(0xd10003ff))
+                u32 next_cursor = cursor + 4;
+                if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0xd10003ff))
                 {
-                    return false;
-                }
-                u32 amount = (instruction >> 10) & 0xfff;
-                if (instruction & (1u << 22))
-                {
-                    amount <<= 12;
-                }
-                if (!amount || amount > expected_stack - stack_size)
-                {
-                    return false;
-                }
-                cursor += 4;
-                stack_size += amount;
-                if (!object_mach_compact_action_append(descriptor, ACTION_CAPACITY, cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
-                {
-                    return false;
-                }
-            }
-            descriptor->prolog_size = cursor;
-            return stack_size == expected_stack;
-        }
-        if (mode != 0x04000000 || (encoding & 0x00000f00) || (encoding & 0x000000e0))
-        {
-            return false;
-        }
-        u32 expected_pairs = encoding & 0x1f;
-        u32 seen_pairs = 0;
-        u32 stack_size = 0;
-        u32 cursor = 0;
-        bool frame_pair = false;
-        while (cursor + 4 <= function_size)
-        {
-            u32 instruction = 0;
-            memcpy(&instruction, code + cursor, sizeof(instruction));
-            u32 next_cursor = cursor + 4;
-            if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0xd10003ff))
-            {
-                u32 amount = (instruction >> 10) & 0xfff;
-                if (instruction & (1u << 22))
-                {
-                    amount <<= 12;
-                }
-                if (!amount || stack_size > UINT32_MAX - amount ||
-                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
-                {
-                    return false;
-                }
-                stack_size += amount;
-                cursor = next_cursor;
-                continue;
-            }
-            u32 pair_form = instruction & UINT32_C(0xffc00000);
-            if (pair_form == UINT32_C(0xa9800000) || pair_form == UINT32_C(0xa9000000))
-            {
-                if (((instruction >> 5) & 31) != 31)
-                {
-                    return false;
-                }
-                s32 signed_immediate = (s32)((instruction >> 15) & 0x7f);
-                if (signed_immediate & 0x40)
-                {
-                    signed_immediate -= 0x80;
-                }
-                signed_immediate *= 8;
-                if (pair_form == UINT32_C(0xa9800000))
-                {
-                    if (signed_immediate >= 0 || (u32)-signed_immediate > UINT32_MAX - stack_size ||
-                        !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
-                                                           (u32)-signed_immediate))
+                    u32 amount = (instruction >> 10) & 0xfff;
+                    if (instruction & (1u << 22))
+                    {
+                        amount <<= 12;
+                    }
+                    if (!amount || stack_size > UINT32_MAX - amount ||
+                        !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, amount))
                     {
                         return false;
                     }
-                    stack_size += (u32)-signed_immediate;
-                    signed_immediate = 0;
+                    stack_size += amount;
+                    cursor = next_cursor;
+                    continue;
                 }
-                if (signed_immediate < 0 || (u32)signed_immediate > stack_size || (u32)signed_immediate + 16 > stack_size)
+                u32 pair_form = instruction & UINT32_C(0xffc00000);
+                if (pair_form == UINT32_C(0xa9800000) || pair_form == UINT32_C(0xa9000000))
                 {
-                    return false;
-                }
-                u8 first = (u8)(instruction & 31);
-                u8 second = (u8)((instruction >> 10) & 31);
-                if ((first == 29 && second == 30) || (first == 30 && second == 29))
-                {
-                    frame_pair = true;
-                }
-                else
-                {
-                    u8 low = BUSTER_MIN(first, second);
-                    u32 pair_bit = low == 19 && BUSTER_MAX(first, second) == 20   ? 1u
-                                   : low == 21 && BUSTER_MAX(first, second) == 22 ? 2u
-                                   : low == 23 && BUSTER_MAX(first, second) == 24 ? 4u
-                                   : low == 25 && BUSTER_MAX(first, second) == 26 ? 8u
-                                   : low == 27 && BUSTER_MAX(first, second) == 28 ? 16u
-                                                                                 : 0;
-                    if (!pair_bit || (seen_pairs & pair_bit))
+                    if (((instruction >> 5) & 31) != 31)
                     {
                         return false;
                     }
-                    seen_pairs |= pair_bit;
+                    s32 signed_immediate = (s32)((instruction >> 15) & 0x7f);
+                    if (signed_immediate & 0x40)
+                    {
+                        signed_immediate -= 0x80;
+                    }
+                    signed_immediate *= 8;
+                    if (pair_form == UINT32_C(0xa9800000))
+                    {
+                        if (signed_immediate >= 0 || (u32)-signed_immediate > UINT32_MAX - stack_size ||
+                            !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
+                                                               (u32)-signed_immediate))
+                        {
+                            return false;
+                        }
+                        stack_size += (u32)-signed_immediate;
+                        signed_immediate = 0;
+                    }
+                    if (signed_immediate < 0 || (u32)signed_immediate > stack_size || (u32)signed_immediate + 16 > stack_size)
+                    {
+                        return false;
+                    }
+                    u8 first = (u8)(instruction & 31);
+                    u8 second = (u8)((instruction >> 10) & 31);
+                    if ((first == 29 && second == 30) || (first == 30 && second == 29))
+                    {
+                        frame_pair = true;
+                    }
+                    else
+                    {
+                        u8 low = BUSTER_MIN(first, second);
+                        u32 pair_bit = low == 19 && BUSTER_MAX(first, second) == 20   ? 1u
+                                       : low == 21 && BUSTER_MAX(first, second) == 22 ? 2u
+                                       : low == 23 && BUSTER_MAX(first, second) == 24 ? 4u
+                                       : low == 25 && BUSTER_MAX(first, second) == 26 ? 8u
+                                       : low == 27 && BUSTER_MAX(first, second) == 28 ? 16u
+                                                                                     : 0;
+                        if (!pair_bit || (seen_pairs & pair_bit))
+                        {
+                            return false;
+                        }
+                        seen_pairs |= pair_bit;
+                    }
+                    bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, first,
+                                                                   (u32)signed_immediate);
+                    valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, second,
+                                                              (u32)signed_immediate + 8) && valid;
+                    if (!valid)
+                    {
+                        return false;
+                    }
+                    cursor = next_cursor;
+                    continue;
                 }
-                bool valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, first,
-                                                               (u32)signed_immediate);
-                valid = object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, second,
-                                                          (u32)signed_immediate + 8) && valid;
-                if (!valid)
+                if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0x910003fd))
                 {
-                    return false;
+                    u32 frame_offset = ((instruction >> 10) & 0xfff) << ((instruction & (1u << 22)) ? 12 : 0);
+                    if (!frame_pair || seen_pairs != expected_pairs || frame_offset > stack_size ||
+                        !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, frame_offset))
+                    {
+                        return false;
+                    }
+                    descriptor->prolog_size = next_cursor;
+                    return true;
                 }
-                cursor = next_cursor;
-                continue;
+                return false;
             }
-            if ((instruction & UINT32_C(0xff8003ff)) == UINT32_C(0x910003fd))
-            {
-                u32 frame_offset = ((instruction >> 10) & 0xfff) << ((instruction & (1u << 22)) ? 12 : 0);
-                if (!frame_pair || seen_pairs != expected_pairs || frame_offset > stack_size ||
-                    !object_mach_compact_action_append(descriptor, ACTION_CAPACITY, next_cursor, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, frame_offset))
-                {
-                    return false;
-                }
-                descriptor->prolog_size = next_cursor;
-                return true;
-            }
-            return false;
         }
     }
 
@@ -6574,154 +6572,150 @@ ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target)
     if (arena && bytes.pointer && bytes.length >= sizeof(archive_magic) - 1 && memcmp(bytes.pointer, archive_magic, sizeof(archive_magic) - 1) == 0)
     {
         u64 member_capacity_u64 = bytes.length / 60;
-        if (member_capacity_u64 > UINT32_MAX)
+        if (member_capacity_u64 <= UINT32_MAX)
         {
-            return result;
+            u32 member_capacity = (u32)member_capacity_u64;
+            if (object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
+            {
+                result.objects = arena_allocate(arena, ObjectFile, member_capacity);
+                if (object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
+                {
+                    result.member_names = arena_allocate(arena, String8, member_capacity);
+                    String8 long_names = {0};
+                    u64 member_name_bytes = 0;
+                    u64 cursor = sizeof(archive_magic) - 1;
+                    while (cursor < bytes.length)
+                    {
+                        if (cursor > bytes.length || 60 > bytes.length - cursor || bytes.pointer[cursor + 58] != '`' || bytes.pointer[cursor + 59] != '\n')
+                        {
+                            return result;
+                        }
+                        u64 member_size = 0;
+                        if (!object_archive_decimal(bytes.pointer + cursor + 48, 10, &member_size))
+                        {
+                            return result;
+                        }
+                        u64 member_offset = cursor + 60;
+                        if (member_offset > bytes.length || member_size > bytes.length - member_offset)
+                        {
+                            return result;
+                        }
+                        String8 raw_name = {
+                            .pointer = (char8*)bytes.pointer + cursor,
+                            .length = 16,
+                        };
+                        while (raw_name.length && raw_name.pointer[raw_name.length - 1] == ' ')
+                        {
+                            raw_name.length -= 1;
+                        }
+                        String8 member_name = raw_name;
+                        u64 object_offset = member_offset;
+                        u64 object_size = member_size;
+                        bool metadata = false;
+                        if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
+                        {
+                            metadata = true;
+                        }
+                        else if (string_equal(raw_name, S8("//")))
+                        {
+                            long_names = (String8){
+                                .pointer = (char8*)bytes.pointer + member_offset,
+                                .length = member_size,
+                            };
+                            metadata = true;
+                        }
+                        else if (string_starts_with_sequence(raw_name, S8("#1/")))
+                        {
+                            u64 name_length = 0;
+                            if (!object_archive_decimal((u8*)raw_name.pointer + 3, raw_name.length - 3, &name_length) || name_length > object_size)
+                            {
+                                return result;
+                            }
+                            member_name = (String8){
+                                .pointer = (char8*)bytes.pointer + object_offset,
+                                .length = name_length,
+                            };
+                            object_offset += name_length;
+                            object_size -= name_length;
+                        }
+                        else if (raw_name.length > 1 && raw_name.pointer[0] == '/')
+                        {
+                            u64 name_offset = 0;
+                            if (!long_names.pointer || !object_archive_decimal((u8*)raw_name.pointer + 1, raw_name.length - 1, &name_offset) ||
+                                name_offset >= long_names.length)
+                            {
+                                return result;
+                            }
+                            if (name_offset && long_names.pointer[name_offset - 1] != '\n' && long_names.pointer[name_offset - 1] != 0)
+                            {
+                                return result;
+                            }
+                            u64 name_length = 0;
+                            u64 name_remaining = long_names.length - name_offset;
+                            while (name_length < name_remaining && long_names.pointer[name_offset + name_length] != '\n' &&
+                                   long_names.pointer[name_offset + name_length] != 0)
+                            {
+                                name_length += 1;
+                            }
+                            if (name_length == name_remaining)
+                            {
+                                return result;
+                            }
+                            if (name_length && long_names.pointer[name_offset + name_length - 1] == '/')
+                            {
+                                name_length -= 1;
+                            }
+                            member_name = (String8){
+                                .pointer = long_names.pointer + name_offset,
+                                .length = name_length,
+                            };
+                        }
+                        else if (member_name.length && member_name.pointer[member_name.length - 1] == '/')
+                        {
+                            member_name.length -= 1;
+                        }
+                        ByteSlice object_bytes = {
+                            .pointer = bytes.pointer + object_offset,
+                            .length = object_size,
+                        };
+                        if (!metadata && object_bytes_are_object(object_bytes))
+                        {
+                            if (member_name.length > UINT64_MAX - member_name_bytes)
+                            {
+                                return result;
+                            }
+                            member_name_bytes += member_name.length;
+                            if (!object_reader_arena_can_allocate_bytes(arena, member_name.length, BUSTER_ALIGN_OF(char8)))
+                            {
+                                return result;
+                            }
+                            ObjectFile object = object_read(arena, object_bytes, target);
+                            if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
+                            {
+                                result.error = object.error;
+                                return result;
+                            }
+                            result.objects[result.object_count] = object;
+                            result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
+                            result.object_count += 1;
+                        }
+                        cursor = member_offset + member_size;
+                        if (cursor & 1)
+                        {
+                            if (cursor >= bytes.length || bytes.pointer[cursor] != '\n')
+                            {
+                                return result;
+                            }
+                            cursor += 1;
+                        }
+                    }
+                    if (cursor == bytes.length)
+                    {
+                        result.error = OBJECT_ERROR_NONE;
+                    }
+                }
+            }
         }
-        u32 member_capacity = (u32)member_capacity_u64;
-        if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(ObjectFile), BUSTER_ALIGN_OF(ObjectFile)))
-        {
-            return result;
-        }
-        result.objects = arena_allocate(arena, ObjectFile, member_capacity);
-        if (!object_reader_arena_can_allocate_count(arena, member_capacity, sizeof(String8), BUSTER_ALIGN_OF(String8)))
-        {
-            return result;
-        }
-        result.member_names = arena_allocate(arena, String8, member_capacity);
-        String8 long_names = {0};
-        u64 member_name_bytes = 0;
-        u64 cursor = sizeof(archive_magic) - 1;
-        while (cursor < bytes.length)
-        {
-            if (cursor > bytes.length || 60 > bytes.length - cursor || bytes.pointer[cursor + 58] != '`' || bytes.pointer[cursor + 59] != '\n')
-            {
-                return result;
-            }
-            u64 member_size = 0;
-            if (!object_archive_decimal(bytes.pointer + cursor + 48, 10, &member_size))
-            {
-                return result;
-            }
-            u64 member_offset = cursor + 60;
-            if (member_offset > bytes.length || member_size > bytes.length - member_offset)
-            {
-                return result;
-            }
-            String8 raw_name = {
-                .pointer = (char8*)bytes.pointer + cursor,
-                .length = 16,
-            };
-            while (raw_name.length && raw_name.pointer[raw_name.length - 1] == ' ')
-            {
-                raw_name.length -= 1;
-            }
-            String8 member_name = raw_name;
-            u64 object_offset = member_offset;
-            u64 object_size = member_size;
-            bool metadata = false;
-            if (string_equal(raw_name, S8("/")) || string_equal(raw_name, S8("__.SYMDEF")) || string_equal(raw_name, S8("__.SYMDEF SORTED")))
-            {
-                metadata = true;
-            }
-            else if (string_equal(raw_name, S8("//")))
-            {
-                long_names = (String8){
-                    .pointer = (char8*)bytes.pointer + member_offset,
-                    .length = member_size,
-                };
-                metadata = true;
-            }
-            else if (string_starts_with_sequence(raw_name, S8("#1/")))
-            {
-                u64 name_length = 0;
-                if (!object_archive_decimal((u8*)raw_name.pointer + 3, raw_name.length - 3, &name_length) || name_length > object_size)
-                {
-                    return result;
-                }
-                member_name = (String8){
-                    .pointer = (char8*)bytes.pointer + object_offset,
-                    .length = name_length,
-                };
-                object_offset += name_length;
-                object_size -= name_length;
-            }
-            else if (raw_name.length > 1 && raw_name.pointer[0] == '/')
-            {
-                u64 name_offset = 0;
-                if (!long_names.pointer || !object_archive_decimal((u8*)raw_name.pointer + 1, raw_name.length - 1, &name_offset) ||
-                    name_offset >= long_names.length)
-                {
-                    return result;
-                }
-                if (name_offset && long_names.pointer[name_offset - 1] != '\n' && long_names.pointer[name_offset - 1] != 0)
-                {
-                    return result;
-                }
-                u64 name_length = 0;
-                u64 name_remaining = long_names.length - name_offset;
-                while (name_length < name_remaining && long_names.pointer[name_offset + name_length] != '\n' &&
-                       long_names.pointer[name_offset + name_length] != 0)
-                {
-                    name_length += 1;
-                }
-                if (name_length == name_remaining)
-                {
-                    return result;
-                }
-                if (name_length && long_names.pointer[name_offset + name_length - 1] == '/')
-                {
-                    name_length -= 1;
-                }
-                member_name = (String8){
-                    .pointer = long_names.pointer + name_offset,
-                    .length = name_length,
-                };
-            }
-            else if (member_name.length && member_name.pointer[member_name.length - 1] == '/')
-            {
-                member_name.length -= 1;
-            }
-            ByteSlice object_bytes = {
-                .pointer = bytes.pointer + object_offset,
-                .length = object_size,
-            };
-            if (!metadata && object_bytes_are_object(object_bytes))
-            {
-                if (member_name.length > UINT64_MAX - member_name_bytes)
-                {
-                    return result;
-                }
-                member_name_bytes += member_name.length;
-                if (!object_reader_arena_can_allocate_bytes(arena, member_name.length, BUSTER_ALIGN_OF(char8)))
-                {
-                    return result;
-                }
-                ObjectFile object = object_read(arena, object_bytes, target);
-                if (object.error != OBJECT_ERROR_NONE || result.object_count == member_capacity)
-                {
-                    result.error = object.error;
-                    return result;
-                }
-                result.objects[result.object_count] = object;
-                result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
-                result.object_count += 1;
-            }
-            cursor = member_offset + member_size;
-            if (cursor & 1)
-            {
-                if (cursor >= bytes.length || bytes.pointer[cursor] != '\n')
-                {
-                    return result;
-                }
-                cursor += 1;
-            }
-        }
-        if (cursor != bytes.length)
-        {
-            return result;
-        }
-        result.error = OBJECT_ERROR_NONE;
     }
 
     return result;
@@ -6909,26 +6903,25 @@ BUSTER_GLOBAL_LOCAL bool object_fuzz_mach_find_command(ByteSlice bytes, u32 kind
     if (bytes.pointer && bytes.length >= 32)
     {
         u32 command_count = 0;
-        if (!object_read_u32(bytes, 16, &command_count))
+        if (object_read_u32(bytes, 16, &command_count))
         {
-            return false;
-        }
-        u64 command = 32;
-        for (u32 command_index = 0; command_index < command_count; command_index += 1)
-        {
-            u32 command_kind = 0;
-            u32 command_size = 0;
-            if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
-                !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+            u64 command = 32;
+            for (u32 command_index = 0; command_index < command_count; command_index += 1)
             {
-                return false;
+                u32 command_kind = 0;
+                u32 command_size = 0;
+                if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
+                    !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+                {
+                    return false;
+                }
+                if (command_kind == kind)
+                {
+                    *result = command;
+                    return true;
+                }
+                command += command_size;
             }
-            if (command_kind == kind)
-            {
-                *result = command;
-                return true;
-            }
-            command += command_size;
         }
     }
 
@@ -6952,503 +6945,502 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
             return result;
         }
         u8* bytes = arena_allocate(arena, u8, seed.length);
-        if (!bytes)
+        if (bytes)
         {
-            return result;
-        }
-        memcpy(bytes, seed.pointer, seed.length);
-        result.pointer = bytes;
-        u64 input_value = 0;
-        if (input_size)
-        {
-            u64 input_index = ((u64)mutation_index * 17 + 5) % input_size;
-            for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+            memcpy(bytes, seed.pointer, seed.length);
+            result.pointer = bytes;
+            u64 input_value = 0;
+            if (input_size)
             {
-                input_value = (input_value << 8) | input[(input_index + byte_index) % input_size];
-            }
-        }
-        if (mutation_index == 2 || mutation_index == 3 || mutation_index == 7)
-        {
-            u8 value = input_size ? (u8)input_value : 0xa5;
-            u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
-            if (mutation_index == 2)
-            {
-                bytes[offset] ^= value ? value : 0xa5;
-            }
-            else if (mutation_index == 3)
-            {
-                u64 count = BUSTER_MIN((u64)8, seed.length - offset);
-                for (u64 index = 0; index < count; index += 1)
+                u64 input_index = ((u64)mutation_index * 17 + 5) % input_size;
+                for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
                 {
-                    bytes[offset + index] = (u8)(value + index * 17 + mutation_index);
+                    input_value = (input_value << 8) | input[(input_index + byte_index) % input_size];
                 }
             }
-            else
+            if (mutation_index == 2 || mutation_index == 3 || mutation_index == 7)
             {
-                result.length = BUSTER_MAX((u64)1, (u64)value % seed.length);
-            }
-            return result;
-        }
-        if (archive)
-        {
-            if (mutation_index == 4)
-            {
-                memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length > 56 ? seed.length - 56 : 0));
-            }
-            else if (mutation_index == 5)
-            {
-                memset(bytes + 8, '/', BUSTER_MIN((u64)16, seed.length > 8 ? seed.length - 8 : 0));
-            }
-            else if (mutation_index == 6)
-            {
-                u64 offset = 8 + 58;
-                if (offset < seed.length)
-                {
-                    bytes[offset] ^= 1;
-                }
-            }
-            else if (mutation_index == 8)
-            {
-                if (seed.length >= 8)
-                {
-                    memset(bytes + 8, ' ', BUSTER_MIN((u64)16, seed.length - 8));
-                }
-                object_fuzz_write_u8(bytes, seed.length, 8, '/');
-                object_fuzz_write_u8(bytes, seed.length, 9, '1');
-            }
-            else if (mutation_index == 9)
-            {
-                if (seed.length >= 56)
-                {
-                    memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length - 56));
-                }
-            }
-            else if (mutation_index == 10)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 8 + 58, '`' ^ 1);
-            }
-            else if (mutation_index == 11)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 8 + 59, 'x');
-            }
-            else if (mutation_index == 12)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 8 + 60, 'x');
-            }
-            else if (mutation_index == 13)
-            {
-                if (seed.length > 68)
-                {
-                    u64 table_offset = input_size ? input_value % BUSTER_MIN((u64)16, seed.length - 68) : 0;
-                    object_fuzz_write_u8(bytes, seed.length, 8 + 60 + table_offset, 0);
-                }
-            }
-            else if (mutation_index == 14)
-            {
-                if (seed.length > 8)
-                {
-                    u64 truncation = input_size ? input_value % BUSTER_MIN((u64)32, seed.length - 8) : 1;
-                    result.length = BUSTER_MAX((u64)8, seed.length - truncation);
-                }
-            }
-            else
-            {
+                u8 value = input_size ? (u8)input_value : 0xa5;
                 u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
-                bytes[offset] ^= (u8)(0x5a + mutation_index);
-            }
-            return result;
-        }
-        switch (format)
-        {
-        case OBJECT_FORMAT_ELF64:
-            if (mutation_index == 4)
-            {
-                object_fuzz_write_u64(bytes, seed.length, 40, UINT64_MAX);
-            }
-            else if (mutation_index == 5)
-            {
-                object_fuzz_write_u16(bytes, seed.length, 60, UINT16_MAX);
-            }
-            else if (mutation_index == 6)
-            {
-                object_fuzz_write_u64(bytes, seed.length, 48, UINT64_MAX);
-            }
-            else if (mutation_index == 8)
-            {
-                u64 symbol_offset = 0;
-                u64 symbol_size = 0;
-                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                if (mutation_index == 2)
                 {
-                    object_fuzz_write_u64(bytes, seed.length, symbol_offset + 24 + 16, UINT64_MAX);
+                    bytes[offset] ^= value ? value : 0xa5;
                 }
-            }
-            else if (mutation_index == 9)
-            {
-                u64 symbol_offset = 0;
-                u64 symbol_size = 0;
-                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                else if (mutation_index == 3)
                 {
-                    object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, UINT16_MAX);
+                    u64 count = BUSTER_MIN((u64)8, seed.length - offset);
+                    for (u64 index = 0; index < count; index += 1)
+                    {
+                        bytes[offset + index] = (u8)(value + index * 17 + mutation_index);
+                    }
                 }
-            }
-            else if (mutation_index == 10)
-            {
-                u64 relocation_offset = 0;
-                u64 relocation_size = 0;
-                if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                else
                 {
-                    object_fuzz_write_u64(bytes, seed.length, relocation_offset + 8, UINT64_MAX);
+                    result.length = BUSTER_MAX((u64)1, (u64)value % seed.length);
                 }
+                return result;
             }
-            else if (mutation_index == 11)
+            if (archive)
             {
-                u64 string_offset = 0;
-                u64 string_size = 0;
-                if (object_fuzz_elf_find_section(seed, 3, 0, &string_offset, &string_size) && string_size)
+                if (mutation_index == 4)
                 {
-                    object_fuzz_write_u8(bytes, seed.length, string_offset + string_size - 1, 'x');
+                    memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length > 56 ? seed.length - 56 : 0));
                 }
-            }
-            else if (mutation_index == 12)
-            {
-                u64 symbol_header = 0;
-                if (object_fuzz_elf_find_section(seed, 2, &symbol_header, 0, 0))
+                else if (mutation_index == 5)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, symbol_header + 40, UINT32_MAX);
+                    memset(bytes + 8, '/', BUSTER_MIN((u64)16, seed.length > 8 ? seed.length - 8 : 0));
                 }
-            }
-            else if (mutation_index == 13)
-            {
-                u64 relocation_offset = 0;
-                u64 relocation_size = 0;
-                if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                else if (mutation_index == 6)
                 {
-                    object_fuzz_write_u64(bytes, seed.length, relocation_offset, UINT64_MAX);
+                    u64 offset = 8 + 58;
+                    if (offset < seed.length)
+                    {
+                        bytes[offset] ^= 1;
+                    }
                 }
-            }
-            else if (mutation_index == 14)
-            {
-                u64 section_offset = 0;
-                u64 section_size = 0;
-                if (object_fuzz_elf_find_section(seed, 1, 0, &section_offset, &section_size) && section_size)
+                else if (mutation_index == 8)
                 {
-                    object_fuzz_write_u8(bytes, seed.length, section_offset + (input_size ? input_value % section_size : 0), (u8)input_value);
+                    if (seed.length >= 8)
+                    {
+                        memset(bytes + 8, ' ', BUSTER_MIN((u64)16, seed.length - 8));
+                    }
+                    object_fuzz_write_u8(bytes, seed.length, 8, '/');
+                    object_fuzz_write_u8(bytes, seed.length, 9, '1');
                 }
-            }
-            else if (mutation_index == 15)
-            {
-                u64 section_header = 0;
-                if (object_fuzz_elf_find_section(seed, 4, &section_header, 0, 0))
+                else if (mutation_index == 9)
                 {
-                    object_fuzz_write_u64(bytes, seed.length, section_header + 32, UINT64_MAX);
+                    if (seed.length >= 56)
+                    {
+                        memset(bytes + 8 + 48, '9', BUSTER_MIN((u64)10, seed.length - 56));
+                    }
                 }
-            }
-            else if (mutation_index == 16)
-            {
-                u64 symbol_offset = 0;
-                u64 symbol_size = 0;
-                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                else if (mutation_index == 10)
                 {
-                    object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, 0x7fff);
+                    object_fuzz_write_u8(bytes, seed.length, 8 + 58, '`' ^ 1);
                 }
-            }
-            else if (mutation_index == 17)
-            {
-                u64 symbol_offset = 0;
-                u64 symbol_size = 0;
-                if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                else if (mutation_index == 11)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, symbol_offset + 24, UINT32_MAX);
+                    object_fuzz_write_u8(bytes, seed.length, 8 + 59, 'x');
                 }
-            }
-            else if (mutation_index == 18)
-            {
-                u64 relocation_header = 0;
-                if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                else if (mutation_index == 12)
                 {
-                    object_fuzz_write_u64(bytes, seed.length, relocation_header + 56, UINT64_MAX);
+                    object_fuzz_write_u8(bytes, seed.length, 8 + 60, 'x');
                 }
-            }
-            else if (mutation_index == 19)
-            {
-                u64 relocation_header = 0;
-                if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                else if (mutation_index == 13)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, relocation_header + 40, UINT32_MAX);
+                    if (seed.length > 68)
+                    {
+                        u64 table_offset = input_size ? input_value % BUSTER_MIN((u64)16, seed.length - 68) : 0;
+                        object_fuzz_write_u8(bytes, seed.length, 8 + 60 + table_offset, 0);
+                    }
                 }
-            }
-            else if (mutation_index == 20)
-            {
-                u64 section_header = 0;
-                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                else if (mutation_index == 14)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, section_header, UINT32_MAX);
+                    if (seed.length > 8)
+                    {
+                        u64 truncation = input_size ? input_value % BUSTER_MIN((u64)32, seed.length - 8) : 1;
+                        result.length = BUSTER_MAX((u64)8, seed.length - truncation);
+                    }
                 }
-            }
-            else if (mutation_index == 21)
-            {
-                u64 section_header = 0;
-                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                else
                 {
-                    object_fuzz_write_u64(bytes, seed.length, section_header + 48, UINT64_MAX);
+                    u64 offset = input_size ? input_value % seed.length : (u64)mutation_index % seed.length;
+                    bytes[offset] ^= (u8)(0x5a + mutation_index);
                 }
+                return result;
             }
-            else if (mutation_index == 22)
+            switch (format)
             {
-                u64 section_header = 0;
-                if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+            case OBJECT_FORMAT_ELF64:
+                if (mutation_index == 4)
                 {
-                    object_fuzz_write_u64(bytes, seed.length, section_header + 8, UINT64_MAX);
+                    object_fuzz_write_u64(bytes, seed.length, 40, UINT64_MAX);
                 }
-            }
-            else
-            {
-                object_fuzz_write_u16(bytes, seed.length, 62, (u16)input_value);
-            }
-            break;
-        case OBJECT_FORMAT_COFF:
-            if (mutation_index == 4)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 8, UINT32_MAX);
-            }
-            else if (mutation_index == 5)
-            {
-                object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
-            }
-            else if (mutation_index == 6)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 12, UINT32_MAX);
-            }
-            else if (mutation_index == 8)
-            {
-                u32 symbol_offset = 0;
-                u32 symbol_count = 0;
-                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
+                else if (mutation_index == 5)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
+                    object_fuzz_write_u16(bytes, seed.length, 60, UINT16_MAX);
                 }
-            }
-            else if (mutation_index == 9)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 20, '/');
-                object_fuzz_write_u8(bytes, seed.length, 21, '9');
-                object_fuzz_write_u8(bytes, seed.length, 22, '9');
-                object_fuzz_write_u8(bytes, seed.length, 23, '9');
-                object_fuzz_write_u8(bytes, seed.length, 24, '9');
-                object_fuzz_write_u8(bytes, seed.length, 25, '9');
-                object_fuzz_write_u8(bytes, seed.length, 26, '9');
-            }
-            else if (mutation_index == 10)
-            {
-                u32 symbol_offset = 0;
-                u32 symbol_count = 0;
-                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
-                    (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
+                else if (mutation_index == 6)
                 {
-                    object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
+                    object_fuzz_write_u64(bytes, seed.length, 48, UINT64_MAX);
                 }
-            }
-            else if (mutation_index == 11)
-            {
-                u32 relocation_offset = 0;
-                u16 relocation_count = 0;
-                if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                else if (mutation_index == 8)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                    u64 symbol_offset = 0;
+                    u64 symbol_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, symbol_offset + 24 + 16, UINT64_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 12)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20 + 20, UINT32_MAX);
-            }
-            else if (mutation_index == 13)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20 + 24, UINT32_MAX);
-            }
-            else if (mutation_index == 14)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20 + 16, UINT32_MAX);
-            }
-            else if (mutation_index == 15)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20 + 36, 0x02000800);
-            }
-            else if (mutation_index == 16)
-            {
-                u32 symbol_offset = 0;
-                if (object_read_u32(seed, 8, &symbol_offset))
+                else if (mutation_index == 9)
                 {
-                    object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
+                    u64 symbol_offset = 0;
+                    u64 symbol_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                    {
+                        object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, UINT16_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 17)
-            {
-                u32 symbol_offset = 0;
-                if (object_read_u32(seed, 8, &symbol_offset))
+                else if (mutation_index == 10)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
+                    u64 relocation_offset = 0;
+                    u64 relocation_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, relocation_offset + 8, UINT64_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 18)
-            {
-                u32 relocation_offset = 0;
-                u16 relocation_count = 0;
-                if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                else if (mutation_index == 11)
                 {
-                    object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
+                    u64 string_offset = 0;
+                    u64 string_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 3, 0, &string_offset, &string_size) && string_size)
+                    {
+                        object_fuzz_write_u8(bytes, seed.length, string_offset + string_size - 1, 'x');
+                    }
                 }
-            }
-            else if (mutation_index == 19)
-            {
-                u32 symbol_offset = 0;
-                u32 symbol_count = 0;
-                if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
-                    (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
+                else if (mutation_index == 12)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
+                    u64 symbol_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 2, &symbol_header, 0, 0))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, symbol_header + 40, UINT32_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 20)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 20, (u8)input_value);
-            }
-            else if (mutation_index == 21)
-            {
-                u32 symbol_offset = 0;
-                if (object_read_u32(seed, 8, &symbol_offset))
+                else if (mutation_index == 13)
                 {
-                    object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
+                    u64 relocation_offset = 0;
+                    u64 relocation_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 4, 0, &relocation_offset, &relocation_size) && relocation_size >= 24)
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, relocation_offset, UINT64_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 22)
-            {
-                object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
-            }
-            else
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20, (u32)input_value);
-            }
-            break;
-        case OBJECT_FORMAT_MACH_O64:
-            if (mutation_index == 4)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 20, UINT32_MAX);
-            }
-            else if (mutation_index == 5)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
-            }
-            else if (mutation_index == 6)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 8, UINT32_MAX);
-            }
-            else if (mutation_index == 8)
-            {
-                u64 command = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command))
+                else if (mutation_index == 14)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, command + 8, UINT32_MAX);
+                    u64 section_offset = 0;
+                    u64 section_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 1, 0, &section_offset, &section_size) && section_size)
+                    {
+                        object_fuzz_write_u8(bytes, seed.length, section_offset + (input_size ? input_value % section_size : 0), (u8)input_value);
+                    }
                 }
-            }
-            else if (mutation_index == 9)
-            {
-                u64 command = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command))
+                else if (mutation_index == 15)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, command + 16, UINT32_MAX);
+                    u64 section_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 4, &section_header, 0, 0))
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, section_header + 32, UINT64_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 10)
-            {
-                u64 command = 0;
-                u32 string_offset = 0;
-                u32 string_size = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
-                    object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
+                else if (mutation_index == 16)
                 {
-                    object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
+                    u64 symbol_offset = 0;
+                    u64 symbol_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                    {
+                        object_fuzz_write_u16(bytes, seed.length, symbol_offset + 24 + 6, 0x7fff);
+                    }
                 }
-            }
-            else if (mutation_index == 11)
-            {
-                u64 command = 0;
-                u32 symbol_offset = 0;
-                u32 symbol_count = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
-                    object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
+                else if (mutation_index == 17)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
+                    u64 symbol_offset = 0;
+                    u64 symbol_size = 0;
+                    if (object_fuzz_elf_find_section(seed, 2, 0, &symbol_offset, &symbol_size) && symbol_size >= 48)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, symbol_offset + 24, UINT32_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 12)
-            {
-                u64 section = 32 + 72;
-                u32 relocation_offset = 0;
-                u32 relocation_count = 0;
-                if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
+                else if (mutation_index == 18)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                    u64 relocation_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, relocation_header + 56, UINT64_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 13)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 48, UINT32_MAX);
-            }
-            else if (mutation_index == 14)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 56, UINT32_MAX);
-            }
-            else if (mutation_index == 15)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 60, UINT32_MAX);
-            }
-            else if (mutation_index == 16)
-            {
-                u64 command = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command))
+                else if (mutation_index == 19)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, command + 12, UINT32_MAX);
+                    u64 relocation_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 4, &relocation_header, 0, 0))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, relocation_header + 40, UINT32_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 17)
-            {
-                u64 command = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command))
+                else if (mutation_index == 20)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, command + 20, UINT32_MAX);
+                    u64 section_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, section_header, UINT32_MAX);
+                    }
                 }
-            }
-            else if (mutation_index == 18)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 4, UINT32_MAX);
-            }
-            else if (mutation_index == 19)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
-            }
-            else if (mutation_index == 20)
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 64, UINT32_MAX);
-            }
-            else if (mutation_index == 21)
-            {
-                object_fuzz_write_u8(bytes, seed.length, 32 + 72, (u8)input_value);
-            }
-            else if (mutation_index == 22)
-            {
-                u64 command = 0;
-                if (object_fuzz_mach_find_command(seed, 2, &command))
+                else if (mutation_index == 21)
                 {
-                    object_fuzz_write_u32(bytes, seed.length, command + 4, UINT32_MAX);
+                    u64 section_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, section_header + 48, UINT64_MAX);
+                    }
                 }
+                else if (mutation_index == 22)
+                {
+                    u64 section_header = 0;
+                    if (object_fuzz_elf_find_section(seed, 1, &section_header, 0, 0))
+                    {
+                        object_fuzz_write_u64(bytes, seed.length, section_header + 8, UINT64_MAX);
+                    }
+                }
+                else
+                {
+                    object_fuzz_write_u16(bytes, seed.length, 62, (u16)input_value);
+                }
+                break;
+            case OBJECT_FORMAT_COFF:
+                if (mutation_index == 4)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 8, UINT32_MAX);
+                }
+                else if (mutation_index == 5)
+                {
+                    object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+                }
+                else if (mutation_index == 6)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 12, UINT32_MAX);
+                }
+                else if (mutation_index == 8)
+                {
+                    u32 symbol_offset = 0;
+                    u32 symbol_count = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 9)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, 20, '/');
+                    object_fuzz_write_u8(bytes, seed.length, 21, '9');
+                    object_fuzz_write_u8(bytes, seed.length, 22, '9');
+                    object_fuzz_write_u8(bytes, seed.length, 23, '9');
+                    object_fuzz_write_u8(bytes, seed.length, 24, '9');
+                    object_fuzz_write_u8(bytes, seed.length, 25, '9');
+                    object_fuzz_write_u8(bytes, seed.length, 26, '9');
+                }
+                else if (mutation_index == 10)
+                {
+                    u32 symbol_offset = 0;
+                    u32 symbol_count = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                        (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
+                    {
+                        object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
+                    }
+                }
+                else if (mutation_index == 11)
+                {
+                    u32 relocation_offset = 0;
+                    u16 relocation_count = 0;
+                    if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 12)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20 + 20, UINT32_MAX);
+                }
+                else if (mutation_index == 13)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20 + 24, UINT32_MAX);
+                }
+                else if (mutation_index == 14)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20 + 16, UINT32_MAX);
+                }
+                else if (mutation_index == 15)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20 + 36, 0x02000800);
+                }
+                else if (mutation_index == 16)
+                {
+                    u32 symbol_offset = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset))
+                    {
+                        object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
+                    }
+                }
+                else if (mutation_index == 17)
+                {
+                    u32 symbol_offset = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 18)
+                {
+                    u32 relocation_offset = 0;
+                    u16 relocation_count = 0;
+                    if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                    {
+                        object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
+                    }
+                }
+                else if (mutation_index == 19)
+                {
+                    u32 symbol_offset = 0;
+                    u32 symbol_count = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                        (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 20)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, 20, (u8)input_value);
+                }
+                else if (mutation_index == 21)
+                {
+                    u32 symbol_offset = 0;
+                    if (object_read_u32(seed, 8, &symbol_offset))
+                    {
+                        object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
+                    }
+                }
+                else if (mutation_index == 22)
+                {
+                    object_fuzz_write_u16(bytes, seed.length, 2, UINT16_MAX);
+                }
+                else
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20, (u32)input_value);
+                }
+                break;
+            case OBJECT_FORMAT_MACH_O64:
+                if (mutation_index == 4)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 20, UINT32_MAX);
+                }
+                else if (mutation_index == 5)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+                }
+                else if (mutation_index == 6)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 8, UINT32_MAX);
+                }
+                else if (mutation_index == 8)
+                {
+                    u64 command = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, command + 8, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 9)
+                {
+                    u64 command = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, command + 16, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 10)
+                {
+                    u64 command = 0;
+                    u32 string_offset = 0;
+                    u32 string_size = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
+                        object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
+                    {
+                        object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
+                    }
+                }
+                else if (mutation_index == 11)
+                {
+                    u64 command = 0;
+                    u32 symbol_offset = 0;
+                    u32 symbol_count = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
+                        object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 12)
+                {
+                    u64 section = 32 + 72;
+                    u32 relocation_offset = 0;
+                    u32 relocation_count = 0;
+                    if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 13)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 48, UINT32_MAX);
+                }
+                else if (mutation_index == 14)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 56, UINT32_MAX);
+                }
+                else if (mutation_index == 15)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 60, UINT32_MAX);
+                }
+                else if (mutation_index == 16)
+                {
+                    u64 command = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, command + 12, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 17)
+                {
+                    u64 command = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, command + 20, UINT32_MAX);
+                    }
+                }
+                else if (mutation_index == 18)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 4, UINT32_MAX);
+                }
+                else if (mutation_index == 19)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 16, UINT32_MAX);
+                }
+                else if (mutation_index == 20)
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 72 + 64, UINT32_MAX);
+                }
+                else if (mutation_index == 21)
+                {
+                    object_fuzz_write_u8(bytes, seed.length, 32 + 72, (u8)input_value);
+                }
+                else if (mutation_index == 22)
+                {
+                    u64 command = 0;
+                    if (object_fuzz_mach_find_command(seed, 2, &command))
+                    {
+                        object_fuzz_write_u32(bytes, seed.length, command + 4, UINT32_MAX);
+                    }
+                }
+                else
+                {
+                    object_fuzz_write_u32(bytes, seed.length, 32 + 12, (u32)input_value);
+                }
+                break;
+            case OBJECT_FORMAT_COUNT:
+                break;
             }
-            else
-            {
-                object_fuzz_write_u32(bytes, seed.length, 32 + 12, (u32)input_value);
-            }
-            break;
-        case OBJECT_FORMAT_COUNT:
-            break;
         }
     }
 

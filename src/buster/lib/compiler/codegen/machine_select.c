@@ -107,11 +107,17 @@ BUSTER_GLOBAL_LOCAL MachineSelectionResultClass machine_selection_instruction_re
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_scalar_register_type(IrType* type)
 {
+    bool result;
     if (!type || !type->layout.resolved || type->layout.size > 8)
     {
-        return false;
+        result = false;
     }
-    return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    else
+    {
+        result = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_local_type_promotable(IrProgram* program, IrValue* value)
@@ -121,11 +127,17 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_local_type_promotable(IrProgram* prog
         return false;
     }
     IrType* type = ir_type_from_id(&program->types, value->canonical_type);
+    bool result;
     if (!machine_selection_scalar_register_type(type) || (type->layout.size != 4 && type->layout.size != 8))
     {
-        return false;
+        result = false;
     }
-    return true;
+    else
+    {
+        result = true;
+    }
+
+    return result;
 }
 
 MachineSelectionPrepass machine_selection_prepass_build(Arena* arena, IrProgram* program, IrFunction* function)

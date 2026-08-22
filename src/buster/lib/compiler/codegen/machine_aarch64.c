@@ -192,11 +192,17 @@ struct MachineA64Selector
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_scalar_register(IrType* type)
 {
+    bool result;
     if (!type || !type->layout.resolved || type->layout.size > 8)
     {
-        return false;
+        result = false;
     }
-    return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    else
+    {
+        result = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_64_bit(IrProgram* program, IrTypeId type_id)
@@ -4430,16 +4436,15 @@ u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 
                 return 0u;
             }
             u32 inverse = 0;
-            if (!a64_condition_invert(condition, &inverse))
+            if (a64_condition_invert(condition, &inverse))
             {
-                return UINT8_MAX;
+                if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
+                {
+                    return 2u;
+                }
+                word = UINT32_C(0x14000000);
+                return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
             }
-            if (displacement < INT64_MIN + 4 || displacement > INT64_MAX - 4)
-            {
-                return 2u;
-            }
-            word = UINT32_C(0x14000000);
-            return a64_pc_relative_patch(A64_OPCODE_B, word, displacement - 4, &patched) ? 1u : 2u;
         }
     }
 
@@ -5667,23 +5672,23 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             }
         }
     }
-    if (encoder.overflow || encoder.error)
+    if (!encoder.overflow && !encoder.error)
     {
-        return result;
+        if (!machine_a64_relax_branches(&encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
+                                        &call_sites, &epilogs))
+        {
+            return result;
+        }
+        result.call_sites = arena_allocate(arena, MachineCallSite, call_sites.total_count);
+        result.call_site_count = call_sites.total_count;
+        machine_stream_flatten(&call_sites, result.call_sites);
+        result.epilog_offsets = arena_allocate(arena, u32, epilogs.total_count ? epilogs.total_count : 1);
+        result.epilog_count = epilogs.total_count;
+        machine_stream_flatten(&epilogs, result.epilog_offsets);
+        result.bytes = encoder.bytes;
+        result.byte_count = encoder.count;
+        result.valid = true;
     }
-    if (!machine_a64_relax_branches(&encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
-                                    &call_sites, &epilogs))
-    {
-        return result;
-    }
-    result.call_sites = arena_allocate(arena, MachineCallSite, call_sites.total_count);
-    result.call_site_count = call_sites.total_count;
-    machine_stream_flatten(&call_sites, result.call_sites);
-    result.epilog_offsets = arena_allocate(arena, u32, epilogs.total_count ? epilogs.total_count : 1);
-    result.epilog_count = epilogs.total_count;
-    machine_stream_flatten(&epilogs, result.epilog_offsets);
-    result.bytes = encoder.bytes;
-    result.byte_count = encoder.count;
-    result.valid = true;
+
     return result;
 }

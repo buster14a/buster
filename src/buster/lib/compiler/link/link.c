@@ -1444,318 +1444,317 @@ BUSTER_GLOBAL_LOCAL bool link_arena_block_on_top(Arena* arena, u8* bytes, u64 le
 BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecutableLinkResult* result, ObjectFile* object, u64 image_base,
                                                        u64 const* section_offsets, LinkElfSectionTableLayout layout)
 {
-    if (result->error != LINK_ERROR_NONE || object->section_count < OBJECT_SECTION_COUNT)
+    if (result->error == LINK_ERROR_NONE && object->section_count >= OBJECT_SECTION_COUNT)
     {
-        return;
-    }
-    LinkElfSectionDescriptor descriptors[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY] = {0};
-    u32 descriptor_count = 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
-    {
-        ObjectSectionKind kind = link_elf_loaded_kinds[index];
-        ObjectSection* section = &object->sections[kind];
-        u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
-        u64 offset = section_offsets[kind];
-        bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
-        bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = object_section_name_for_kind(kind),
-            .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
-                     (thread_local_section ? UINT64_C(0x400) : 0),
-            .address = size ? image_base + offset : 0,
-            .offset = size ? offset : 0,
-            .size = size,
-            .alignment = section->alignment,
-            .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
-        };
-    }
-    if (layout.eh_frame_header_size)
-    {
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".eh_frame_hdr"),
-            .flags = 0x2,
-            .address = image_base + layout.eh_frame_header_offset,
-            .offset = layout.eh_frame_header_offset,
-            .size = layout.eh_frame_header_size,
-            .alignment = 4,
-            .type = 1,
-        };
-    }
-    if (layout.dynamic)
-    {
-        u32 dynamic_base = 1 + descriptor_count;
-        u32 dynamic_string_index = dynamic_base + 2;
-        u32 dynamic_symbol_index = dynamic_base + 3;
-        u32 got_index = dynamic_base + 6;
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".interp"),
-            .flags = 0x2,
-            .address = image_base + layout.interpreter_offset,
-            .offset = layout.interpreter_offset,
-            .size = layout.interpreter_size,
-            .alignment = 1,
-            .type = 1,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".plt"),
-            .flags = 0x6,
-            .address = image_base + layout.plt_offset,
-            .offset = layout.plt_offset,
-            .size = layout.plt_size,
-            .alignment = 16,
-            .entry_size = 16,
-            .type = 1,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".dynstr"),
-            .flags = 0x2,
-            .address = image_base + layout.dynamic_string_offset,
-            .offset = layout.dynamic_string_offset,
-            .size = layout.dynamic_string_size,
-            .alignment = 1,
-            .type = 3,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".dynsym"),
-            .flags = 0x2,
-            .address = image_base + layout.dynamic_symbol_offset,
-            .offset = layout.dynamic_symbol_offset,
-            .size = layout.dynamic_symbol_size,
-            .alignment = 8,
-            .entry_size = 24,
-            .type = 11,
-            .link = dynamic_string_index,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".hash"),
-            .flags = 0x2,
-            .address = image_base + layout.hash_offset,
-            .offset = layout.hash_offset,
-            .size = layout.hash_size,
-            .alignment = 4,
-            .entry_size = 4,
-            .type = 5,
-            .link = dynamic_symbol_index,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".rela.plt"),
-            .flags = 0x2,
-            .address = image_base + layout.relocation_offset,
-            .offset = layout.relocation_offset,
-            .size = layout.relocation_size,
-            .alignment = 8,
-            .entry_size = 24,
-            .type = 4,
-            .link = dynamic_symbol_index,
-            .info = got_index,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".got.plt"),
-            .flags = 0x3,
-            .address = image_base + layout.got_offset,
-            .offset = layout.got_offset,
-            .size = layout.got_size,
-            .alignment = 8,
-            .entry_size = 8,
-            .type = 1,
-        };
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = S8(".dynamic"),
-            .flags = 0x3,
-            .address = image_base + layout.dynamic_offset,
-            .offset = layout.dynamic_offset,
-            .size = layout.dynamic_size,
-            .alignment = 8,
-            .entry_size = 16,
-            .type = 6,
-            .link = dynamic_string_index,
-        };
-    }
-    u64 debug_offsets[BUSTER_ARRAY_LENGTH(link_elf_debug_kinds)];
-    u64 cursor = result->executable.length;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
-    {
-        ObjectSection* section = &object->sections[link_elf_debug_kinds[index]];
-        debug_offsets[index] = cursor;
-        if (section->data.length > UINT64_MAX - cursor)
+        LinkElfSectionDescriptor descriptors[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY] = {0};
+        u32 descriptor_count = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds); index += 1)
         {
-            result->error = LINK_ERROR_INVALID_INPUT;
-            return;
+            ObjectSectionKind kind = link_elf_loaded_kinds[index];
+            ObjectSection* section = &object->sections[kind];
+            u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
+            u64 offset = section_offsets[kind];
+            bool thread_local_section = kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            bool writable = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO || thread_local_section;
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = object_section_name_for_kind(kind),
+                .flags = (kind == OBJECT_SECTION_TEXT ? UINT64_C(0x6) : writable ? UINT64_C(0x3) : UINT64_C(0x2)) |
+                         (thread_local_section ? UINT64_C(0x400) : 0),
+                .address = size ? image_base + offset : 0,
+                .offset = size ? offset : 0,
+                .size = size,
+                .alignment = section->alignment,
+                .type = object_section_kind_is_zero_fill(kind) ? 8 : 1,
+            };
         }
-        descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
-            .name = object_section_name_for_kind(link_elf_debug_kinds[index]),
-            .offset = cursor,
-            .size = section->data.length,
-            .alignment = section->alignment,
-            .type = 1,
-        };
-        cursor += section->data.length;
-    }
-    u64 string_offset = cursor;
-    u64 name_offsets[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY + 2] = {0};
-    u64 string_size = 1;
-    for (u32 index = 0; index < descriptor_count; index += 1)
-    {
-        name_offsets[index + 1] = string_size;
-        if (descriptors[index].name.length > UINT64_MAX - string_size - 1)
+        if (layout.eh_frame_header_size)
         {
-            result->error = LINK_ERROR_INVALID_INPUT;
-            return;
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".eh_frame_hdr"),
+                .flags = 0x2,
+                .address = image_base + layout.eh_frame_header_offset,
+                .offset = layout.eh_frame_header_offset,
+                .size = layout.eh_frame_header_size,
+                .alignment = 4,
+                .type = 1,
+            };
         }
-        string_size += descriptors[index].name.length + 1;
-    }
-    u32 string_table_index = descriptor_count + 1;
-    u32 section_count = string_table_index + 1;
-    name_offsets[string_table_index] = string_size;
-    string_size += sizeof(".shstrtab");
-    if (string_size > UINT64_MAX - string_offset)
-    {
-        result->error = LINK_ERROR_INVALID_INPUT;
-        return;
-    }
-    cursor = align_forward(string_offset + string_size, 8);
-    u64 header_offset = cursor;
-    if ((u64)section_count > (UINT64_MAX - header_offset) / BUSTER_LINK_ELF_SECTION_HEADER_SIZE)
-    {
-        result->error = LINK_ERROR_INVALID_INPUT;
-        return;
-    }
-    u64 total_size = header_offset + (u64)section_count * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
-    // The debug sections and the section table are appended to the image the
-    // writer above just finished, and `cursor` started at its end, so the block
-    // only ever grows. Every writer that reaches here allocated that image
-    // last, so the growth is a bump: taking the tail alone leaves the image
-    // where it is and copies nothing. Reallocating and copying instead moved
-    // 35 MB per self-host link and was 3,03% of the compile's fills from DRAM
-    // (audit 2026-08-22T084855Z). The copying form stays for the case where
-    // something else has allocated since — it is the same block either way.
-    u8* bytes = result->executable.pointer;
-    if (link_arena_block_on_top(arena, bytes, result->executable.length))
-    {
-        arena_allocate(arena, u8, total_size - result->executable.length);
-    }
-    else
-    {
-        bytes = arena_allocate(arena, u8, total_size);
-        memcpy(bytes, result->executable.pointer, result->executable.length);
-    }
-    // The tail is arena bytes, which a reused arena hands back dirty.
-    memset(bytes + result->executable.length, 0, total_size - result->executable.length);
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
-    {
-        ByteSlice data = object->sections[link_elf_debug_kinds[index]].data;
-        if (data.length)
+        if (layout.dynamic)
         {
-            memcpy(bytes + debug_offsets[index], data.pointer, data.length);
+            u32 dynamic_base = 1 + descriptor_count;
+            u32 dynamic_string_index = dynamic_base + 2;
+            u32 dynamic_symbol_index = dynamic_base + 3;
+            u32 got_index = dynamic_base + 6;
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".interp"),
+                .flags = 0x2,
+                .address = image_base + layout.interpreter_offset,
+                .offset = layout.interpreter_offset,
+                .size = layout.interpreter_size,
+                .alignment = 1,
+                .type = 1,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".plt"),
+                .flags = 0x6,
+                .address = image_base + layout.plt_offset,
+                .offset = layout.plt_offset,
+                .size = layout.plt_size,
+                .alignment = 16,
+                .entry_size = 16,
+                .type = 1,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".dynstr"),
+                .flags = 0x2,
+                .address = image_base + layout.dynamic_string_offset,
+                .offset = layout.dynamic_string_offset,
+                .size = layout.dynamic_string_size,
+                .alignment = 1,
+                .type = 3,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".dynsym"),
+                .flags = 0x2,
+                .address = image_base + layout.dynamic_symbol_offset,
+                .offset = layout.dynamic_symbol_offset,
+                .size = layout.dynamic_symbol_size,
+                .alignment = 8,
+                .entry_size = 24,
+                .type = 11,
+                .link = dynamic_string_index,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".hash"),
+                .flags = 0x2,
+                .address = image_base + layout.hash_offset,
+                .offset = layout.hash_offset,
+                .size = layout.hash_size,
+                .alignment = 4,
+                .entry_size = 4,
+                .type = 5,
+                .link = dynamic_symbol_index,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".rela.plt"),
+                .flags = 0x2,
+                .address = image_base + layout.relocation_offset,
+                .offset = layout.relocation_offset,
+                .size = layout.relocation_size,
+                .alignment = 8,
+                .entry_size = 24,
+                .type = 4,
+                .link = dynamic_symbol_index,
+                .info = got_index,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".got.plt"),
+                .flags = 0x3,
+                .address = image_base + layout.got_offset,
+                .offset = layout.got_offset,
+                .size = layout.got_size,
+                .alignment = 8,
+                .entry_size = 8,
+                .type = 1,
+            };
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = S8(".dynamic"),
+                .flags = 0x3,
+                .address = image_base + layout.dynamic_offset,
+                .offset = layout.dynamic_offset,
+                .size = layout.dynamic_size,
+                .alignment = 8,
+                .entry_size = 16,
+                .type = 6,
+                .link = dynamic_string_index,
+            };
         }
-    }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* relocation = &object->relocations[index];
-        if (relocation->section >= OBJECT_SECTION_COUNT || !object_section_kind_is_debug((ObjectSectionKind)relocation->section) ||
-            relocation->symbol >= object->symbol_count)
+        u64 debug_offsets[BUSTER_ARRAY_LENGTH(link_elf_debug_kinds)];
+        u64 cursor = result->executable.length;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
         {
-            continue;
-        }
-        u32 debug_index = 0;
-        while (debug_index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) && link_elf_debug_kinds[debug_index] != (ObjectSectionKind)relocation->section)
-        {
-            debug_index += 1;
-        }
-        if (debug_index >= BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
-        {
-            continue;
-        }
-        ObjectSection* section = &object->sections[relocation->section];
-        ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
-        if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
-        {
-            result->error = LINK_ERROR_RELOCATION;
-            return;
-        }
-        u64 slot = debug_offsets[debug_index] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
-        {
-            // DWARF 4 range and location lists use offset pairs relative to
-            // the containing compilation unit's base address.  Their text
-            // relocations therefore remain section-relative after linking;
-            // adding the final image address here makes consumers add the CU
-            // base a second time.  Other debug address attributes (line
-            // addresses, DW_OP_addr, and DW_AT_low_pc) are true addresses.
-            bool relative_text_range = (relocation->section == OBJECT_SECTION_DEBUG_LOC || relocation->section == OBJECT_SECTION_DEBUG_RANGES) &&
-                                       symbol->section == OBJECT_SECTION_TEXT;
-            u64 value = 0;
-            if (relative_text_range)
+            ObjectSection* section = &object->sections[link_elf_debug_kinds[index]];
+            debug_offsets[index] = cursor;
+            if (section->data.length > UINT64_MAX - cursor)
             {
-                if (!link_address_addend(symbol->value, relocation->addend, &value))
+                result->error = LINK_ERROR_INVALID_INPUT;
+                return;
+            }
+            descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                .name = object_section_name_for_kind(link_elf_debug_kinds[index]),
+                .offset = cursor,
+                .size = section->data.length,
+                .alignment = section->alignment,
+                .type = 1,
+            };
+            cursor += section->data.length;
+        }
+        u64 string_offset = cursor;
+        u64 name_offsets[BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY + 2] = {0};
+        u64 string_size = 1;
+        for (u32 index = 0; index < descriptor_count; index += 1)
+        {
+            name_offsets[index + 1] = string_size;
+            if (descriptors[index].name.length > UINT64_MAX - string_size - 1)
+            {
+                result->error = LINK_ERROR_INVALID_INPUT;
+                return;
+            }
+            string_size += descriptors[index].name.length + 1;
+        }
+        u32 string_table_index = descriptor_count + 1;
+        u32 section_count = string_table_index + 1;
+        name_offsets[string_table_index] = string_size;
+        string_size += sizeof(".shstrtab");
+        if (string_size > UINT64_MAX - string_offset)
+        {
+            result->error = LINK_ERROR_INVALID_INPUT;
+            return;
+        }
+        cursor = align_forward(string_offset + string_size, 8);
+        u64 header_offset = cursor;
+        if ((u64)section_count > (UINT64_MAX - header_offset) / BUSTER_LINK_ELF_SECTION_HEADER_SIZE)
+        {
+            result->error = LINK_ERROR_INVALID_INPUT;
+            return;
+        }
+        u64 total_size = header_offset + (u64)section_count * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
+        // The debug sections and the section table are appended to the image the
+        // writer above just finished, and `cursor` started at its end, so the block
+        // only ever grows. Every writer that reaches here allocated that image
+        // last, so the growth is a bump: taking the tail alone leaves the image
+        // where it is and copies nothing. Reallocating and copying instead moved
+        // 35 MB per self-host link and was 3,03% of the compile's fills from DRAM
+        // (audit 2026-08-22T084855Z). The copying form stays for the case where
+        // something else has allocated since — it is the same block either way.
+        u8* bytes = result->executable.pointer;
+        if (link_arena_block_on_top(arena, bytes, result->executable.length))
+        {
+            arena_allocate(arena, u8, total_size - result->executable.length);
+        }
+        else
+        {
+            bytes = arena_allocate(arena, u8, total_size);
+            memcpy(bytes, result->executable.pointer, result->executable.length);
+        }
+        // The tail is arena bytes, which a reused arena hands back dirty.
+        memset(bytes + result->executable.length, 0, total_size - result->executable.length);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
+        {
+            ByteSlice data = object->sections[link_elf_debug_kinds[index]].data;
+            if (data.length)
+            {
+                memcpy(bytes + debug_offsets[index], data.pointer, data.length);
+            }
+        }
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation* relocation = &object->relocations[index];
+            if (relocation->section >= OBJECT_SECTION_COUNT || !object_section_kind_is_debug((ObjectSectionKind)relocation->section) ||
+                relocation->symbol >= object->symbol_count)
+            {
+                continue;
+            }
+            u32 debug_index = 0;
+            while (debug_index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) && link_elf_debug_kinds[debug_index] != (ObjectSectionKind)relocation->section)
+            {
+                debug_index += 1;
+            }
+            if (debug_index >= BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
+            {
+                continue;
+            }
+            ObjectSection* section = &object->sections[relocation->section];
+            ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+            u64 width = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
+            if (relocation->offset > section->data.length || width > section->data.length - relocation->offset || symbol->section >= OBJECT_SECTION_COUNT)
+            {
+                result->error = LINK_ERROR_RELOCATION;
+                return;
+            }
+            u64 slot = debug_offsets[debug_index] + relocation->offset;
+            if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+            {
+                // DWARF 4 range and location lists use offset pairs relative to
+                // the containing compilation unit's base address.  Their text
+                // relocations therefore remain section-relative after linking;
+                // adding the final image address here makes consumers add the CU
+                // base a second time.  Other debug address attributes (line
+                // addresses, DW_OP_addr, and DW_AT_low_pc) are true addresses.
+                bool relative_text_range = (relocation->section == OBJECT_SECTION_DEBUG_LOC || relocation->section == OBJECT_SECTION_DEBUG_RANGES) &&
+                                           symbol->section == OBJECT_SECTION_TEXT;
+                u64 value = 0;
+                if (relative_text_range)
+                {
+                    if (!link_address_addend(symbol->value, relocation->addend, &value))
+                    {
+                        result->error = LINK_ERROR_RELOCATION;
+                        return;
+                    }
+                }
+                else if (!link_u64_add(image_base, section_offsets[symbol->section], &value) ||
+                         !link_u64_add(value, symbol->value, &value) || !link_address_addend(value, relocation->addend, &value))
                 {
                     result->error = LINK_ERROR_RELOCATION;
                     return;
                 }
+                link_write_u64(bytes, slot, value);
             }
-            else if (!link_u64_add(image_base, section_offsets[symbol->section], &value) ||
-                     !link_u64_add(value, symbol->value, &value) || !link_address_addend(value, relocation->addend, &value))
+            else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+            {
+                u64 value = 0;
+                if (!link_address_addend(symbol->value, relocation->addend, &value) || value > UINT32_MAX)
+                {
+                    result->error = LINK_ERROR_RELOCATION;
+                    return;
+                }
+                link_write_u32(bytes, slot, (u32)value);
+            }
+            else
             {
                 result->error = LINK_ERROR_RELOCATION;
                 return;
             }
-            link_write_u64(bytes, slot, value);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+        u64 name_cursor = string_offset + 1;
+        for (u32 index = 0; index < descriptor_count; index += 1)
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol->value, relocation->addend, &value) || value > UINT32_MAX)
-            {
-                result->error = LINK_ERROR_RELOCATION;
-                return;
-            }
-            link_write_u32(bytes, slot, (u32)value);
+            String8 name = descriptors[index].name;
+            memcpy(bytes + name_cursor, name.pointer, name.length);
+            name_cursor += name.length + 1;
         }
-        else
+        memcpy(bytes + name_cursor, ".shstrtab", sizeof(".shstrtab"));
+        for (u32 descriptor_index = 0; descriptor_index < descriptor_count; descriptor_index += 1)
         {
-            result->error = LINK_ERROR_RELOCATION;
-            return;
+            u32 header_index = descriptor_index + 1;
+            u64 offset = header_offset + (u64)header_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
+            link_write_u32(bytes, offset, (u32)name_offsets[header_index]);
+            LinkElfSectionDescriptor* descriptor = &descriptors[descriptor_index];
+            link_write_u32(bytes, offset + 4, descriptor->type);
+            link_write_u64(bytes, offset + 8, descriptor->flags);
+            link_write_u64(bytes, offset + 16, descriptor->address);
+            link_write_u64(bytes, offset + 24, descriptor->offset);
+            link_write_u64(bytes, offset + 32, descriptor->size);
+            link_write_u32(bytes, offset + 40, descriptor->link);
+            link_write_u32(bytes, offset + 44, descriptor->info);
+            link_write_u64(bytes, offset + 48, descriptor->alignment);
+            link_write_u64(bytes, offset + 56, descriptor->entry_size);
         }
+        u64 string_header = header_offset + (u64)string_table_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
+        link_write_u32(bytes, string_header, (u32)name_offsets[string_table_index]);
+        link_write_u32(bytes, string_header + 4, 3);
+        link_write_u64(bytes, string_header + 24, string_offset);
+        link_write_u64(bytes, string_header + 32, string_size);
+        link_write_u64(bytes, string_header + 48, 1);
+        link_write_u64(bytes, 40, header_offset);
+        link_write_u16(bytes, 58, BUSTER_LINK_ELF_SECTION_HEADER_SIZE);
+        link_write_u16(bytes, 60, (u16)section_count);
+        link_write_u16(bytes, 62, (u16)string_table_index);
+        result->executable = (ByteSlice){
+            .pointer = bytes,
+            .length = total_size,
+        };
     }
-    u64 name_cursor = string_offset + 1;
-    for (u32 index = 0; index < descriptor_count; index += 1)
-    {
-        String8 name = descriptors[index].name;
-        memcpy(bytes + name_cursor, name.pointer, name.length);
-        name_cursor += name.length + 1;
-    }
-    memcpy(bytes + name_cursor, ".shstrtab", sizeof(".shstrtab"));
-    for (u32 descriptor_index = 0; descriptor_index < descriptor_count; descriptor_index += 1)
-    {
-        u32 header_index = descriptor_index + 1;
-        u64 offset = header_offset + (u64)header_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
-        link_write_u32(bytes, offset, (u32)name_offsets[header_index]);
-        LinkElfSectionDescriptor* descriptor = &descriptors[descriptor_index];
-        link_write_u32(bytes, offset + 4, descriptor->type);
-        link_write_u64(bytes, offset + 8, descriptor->flags);
-        link_write_u64(bytes, offset + 16, descriptor->address);
-        link_write_u64(bytes, offset + 24, descriptor->offset);
-        link_write_u64(bytes, offset + 32, descriptor->size);
-        link_write_u32(bytes, offset + 40, descriptor->link);
-        link_write_u32(bytes, offset + 44, descriptor->info);
-        link_write_u64(bytes, offset + 48, descriptor->alignment);
-        link_write_u64(bytes, offset + 56, descriptor->entry_size);
-    }
-    u64 string_header = header_offset + (u64)string_table_index * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
-    link_write_u32(bytes, string_header, (u32)name_offsets[string_table_index]);
-    link_write_u32(bytes, string_header + 4, 3);
-    link_write_u64(bytes, string_header + 24, string_offset);
-    link_write_u64(bytes, string_header + 32, string_size);
-    link_write_u64(bytes, string_header + 48, 1);
-    link_write_u64(bytes, 40, header_offset);
-    link_write_u16(bytes, 58, BUSTER_LINK_ELF_SECTION_HEADER_SIZE);
-    link_write_u16(bytes, 60, (u16)section_count);
-    link_write_u16(bytes, 62, (u16)string_table_index);
-    result->executable = (ByteSlice){
-        .pointer = bytes,
-        .length = total_size,
-    };
 }
 
 // ELF64 format facts shared by every ELF executable writer below. Each

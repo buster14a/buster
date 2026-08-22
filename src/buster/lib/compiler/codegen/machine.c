@@ -52,11 +52,17 @@ MachinePointPhase machine_point_phase(MachinePoint point)
 
 MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmitRecipeId recipe)
 {
+    MachineEmitRecipeCategory result;
     if (recipe == MACHINE_EMIT_RECIPE_INVALID)
     {
-        return MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
+        result = MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
     }
-    return (MachineEmitRecipeCategory)(recipe >> MACHINE_EMIT_RECIPE_CATEGORY_SHIFT);
+    else
+    {
+        result = (MachineEmitRecipeCategory)(recipe >> MACHINE_EMIT_RECIPE_CATEGORY_SHIFT);
+    }
+
+    return result;
 }
 
 u16 machine_emit_recipe_index(MachineEmitRecipeId recipe)
@@ -1074,11 +1080,17 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
 {
+    MachineOpcodeInfo const* result;
     if (opcode >= MACHINE_OPCODE_COUNT)
     {
-        return 0;
+        result = 0;
     }
-    return machine_opcode_infos + opcode;
+    else
+    {
+        result = machine_opcode_infos + opcode;
+    }
+
+    return result;
 }
 
 MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode)
@@ -1174,11 +1186,17 @@ bool machine_opcode_is_memory(MachineOpcodeInfo const* info)
 
 u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
 {
+    u32 result;
     if (!info || slot >= BUSTER_ARRAY_LENGTH(info->fixed_registers) || !(info->fixed_register_mask & (1u << slot)))
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return info->fixed_registers[slot];
+    else
+    {
+        result = info->fixed_registers[slot];
+    }
+
+    return result;
 }
 
 u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
@@ -1407,74 +1425,73 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
 void machine_function_stamp_frequency_classes(MachineFunction* function)
 {
     u32 block_count = function->block_count;
-    if (!block_count)
+    if (block_count)
     {
-        return;
-    }
-    TemporalArena scratch = scratch_begin(0, 0);
-    // Widest backward span per head block, or UINT32_MAX for no span.
-    u32* head_ends = arena_allocate(scratch.arena, u32, block_count);
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        head_ends[block_index] = UINT32_MAX;
-    }
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        TemporalArena scratch = scratch_begin(0, 0);
+        // Widest backward span per head block, or UINT32_MAX for no span.
+        u32* head_ends = arena_allocate(scratch.arena, u32, block_count);
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
         {
-            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            if (!info)
+            head_ends[block_index] = UINT32_MAX;
+        }
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
+        {
+            MachineBlock* block = function->blocks + block_index;
+            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
             {
-                scratch_end(scratch);
-                return;
-            }
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK ||
-                    machine_ref_payload(instruction->operands[slot]) > block_index)
+                MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                if (!info)
                 {
-                    continue;
+                    scratch_end(scratch);
+                    return;
                 }
-                u32 head = machine_ref_payload(instruction->operands[slot]);
-                head_ends[head] = head_ends[head] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[head], block_index);
-            }
-            if (function->target && instruction->opcode == function->target->switch_opcode)
-            {
-                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                for (u32 slot = 0; slot < info->operand_count; slot += 1)
                 {
-                    u32 case_target = function->switch_cases[instruction->payload + case_index].target_block;
-                    if (case_target > block_index)
+                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK ||
+                        machine_ref_payload(instruction->operands[slot]) > block_index)
                     {
                         continue;
                     }
-                    head_ends[case_target] = head_ends[case_target] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[case_target], block_index);
+                    u32 head = machine_ref_payload(instruction->operands[slot]);
+                    head_ends[head] = head_ends[head] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[head], block_index);
+                }
+                if (function->target && instruction->opcode == function->target->switch_opcode)
+                {
+                    for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                    {
+                        u32 case_target = function->switch_cases[instruction->payload + case_index].target_block;
+                        if (case_target > block_index)
+                        {
+                            continue;
+                        }
+                        head_ends[case_target] = head_ends[case_target] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[case_target], block_index);
+                    }
                 }
             }
         }
-    }
-    s32* depth_deltas = arena_allocate(scratch.arena, s32, block_count + 1);
-    for (u32 block_index = 0; block_index <= block_count; block_index += 1)
-    {
-        depth_deltas[block_index] = 0;
-    }
-    for (u32 head = 0; head < block_count; head += 1)
-    {
-        if (head_ends[head] == UINT32_MAX)
+        s32* depth_deltas = arena_allocate(scratch.arena, s32, block_count + 1);
+        for (u32 block_index = 0; block_index <= block_count; block_index += 1)
         {
-            continue;
+            depth_deltas[block_index] = 0;
         }
-        depth_deltas[head] += 1;
-        depth_deltas[head_ends[head] + 1] -= 1;
+        for (u32 head = 0; head < block_count; head += 1)
+        {
+            if (head_ends[head] == UINT32_MAX)
+            {
+                continue;
+            }
+            depth_deltas[head] += 1;
+            depth_deltas[head_ends[head] + 1] -= 1;
+        }
+        s32 depth = 0;
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
+        {
+            depth += depth_deltas[block_index];
+            function->blocks[block_index].frequency_class = (u16)BUSTER_MIN((u32)depth, MACHINE_FREQUENCY_CLASS_LIMIT);
+        }
+        scratch_end(scratch);
     }
-    s32 depth = 0;
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        depth += depth_deltas[block_index];
-        function->blocks[block_index].frequency_class = (u16)BUSTER_MIN((u32)depth, MACHINE_FREQUENCY_CLASS_LIMIT);
-    }
-    scratch_end(scratch);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, MachineRef ref)
@@ -1876,17 +1893,16 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         // deepest values live under the stack pointer where the next call's shadow
         // space and return address overwrite them. Refuse the placement instead:
         // the function falls back to the canonical emitter rather than miscompile.
-        if (running > placement.frame_size + push_area)
+        if (running <= placement.frame_size + push_area)
         {
-            return placement;
+            // Pushes that precede the frame pointer sit between it and the caller's
+            // frame, so every incoming stack argument is that much further up.
+            placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
+            placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
+            placement.edit_count = edits.total_count;
+            machine_stream_flatten(&edits, placement.edits);
+            placement.valid = true;
         }
-        // Pushes that precede the frame pointer sit between it and the caller's
-        // frame, so every incoming stack argument is that much further up.
-        placement.incoming_base = function->target && function->target->saves_precede_frame_pointer ? 8u * push_count : 0u;
-        placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
-        placement.edit_count = edits.total_count;
-        machine_stream_flatten(&edits, placement.edits);
-        placement.valid = true;
     }
 
     return placement;

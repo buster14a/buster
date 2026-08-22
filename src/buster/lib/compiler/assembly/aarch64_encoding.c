@@ -317,12 +317,17 @@ BUSTER_GLOBAL_LOCAL Target a64_metadata_apple_m1_target(void)
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_target_is_m1_profile(Target target)
 {
+    bool result;
     if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
     {
-        return true;
+        result = true;
     }
-    return target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 &&
-           target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    else
+    {
+        result = target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 && target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+    }
+
+    return result;
 }
 
 typedef struct A64MetadataPredicateFeature A64MetadataPredicateFeature;
@@ -1051,30 +1056,32 @@ BUSTER_GLOBAL_LOCAL bool a64_scalar_logical_immediate_encode(u64 value, u8 width
     if (encoded && (width == 32 || width == 64))
     {
         u64 mask = a64_scalar_width_mask(width);
-        if ((value & ~mask) || !value || value == mask) return false;
-        for (u32 element_width = 2; element_width <= width; element_width <<= 1)
+        if (!(value & ~mask) && value && value != mask)
         {
-            u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
-            u64 element = value & element_mask;
-            bool replicated = true;
-            for (u32 offset = element_width; offset < width; offset += element_width)
+            for (u32 element_width = 2; element_width <= width; element_width <<= 1)
             {
-                if (((value >> offset) & element_mask) != element)
+                u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
+                u64 element = value & element_mask;
+                bool replicated = true;
+                for (u32 offset = element_width; offset < width; offset += element_width)
                 {
-                    replicated = false;
-                    break;
+                    if (((value >> offset) & element_mask) != element)
+                    {
+                        replicated = false;
+                        break;
+                    }
                 }
-            }
-            if (!replicated || !element || element == element_mask) continue;
-            for (u32 ones = 1; ones < element_width; ones += 1)
-            {
-                u64 ones_mask = (UINT64_C(1) << ones) - 1;
-                for (u32 rotation = 0; rotation < element_width; rotation += 1)
+                if (!replicated || !element || element == element_mask) continue;
+                for (u32 ones = 1; ones < element_width; ones += 1)
                 {
-                    if (a64_scalar_rotate_right(ones_mask, rotation, element_width) != element) continue;
-                    u32 levels = (~(element_width * 2u - 1u)) & 0x3fu;
-                    *encoded = ((element_width == 64 ? 1u : 0u) << 22) | (rotation << 16) | (levels | (ones - 1u)) << 10;
-                    return true;
+                    u64 ones_mask = (UINT64_C(1) << ones) - 1;
+                    for (u32 rotation = 0; rotation < element_width; rotation += 1)
+                    {
+                        if (a64_scalar_rotate_right(ones_mask, rotation, element_width) != element) continue;
+                        u32 levels = (~(element_width * 2u - 1u)) & 0x3fu;
+                        *encoded = ((element_width == 64 ? 1u : 0u) << 22) | (rotation << 16) | (levels | (ones - 1u)) << 10;
+                        return true;
+                    }
                 }
             }
         }

@@ -232,11 +232,17 @@ BUSTER_GLOBAL_LOCAL IrAbiConvention machine_x64_abi_convention(Target target)
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_scalar_register(IrType* type)
 {
+    bool result;
     if (!type || !type->layout.resolved || type->layout.size > 8)
     {
-        return false;
+        result = false;
     }
-    return type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    else
+    {
+        result = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+    }
+
+    return result;
 }
 
 // The vector subset is the target-fixed 512-bit vocabulary: 64-byte vector
@@ -6658,12 +6664,14 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_id_for_recipe_variant(MachineEmitR
     }
     if (category == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY)
     {
-        if (recipe_index >= BUSTER_ARRAY_LENGTH(machine_x64_family_exact_plan_id_by_recipe)) return MACHINE_X64_EXACT_PLAN_INVALID;
-        if (recipe_index == 0 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_MOV_SIGNED_IMMEDIATE;
-        if (recipe_index == 2 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_ADD_RSP;
-        if (recipe_index == 3 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE32;
-        if (recipe_index == 25 && variant_index <= 10) return (u8)(MACHINE_X64_EXACT_PLAN_VPADDB + variant_index);
-        return machine_x64_family_exact_plan_id_by_recipe[recipe_index];
+        if (recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_family_exact_plan_id_by_recipe))
+        {
+            if (recipe_index == 0 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_MOV_SIGNED_IMMEDIATE;
+            if (recipe_index == 2 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_ADD_RSP;
+            if (recipe_index == 3 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE32;
+            if (recipe_index == 25 && variant_index <= 10) return (u8)(MACHINE_X64_EXACT_PLAN_VPADDB + variant_index);
+            return machine_x64_family_exact_plan_id_by_recipe[recipe_index];
+        }
     }
     return MACHINE_X64_EXACT_PLAN_INVALID;
 }
@@ -8289,11 +8297,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_instruction(MachineX64Encoder
         return machine_x64_exact_reject(encoder, counters);
     }
     BusterX86MetadataMachineExactToken const* token = machine_x64_metadata_shape_cache_find(mnemonic, operands, operand_count, features, attributes);
+    bool result;
     if (!token)
     {
-        return machine_x64_exact_reject(encoder, counters);
+        result = machine_x64_exact_reject(encoder, counters);
     }
-    return machine_x64_emit_exact_form(encoder, *token, operands, operand_count, false, attributes.lock, 0, false, counters);
+    else
+    {
+        result = machine_x64_emit_exact_form(encoder, *token, operands, operand_count, false, attributes.lock, 0, false, counters);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode);
