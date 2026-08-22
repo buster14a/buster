@@ -2391,6 +2391,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wide_vector_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // 256-bit vector arguments, once through the default pipeline and once
+    // through the canonical emitter, whose VMOVDQU move is the shape the
+    // default pipeline only reaches through per-function fallback.
+    for (u32 ymm_mode = 0; ymm_mode < 2; ymm_mode += 1)
+    {
+        String8 c_ymm_vector_path = buster_test_temporary_path(
+            arguments->arena, ymm_mode ? S8("buster-c-vector-ymm-canonical") : S8("buster-c-vector-ymm"), S8(""));
+        String8 c_ymm_vector_command_line[] = {
+            ymm_mode ? S8("-fno-register-allocator") : S8("-fregister-allocator=fast"),
+            S8("-o"),
+            c_ymm_vector_path,
+            S8("tests/basic_c_vector_argument_ymm.c"),
+        };
+        CompilerDriverResult c_ymm_vector = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_vector_command_line)));
+        BUSTER_TEST(arguments, c_ymm_vector.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_ymm_vector.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_ymm_vector_arguments[] = {
+                c_ymm_vector_path,
+            };
+            ProcessSpawnResult c_ymm_vector_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_vector_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, c_ymm_vector_spawn.handle != 0);
+            if (c_ymm_vector_spawn.handle)
+            {
+                ProcessWaitResult c_ymm_vector_wait = os_process_wait_sync(arguments->arena, c_ymm_vector_spawn);
+                BUSTER_TEST(arguments, c_ymm_vector_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),
 #if BUSTER_WINDOWS
                                                                           S8(".exe"));

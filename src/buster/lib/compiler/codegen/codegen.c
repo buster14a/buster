@@ -4042,7 +4042,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
     {
         vector_width = 256;
         mnemonic = S8("VMOVDQU");
-        feature_names[0] = S8("avx2");
+        // The 256-bit VMOVDQU rows are AVX, not AVX2; offering only "avx2"
+        // made the metadata resolve fail every 32-byte vector argument and
+        // return down the canonical path (found by
+        // tools/differential_c_harness.py, family union_vector).
+        feature_names[0] = S8("avx");
         feature_count = 1;
     }
     else if (size == 16)
