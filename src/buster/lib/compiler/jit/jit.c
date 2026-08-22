@@ -209,37 +209,35 @@ bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch
     if (patch && !(place & 3))
     {
         u64 address = 0;
-        if (!jit_address_addend(target, addend, &address))
+        if (jit_address_addend(target, addend, &address))
         {
-            return false;
-        }
-        u32 instruction = 0;
-        memcpy(&instruction, patch, sizeof(instruction));
-        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
-        {
-            if (!jit_aarch64_page21_instruction_valid(instruction))
+            u32 instruction = 0;
+            memcpy(&instruction, patch, sizeof(instruction));
+            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
             {
-                return false;
+                if (!jit_aarch64_page21_instruction_valid(instruction))
+                {
+                    return false;
+                }
+                u32 patched = 0;
+                if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+                {
+                    return false;
+                }
+                memcpy(patch, &patched, sizeof(patched));
+                return true;
             }
-            u32 patched = 0;
-            if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
             {
-                return false;
+                u32 shift = 0;
+                if (jit_aarch64_pageoff12_shift(instruction, &shift) && !((address & 0xfff) & ((1u << shift) - 1)))
+                {
+                    instruction &= ~(UINT32_C(0xfff) << 10);
+                    instruction |= (u32)((address & 0xfff) >> shift) << 10;
+                    memcpy(patch, &instruction, sizeof(instruction));
+                    return true;
+                }
             }
-            memcpy(patch, &patched, sizeof(patched));
-            return true;
-        }
-        if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-        {
-            u32 shift = 0;
-            if (!jit_aarch64_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
-            {
-                return false;
-            }
-            instruction &= ~(UINT32_C(0xfff) << 10);
-            instruction |= (u32)((address & 0xfff) >> shift) << 10;
-            memcpy(patch, &instruction, sizeof(instruction));
-            return true;
         }
     }
 

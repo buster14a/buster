@@ -380,11 +380,17 @@ BUSTER_C_INTERNAL u32 c_parse_first_position_in_range(u32* positions, u32 count,
             high = middle;
         }
     }
+    u32 result;
     if (low < count && positions[low] < end)
     {
-        return positions[low];
+        result = positions[low];
     }
-    return UINT32_MAX;
+    else
+    {
+        result = UINT32_MAX;
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_parse_declaration_keyword_at(CParseResult* result, CPreprocessResult preprocess, u32 token_index)
@@ -3811,40 +3817,39 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
 {
     CAggregateLookup* lookup = result->aggregate_lookup;
     CType* type = &result->types[id.value];
-    if (!lookup || lookup->saturated || !type->tag.length)
+    if (lookup && !lookup->saturated && type->tag.length)
     {
-        return;
-    }
-    u32 mask = lookup->slot_count - 1;
-    u32 slot_index = (u32)(c_macro_name_hash(type->tag) & mask) ^ ((u32)type->kind & mask);
-    CAggregateLookupSlot* slot = lookup->slots + slot_index;
-    while (slot->used && (slot->kind != (u32)type->kind || !string_equal(slot->tag, type->tag)))
-    {
-        slot_index = (slot_index + 1) & mask;
-        slot = lookup->slots + slot_index;
-    }
-    if (slot->used)
-    {
-        // Keep the recorded id only while it still names an older live type
-        // with this key; a rolled-back id is replaced by the new one.
-        u32 existing = slot->type_index;
-        if (existing < id.value && result->types[existing].kind == type->kind && string_equal(result->types[existing].tag, type->tag))
+        u32 mask = lookup->slot_count - 1;
+        u32 slot_index = (u32)(c_macro_name_hash(type->tag) & mask) ^ ((u32)type->kind & mask);
+        CAggregateLookupSlot* slot = lookup->slots + slot_index;
+        while (slot->used && (slot->kind != (u32)type->kind || !string_equal(slot->tag, type->tag)))
         {
+            slot_index = (slot_index + 1) & mask;
+            slot = lookup->slots + slot_index;
+        }
+        if (slot->used)
+        {
+            // Keep the recorded id only while it still names an older live type
+            // with this key; a rolled-back id is replaced by the new one.
+            u32 existing = slot->type_index;
+            if (existing < id.value && result->types[existing].kind == type->kind && string_equal(result->types[existing].tag, type->tag))
+            {
+                return;
+            }
+            slot->type_index = id.value;
             return;
         }
+        if (lookup->fill >= lookup->slot_count / 2)
+        {
+            lookup->saturated = true;
+            return;
+        }
+        lookup->fill += 1;
+        slot->used = true;
+        slot->tag = type->tag;
+        slot->kind = (u32)type->kind;
         slot->type_index = id.value;
-        return;
     }
-    if (lookup->fill >= lookup->slot_count / 2)
-    {
-        lookup->saturated = true;
-        return;
-    }
-    lookup->fill += 1;
-    slot->used = true;
-    slot->tag = type->tag;
-    slot->kind = (u32)type->kind;
-    slot->type_index = id.value;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
@@ -7415,198 +7420,195 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
             }
         }
     }
-    if (name_index == declarator_end)
+    if (name_index != declarator_end)
     {
-        return;
-    }
-    if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, name_index, &declaration->alignment_start,
-                                      &declaration->alignment_count))
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
-        return;
-    }
-    if (declaration->alignment_count && (declaration->kind == C_DECLARATION_FUNCTION || declaration->kind == C_DECLARATION_TYPEDEF))
-    {
-        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
-                           declaration->kind == C_DECLARATION_FUNCTION ? S8("alignment specifier cannot be applied to a function")
-                                                                       : S8("alignment specifier cannot be applied to a typedef"));
-        declaration->alignment_count = 0;
-    }
-    u32 declarator_start = declaration->token_start;
-    CTypeId base = inherited_base;
-    if (base.value == C_ID_UNDERLYING_INVALID)
-    {
-        base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
-        base = c_parse_apply_vector_attribute(result, preprocess, base, declaration->token_start, name_index);
-    }
-    else
-    {
-        declarator_start = declaration->declarator_start;
-    }
-    if (base.value == C_ID_UNDERLYING_INVALID)
-    {
-        return;
-    }
-    declaration->base_type = base;
-    base = c_parse_pointer_chain(result, preprocess, base, &declarator_start, name_index);
-    if (base.value == C_ID_UNDERLYING_INVALID)
-    {
-        return;
-    }
-    bool parenthesized = declarator_start < name_index && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
-    if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
-    {
-        u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
-        declaration->type =
-            c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
-        return;
-    }
-    if (declarator_start != name_index)
-    {
-        return;
-    }
-    bool function_declarator =
-        declaration->kind == C_DECLARATION_FUNCTION || (declaration->kind == C_DECLARATION_TYPEDEF && name_index + 1 < end &&
-                                                        c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
-    if (!function_declarator)
-    {
-        u32 suffix_end = name_index + 1;
-        while (suffix_end < end && !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_ASSIGN) &&
-               !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_COMMA) &&
-               !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_SEMICOLON))
+        if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, name_index, &declaration->alignment_start,
+                                          &declaration->alignment_count))
         {
-            suffix_end += 1;
-        }
-        u32 suffix_index = name_index + 1;
-        base = c_parse_apply_vector_attribute(result, preprocess, base, name_index + 1, suffix_end);
-        suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
-        base = c_parse_array_suffixes(result, preprocess, base, &suffix_index, suffix_end);
-        suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
-        if (suffix_index != suffix_end || base.value == C_ID_UNDERLYING_INVALID)
-        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
             return;
         }
-        declaration->type = base;
-        return;
-    }
-    u32 parameter_start = result->parameter_count;
-    u32 reserved_parameter_count = 0;
-    {
-        u32 count_start = name_index + 2;
-        u32 count_depth = 1;
-        for (u32 count_index = count_start; count_index < end; count_index += 1)
+        if (declaration->alignment_count && (declaration->kind == C_DECLARATION_FUNCTION || declaration->kind == C_DECLARATION_TYPEDEF))
         {
-            CToken count_token = preprocess.tokens[count_index];
-            if (c_token_is_punctuator(&count_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                count_depth += 1;
-                continue;
-            }
-            if (c_token_is_punctuator(&count_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && count_depth > 1)
-            {
-                count_depth -= 1;
-                continue;
-            }
-            bool count_separator = count_depth == 1 && c_token_is_punctuator(&count_token, C_PUNCTUATOR_COMMA);
-            bool count_end = count_depth == 1 && c_token_is_punctuator(&count_token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (!count_separator && !count_end)
-            {
-                continue;
-            }
-            u32 count = count_index - count_start;
-            bool omitted =
-                !count || (count == 1 && (c_token_is_punctuator(&preprocess.tokens[count_start], C_PUNCTUATOR_ELLIPSIS) ||
-                                          (count_end && !reserved_parameter_count && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[count_start]), S8("void")))));
-            reserved_parameter_count += omitted ? 0 : 1;
-            if (count_end)
-            {
-                break;
-            }
-            count_start = count_index + 1;
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                               declaration->kind == C_DECLARATION_FUNCTION ? S8("alignment specifier cannot be applied to a function")
+                                                                           : S8("alignment specifier cannot be applied to a typedef"));
+            declaration->alignment_count = 0;
         }
-    }
-    result->parameter_count += reserved_parameter_count;
-    u32 written_parameter_count = 0;
-    u32 segment_start = name_index + 2;
-    u32 depth = 1;
-    bool valid = true;
-    for (u32 index = segment_start; index < end; index += 1)
-    {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        u32 declarator_start = declaration->token_start;
+        CTypeId base = inherited_base;
+        if (base.value == C_ID_UNDERLYING_INVALID)
         {
-            depth += 1;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            if (depth > 1)
-            {
-                depth -= 1;
-                continue;
-            }
-        }
-        bool segment_end = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
-        bool list_end = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (!segment_end && !list_end)
-        {
-            continue;
-        }
-        u32 segment_count = index - segment_start;
-        if (list_end && !segment_count && result->parameter_count == parameter_start)
-        {
-            break;
-        }
-        if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
-        {
-            declaration->is_variadic = true;
-        }
-        else if (list_end && result->parameter_count == parameter_start && segment_count == 1 &&
-                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")))
-        {
-        }
-        else if (!segment_count)
-        {
-            valid = false;
-            break;
+            base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
+            base = c_parse_apply_vector_attribute(result, preprocess, base, declaration->token_start, name_index);
         }
         else
         {
-            if (!c_parse_parameter_segment(machine, result, preprocess, *declaration, segment_start, index))
-            {
-                valid = false;
-                break;
-            }
-            if (written_parameter_count >= reserved_parameter_count)
-            {
-                valid = false;
-                break;
-            }
-            result->parameters[parameter_start + written_parameter_count++] = result->parameters[result->parameter_count - 1];
-            result->parameter_count -= 1;
+            declarator_start = declaration->declarator_start;
         }
-        if (list_end)
+        if (base.value != C_ID_UNDERLYING_INVALID)
         {
-            break;
+            declaration->base_type = base;
+            base = c_parse_pointer_chain(result, preprocess, base, &declarator_start, name_index);
+            if (base.value == C_ID_UNDERLYING_INVALID)
+            {
+                return;
+            }
+            bool parenthesized = declarator_start < name_index && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
+            {
+                u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
+                declaration->type =
+                    c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
+                return;
+            }
+            if (declarator_start == name_index)
+            {
+                bool function_declarator =
+                    declaration->kind == C_DECLARATION_FUNCTION || (declaration->kind == C_DECLARATION_TYPEDEF && name_index + 1 < end &&
+                                                                    c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+                if (!function_declarator)
+                {
+                    u32 suffix_end = name_index + 1;
+                    while (suffix_end < end && !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_ASSIGN) &&
+                           !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_COMMA) &&
+                           !c_token_is_punctuator(&preprocess.tokens[suffix_end], C_PUNCTUATOR_SEMICOLON))
+                    {
+                        suffix_end += 1;
+                    }
+                    u32 suffix_index = name_index + 1;
+                    base = c_parse_apply_vector_attribute(result, preprocess, base, name_index + 1, suffix_end);
+                    suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
+                    base = c_parse_array_suffixes(result, preprocess, base, &suffix_index, suffix_end);
+                    suffix_index = c_parse_skip_attributes(preprocess, suffix_index, suffix_end);
+                    if (suffix_index != suffix_end || base.value == C_ID_UNDERLYING_INVALID)
+                    {
+                        return;
+                    }
+                    declaration->type = base;
+                    return;
+                }
+                u32 parameter_start = result->parameter_count;
+                u32 reserved_parameter_count = 0;
+                {
+                    u32 count_start = name_index + 2;
+                    u32 count_depth = 1;
+                    for (u32 count_index = count_start; count_index < end; count_index += 1)
+                    {
+                        CToken count_token = preprocess.tokens[count_index];
+                        if (c_token_is_punctuator(&count_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            count_depth += 1;
+                            continue;
+                        }
+                        if (c_token_is_punctuator(&count_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && count_depth > 1)
+                        {
+                            count_depth -= 1;
+                            continue;
+                        }
+                        bool count_separator = count_depth == 1 && c_token_is_punctuator(&count_token, C_PUNCTUATOR_COMMA);
+                        bool count_end = count_depth == 1 && c_token_is_punctuator(&count_token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                        if (!count_separator && !count_end)
+                        {
+                            continue;
+                        }
+                        u32 count = count_index - count_start;
+                        bool omitted =
+                            !count || (count == 1 && (c_token_is_punctuator(&preprocess.tokens[count_start], C_PUNCTUATOR_ELLIPSIS) ||
+                                                      (count_end && !reserved_parameter_count && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[count_start]), S8("void")))));
+                        reserved_parameter_count += omitted ? 0 : 1;
+                        if (count_end)
+                        {
+                            break;
+                        }
+                        count_start = count_index + 1;
+                    }
+                }
+                result->parameter_count += reserved_parameter_count;
+                u32 written_parameter_count = 0;
+                u32 segment_start = name_index + 2;
+                u32 depth = 1;
+                bool valid = true;
+                for (u32 index = segment_start; index < end; index += 1)
+                {
+                    CToken token = preprocess.tokens[index];
+                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        depth += 1;
+                        continue;
+                    }
+                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                    {
+                        if (depth > 1)
+                        {
+                            depth -= 1;
+                            continue;
+                        }
+                    }
+                    bool segment_end = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+                    bool list_end = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (!segment_end && !list_end)
+                    {
+                        continue;
+                    }
+                    u32 segment_count = index - segment_start;
+                    if (list_end && !segment_count && result->parameter_count == parameter_start)
+                    {
+                        break;
+                    }
+                    if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
+                    {
+                        declaration->is_variadic = true;
+                    }
+                    else if (list_end && result->parameter_count == parameter_start && segment_count == 1 &&
+                             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")))
+                    {
+                    }
+                    else if (!segment_count)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    else
+                    {
+                        if (!c_parse_parameter_segment(machine, result, preprocess, *declaration, segment_start, index))
+                        {
+                            valid = false;
+                            break;
+                        }
+                        if (written_parameter_count >= reserved_parameter_count)
+                        {
+                            valid = false;
+                            break;
+                        }
+                        result->parameters[parameter_start + written_parameter_count++] = result->parameters[result->parameter_count - 1];
+                        result->parameter_count -= 1;
+                    }
+                    if (list_end)
+                    {
+                        break;
+                    }
+                    segment_start = index + 1;
+                }
+                if (!valid)
+                {
+                    result->parameter_count = parameter_start;
+                    return;
+                }
+                declaration->parameter_start = parameter_start;
+                declaration->parameter_count = written_parameter_count;
+                declaration->type = c_parse_add_type(result, (CType){
+                                                                 .element_type = C_TYPE_ID_INVALID,
+                                                                 .return_type = base,
+                                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+                                                                 .parameter_start = parameter_start,
+                                                                 .parameter_count = declaration->parameter_count,
+                                                                 .kind = C_TYPE_FUNCTION,
+                                                                 .is_variadic = declaration->is_variadic,
+                                                             });
+            }
         }
-        segment_start = index + 1;
     }
-    if (!valid)
-    {
-        result->parameter_count = parameter_start;
-        return;
-    }
-    declaration->parameter_start = parameter_start;
-    declaration->parameter_count = written_parameter_count;
-    declaration->type = c_parse_add_type(result, (CType){
-                                                     .element_type = C_TYPE_ID_INVALID,
-                                                     .return_type = base,
-                                                     .array_bound = C_ARRAY_BOUND_INVALID,
-                                                     .parameter_start = parameter_start,
-                                                     .parameter_count = declaration->parameter_count,
-                                                     .kind = C_TYPE_FUNCTION,
-                                                     .is_variadic = declaration->is_variadic,
-                                                 });
 }
 
 BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -7897,11 +7899,17 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
 
 BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
 {
+    CSourceLocation result;
     if (attribute.first_start < preprocess.token_count)
     {
-        return c_preprocess_token_location(&preprocess, preprocess.tokens[attribute.first_start]);
+        result = c_preprocess_token_location(&preprocess, preprocess.tokens[attribute.first_start]);
     }
-    return (CSourceLocation){0};
+    else
+    {
+        result = (CSourceLocation){0};
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_parse_cleanup_diagnostic(CParseResult* result, CPreprocessResult preprocess, CCleanupAttributeInfo attribute, String8 message)
@@ -8044,30 +8052,30 @@ BUSTER_C_INTERNAL bool c_parse_cleanup_attribute_was_checked(CParseResult* resul
 BUSTER_C_INTERNAL u32 c_parse_validate_cleanup_attribute_keyword(CParseResult* result, CPreprocessResult preprocess, u32 index)
 {
     CCleanupAttributeInfo attribute = {0};
-    if (!c_parse_cleanup_attribute_at(preprocess, index, (u32)preprocess.token_count, &attribute))
+    if (c_parse_cleanup_attribute_at(preprocess, index, (u32)preprocess.token_count, &attribute))
     {
-        return index + 1;
-    }
-    if (!c_parse_cleanup_attribute_was_checked(result, attribute.first_start))
-    {
-        if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+        if (!c_parse_cleanup_attribute_was_checked(result, attribute.first_start))
         {
-            c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+            if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("GNU cleanup attribute is only available in GNU dialects"));
+            }
+            else if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
+            }
+            else
+            {
+                c_parse_cleanup_diagnostic(result, preprocess, attribute,
+                                           S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+            }
         }
-        else if (attribute.malformed || attribute.count != 1 || attribute.function_token >= preprocess.token_count)
+        if (attribute.first_end > index && attribute.first_end <= preprocess.token_count)
         {
-            c_parse_cleanup_diagnostic(result, preprocess, attribute, S8("cleanup attribute requires exactly one function argument"));
-        }
-        else
-        {
-            c_parse_cleanup_diagnostic(result, preprocess, attribute,
-                                       S8("GNU cleanup attribute may only be applied to an automatic block-scope object"));
+            return attribute.first_end;
         }
     }
-    if (attribute.first_end > index && attribute.first_end <= preprocess.token_count)
-    {
-        return attribute.first_end;
-    }
+
     return index + 1;
 }
 
@@ -8368,16 +8376,15 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* res
 
         // Preserve the original fallback for absent or malformed lookup metadata.
         // Ascending entity order is the language's oldest-typedef tie breaker.
-        if (!result->entities)
+        if (result->entities)
         {
-            return C_ENTITY_ID_INVALID;
-        }
-        for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
-        {
-            CEntity* entity = &result->entities[entity_index];
-            if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
+            for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
             {
-                return (CEntityId){.value = entity_index};
+                CEntity* entity = &result->entities[entity_index];
+                if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
+                {
+                    return (CEntityId){.value = entity_index};
+                }
             }
         }
     }
@@ -8576,56 +8583,55 @@ BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machi
     if (entity->is_constexpr && entity->type.value < result->type_count)
     {
         CType value_type = result->types[entity->type.value];
-        if (!c_type_kind_is_integer(value_type.kind))
+        if (c_type_kind_is_integer(value_type.kind))
         {
-            return true;
-        }
-        Arena* conflicts[] = {
-            arena,
-        };
-        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-        u64 value = 0;
-        bool evaluated =
-            c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
-        scratch_end(temporary);
-        if (!evaluated)
-        {
-            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                               S8("integer constexpr initializer must be an integer constant expression"));
-            return false;
-        }
-        bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
-        bool negative = value > INT64_MAX && !expression_unsigned;
-        u64 magnitude = negative ? 0 - value : value;
-        u64 size = 0;
-        u32 alignment = 0;
-        bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
-        BUSTER_UNUSED(alignment);
-        if (representable && size <= 8)
-        {
-            u32 bits = (u32)(size * 8);
-            bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
-            if (target_signed)
+            Arena* conflicts[] = {
+                arena,
+            };
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            u64 value = 0;
+            bool evaluated =
+                c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+            scratch_end(temporary);
+            if (!evaluated)
             {
-                u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
-                u64 negative_max = positive_max + 1;
-                representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+                c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                   S8("integer constexpr initializer must be an integer constant expression"));
+                return false;
             }
-            else
+            bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
+            bool negative = value > INT64_MAX && !expression_unsigned;
+            u64 magnitude = negative ? 0 - value : value;
+            u64 size = 0;
+            u32 alignment = 0;
+            bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
+            BUSTER_UNUSED(alignment);
+            if (representable && size <= 8)
             {
-                u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
-                representable = !negative && magnitude <= maximum;
+                u32 bits = (u32)(size * 8);
+                bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
+                if (target_signed)
+                {
+                    u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
+                    u64 negative_max = positive_max + 1;
+                    representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+                }
+                else
+                {
+                    u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
+                    representable = !negative && magnitude <= maximum;
+                }
             }
+            if (!representable)
+            {
+                c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                   S8("integer constexpr initializer is not exactly representable in the declared type"));
+                return false;
+            }
+            entity->has_constant_value = true;
+            entity->constant_is_negative = negative;
+            entity->constant_value = magnitude;
         }
-        if (!representable)
-        {
-            c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                               S8("integer constexpr initializer is not exactly representable in the declared type"));
-            return false;
-        }
-        entity->has_constant_value = true;
-        entity->constant_is_negative = negative;
-        entity->constant_value = magnitude;
     }
 
     return true;
@@ -8720,11 +8726,17 @@ struct CAutoDeclarationInfo
 BUSTER_C_INTERNAL u32 c_parse_auto_skip_specifier(CPreprocessResult preprocess, u32 index, u32 end)
 {
     u32 skipped = c_parse_skip_attributes(preprocess, index, end);
+    u32 result;
     if (skipped != index)
     {
-        return skipped;
+        result = skipped;
     }
-    return c_parse_skip_alignment_specifiers(preprocess, index, end);
+    else
+    {
+        result = c_parse_skip_alignment_specifiers(preprocess, index, end);
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_parse_auto_storage_word(String8 spelling, CAutoDeclarationInfo* info)
@@ -9881,63 +9893,62 @@ BUSTER_C_INTERNAL bool c_parse_asm_operand_name_token(CPreprocessResult preproce
                 separators[separator_count++] = index;
             }
         }
-        if (!separator_count)
+        if (separator_count)
         {
-            return false;
-        }
-        u32 ranges[4] = {
-            separators[0] + 1,
-            separator_count >= 2 ? separators[1] : close,
-            separator_count >= 2 ? separators[1] + 1 : close,
-            separator_count >= 3 ? separators[2] : close,
-        };
-        for (u32 range_index = 0; range_index < 2; range_index += 1)
-        {
-            u32 start = ranges[range_index * 2];
-            u32 end = ranges[range_index * 2 + 1];
-            if (token_index < start || token_index >= end)
+            u32 ranges[4] = {
+                separators[0] + 1,
+                separator_count >= 2 ? separators[1] : close,
+                separator_count >= 2 ? separators[1] + 1 : close,
+                separator_count >= 3 ? separators[2] : close,
+            };
+            for (u32 range_index = 0; range_index < 2; range_index += 1)
             {
-                continue;
+                u32 start = ranges[range_index * 2];
+                u32 end = ranges[range_index * 2 + 1];
+                if (token_index < start || token_index >= end)
+                {
+                    continue;
+                }
+                u32 segment_start = start;
+                parentheses = 0;
+                brackets = 0;
+                braces = 0;
+                for (u32 index = start; index <= token_index && index < end; index += 1)
+                {
+                    u32 punctuator = preprocess.tokens[index].punctuator;
+                    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
+                    {
+                        parentheses += 1;
+                    }
+                    else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
+                    {
+                        parentheses -= 1;
+                    }
+                    else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
+                    {
+                        brackets += 1;
+                    }
+                    else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
+                    {
+                        brackets -= 1;
+                    }
+                    else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
+                    {
+                        braces += 1;
+                    }
+                    else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
+                    {
+                        braces -= 1;
+                    }
+                    else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
+                    {
+                        segment_start = index + 1;
+                    }
+                }
+                return token_index == segment_start + 1 && segment_start + 2 < end &&
+                       c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
+                       c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
             }
-            u32 segment_start = start;
-            parentheses = 0;
-            brackets = 0;
-            braces = 0;
-            for (u32 index = start; index <= token_index && index < end; index += 1)
-            {
-                u32 punctuator = preprocess.tokens[index].punctuator;
-                if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
-                {
-                    parentheses += 1;
-                }
-                else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
-                {
-                    brackets += 1;
-                }
-                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
-                {
-                    braces += 1;
-                }
-                else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
-                {
-                    braces -= 1;
-                }
-                else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
-                {
-                    segment_start = index + 1;
-                }
-            }
-            return token_index == segment_start + 1 && segment_start + 2 < end &&
-                   c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_LEFT_BRACKET) &&
-                   c_token_is_punctuator(&preprocess.tokens[segment_start + 2], C_PUNCTUATOR_RIGHT_BRACKET);
         }
     }
 
@@ -10625,19 +10636,25 @@ BUSTER_C_INTERNAL CParserStatementKind c_parser_statement_kind(CPreprocessResult
         return C_PARSER_STATEMENT_UNKNOWN;
     }
     CToken first = preprocess.tokens[start];
+    CParserStatementKind result;
     if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Static_assert")))
     {
-        return C_PARSER_STATEMENT_STATIC_ASSERT;
+        result = C_PARSER_STATEMENT_STATIC_ASSERT;
     }
-    if (start + 1 < end && first.kind == C_TOKEN_IDENTIFIER && c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_COLON))
+    else if (start + 1 < end && first.kind == C_TOKEN_IDENTIFIER && c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_COLON))
     {
-        return C_PARSER_STATEMENT_LABEL;
+        result = C_PARSER_STATEMENT_LABEL;
     }
-    if (c_parser_statement_is_declaration(preprocess.spelling_base, first, preprocess.dialect))
+    else if (c_parser_statement_is_declaration(preprocess.spelling_base, first, preprocess.dialect))
     {
-        return C_PARSER_STATEMENT_DECLARATION;
+        result = C_PARSER_STATEMENT_DECLARATION;
     }
-    return C_PARSER_STATEMENT_EXPRESSION;
+    else
+    {
+        result = C_PARSER_STATEMENT_EXPRESSION;
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL CParserStatement* c_parser_statement_make(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end,
@@ -10969,234 +10986,234 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
 CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult result = {0};
-    if (!arena || !preprocess.tokens || !preprocess.token_count || preprocess.token_count > (UINT32_MAX - 1) / 2)
+    if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
     {
-        return result;
-    }
-    u32 token_count = (u32)preprocess.token_count;
-    result.declaration_capacity = token_count + 1;
-    result.diagnostic_capacity = token_count + 1;
-    result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
-    u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
-    u32 index = 0;
-    while (index < token_count && preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
-    {
-        u32 start = index;
-        u32 delimiter_count = 0;
-        u32 body_start = 0;
-        u32 body_token_count = 0;
-        u32 name_token = C_ID_UNDERLYING_INVALID;
-        u32 function_name_token = C_ID_UNDERLYING_INVALID;
-        bool is_typedef = false;
-        bool is_constexpr = false;
-        bool seen_equal = false;
-        bool seen_declarator_comma = false;
-        bool is_variadic = false;
-        bool ended = false;
-        while (index < token_count)
+        u32 token_count = (u32)preprocess.token_count;
+        result.declaration_capacity = token_count + 1;
+        result.diagnostic_capacity = token_count + 1;
+        result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
+        u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
+        u32 index = 0;
+        while (index < token_count && preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
         {
-            CToken token = preprocess.tokens[index];
-            if (token.kind == C_TOKEN_END_OF_FILE)
+            u32 start = index;
+            u32 delimiter_count = 0;
+            u32 body_start = 0;
+            u32 body_token_count = 0;
+            u32 name_token = C_ID_UNDERLYING_INVALID;
+            u32 function_name_token = C_ID_UNDERLYING_INVALID;
+            bool is_typedef = false;
+            bool is_constexpr = false;
+            bool seen_equal = false;
+            bool seen_declarator_comma = false;
+            bool is_variadic = false;
+            bool ended = false;
+            while (index < token_count)
             {
-                break;
-            }
-            if (token.kind == C_TOKEN_IDENTIFIER)
-            {
-                is_typedef |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("typedef"));
-                is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("constexpr"));
-                if (!delimiter_count && !seen_equal && !seen_declarator_comma && !c_declaration_keyword_for_dialect_token(preprocess, token))
+                CToken token = preprocess.tokens[index];
+                if (token.kind == C_TOKEN_END_OF_FILE)
                 {
-                    name_token = index;
+                    break;
                 }
-                else if (name_token == C_ID_UNDERLYING_INVALID && !c_declaration_keyword_for_dialect_token(preprocess, token))
+                if (token.kind == C_TOKEN_IDENTIFIER)
                 {
-                    name_token = index;
-                }
-            }
-            is_variadic |= c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
-            seen_declarator_comma |= !delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
-            if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
-            {
-                seen_equal = true;
-            }
-            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
-            {
-                if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
-                    preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                    !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) && !seen_equal &&
-                    function_name_token == C_ID_UNDERLYING_INVALID)
-                {
-                    u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
-                    if (c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
+                    is_typedef |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("typedef"));
+                    is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("constexpr"));
+                    if (!delimiter_count && !seen_equal && !seen_declarator_comma && !c_declaration_keyword_for_dialect_token(preprocess, token))
                     {
-                        name_token = parenthesized_name_token;
+                        name_token = index;
+                    }
+                    else if (name_token == C_ID_UNDERLYING_INVALID && !c_declaration_keyword_for_dialect_token(preprocess, token))
+                    {
+                        name_token = index;
+                    }
+                }
+                is_variadic |= c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
+                seen_declarator_comma |= !delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+                {
+                    seen_equal = true;
+                }
+                if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                {
+                    if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
+                        preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                        !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) && !seen_equal &&
+                        function_name_token == C_ID_UNDERLYING_INVALID)
+                    {
+                        u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
+                        if (c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
+                        {
+                            name_token = parenthesized_name_token;
+                        }
+                        else
+                        {
+                            function_name_token = index - 1;
+                            name_token = function_name_token;
+                        }
+                    }
+                    if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
+                    {
+                        body_start = index + 1;
+                        u32 brace_depth = 1;
+                        index += 1;
+                        while (index < token_count)
+                        {
+                            CToken body_token = preprocess.tokens[index];
+                            if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_LEFT_BRACE))
+                            {
+                                brace_depth += 1;
+                            }
+                            else if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_RIGHT_BRACE))
+                            {
+                                brace_depth -= 1;
+                                if (!brace_depth)
+                                {
+                                    body_token_count = index - body_start;
+                                    index += 1;
+                                    ended = true;
+                                    break;
+                                }
+                            }
+                            index += 1;
+                        }
+                        if (!ended)
+                        {
+                            c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
+                        }
+                        break;
+                    }
+                    delimiter_stack[delimiter_count++] = index;
+                    index += 1;
+                    continue;
+                }
+                if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+                {
+                    CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                                           : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                                                                                              : C_PUNCTUATOR_LEFT_BRACE;
+                    if (!delimiter_count || !c_token_is_punctuator(&preprocess.tokens[delimiter_stack[delimiter_count - 1]], expected))
+                    {
+                        c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
                     }
                     else
                     {
-                        function_name_token = index - 1;
-                        name_token = function_name_token;
+                        delimiter_count -= 1;
                     }
-                }
-                if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
-                {
-                    body_start = index + 1;
-                    u32 brace_depth = 1;
                     index += 1;
-                    while (index < token_count)
-                    {
-                        CToken body_token = preprocess.tokens[index];
-                        if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_LEFT_BRACE))
-                        {
-                            brace_depth += 1;
-                        }
-                        else if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_RIGHT_BRACE))
-                        {
-                            brace_depth -= 1;
-                            if (!brace_depth)
-                            {
-                                body_token_count = index - body_start;
-                                index += 1;
-                                ended = true;
-                                break;
-                            }
-                        }
-                        index += 1;
-                    }
-                    if (!ended)
-                    {
-                        c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
-                    }
+                    continue;
+                }
+                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                {
+                    index += 1;
+                    ended = true;
                     break;
                 }
-                delimiter_stack[delimiter_count++] = index;
                 index += 1;
-                continue;
             }
-            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+            if (!ended)
             {
-                CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                                       : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
-                                                                                          : C_PUNCTUATOR_LEFT_BRACE;
-                if (!delimiter_count || !c_token_is_punctuator(&preprocess.tokens[delimiter_stack[delimiter_count - 1]], expected))
+                CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[BUSTER_MIN(index, token_count - 1)]);
+                c_parser_diagnostic(&result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
+                break;
+            }
+            CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
+                                          : function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
+                                          : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                                             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Static_assert")))
+                                                ? C_PARSER_DECLARATION_STATIC_ASSERT
+                                          : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                                             (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("asm")) ||
+                                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm")) ||
+                                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm__"))))
+                                                ? C_PARSER_DECLARATION_ASSEMBLY
+                                          : c_parse_type_only_declaration(preprocess, start, index) ? C_PARSER_DECLARATION_TYPE
+                                          : name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_OBJECT
+                                                                                   : C_PARSER_DECLARATION_UNKNOWN;
+            // A declarator list binds one name per declarator, but the scan above
+            // tracks only the first: it stops updating name_token at the first
+            // top-level comma. Split the declaration so every declarator gets its
+            // own segment, its own name and its own initializer, the way the
+            // block-scope path in c_parse_local_declarations already does. The
+            // declaration specifiers stay shared through token_start/token_count,
+            // which is what the storage-class and attribute scans read.
+            u32 declarator_list_end = index;
+            if (declarator_list_end > start && c_token_is_punctuator(&preprocess.tokens[declarator_list_end - 1], C_PUNCTUATOR_SEMICOLON))
+            {
+                declarator_list_end -= 1;
+            }
+            bool split_declarators = seen_declarator_comma && !body_start && kind != C_PARSER_DECLARATION_STATIC_ASSERT &&
+                                     kind != C_PARSER_DECLARATION_ASSEMBLY && kind != C_PARSER_DECLARATION_TYPE;
+            u32 segment_start = start;
+            bool continuation = false;
+            while (true)
+            {
+                u32 segment_end = split_declarators ? c_parser_declarator_list_segment_end(preprocess, segment_start, declarator_list_end)
+                                                    : declarator_list_end;
+                CParserDeclaration* declaration = arena_allocate(arena, CParserDeclaration, 1);
+                *declaration = (CParserDeclaration){
+                    .location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+                    .token_start = start,
+                    .token_count = index - start,
+                    .declarator_start = split_declarators ? segment_start : 0,
+                    .declarator_count = split_declarators ? segment_end - segment_start : 0,
+                    .body_start = body_start,
+                    .body_token_count = body_token_count,
+                    .name_token = name_token,
+                    .function_name_token = function_name_token,
+                    .kind = kind,
+                    .is_definition = body_start != 0 || (kind == C_PARSER_DECLARATION_OBJECT && seen_equal),
+                    .is_typedef = is_typedef,
+                    .is_constexpr = is_constexpr,
+                    .is_variadic = is_variadic,
+                    .seen_equal = seen_equal,
+                    .is_declarator_continuation = continuation,
+                };
+                if (split_declarators)
                 {
-                    c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
+                    CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+                    declaration->name_token = declarator.name_token;
+                    declaration->function_name_token = declarator.function_name_token;
+                    declaration->seen_equal = declarator.seen_equal;
+                    declaration->is_variadic = declarator.is_variadic;
+                    declaration->kind = is_typedef                                                   ? C_PARSER_DECLARATION_TYPEDEF
+                                        : declarator.function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
+                                        : declarator.name_token != C_ID_UNDERLYING_INVALID          ? C_PARSER_DECLARATION_OBJECT
+                                                                                                    : C_PARSER_DECLARATION_UNKNOWN;
+                    declaration->is_definition = declaration->kind == C_PARSER_DECLARATION_OBJECT && declarator.seen_equal;
+                }
+                c_parser_parse_declaration_expression(preprocess, declaration);
+                if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
+                {
+                    c_parser_parse_function_body(arena, preprocess, declaration);
+                }
+                if (result.last_declaration)
+                {
+                    result.last_declaration->next = declaration;
                 }
                 else
                 {
-                    delimiter_count -= 1;
+                    result.first_declaration = declaration;
                 }
-                index += 1;
-                continue;
+                result.last_declaration = declaration;
+                result.declaration_count += 1;
+                if (!split_declarators || segment_end >= declarator_list_end)
+                {
+                    break;
+                }
+                // An empty trailing segment ("int a, ;") would otherwise be emitted
+                // with a zero declarator count, which reads as an unsplit
+                // declaration owning the whole range.
+                segment_start = segment_end + 1;
+                if (segment_start >= declarator_list_end)
+                {
+                    break;
+                }
+                continuation = true;
             }
-            if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-            {
-                index += 1;
-                ended = true;
-                break;
-            }
-            index += 1;
-        }
-        if (!ended)
-        {
-            CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[BUSTER_MIN(index, token_count - 1)]);
-            c_parser_diagnostic(&result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
-            break;
-        }
-        CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
-                                      : function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
-                                      : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-                                         string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Static_assert")))
-                                            ? C_PARSER_DECLARATION_STATIC_ASSERT
-                                      : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
-                                         (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("asm")) ||
-                                          string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm")) ||
-                                          string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm__"))))
-                                            ? C_PARSER_DECLARATION_ASSEMBLY
-                                      : c_parse_type_only_declaration(preprocess, start, index) ? C_PARSER_DECLARATION_TYPE
-                                      : name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_OBJECT
-                                                                               : C_PARSER_DECLARATION_UNKNOWN;
-        // A declarator list binds one name per declarator, but the scan above
-        // tracks only the first: it stops updating name_token at the first
-        // top-level comma. Split the declaration so every declarator gets its
-        // own segment, its own name and its own initializer, the way the
-        // block-scope path in c_parse_local_declarations already does. The
-        // declaration specifiers stay shared through token_start/token_count,
-        // which is what the storage-class and attribute scans read.
-        u32 declarator_list_end = index;
-        if (declarator_list_end > start && c_token_is_punctuator(&preprocess.tokens[declarator_list_end - 1], C_PUNCTUATOR_SEMICOLON))
-        {
-            declarator_list_end -= 1;
-        }
-        bool split_declarators = seen_declarator_comma && !body_start && kind != C_PARSER_DECLARATION_STATIC_ASSERT &&
-                                 kind != C_PARSER_DECLARATION_ASSEMBLY && kind != C_PARSER_DECLARATION_TYPE;
-        u32 segment_start = start;
-        bool continuation = false;
-        while (true)
-        {
-            u32 segment_end = split_declarators ? c_parser_declarator_list_segment_end(preprocess, segment_start, declarator_list_end)
-                                                : declarator_list_end;
-            CParserDeclaration* declaration = arena_allocate(arena, CParserDeclaration, 1);
-            *declaration = (CParserDeclaration){
-                .location = c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
-                .token_start = start,
-                .token_count = index - start,
-                .declarator_start = split_declarators ? segment_start : 0,
-                .declarator_count = split_declarators ? segment_end - segment_start : 0,
-                .body_start = body_start,
-                .body_token_count = body_token_count,
-                .name_token = name_token,
-                .function_name_token = function_name_token,
-                .kind = kind,
-                .is_definition = body_start != 0 || (kind == C_PARSER_DECLARATION_OBJECT && seen_equal),
-                .is_typedef = is_typedef,
-                .is_constexpr = is_constexpr,
-                .is_variadic = is_variadic,
-                .seen_equal = seen_equal,
-                .is_declarator_continuation = continuation,
-            };
-            if (split_declarators)
-            {
-                CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
-                declaration->name_token = declarator.name_token;
-                declaration->function_name_token = declarator.function_name_token;
-                declaration->seen_equal = declarator.seen_equal;
-                declaration->is_variadic = declarator.is_variadic;
-                declaration->kind = is_typedef                                                   ? C_PARSER_DECLARATION_TYPEDEF
-                                    : declarator.function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
-                                    : declarator.name_token != C_ID_UNDERLYING_INVALID          ? C_PARSER_DECLARATION_OBJECT
-                                                                                                : C_PARSER_DECLARATION_UNKNOWN;
-                declaration->is_definition = declaration->kind == C_PARSER_DECLARATION_OBJECT && declarator.seen_equal;
-            }
-            c_parser_parse_declaration_expression(preprocess, declaration);
-            if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
-            {
-                c_parser_parse_function_body(arena, preprocess, declaration);
-            }
-            if (result.last_declaration)
-            {
-                result.last_declaration->next = declaration;
-            }
-            else
-            {
-                result.first_declaration = declaration;
-            }
-            result.last_declaration = declaration;
-            result.declaration_count += 1;
-            if (!split_declarators || segment_end >= declarator_list_end)
-            {
-                break;
-            }
-            // An empty trailing segment ("int a, ;") would otherwise be emitted
-            // with a zero declarator count, which reads as an unsplit
-            // declaration owning the whole range.
-            segment_start = segment_end + 1;
-            if (segment_start >= declarator_list_end)
-            {
-                break;
-            }
-            continuation = true;
         }
     }
+
     return result;
 }
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);

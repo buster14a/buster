@@ -1731,11 +1731,17 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation,
                                                                                               bool* static_libraries)
 {
+    CompilerDriverDynamicLibraries result;
     if (invocation.target.os == OPERATING_SYSTEM_UEFI)
     {
-        return (CompilerDriverDynamicLibraries){0};
+        result = (CompilerDriverDynamicLibraries){0};
     }
-    return compiler_driver_dynamic_libraries(arena, invocation, static_libraries);
+    else
+    {
+        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8 definition)

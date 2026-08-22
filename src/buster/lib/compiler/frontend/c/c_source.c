@@ -2135,82 +2135,79 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         // the scalar loop needs; eight more absorb the tail rows of the emitter's
         // full-width interleaved stores, which the next window overwrites.
         result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 8);
-        if (translated.source.length > UINT64_MAX / sizeof(CDiagnostic) - 1)
+        if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
         {
-            return result;
-        }
-        u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
-        if (diagnostic_bytes > (UINT64_MAX - BUSTER_MB(1)) / 2)
-        {
-            return result;
-        }
-        u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
-        Arena* conflicts[] = {
-            arena,
-        };
-        TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-        Arena* diagnostic_arena = diagnostic_temporary.arena;
-        bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
-        if (!diagnostic_arena_is_scratch)
-        {
-            scratch_end(diagnostic_temporary);
-            diagnostic_arena = arena_create((ArenaCreation){
-                .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
-            });
-        }
-        if (!diagnostic_arena)
-        {
-            return result;
-        }
-        CLexState state = {
-            .result = &result,
-            .translated = translated,
-            .diagnostic_arena = diagnostic_arena,
-            .maximum_diagnostic_count = translated.source.length + 1,
-        };
-        state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
-        result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
-        // Source measurement rides the branches the lexer already takes; see
-        // CSourceMetrics.
-        result.metrics.files = 1;
-        result.metrics.bytes = source.length;
-        result.metrics.translated_bytes = translated.source.length;
-        result.metrics.lines = translated.raw_lines;
+            u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
+            if (diagnostic_bytes <= (UINT64_MAX - BUSTER_MB(1)) / 2)
+            {
+                u64 diagnostic_reserve_size = diagnostic_bytes * 2 + BUSTER_MB(1);
+                Arena* conflicts[] = {
+                    arena,
+                };
+                TemporalArena diagnostic_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                Arena* diagnostic_arena = diagnostic_temporary.arena;
+                bool diagnostic_arena_is_scratch = diagnostic_reserve_size <= diagnostic_arena->reserved_size - diagnostic_arena->position;
+                if (!diagnostic_arena_is_scratch)
+                {
+                    scratch_end(diagnostic_temporary);
+                    diagnostic_arena = arena_create((ArenaCreation){
+                        .reserved_size = BUSTER_MAX(BUSTER_MB(64), diagnostic_reserve_size),
+                    });
+                }
+                if (diagnostic_arena)
+                {
+                    CLexState state = {
+                        .result = &result,
+                        .translated = translated,
+                        .diagnostic_arena = diagnostic_arena,
+                        .maximum_diagnostic_count = translated.source.length + 1,
+                    };
+                    state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
+                    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
+                    // Source measurement rides the branches the lexer already takes; see
+                    // CSourceMetrics.
+                    result.metrics.files = 1;
+                    result.metrics.bytes = source.length;
+                    result.metrics.translated_bytes = translated.source.length;
+                    result.metrics.lines = translated.raw_lines;
 #if BUSTER_C_LEX_COMPACT
-        if (force_scalar)
-        {
-            c_lex_scalar(&state);
-        }
-        else
-        {
-            state.simd_scan = 1;
-            c_lex_compact(&state);
-        }
+                    if (force_scalar)
+                    {
+                        c_lex_scalar(&state);
+                    }
+                    else
+                    {
+                        state.simd_scan = 1;
+                        c_lex_compact(&state);
+                    }
 #else
-        BUSTER_UNUSED(force_scalar);
-        c_lex_scalar(&state);
+                    BUSTER_UNUSED(force_scalar);
+                    c_lex_scalar(&state);
 #endif
-        // A file whose last line has no terminating newline still ends a line.
-        if (translated.source.length > state.line_start)
-        {
-            c_source_metrics_line(&result.metrics, state.line_has_code, state.line_has_comment);
-        }
-        result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
-        result.metrics.tokens = result.token_count - state.newline_tokens;
-        c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
-        CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
-        if (result.diagnostic_count)
-        {
-            memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
-        }
-        result.diagnostics = diagnostics;
-        if (diagnostic_arena_is_scratch)
-        {
-            scratch_end(diagnostic_temporary);
-        }
-        else
-        {
-            arena_destroy(diagnostic_arena, 1);
+                    // A file whose last line has no terminating newline still ends a line.
+                    if (translated.source.length > state.line_start)
+                    {
+                        c_source_metrics_line(&result.metrics, state.line_has_code, state.line_has_comment);
+                    }
+                    result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
+                    result.metrics.tokens = result.token_count - state.newline_tokens;
+                    c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
+                    CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
+                    if (result.diagnostic_count)
+                    {
+                        memcpy(diagnostics, result.diagnostics, sizeof(*diagnostics) * result.diagnostic_count);
+                    }
+                    result.diagnostics = diagnostics;
+                    if (diagnostic_arena_is_scratch)
+                    {
+                        scratch_end(diagnostic_temporary);
+                    }
+                    else
+                    {
+                        arena_destroy(diagnostic_arena, 1);
+                    }
+                }
+            }
         }
     }
 
@@ -4648,20 +4645,19 @@ BUSTER_C_INTERNAL void c_macro_pop_definition(CPreprocessPragmaContext context, 
     {
         cursor = &(*cursor)->previous;
     }
-    if (!*cursor)
+    if (!(!*cursor))
     {
-        return;
+        CMacroPushMacro* entry = *cursor;
+        *cursor = entry->previous;
+        if (!entry->macro)
+        {
+            c_macro_clear_definition(c_macro_find(*context.first_macro, c_symbol_intern(context.symbols, name)));
+            return;
+        }
+        CMacro* macro = entry->macro;
+        macro->definition = entry->definition;
+        macro->disabled = false;
     }
-    CMacroPushMacro* entry = *cursor;
-    *cursor = entry->previous;
-    if (!entry->macro)
-    {
-        c_macro_clear_definition(c_macro_find(*context.first_macro, c_symbol_intern(context.symbols, name)));
-        return;
-    }
-    CMacro* macro = entry->macro;
-    macro->definition = entry->definition;
-    macro->disabled = false;
 }
 
 // The bound is UINT16_MAX because CToken carries the alignment in a u16, and
@@ -4758,50 +4754,49 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_pack(CPreprocessPragmaContext context
 
 BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
 {
-    if (!token_count)
+    if (token_count)
     {
-        return;
-    }
-    if (token_count == 1 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("once")))
-    {
-        bool found = false;
-        for (u32 index = 0; index < *context.once_path_count; index += 1)
+        if (token_count == 1 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("once")))
         {
-            found |= string_equal(context.once_paths[index], context.current_path);
+            bool found = false;
+            for (u32 index = 0; index < *context.once_path_count; index += 1)
+            {
+                found |= string_equal(context.once_paths[index], context.current_path);
+            }
+            if (!found && *context.once_path_count < context.once_path_capacity)
+            {
+                u32 once_path_index = *context.once_path_count;
+                context.once_paths[once_path_index] = context.current_path;
+                *context.once_path_count = once_path_index + 1;
+            }
+            return;
         }
-        if (!found && *context.once_path_count < context.once_path_capacity)
+        if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("push_macro")))
         {
-            u32 once_path_index = *context.once_path_count;
-            context.once_paths[once_path_index] = context.current_path;
-            *context.once_path_count = once_path_index + 1;
+            String8 name = {0};
+            if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+            {
+                c_macro_push_definition(context, name);
+            }
+            return;
         }
-        return;
-    }
-    if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("push_macro")))
-    {
-        String8 name = {0};
-        if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+        if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pop_macro")))
         {
-            c_macro_push_definition(context, name);
+            String8 name = {0};
+            if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+            {
+                c_macro_pop_definition(context, name);
+            }
+            return;
         }
-        return;
-    }
-    if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pop_macro")))
-    {
-        String8 name = {0};
-        if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+        if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pack")))
         {
-            c_macro_pop_definition(context, name);
+            c_preprocess_pragma_pack(context, base, tokens, token_count);
         }
-        return;
+        // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
+        // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
+        // pragma bodies are intentionally ignored as well.
     }
-    if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pack")))
-    {
-        c_preprocess_pragma_pack(context, base, tokens, token_count);
-    }
-    // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
-    // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
-    // pragma bodies are intentionally ignored as well.
 }
 
 BUSTER_C_INTERNAL void c_preprocess_pragma_marker(CPreprocessPragmaContext context, char8 const* base, CToken marker)

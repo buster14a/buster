@@ -661,21 +661,33 @@ static bool wasm64_symbol_is_function_definition(Wasm64Context* context, IrSymbo
 static String8 wasm64_import_module(String8 link_name)
 {
     u64 hash = 0;
+    String8 result;
     if (wasm64_string_has_hash(link_name, &hash))
     {
-        return wasm64_string_slice(link_name, 0, hash);
+        result = wasm64_string_slice(link_name, 0, hash);
     }
-    return wasm64_s8("env");
+    else
+    {
+        result = wasm64_s8("env");
+    }
+
+    return result;
 }
 
 static String8 wasm64_import_name(String8 link_name, String8 fallback)
 {
     u64 hash = 0;
+    String8 result;
     if (wasm64_string_has_hash(link_name, &hash))
     {
-        return wasm64_string_slice(link_name, hash + 1, link_name.length);
+        result = wasm64_string_slice(link_name, hash + 1, link_name.length);
     }
-    return link_name.length ? link_name : fallback;
+    else
+    {
+        result = link_name.length ? link_name : fallback;
+    }
+
+    return result;
 }
 
 static Wasm64FunctionRecord* wasm64_function_record_for_symbol(Wasm64Context* context, IrSymbolId symbol)
@@ -1198,11 +1210,17 @@ static String8 wasm64_function_export_name(Wasm64FunctionRecord* record)
     }
     String8 link_name = record->symbol->link_name.length ? record->symbol->link_name : record->symbol->name;
     u64 hash = 0;
+    String8 result;
     if (wasm64_string_has_hash(link_name, &hash))
     {
-        return wasm64_string_slice(link_name, hash + 1, link_name.length);
+        result = wasm64_string_slice(link_name, hash + 1, link_name.length);
     }
-    return link_name;
+    else
+    {
+        result = link_name;
+    }
+
+    return result;
 }
 
 static bool wasm64_build_global_payload(Wasm64Context* context)
@@ -1357,79 +1375,83 @@ static void wasm64_fe_emit_memarg(Wasm64FunctionEmitter* emitter, u32 alignment,
 
 static IrType* wasm64_fe_value_ir_type(Wasm64FunctionEmitter* emitter, IrValueId value_id)
 {
+    IrType* result;
     if (value_id.value >= emitter->function->value_count)
     {
-        return 0;
+        result = 0;
     }
-    return wasm64_type(emitter->context, emitter->function->values[value_id.value].canonical_type);
+    else
+    {
+        result = wasm64_type(emitter->context, emitter->function->values[value_id.value].canonical_type);
+    }
+
+    return result;
 }
 
 static void wasm64_fe_integer_normalize(Wasm64FunctionEmitter* emitter, IrType* type, bool signed_value)
 {
-    if (!type || !wasm64_type_is_integer(type))
+    if (type && wasm64_type_is_integer(type))
     {
-        return;
-    }
-    u32 bits = wasm64_integer_bits(type);
-    Wasm64ValType valtype = 0;
-    wasm64_valtype_for_type(type, false, &valtype);
-    if (type->kind == IR_TYPE_BOOLEAN)
-    {
-        wasm64_fe_u8(emitter, valtype == WASM64_VALTYPE_I64 ? 0x50 : 0x45); // eqz
-        wasm64_fe_u8(emitter, valtype == WASM64_VALTYPE_I64 ? 0x45 : 0x45);
-        // The two eqz operations turn a non-zero scalar into one for both
-        // widths.  For i64 the first opcode above was intentionally replaced
-        // below by the canonical i64.eqz sequence.
-        return;
-    }
-    if (valtype == WASM64_VALTYPE_I32)
-    {
-        if (bits >= 32)
+        u32 bits = wasm64_integer_bits(type);
+        Wasm64ValType valtype = 0;
+        wasm64_valtype_for_type(type, false, &valtype);
+        if (type->kind == IR_TYPE_BOOLEAN)
         {
+            wasm64_fe_u8(emitter, valtype == WASM64_VALTYPE_I64 ? 0x50 : 0x45); // eqz
+            wasm64_fe_u8(emitter, valtype == WASM64_VALTYPE_I64 ? 0x45 : 0x45);
+            // The two eqz operations turn a non-zero scalar into one for both
+            // widths.  For i64 the first opcode above was intentionally replaced
+            // below by the canonical i64.eqz sequence.
             return;
         }
-        if (signed_value)
+        if (valtype == WASM64_VALTYPE_I32)
         {
-            if (bits == 8)
+            if (bits >= 32)
             {
-                wasm64_fe_u8(emitter, 0xc0); // i32.extend8_s
+                return;
             }
-            else if (bits == 16)
+            if (signed_value)
             {
-                wasm64_fe_u8(emitter, 0xc1); // i32.extend16_s
+                if (bits == 8)
+                {
+                    wasm64_fe_u8(emitter, 0xc0); // i32.extend8_s
+                }
+                else if (bits == 16)
+                {
+                    wasm64_fe_u8(emitter, 0xc1); // i32.extend16_s
+                }
+                else
+                {
+                    wasm64_fe_i32_const(emitter, (s32)(32 - bits));
+                    wasm64_fe_u8(emitter, 0x74); // shl
+                    wasm64_fe_i32_const(emitter, (s32)(32 - bits));
+                    wasm64_fe_u8(emitter, 0x75); // shr_s
+                }
             }
             else
             {
-                wasm64_fe_i32_const(emitter, (s32)(32 - bits));
-                wasm64_fe_u8(emitter, 0x74); // shl
-                wasm64_fe_i32_const(emitter, (s32)(32 - bits));
-                wasm64_fe_u8(emitter, 0x75); // shr_s
+                wasm64_fe_i32_const(emitter, (s32)((UINT32_C(1) << bits) - 1));
+                wasm64_fe_u8(emitter, 0x71); // and
             }
         }
-        else
+        else if (valtype == WASM64_VALTYPE_I64)
         {
-            wasm64_fe_i32_const(emitter, (s32)((UINT32_C(1) << bits) - 1));
-            wasm64_fe_u8(emitter, 0x71); // and
-        }
-    }
-    else if (valtype == WASM64_VALTYPE_I64)
-    {
-        if (bits >= 64)
-        {
-            return;
-        }
-        if (signed_value)
-        {
-            wasm64_fe_i64_const(emitter, (s64)(64 - bits));
-            wasm64_fe_u8(emitter, 0x86); // i64.shl
-            wasm64_fe_i64_const(emitter, (s64)(64 - bits));
-            wasm64_fe_u8(emitter, 0x87); // i64.shr_s
-        }
-        else
-        {
-            u64 mask = bits == 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
-            wasm64_fe_i64_const(emitter, (s64)mask);
-            wasm64_fe_u8(emitter, 0x83); // i64.and
+            if (bits < 64)
+            {
+                if (signed_value)
+                {
+                    wasm64_fe_i64_const(emitter, (s64)(64 - bits));
+                    wasm64_fe_u8(emitter, 0x86); // i64.shl
+                    wasm64_fe_i64_const(emitter, (s64)(64 - bits));
+                    wasm64_fe_u8(emitter, 0x87); // i64.shr_s
+                }
+                else
+                {
+                    u64 mask = bits == 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
+                    wasm64_fe_i64_const(emitter, (s64)mask);
+                    wasm64_fe_u8(emitter, 0x83); // i64.and
+                }
+            }
         }
     }
 }
@@ -1647,36 +1669,35 @@ static void wasm64_fe_emit_unary_opcode(Wasm64FunctionEmitter* emitter, IrUnaryO
 static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock* predecessor, IrBlock* target)
 {
     u32 parameter_count = target ? target->parameter_count : 0;
-    if (!parameter_count)
+    if (parameter_count)
     {
-        return;
-    }
-    u32 parameter_index = 0;
-    for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
-    {
-        IrValueId source = IR_VALUE_ID_INVALID;
-        for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+        u32 parameter_index = 0;
+        for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
         {
-            if (incoming->predecessor.value == predecessor->id.value)
+            IrValueId source = IR_VALUE_ID_INVALID;
+            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
             {
-                source = incoming->value;
-                break;
+                if (incoming->predecessor.value == predecessor->id.value)
+                {
+                    source = incoming->value;
+                    break;
+                }
             }
+            if (source.value == IR_ID_UNDERLYING_INVALID || parameter->value.value >= emitter->function->value_count)
+            {
+                wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 block-parameter incoming value"), emitter->function,
+                            target, 0, IR_SYMBOL_ID_INVALID);
+                return;
+            }
+            wasm64_fe_emit_value(emitter, source);
+            wasm64_fe_local_set(emitter, emitter->temp_base + parameter_index);
         }
-        if (source.value == IR_ID_UNDERLYING_INVALID || parameter->value.value >= emitter->function->value_count)
+        parameter_index = 0;
+        for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
         {
-            wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 block-parameter incoming value"), emitter->function,
-                        target, 0, IR_SYMBOL_ID_INVALID);
-            return;
+            wasm64_fe_local_get(emitter, emitter->temp_base + parameter_index);
+            wasm64_fe_local_set(emitter, emitter->value_locals[parameter->value.value]);
         }
-        wasm64_fe_emit_value(emitter, source);
-        wasm64_fe_local_set(emitter, emitter->temp_base + parameter_index);
-    }
-    parameter_index = 0;
-    for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
-    {
-        wasm64_fe_local_get(emitter, emitter->temp_base + parameter_index);
-        wasm64_fe_local_set(emitter, emitter->value_locals[parameter->value.value]);
     }
 }
 
@@ -1721,91 +1742,90 @@ static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* i
     {
         wasm64_fe_emit_value(emitter, instruction->operands[0]);
     }
-    if (source_type == destination_type && instruction->conversion_operation == IR_CONVERSION_IDENTITY)
+    if (source_type != destination_type || instruction->conversion_operation != IR_CONVERSION_IDENTITY)
     {
-        return;
+        if (source_integer && destination_integer)
+        {
+            if (source_type == WASM64_VALTYPE_I32 && destination_type == WASM64_VALTYPE_I64)
+            {
+                wasm64_fe_u8(emitter, source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xac : 0xad);
+            }
+            else if (source_type == WASM64_VALTYPE_I64 && destination_type == WASM64_VALTYPE_I32)
+            {
+                wasm64_fe_u8(emitter, 0xa7);
+            }
+            wasm64_fe_integer_normalize(emitter, destination, destination->kind == IR_TYPE_INTEGER && destination->is_signed);
+            return;
+        }
+        if (source_integer && destination_float)
+        {
+            if (destination_type == WASM64_VALTYPE_F32)
+            {
+                wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_I64 ? (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb4 : 0xb5)
+                                                                         : (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb2 : 0xb3));
+            }
+            else
+            {
+                wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_I64 ? (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb9 : 0xba)
+                                                                         : (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb7 : 0xb8));
+            }
+            return;
+        }
+        if (source_float && destination_integer)
+        {
+            if (destination_type == WASM64_VALTYPE_I32)
+            {
+                wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_F32 ? (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xa8 : 0xa9)
+                                                                         : (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xaa : 0xab));
+            }
+            else
+            {
+                wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_F32 ? (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xae : 0xaf)
+                                                                         : (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xb0 : 0xb1));
+            }
+            wasm64_fe_integer_normalize(emitter, destination, destination->kind == IR_TYPE_INTEGER && destination->is_signed);
+            return;
+        }
+        if (source_float && destination_float)
+        {
+            if (source_type == WASM64_VALTYPE_F32 && destination_type == WASM64_VALTYPE_F64)
+            {
+                wasm64_fe_u8(emitter, 0xbb);
+            }
+            else if (source_type == WASM64_VALTYPE_F64 && destination_type == WASM64_VALTYPE_F32)
+            {
+                wasm64_fe_u8(emitter, 0xb6);
+            }
+            return;
+        }
+        if (instruction->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET || instruction->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET)
+        {
+            if (source_type == WASM64_VALTYPE_I32 && destination_type == WASM64_VALTYPE_F32)
+            {
+                wasm64_fe_u8(emitter, 0xbe);
+            }
+            else if (source_type == WASM64_VALTYPE_F32 && destination_type == WASM64_VALTYPE_I32)
+            {
+                wasm64_fe_u8(emitter, 0xbc);
+            }
+            else if (source_type == WASM64_VALTYPE_I64 && destination_type == WASM64_VALTYPE_F64)
+            {
+                wasm64_fe_u8(emitter, 0xbf);
+            }
+            else if (source_type == WASM64_VALTYPE_F64 && destination_type == WASM64_VALTYPE_I64)
+            {
+                wasm64_fe_u8(emitter, 0xbd);
+            }
+            else if (source_type != destination_type)
+            {
+                wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("invalid Wasm64 reinterpret cast"), emitter->function, 0,
+                            instruction, IR_SYMBOL_ID_INVALID);
+            }
+            return;
+        }
+        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("unsupported Wasm64 conversion"), emitter->function, 0, instruction,
+                    IR_SYMBOL_ID_INVALID);
     }
-    if (source_integer && destination_integer)
-    {
-        if (source_type == WASM64_VALTYPE_I32 && destination_type == WASM64_VALTYPE_I64)
-        {
-            wasm64_fe_u8(emitter, source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xac : 0xad);
-        }
-        else if (source_type == WASM64_VALTYPE_I64 && destination_type == WASM64_VALTYPE_I32)
-        {
-            wasm64_fe_u8(emitter, 0xa7);
-        }
-        wasm64_fe_integer_normalize(emitter, destination, destination->kind == IR_TYPE_INTEGER && destination->is_signed);
-        return;
-    }
-    if (source_integer && destination_float)
-    {
-        if (destination_type == WASM64_VALTYPE_F32)
-        {
-            wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_I64 ? (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb4 : 0xb5)
-                                                                     : (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb2 : 0xb3));
-        }
-        else
-        {
-            wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_I64 ? (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb9 : 0xba)
-                                                                     : (source->kind == IR_TYPE_INTEGER && source->is_signed ? 0xb7 : 0xb8));
-        }
-        return;
-    }
-    if (source_float && destination_integer)
-    {
-        if (destination_type == WASM64_VALTYPE_I32)
-        {
-            wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_F32 ? (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xa8 : 0xa9)
-                                                                     : (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xaa : 0xab));
-        }
-        else
-        {
-            wasm64_fe_u8(emitter, source_type == WASM64_VALTYPE_F32 ? (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xae : 0xaf)
-                                                                     : (destination->kind == IR_TYPE_INTEGER && destination->is_signed ? 0xb0 : 0xb1));
-        }
-        wasm64_fe_integer_normalize(emitter, destination, destination->kind == IR_TYPE_INTEGER && destination->is_signed);
-        return;
-    }
-    if (source_float && destination_float)
-    {
-        if (source_type == WASM64_VALTYPE_F32 && destination_type == WASM64_VALTYPE_F64)
-        {
-            wasm64_fe_u8(emitter, 0xbb);
-        }
-        else if (source_type == WASM64_VALTYPE_F64 && destination_type == WASM64_VALTYPE_F32)
-        {
-            wasm64_fe_u8(emitter, 0xb6);
-        }
-        return;
-    }
-    if (instruction->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET || instruction->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET)
-    {
-        if (source_type == WASM64_VALTYPE_I32 && destination_type == WASM64_VALTYPE_F32)
-        {
-            wasm64_fe_u8(emitter, 0xbe);
-        }
-        else if (source_type == WASM64_VALTYPE_F32 && destination_type == WASM64_VALTYPE_I32)
-        {
-            wasm64_fe_u8(emitter, 0xbc);
-        }
-        else if (source_type == WASM64_VALTYPE_I64 && destination_type == WASM64_VALTYPE_F64)
-        {
-            wasm64_fe_u8(emitter, 0xbf);
-        }
-        else if (source_type == WASM64_VALTYPE_F64 && destination_type == WASM64_VALTYPE_I64)
-        {
-            wasm64_fe_u8(emitter, 0xbd);
-        }
-        else if (source_type != destination_type)
-        {
-            wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("invalid Wasm64 reinterpret cast"), emitter->function, 0,
-                        instruction, IR_SYMBOL_ID_INVALID);
-        }
-        return;
-    }
-    wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("unsupported Wasm64 conversion"), emitter->function, 0, instruction,
-                IR_SYMBOL_ID_INVALID);
 }
 
 static u32 wasm64_fe_count_block_parameters(IrFunction* function)

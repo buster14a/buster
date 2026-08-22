@@ -510,11 +510,17 @@ static u32 ebpf_type_bits(IrType* type)
 
 static u32 ebpf_type_size(IrType* type)
 {
+    u32 result;
     if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX)
     {
-        return 0;
+        result = 0;
     }
-    return (u32)type->layout.size;
+    else
+    {
+        result = (u32)type->layout.size;
+    }
+
+    return result;
 }
 
 static EbpfSection* ebpf_section_find(EbpfContext* context, String8 name)
@@ -589,11 +595,17 @@ static EbpfSymbolRecord* ebpf_add_symbol_record(EbpfContext* context, u32 key, S
 
 static u32 ebpf_ir_symbol_key(EbpfContext* context, IrSymbolId id)
 {
+    u32 result;
     if (id.value >= context->program->symbols.count)
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return context->ir_symbol_keys[id.value];
+    else
+    {
+        result = context->ir_symbol_keys[id.value];
+    }
+
+    return result;
 }
 
 static bool ebpf_parse_helper_id(String8 name, u32* id)
@@ -747,20 +759,32 @@ static IrInstruction* ebpf_fe_definition(EbpfFunctionEmitter* emitter, IrValueId
         return 0;
     }
     IrInstructionId definition = emitter->function->values[value.value].definition;
+    IrInstruction* result;
     if (definition.value >= emitter->function->instruction_count)
     {
-        return 0;
+        result = 0;
     }
-    return emitter->function->instructions + definition.value;
+    else
+    {
+        result = emitter->function->instructions + definition.value;
+    }
+
+    return result;
 }
 
 static IrType* ebpf_fe_value_type(EbpfFunctionEmitter* emitter, IrValueId value)
 {
+    IrType* result;
     if (value.value >= emitter->function->value_count)
     {
-        return 0;
+        result = 0;
     }
-    return ebpf_type(emitter->context, emitter->function->values[value.value].canonical_type);
+    else
+    {
+        result = ebpf_type(emitter->context, emitter->function->values[value.value].canonical_type);
+    }
+
+    return result;
 }
 
 static EbpfStringRecord* ebpf_string_find(EbpfContext* context, IrFunction* function, IrInstructionId instruction)
@@ -802,40 +826,38 @@ static EbpfGlobalRecord* ebpf_global_for_symbol(EbpfContext* context, IrSymbolId
 
 static void ebpf_fe_normalize(EbpfFunctionEmitter* emitter, u8 reg, IrType* type, bool signed_value)
 {
-    if (!ebpf_type_is_integer(type))
+    if (ebpf_type_is_integer(type))
     {
-        return;
-    }
-    u32 bits = ebpf_type_bits(type);
-    if (type->kind == IR_TYPE_BOOLEAN)
-    {
-        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JNE | EBPF_SRC_K, reg, 0, 2, 0);
-        ebpf_fe_mov_imm(emitter, reg, 0);
-        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
-        ebpf_fe_mov_imm(emitter, reg, 1);
-        return;
-    }
-    if (!bits || bits >= 64)
-    {
-        return;
-    }
-    if (signed_value)
-    {
-        ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, reg, (s32)(64 - bits));
-        ebpf_fe_alu_imm(emitter, EBPF_OP_ARSH, reg, (s32)(64 - bits));
-    }
-    else
-    {
-        u64 mask = (UINT64_C(1) << bits) - 1;
-        if (mask <= INT32_MAX)
+        u32 bits = ebpf_type_bits(type);
+        if (type->kind == IR_TYPE_BOOLEAN)
         {
-            ebpf_fe_alu_imm(emitter, EBPF_OP_AND, reg, (s32)mask);
+            ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JNE | EBPF_SRC_K, reg, 0, 2, 0);
+            ebpf_fe_mov_imm(emitter, reg, 0);
+            ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
+            ebpf_fe_mov_imm(emitter, reg, 1);
+            return;
         }
-        else
+        if (bits && bits < 64)
         {
-            u8 temporary = reg == EBPF_REG_9 ? EBPF_REG_8 : EBPF_REG_9;
-            ebpf_fe_mov_imm(emitter, temporary, (s64)mask);
-            ebpf_fe_alu_reg(emitter, EBPF_OP_AND, reg, temporary);
+            if (signed_value)
+            {
+                ebpf_fe_alu_imm(emitter, EBPF_OP_LSH, reg, (s32)(64 - bits));
+                ebpf_fe_alu_imm(emitter, EBPF_OP_ARSH, reg, (s32)(64 - bits));
+            }
+            else
+            {
+                u64 mask = (UINT64_C(1) << bits) - 1;
+                if (mask <= INT32_MAX)
+                {
+                    ebpf_fe_alu_imm(emitter, EBPF_OP_AND, reg, (s32)mask);
+                }
+                else
+                {
+                    u8 temporary = reg == EBPF_REG_9 ? EBPF_REG_8 : EBPF_REG_9;
+                    ebpf_fe_mov_imm(emitter, temporary, (s64)mask);
+                    ebpf_fe_alu_reg(emitter, EBPF_OP_AND, reg, temporary);
+                }
+            }
         }
     }
 }
@@ -2644,11 +2666,17 @@ static u32 ebpf_elf_string(EbpfBuffer* table, String8 string)
         return UINT32_MAX;
     }
     u32 offset = (u32)table->length;
+    u32 result;
     if (!ebpf_buffer_bytes(table, string.pointer, string.length) || !ebpf_buffer_u8(table, 0))
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return offset;
+    else
+    {
+        result = offset;
+    }
+
+    return result;
 }
 
 static bool ebpf_elf_symbol(EbpfBuffer* table, u32 name, u8 binding, u8 type, u16 section, u64 value, u64 size)

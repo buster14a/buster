@@ -1277,15 +1277,21 @@ static u32 llvm_bc_value_type_id(LlvmBcContext* context, IrFunction* function, I
         return context->pointer_type_id;
     }
     IrType* type = llvm_bc_ir_type(context, value->canonical_type);
+    u32 result;
     if (!type)
     {
-        return LLVM_BC_INVALID_ID;
+        result = LLVM_BC_INVALID_ID;
     }
-    if (type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_POINTER)
+    else if (type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_POINTER)
     {
-        return context->pointer_type_id;
+        result = context->pointer_type_id;
     }
-    return context->ir_type_ids[value->canonical_type.value];
+    else
+    {
+        result = context->ir_type_ids[value->canonical_type.value];
+    }
+
+    return result;
 }
 
 static u32 llvm_bc_integer_width(IrType* type)
@@ -1586,11 +1592,17 @@ static u64 llvm_bc_encode_signed_relative(s64 value)
 
 static u32 llvm_bc_symbol_value_id(LlvmBcContext* context, IrSymbolId symbol)
 {
+    u32 result;
     if (symbol.value >= context->program->symbols.count)
     {
-        return LLVM_BC_INVALID_ID;
+        result = LLVM_BC_INVALID_ID;
     }
-    return context->symbol_value_ids[symbol.value];
+    else
+    {
+        result = context->symbol_value_ids[symbol.value];
+    }
+
+    return result;
 }
 
 static u32 llvm_bc_function_block_index(LlvmBcContext* context, LlvmBcFunction* record, IrBlockId block)
@@ -3269,11 +3281,17 @@ LlvmBitcodeArtifact llvm_bitcode_emit(Arena* arena, IrProgram* program, IrModule
 
 LlvmBitcodeArtifact llvm_bitcode_emit_program(Arena* arena, IrProgram* program)
 {
+    LlvmBitcodeArtifact result;
     if (!program)
     {
-        return llvm_bitcode_emit(arena, program, 0, 0);
+        result = llvm_bitcode_emit(arena, program, 0, 0);
     }
-    return llvm_bitcode_emit(arena, program, program->modules, program->module_count);
+    else
+    {
+        result = llvm_bitcode_emit(arena, program, program->modules, program->module_count);
+    }
+
+    return result;
 }
 
 bool llvm_bitcode_artifact_is_valid(LlvmBitcodeArtifact artifact)

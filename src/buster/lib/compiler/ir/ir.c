@@ -20,29 +20,47 @@
 
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
+    IrType* result;
     if (!table || id.value >= table->count)
     {
-        return 0;
+        result = 0;
     }
-    return table->types + id.value;
+    else
+    {
+        result = table->types + id.value;
+    }
+
+    return result;
 }
 
 IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
+    IrSymbol* result;
     if (!table || id.value >= table->count)
     {
-        return 0;
+        result = 0;
     }
-    return table->symbols + id.value;
+    else
+    {
+        result = table->symbols + id.value;
+    }
+
+    return result;
 }
 
 IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id)
 {
+    IrSource* result;
     if (!table || id.value >= table->count)
     {
-        return 0;
+        result = 0;
     }
-    return table->sources + id.value;
+    else
+    {
+        result = table->sources + id.value;
+    }
+
+    return result;
 }
 
 // The two source-map searches, and the one shape they share: the greatest
@@ -800,11 +818,17 @@ IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFunction* functi
 
 IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction)
 {
+    IrSourceRange result;
     if (!function || !function->instruction_canonical_sources || instruction.value >= function->instruction_count)
     {
-        return (IrSourceRange){0};
+        result = (IrSourceRange){0};
     }
-    return function->instruction_canonical_sources[instruction.value];
+    else
+    {
+        result = function->instruction_canonical_sources[instruction.value];
+    }
+
+    return result;
 }
 
 IrSourcePosition ir_source_position(IrProgram* program, IrSourceRange range)
@@ -818,11 +842,17 @@ IrSourcePosition ir_source_position(IrProgram* program, IrSourceRange range)
         return ir_source_map_position(&program->source_map, range.offset, &program->source_cursor);
     }
     IrSource* source = ir_source_from_id(&program->sources, range.source);
+    IrSourcePosition result;
     if (!source || !source->text.length)
     {
-        return (IrSourcePosition){.source = range.source.value};
+        result = (IrSourcePosition){.source = range.source.value};
     }
-    return ir_source_text_position(source->text, range.source.value, range.offset, &program->source_cursor);
+    else
+    {
+        result = ir_source_text_position(source->text, range.source.value, range.offset, &program->source_cursor);
+    }
+
+    return result;
 }
 
 IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
@@ -2143,213 +2173,206 @@ bool ir_label_provenance_contains(IrValueLabelMetadata* value, IrBlockId block)
 
 void ir_label_provenance_union(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!arena || !function || destination_id.value >= function->value_count || source_id.value >= function->value_count)
+    if (arena && function && destination_id.value < function->value_count && source_id.value < function->value_count)
     {
-        return;
-    }
-    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
-    bool source_blocks_present = source.is_label_value && source.label_block_count && source.label_blocks;
-    if (!source.has_non_label_provenance && !source_blocks_present)
-    {
-        return;
-    }
-    IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
-    if (!destination)
-    {
-        return;
-    }
-    destination->has_non_label_provenance |= source.has_non_label_provenance;
-    if (!source_blocks_present)
-    {
-        return;
-    }
-    u32 existing_count = destination->is_label_value && destination->label_blocks ? destination->label_block_count : 0;
-    u32 capacity = existing_count + source.label_block_count;
-    IrBlockId* blocks = arena_allocate(arena, IrBlockId, capacity);
-    u32 count = 0;
-    for (u32 index = 0; index < existing_count; index += 1)
-    {
-        blocks[count++] = destination->label_blocks[index];
-    }
-    for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
-    {
-        IrBlockId block = source.label_blocks[source_index];
-        bool found = false;
-        for (u32 index = 0; index < count; index += 1)
+        IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+        bool source_blocks_present = source.is_label_value && source.label_block_count && source.label_blocks;
+        if (source.has_non_label_provenance || source_blocks_present)
         {
-            found |= blocks[index].value == block.value;
-        }
-        if (!found)
-        {
-            blocks[count++] = block;
+            IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
+            if (destination)
+            {
+                destination->has_non_label_provenance |= source.has_non_label_provenance;
+                if (!source_blocks_present)
+                {
+                    return;
+                }
+                u32 existing_count = destination->is_label_value && destination->label_blocks ? destination->label_block_count : 0;
+                u32 capacity = existing_count + source.label_block_count;
+                IrBlockId* blocks = arena_allocate(arena, IrBlockId, capacity);
+                u32 count = 0;
+                for (u32 index = 0; index < existing_count; index += 1)
+                {
+                    blocks[count++] = destination->label_blocks[index];
+                }
+                for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
+                {
+                    IrBlockId block = source.label_blocks[source_index];
+                    bool found = false;
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        found |= blocks[index].value == block.value;
+                    }
+                    if (!found)
+                    {
+                        blocks[count++] = block;
+                    }
+                }
+                bool has_non_label = destination->has_non_label_provenance || source.has_non_label_provenance;
+                destination->is_label_value = count != 0;
+                destination->has_label_provenance = false;
+                destination->has_non_label_provenance = has_non_label;
+                destination->label_blocks = blocks;
+                destination->label_block_count = count;
+                destination->label_paths = 0;
+                destination->label_path_count = 0;
+            }
         }
     }
-    bool has_non_label = destination->has_non_label_provenance || source.has_non_label_provenance;
-    destination->is_label_value = count != 0;
-    destination->has_label_provenance = false;
-    destination->has_non_label_provenance = has_non_label;
-    destination->label_blocks = blocks;
-    destination->label_block_count = count;
-    destination->label_paths = 0;
-    destination->label_path_count = 0;
 }
 
 BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id);
 
 void ir_label_provenance_copy(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!function || destination_id.value >= function->value_count)
+    if (function && destination_id.value < function->value_count)
     {
-        return;
-    }
-    IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
-    if (existing)
-    {
-        *existing = (IrValueLabelMetadata){0};
-    }
-    if (source_id.value >= function->value_count)
-    {
-        return;
-    }
-    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
-    if (source.has_non_label_provenance)
-    {
-        IrValueLabelMetadata* destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
-        if (destination)
+        IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
+        if (existing)
         {
-            destination->has_non_label_provenance = true;
+            *existing = (IrValueLabelMetadata){0};
         }
-    }
-    if (source.has_label_provenance || source.label_path_count)
-    {
-        ir_label_storage_union_source(arena, function, destination_id, source_id);
-    }
-    else
-    {
-        ir_label_provenance_union(arena, function, destination_id, source_id);
+        if (source_id.value >= function->value_count)
+        {
+            return;
+        }
+        IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+        if (source.has_non_label_provenance)
+        {
+            IrValueLabelMetadata* destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
+            if (destination)
+            {
+                destination->has_non_label_provenance = true;
+            }
+        }
+        if (source.has_label_provenance || source.label_path_count)
+        {
+            ir_label_storage_union_source(arena, function, destination_id, source_id);
+        }
+        else
+        {
+            ir_label_provenance_union(arena, function, destination_id, source_id);
+        }
     }
 }
 
 BUSTER_GLOBAL_LOCAL void ir_label_storage_path_append(Arena* arena, IrValueLabelMetadata* destination, IrLabelProvenancePath* source_path)
 {
-    if (!arena || !destination || !source_path)
+    if (arena && destination && source_path)
     {
-        return;
-    }
-    for (u32 path_index = 0; path_index < destination->label_path_count; path_index += 1)
-    {
-        IrLabelProvenancePath* destination_path = destination->label_paths + path_index;
-        if (destination_path->offset != source_path->offset || destination_path->size != source_path->size)
+        for (u32 path_index = 0; path_index < destination->label_path_count; path_index += 1)
         {
-            continue;
-        }
-        if (destination_path->is_non_label && source_path->is_non_label)
-        {
+            IrLabelProvenancePath* destination_path = destination->label_paths + path_index;
+            if (destination_path->offset != source_path->offset || destination_path->size != source_path->size)
+            {
+                continue;
+            }
+            if (destination_path->is_non_label && source_path->is_non_label)
+            {
+                return;
+            }
+            if (destination_path->is_non_label != source_path->is_non_label)
+            {
+                destination->has_non_label_provenance = true;
+                if (destination_path->is_non_label)
+                {
+                    destination_path->is_non_label = false;
+                    destination_path->label_blocks = arena_allocate(arena, IrBlockId, source_path->label_block_count);
+                    destination_path->label_block_count = 0;
+                }
+            }
+            u32 existing_count = destination_path->label_block_count;
+            IrBlockId* merged = arena_allocate(arena, IrBlockId, existing_count + source_path->label_block_count);
+            u32 merged_count = 0;
+            for (u32 block_index = 0; block_index < existing_count; block_index += 1)
+            {
+                merged[merged_count++] = destination_path->label_blocks[block_index];
+            }
+            for (u32 block_index = 0; block_index < source_path->label_block_count; block_index += 1)
+            {
+                bool found = false;
+                for (u32 merged_index = 0; merged_index < merged_count; merged_index += 1)
+                {
+                    found |= merged[merged_index].value == source_path->label_blocks[block_index].value;
+                }
+                if (!found)
+                {
+                    merged[merged_count++] = source_path->label_blocks[block_index];
+                }
+            }
+            destination_path->label_blocks = merged_count ? merged : 0;
+            destination_path->label_block_count = merged_count;
             return;
         }
-        if (destination_path->is_non_label != source_path->is_non_label)
+        IrLabelProvenancePath* paths = arena_allocate(arena, IrLabelProvenancePath, destination->label_path_count + 1);
+        for (u32 path_index = 0; path_index < destination->label_path_count; path_index += 1)
         {
-            destination->has_non_label_provenance = true;
-            if (destination_path->is_non_label)
-            {
-                destination_path->is_non_label = false;
-                destination_path->label_blocks = arena_allocate(arena, IrBlockId, source_path->label_block_count);
-                destination_path->label_block_count = 0;
-            }
+            paths[path_index] = destination->label_paths[path_index];
         }
-        u32 existing_count = destination_path->label_block_count;
-        IrBlockId* merged = arena_allocate(arena, IrBlockId, existing_count + source_path->label_block_count);
-        u32 merged_count = 0;
-        for (u32 block_index = 0; block_index < existing_count; block_index += 1)
-        {
-            merged[merged_count++] = destination_path->label_blocks[block_index];
-        }
-        for (u32 block_index = 0; block_index < source_path->label_block_count; block_index += 1)
-        {
-            bool found = false;
-            for (u32 merged_index = 0; merged_index < merged_count; merged_index += 1)
-            {
-                found |= merged[merged_index].value == source_path->label_blocks[block_index].value;
-            }
-            if (!found)
-            {
-                merged[merged_count++] = source_path->label_blocks[block_index];
-            }
-        }
-        destination_path->label_blocks = merged_count ? merged : 0;
-        destination_path->label_block_count = merged_count;
-        return;
+        paths[destination->label_path_count] = *source_path;
+        destination->label_paths = paths;
+        destination->label_path_count += 1;
     }
-    IrLabelProvenancePath* paths = arena_allocate(arena, IrLabelProvenancePath, destination->label_path_count + 1);
-    for (u32 path_index = 0; path_index < destination->label_path_count; path_index += 1)
-    {
-        paths[path_index] = destination->label_paths[path_index];
-    }
-    paths[destination->label_path_count] = *source_path;
-    destination->label_paths = paths;
-    destination->label_path_count += 1;
 }
 
 BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!arena || !function || destination_id.value >= function->value_count || source_id.value >= function->value_count)
+    if (arena && function && destination_id.value < function->value_count && source_id.value < function->value_count)
     {
-        return;
-    }
-    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
-    bool source_blocks_present = (source.is_label_value || source.has_label_provenance) && source.label_block_count && source.label_blocks;
-    bool source_has_content = source.has_non_label_provenance || source.label_path_count || source_blocks_present;
-    IrValueLabelMetadata* destination =
-        source_has_content ? ir_value_label_metadata_ensure(arena, function, destination_id) : ir_value_label_metadata_find(function, destination_id);
-    if (!destination)
-    {
-        return;
-    }
-    // Preserve ordinary-pointer alternatives even when the source contributes
-    // no label blocks; otherwise a later load can become falsely label-only.
-    destination->has_non_label_provenance |= source.has_non_label_provenance;
-    for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
-    {
-        IrLabelProvenancePath* source_path = source.label_paths + path_index;
-        destination->has_non_label_provenance |= source_path->is_non_label;
-        ir_label_storage_path_append(arena, destination, source_path);
-    }
-    if (!source_blocks_present)
-    {
-        if (destination->is_label_value && destination->has_non_label_provenance)
+        IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+        bool source_blocks_present = (source.is_label_value || source.has_label_provenance) && source.label_block_count && source.label_blocks;
+        bool source_has_content = source.has_non_label_provenance || source.label_path_count || source_blocks_present;
+        IrValueLabelMetadata* destination =
+            source_has_content ? ir_value_label_metadata_ensure(arena, function, destination_id) : ir_value_label_metadata_find(function, destination_id);
+        if (destination)
         {
+            // Preserve ordinary-pointer alternatives even when the source contributes
+            // no label blocks; otherwise a later load can become falsely label-only.
+            destination->has_non_label_provenance |= source.has_non_label_provenance;
+            for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+            {
+                IrLabelProvenancePath* source_path = source.label_paths + path_index;
+                destination->has_non_label_provenance |= source_path->is_non_label;
+                ir_label_storage_path_append(arena, destination, source_path);
+            }
+            if (!source_blocks_present)
+            {
+                if (destination->is_label_value && destination->has_non_label_provenance)
+                {
+                    destination->is_label_value = false;
+                    destination->has_label_provenance = destination->label_block_count != 0;
+                }
+                return;
+            }
+            u32 existing_count = destination->has_label_provenance && destination->label_blocks ? destination->label_block_count
+                                                                                                   : destination->is_label_value && destination->label_blocks
+                                                                                                         ? destination->label_block_count
+                                                                                                         : 0;
+            IrBlockId* blocks = arena_allocate(arena, IrBlockId, existing_count + source.label_block_count);
+            u32 count = 0;
+            for (u32 index = 0; index < existing_count; index += 1)
+            {
+                blocks[count++] = destination->label_blocks[index];
+            }
+            for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
+            {
+                IrBlockId block = source.label_blocks[source_index];
+                bool found = false;
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    found |= blocks[index].value == block.value;
+                }
+                if (!found)
+                {
+                    blocks[count++] = block;
+                }
+            }
             destination->is_label_value = false;
-            destination->has_label_provenance = destination->label_block_count != 0;
-        }
-        return;
-    }
-    u32 existing_count = destination->has_label_provenance && destination->label_blocks ? destination->label_block_count
-                                                                                           : destination->is_label_value && destination->label_blocks
-                                                                                                 ? destination->label_block_count
-                                                                                                 : 0;
-    IrBlockId* blocks = arena_allocate(arena, IrBlockId, existing_count + source.label_block_count);
-    u32 count = 0;
-    for (u32 index = 0; index < existing_count; index += 1)
-    {
-        blocks[count++] = destination->label_blocks[index];
-    }
-    for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
-    {
-        IrBlockId block = source.label_blocks[source_index];
-        bool found = false;
-        for (u32 index = 0; index < count; index += 1)
-        {
-            found |= blocks[index].value == block.value;
-        }
-        if (!found)
-        {
-            blocks[count++] = block;
+            destination->has_label_provenance = count != 0;
+            destination->label_blocks = blocks;
+            destination->label_block_count = count;
         }
     }
-    destination->is_label_value = false;
-    destination->has_label_provenance = count != 0;
-    destination->label_blocks = blocks;
-    destination->label_block_count = count;
 }
 
 void ir_label_storage_provenance_union(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
@@ -2373,53 +2396,50 @@ void ir_label_storage_provenance_copy(Arena* arena, IrFunction* function, IrValu
 
 void ir_label_provenance_load(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!function || destination_id.value >= function->value_count)
+    if (function && destination_id.value < function->value_count)
     {
-        return;
-    }
-    IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
-    if (existing)
-    {
-        *existing = (IrValueLabelMetadata){0};
-    }
-    if (source_id.value >= function->value_count)
-    {
-        return;
-    }
-    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
-    if (source.has_non_label_provenance)
-    {
-        IrValueLabelMetadata* non_label_destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
-        if (non_label_destination)
+        IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
+        if (existing)
         {
-            non_label_destination->has_non_label_provenance = true;
+            *existing = (IrValueLabelMetadata){0};
         }
-    }
-    if (!arena || !source.label_block_count || !source.label_blocks)
-    {
-        return;
-    }
-    bool scalar_label_paths = !source.has_non_label_provenance;
-    for (u32 path_index = 0; scalar_label_paths && path_index < source.label_path_count; path_index += 1)
-    {
-        IrLabelProvenancePath* path = source.label_paths + path_index;
-        scalar_label_paths = !path->is_non_label && path->offset == 0 && path->label_block_count != 0;
-    }
-    if (scalar_label_paths)
-    {
-        IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
-        if (!destination)
+        if (source_id.value < function->value_count)
         {
-            return;
+            IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+            if (source.has_non_label_provenance)
+            {
+                IrValueLabelMetadata* non_label_destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
+                if (non_label_destination)
+                {
+                    non_label_destination->has_non_label_provenance = true;
+                }
+            }
+            if (arena && source.label_block_count && source.label_blocks)
+            {
+                bool scalar_label_paths = !source.has_non_label_provenance;
+                for (u32 path_index = 0; scalar_label_paths && path_index < source.label_path_count; path_index += 1)
+                {
+                    IrLabelProvenancePath* path = source.label_paths + path_index;
+                    scalar_label_paths = !path->is_non_label && path->offset == 0 && path->label_block_count != 0;
+                }
+                if (scalar_label_paths)
+                {
+                    IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
+                    if (!destination)
+                    {
+                        return;
+                    }
+                    destination->is_label_value = true;
+                    destination->label_blocks = arena_allocate(arena, IrBlockId, source.label_block_count);
+                    memcpy(destination->label_blocks, source.label_blocks, sizeof(IrBlockId) * source.label_block_count);
+                    destination->label_block_count = source.label_block_count;
+                }
+                else
+                {
+                    ir_label_storage_provenance_copy(arena, function, destination_id, source_id);
+                }
+            }
         }
-        destination->is_label_value = true;
-        destination->label_blocks = arena_allocate(arena, IrBlockId, source.label_block_count);
-        memcpy(destination->label_blocks, source.label_blocks, sizeof(IrBlockId) * source.label_block_count);
-        destination->label_block_count = source.label_block_count;
-    }
-    else
-    {
-        ir_label_storage_provenance_copy(arena, function, destination_id, source_id);
     }
 }
 
@@ -2795,49 +2815,143 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     {
         u64 size = type->layout.size;
         bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
-        if (type->kind == IR_TYPE_VOID)
+        if (type->kind != IR_TYPE_VOID)
         {
-            return value;
-        }
-        if (!aggregate && type->kind != IR_TYPE_VECTOR)
-        {
-            if (type->kind == IR_TYPE_FLOAT)
+            if (!aggregate && type->kind != IR_TYPE_VECTOR)
             {
-                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
+                if (type->kind == IR_TYPE_FLOAT)
                 {
-                    if (is_result)
+                    if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
                     {
-                        // A scalar long double returns directly in ST0.  Keep
-                        // both eightbyte classes in the neutral ABI model so a
-                        // consumer can validate the x87 result shape without
-                        // inventing a hidden result pointer.
-                        value.part_count = 2;
+                        if (is_result)
+                        {
+                            // A scalar long double returns directly in ST0.  Keep
+                            // both eightbyte classes in the neutral ABI model so a
+                            // consumer can validate the x87 result shape without
+                            // inventing a hidden result pointer.
+                            value.part_count = 2;
+                            value.parts[0] = (IrAbiPart){
+                                .abi_class = IR_ABI_CLASS_X87,
+                                .value_offset = 0,
+                                .size = 8,
+                            };
+                            value.parts[1] = (IrAbiPart){
+                                .abi_class = IR_ABI_CLASS_X87_UP,
+                                .value_offset = 8,
+                                .size = 8,
+                            };
+                        }
+                        else
+                        {
+                            // SysV arguments (including variadic arguments) carry
+                            // long double by value in a 16-byte-aligned memory slot;
+                            // this is not an indirect/sret pointer argument.
+                            value.part_count = 1;
+                            value.memory = true;
+                            value.parts[0] = (IrAbiPart){
+                                .abi_class = IR_ABI_CLASS_MEMORY,
+                                .size = (u32)size,
+                            };
+                        }
+                        return value;
+                    }
+                    if (type->bit_width > 64)
+                    {
+                        value.part_count = 1;
+                        value.indirect = is_result;
+                        value.memory = !is_result;
                         value.parts[0] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_X87,
-                            .value_offset = 0,
-                            .size = 8,
-                        };
-                        value.parts[1] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_X87_UP,
-                            .value_offset = 8,
-                            .size = 8,
+                            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                            .size = is_result ? 8 : (u32)size,
                         };
                     }
                     else
                     {
-                        // SysV arguments (including variadic arguments) carry
-                        // long double by value in a 16-byte-aligned memory slot;
-                        // this is not an indirect/sret pointer argument.
                         value.part_count = 1;
-                        value.memory = true;
                         value.parts[0] = (IrAbiPart){
-                            .abi_class = IR_ABI_CLASS_MEMORY,
+                            .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
                             .size = (u32)size,
                         };
                     }
                     return value;
                 }
-                if (type->bit_width > 64)
+                if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
+                {
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
+                    return value;
+                }
+                if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
+                {
+                    if (size <= 8)
+                    {
+                        value.part_count = 1;
+                        value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                        return value;
+                    }
+                    if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
+                    {
+                        value.part_count = (u32)((size + 7) / 8);
+                        for (u32 part = 0; part < value.part_count; part += 1)
+                        {
+                            value.parts[part] = (IrAbiPart){
+                                .abi_class = IR_ABI_CLASS_INTEGER,
+                                .value_offset = part * 8,
+                                .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                            };
+                        }
+                        return value;
+                    }
+                    value.part_count = 1;
+                    value.indirect = true;
+                    value.memory = !is_result;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                        .size = is_result ? 8 : (u32)size,
+                    };
+                    return value;
+                }
+                return value;
+            }
+            if (type->kind == IR_TYPE_VECTOR)
+            {
+                bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                               convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+                if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+                {
+                    // Win64 hands a vector over by reference and brings it back
+                    // in a vector register at every width from 8 to 64 bytes, the
+                    // way clang and MSVC return it: XMM0, YMM0, or ZMM0 when the
+                    // model has the register, and split across consecutive
+                    // registers when it does not. The width only decides how many
+                    // registers the result takes, which is the backend's question
+                    // and not this one. Past 64 bytes clang's answer depends on
+                    // the CPU model, which this classification cannot see -- and
+                    // the C frontend refuses vector signature types past 64 bytes
+                    // anyway -- while below 8 clang's own shapes turn erratic (a
+                    // 4-byte vector rides EAX, a 2-byte one XMM0), so both ends
+                    // keep the reference the two sides of a buster build already
+                    // agree on.
+                    if (!is_result || size < 8 || size > 64)
+                    {
+                        value.part_count = 1;
+                        value.indirect = true;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_POINTER,
+                            .size = 8,
+                        };
+                    }
+                    else
+                    {
+                        value.part_count = 1;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_VECTOR,
+                            .size = (u32)size,
+                        };
+                    }
+                    return value;
+                }
+                if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
                 {
                     value.part_count = 1;
                     value.indirect = is_result;
@@ -2846,32 +2960,9 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
                         .size = is_result ? 8 : (u32)size,
                     };
-                }
-                else
-                {
-                    value.part_count = 1;
-                    value.parts[0] = (IrAbiPart){
-                        .abi_class = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT,
-                        .size = (u32)size,
-                    };
-                }
-                return value;
-            }
-            if (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION)
-            {
-                value.part_count = 1;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = (u32)size};
-                return value;
-            }
-            if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM)
-            {
-                if (size <= 8)
-                {
-                    value.part_count = 1;
-                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
                     return value;
                 }
-                if (size <= 16 && convention != IR_ABI_CONVENTION_WIN64_X86_64)
+                if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
                 {
                     value.part_count = (u32)((size + 7) / 8);
                     for (u32 part = 0; part < value.part_count; part += 1)
@@ -2884,56 +2975,84 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     }
                     return value;
                 }
-                value.part_count = 1;
-                value.indirect = true;
-                value.memory = !is_result;
-                value.parts[0] = (IrAbiPart){
-                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                    .size = is_result ? 8 : (u32)size,
-                };
-                return value;
-            }
-            return value;
-        }
-        if (type->kind == IR_TYPE_VECTOR)
-        {
-            bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                           convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-            if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-            {
-                // Win64 hands a vector over by reference and brings it back
-                // in a vector register at every width from 8 to 64 bytes, the
-                // way clang and MSVC return it: XMM0, YMM0, or ZMM0 when the
-                // model has the register, and split across consecutive
-                // registers when it does not. The width only decides how many
-                // registers the result takes, which is the backend's question
-                // and not this one. Past 64 bytes clang's answer depends on
-                // the CPU model, which this classification cannot see -- and
-                // the C frontend refuses vector signature types past 64 bytes
-                // anyway -- while below 8 clang's own shapes turn erratic (a
-                // 4-byte vector rides EAX, a 2-byte one XMM0), so both ends
-                // keep the reference the two sides of a buster build already
-                // agree on.
-                if (!is_result || size < 8 || size > 64)
+                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
                 {
                     value.part_count = 1;
-                    value.indirect = true;
+                    value.memory = true;
                     value.parts[0] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_POINTER,
-                        .size = 8,
+                        .abi_class = IR_ABI_CLASS_MEMORY,
+                        .size = (u32)size,
                     };
+                    return value;
+                }
+                if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size < 8)
+                {
+                    // GCC passes 1-, 2- and 4-byte vectors in general-purpose
+                    // registers and clang follows, so INTEGER is the convention
+                    // here; it is also what lets the canonical emitter carry the
+                    // part, whose vector moves start at four bytes.
+                    value.part_count = 1;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                    return value;
+                }
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
+                return value;
+            }
+            if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
+            {
+                value.part_count = 1;
+                if (size == 1 || size == 2 || size == 4 || size == 8)
+                {
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                }
+                else
+                {
+                    value.indirect = true;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+                }
+                return value;
+            }
+            bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                           convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+            if (aarch64)
+            {
+                IrTypeId element = IR_TYPE_ID_INVALID;
+                u32 count = 0;
+                if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
+                {
+                    IrType* element_type = ir_type_from_id(&program->types, element);
+                    value.part_count = count;
+                    for (u32 part = 0; part < count; part += 1)
+                    {
+                        value.parts[part] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_FLOAT,
+                            .value_offset = part * (u32)element_type->layout.size,
+                            .size = (u32)element_type->layout.size,
+                        };
+                    }
+                }
+                else if (size <= 16)
+                {
+                    value.part_count = (u32)((size + 7) / 8);
+                    for (u32 part = 0; part < value.part_count; part += 1)
+                    {
+                        value.parts[part] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_INTEGER,
+                            .value_offset = part * 8,
+                            .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                        };
+                    }
                 }
                 else
                 {
                     value.part_count = 1;
-                    value.parts[0] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_VECTOR,
-                        .size = (u32)size,
-                    };
+                    value.indirect = true;
+                    value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
                 }
                 return value;
             }
-            if ((aarch64 && size > 16) || (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size > 64))
+            if (size > 16)
             {
                 value.part_count = 1;
                 value.indirect = is_result;
@@ -2944,164 +3063,64 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 };
                 return value;
             }
-            if (convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument)
-            {
-                value.part_count = (u32)((size + 7) / 8);
-                for (u32 part = 0; part < value.part_count; part += 1)
-                {
-                    value.parts[part] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_INTEGER,
-                        .value_offset = part * 8,
-                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                    };
-                }
-                return value;
-            }
-            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && variadic_argument && size > 16)
+            IrAbiClass classes[2] = {0};
+            if (!ir_system_v_abi_classes(program, type_id, classes))
             {
                 value.part_count = 1;
-                value.memory = true;
+                value.indirect = is_result;
+                value.memory = !is_result;
                 value.parts[0] = (IrAbiPart){
-                    .abi_class = IR_ABI_CLASS_MEMORY,
-                    .size = (u32)size,
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
                 };
                 return value;
             }
-            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && size < 8)
+            bool has_x87 = false;
+            bool has_memory = false;
+            for (u32 part = 0; part < 2; part += 1)
             {
-                // GCC passes 1-, 2- and 4-byte vectors in general-purpose
-                // registers and clang follows, so INTEGER is the convention
-                // here; it is also what lets the canonical emitter carry the
-                // part, whose vector moves start at four bytes.
+                has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
+                has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
+            }
+            if (has_memory || (has_x87 && !is_result))
+            {
+                // X87/X87_UP arguments are memory-class values in SysV, as are
+                // aggregates whose fields merged incompatibly with an x87 class.
+                // Keep `indirect` clear for arguments: only a result uses a hidden
+                // pointer when the aggregate cannot be returned directly.
                 value.part_count = 1;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
+                value.indirect = is_result;
+                value.memory = !is_result;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
+                };
                 return value;
             }
-            value.part_count = 1;
-            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = (u32)size};
-            return value;
-        }
-        if (convention == IR_ABI_CONVENTION_WIN64_X86_64)
-        {
-            value.part_count = 1;
-            if (size == 1 || size == 2 || size == 4 || size == 8)
+            if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
             {
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_INTEGER, .size = (u32)size};
-            }
-            else
-            {
-                value.indirect = true;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
-            }
-            return value;
-        }
-        bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
-                       convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
-        if (aarch64)
-        {
-            IrTypeId element = IR_TYPE_ID_INVALID;
-            u32 count = 0;
-            if (!(convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && variadic_argument) && ir_homogeneous_float_abi(program, type_id, &element, &count))
-            {
-                IrType* element_type = ir_type_from_id(&program->types, element);
-                value.part_count = count;
-                for (u32 part = 0; part < count; part += 1)
-                {
-                    value.parts[part] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_FLOAT,
-                        .value_offset = part * (u32)element_type->layout.size,
-                        .size = (u32)element_type->layout.size,
-                    };
-                }
-            }
-            else if (size <= 16)
-            {
-                value.part_count = (u32)((size + 7) / 8);
-                for (u32 part = 0; part < value.part_count; part += 1)
-                {
-                    value.parts[part] = (IrAbiPart){
-                        .abi_class = IR_ABI_CLASS_INTEGER,
-                        .value_offset = part * 8,
-                        .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-                    };
-                }
-            }
-            else
-            {
+                // X87_UP is meaningful only as the second half of the canonical
+                // long-double pair.  A malformed/incompatible aggregate is therefore
+                // returned indirectly rather than exposing a register shape that no
+                // SysV caller can consume.
                 value.part_count = 1;
-                value.indirect = true;
-                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 8};
+                value.indirect = is_result;
+                value.memory = !is_result;
+                value.parts[0] = (IrAbiPart){
+                    .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+                    .size = is_result ? 8 : (u32)size,
+                };
+                return value;
             }
-            return value;
-        }
-        if (size > 16)
-        {
-            value.part_count = 1;
-            value.indirect = is_result;
-            value.memory = !is_result;
-            value.parts[0] = (IrAbiPart){
-                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                .size = is_result ? 8 : (u32)size,
-            };
-            return value;
-        }
-        IrAbiClass classes[2] = {0};
-        if (!ir_system_v_abi_classes(program, type_id, classes))
-        {
-            value.part_count = 1;
-            value.indirect = is_result;
-            value.memory = !is_result;
-            value.parts[0] = (IrAbiPart){
-                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                .size = is_result ? 8 : (u32)size,
-            };
-            return value;
-        }
-        bool has_x87 = false;
-        bool has_memory = false;
-        for (u32 part = 0; part < 2; part += 1)
-        {
-            has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
-            has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
-        }
-        if (has_memory || (has_x87 && !is_result))
-        {
-            // X87/X87_UP arguments are memory-class values in SysV, as are
-            // aggregates whose fields merged incompatibly with an x87 class.
-            // Keep `indirect` clear for arguments: only a result uses a hidden
-            // pointer when the aggregate cannot be returned directly.
-            value.part_count = 1;
-            value.indirect = is_result;
-            value.memory = !is_result;
-            value.parts[0] = (IrAbiPart){
-                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                .size = is_result ? 8 : (u32)size,
-            };
-            return value;
-        }
-        if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
-        {
-            // X87_UP is meaningful only as the second half of the canonical
-            // long-double pair.  A malformed/incompatible aggregate is therefore
-            // returned indirectly rather than exposing a register shape that no
-            // SysV caller can consume.
-            value.part_count = 1;
-            value.indirect = is_result;
-            value.memory = !is_result;
-            value.parts[0] = (IrAbiPart){
-                .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
-                .size = is_result ? 8 : (u32)size,
-            };
-            return value;
-        }
-        value.part_count = (u32)((size + 7) / 8);
-        for (u32 part = 0; part < value.part_count; part += 1)
-        {
-            value.parts[part] = (IrAbiPart){
-                .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
-                .value_offset = part * 8,
-                .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
-            };
+            value.part_count = (u32)((size + 7) / 8);
+            for (u32 part = 0; part < value.part_count; part += 1)
+            {
+                value.parts[part] = (IrAbiPart){
+                    .abi_class = classes[part] == IR_ABI_CLASS_NONE ? IR_ABI_CLASS_INTEGER : classes[part],
+                    .value_offset = part * 8,
+                    .size = (u32)BUSTER_MIN((u64)8, size - (u64)part * 8),
+                };
+            }
         }
     }
 
@@ -3351,11 +3370,17 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
 
 IrInstructionId ir_instruction_self_id(IrFunction* function, IrInstruction* instruction)
 {
+    IrInstructionId result;
     if (!function || !instruction || instruction < function->instructions || instruction >= function->instructions + function->instruction_count)
     {
-        return IR_INSTRUCTION_ID_INVALID;
+        result = IR_INSTRUCTION_ID_INVALID;
     }
-    return (IrInstructionId){.value = (IrIdUnderlying)(instruction - function->instructions)};
+    else
+    {
+        result = (IrInstructionId){.value = (IrIdUnderlying)(instruction - function->instructions)};
+    }
+
+    return result;
 }
 
 bool ir_function_may_contain_opcodes(IrFunction* function, u64 mask)
