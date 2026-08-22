@@ -1492,6 +1492,12 @@ struct CIntegerIrBuilder
     u32 failure_token_index;
     u32 declaration_index;
     CIntegerIrLocal* locals;
+    // The entity of `locals[i]`, kept beside the table rather than read out of
+    // it: c_ir_find_local_by_entity scans the whole table backwards on every
+    // identifier the body lowers, and CIntegerIrLocal is 88 bytes, so the
+    // scan touched one cache line per local to compare four bytes.  Sixteen
+    // candidates share a line here.  Appended in lockstep with `locals`.
+    u32* local_entities;
     u32 local_count;
     u32 local_capacity;
     IrBlockId* label_metadata_store_blocks;
@@ -2931,15 +2937,15 @@ BUSTER_C_INTERNAL bool c_ir_value_contains_label_provenance(CIntegerIrBuilder* b
 
 BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* builder, CEntityId entity)
 {
-    for (u32 index = builder->local_count; index != 0; index -= 1)
+    CIntegerIrLocal* result = 0;
+    for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
     {
-        CIntegerIrLocal* local = builder->locals + index - 1;
-        if (local->entity.value == entity.value)
+        if (builder->local_entities[index - 1] == entity.value)
         {
-            return local;
+            result = builder->locals + index - 1;
         }
     }
-    return 0;
+    return result;
 }
 
 BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder, u32 token_index)
@@ -3050,6 +3056,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     instruction.result = place;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[place.value].definition = id;
+    builder->local_entities[builder->local_count] = entity.value;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
         .name = c_token_spelling(builder->preprocess.spelling_base, name),
         .source = c_ir_token_source_range(builder, name),
@@ -24158,6 +24165,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     place = c_ir_emit_global_place(builder, entity, local_source);
+                    builder->local_entities[builder->local_count] = entity.value;
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = c_token_spelling(builder->preprocess.spelling_base, name),
                         .source = local_source,
@@ -31726,6 +31734,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .failure_token_index = UINT32_MAX,
             .declaration_index = declaration_index,
             .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
+            .local_entities = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
             .label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, (u32)lowering_capacity),
             .label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, (u32)lowering_capacity),
