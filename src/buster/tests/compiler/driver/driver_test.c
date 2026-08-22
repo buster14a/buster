@@ -3631,6 +3631,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_float_abi_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The Zig test/c_abi suite port (tests/c_abi.h documents the pairing):
+    // both sides compile with the compiler under test and exchange every
+    // supported ABI shape in both directions; any mismatch faults the
+    // process, so a clean exit is the whole contract.
+    String8 c_abi_path = buster_test_temporary_path(arguments->arena, S8("buster-c-abi"),
+#if BUSTER_WINDOWS
+                                                    S8(".exe"));
+#else
+                                                    S8(""));
+#endif
+    String8 c_abi_command_line[] = {
+        S8("-o"), c_abi_path, S8("tests/c_abi_main.c"), S8("tests/c_abi_main_generated.c"), S8("tests/c_abi_cfuncs.c"),
+    };
+    // The three fixtures total tens of thousands of lines; a dedicated arena
+    // keeps their compile out of the shared test reservation.
+    Arena* c_abi_arena = arena_create((ArenaCreation){0});
+    CompilerDriverResult c_abi = compiler_driver_execute_invocation(
+        c_abi_arena, compiler_driver_parse_arguments(c_abi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_abi_command_line)));
+    BUSTER_TEST(arguments, c_abi.error == COMPILER_DRIVER_ERROR_NONE);
+    CompilerDriverError c_abi_error = c_abi.error;
+    BUSTER_TEST(arguments, arena_destroy(c_abi_arena, 1));
+    if (c_abi_error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_abi_arguments[] = {
+            c_abi_path,
+        };
+        ProcessSpawnResult c_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_abi_arguments), (SliceString8){0}, (SliceString8){0},
+                                                          (ProcessSpawnOptions){
+                                                              .use_process_environment = true,
+                                                          });
+        BUSTER_TEST(arguments, c_abi_spawn.handle != 0);
+        if (c_abi_spawn.handle)
+        {
+            ProcessWaitResult c_abi_wait = os_process_wait_sync(arguments->arena, c_abi_spawn);
+            BUSTER_TEST(arguments, c_abi_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_vector_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));
