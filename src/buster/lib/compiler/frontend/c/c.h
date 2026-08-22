@@ -807,6 +807,11 @@ struct CParserDeclaration
     CParserStatement* last_statement;
     CParserExpression expression;
     CParserDeclarationKind kind;
+    // Whether any statement of this body, at any nesting depth, is a
+    // _Static_assert. Recorded as the statements are appended so the binding
+    // pass can skip the whole statement tree of a body that has none, which
+    // is nearly every body.
+    bool body_has_static_assert;
     bool is_definition;
     bool is_typedef;
     bool is_constexpr;

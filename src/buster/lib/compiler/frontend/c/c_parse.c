@@ -9894,7 +9894,12 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
 {
-    if (!declaration->syntax_body)
+    // The tree walk below chases a pointer per statement of the body to find
+    // the _Static_assert statements, and a body that has none is the common
+    // case by a wide margin: the parser records the answer as it appends the
+    // statements, and the two chasing lines were 1,17% of the compile's DRAM
+    // fills in the cache-miss survey of 2026-08-22T125406Z.
+    if (!declaration->syntax_body || !declaration->syntax_declaration || !declaration->syntax_declaration->body_has_static_assert)
     {
         return;
     }
@@ -10013,6 +10018,7 @@ BUSTER_C_INTERNAL CParserStatement* c_parser_statement_make(Arena* arena, CPrepr
 
 BUSTER_C_INTERNAL void c_parser_statement_append(CParserDeclaration* declaration, CParserStatement* parent, CParserStatement* statement)
 {
+    declaration->body_has_static_assert |= statement->kind == C_PARSER_STATEMENT_STATIC_ASSERT;
     CParserStatement** first = parent ? &parent->first_child : &declaration->first_statement;
     CParserStatement** last = parent ? &parent->last_child : &declaration->last_statement;
     if (*last)
