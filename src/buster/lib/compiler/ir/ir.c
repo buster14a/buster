@@ -2791,6 +2791,18 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
         }
     }
     scratch_end(temporary);
+    IrType* root = ir_type_from_id(&program->types, root_type);
+    IrType* element_type = element.value != IR_ID_UNDERLYING_INVALID ? ir_type_from_id(&program->types, element) : 0;
+    // Padding disqualifies: clang only treats the aggregate as homogeneous
+    // when its size is exactly the members' — `{ _Alignas(8) float a, b; }`
+    // classifies as an integer pair, not an HFA, and both sides of a call
+    // must agree with that reading. A gap-free homogeneous aggregate also
+    // means every member sits at its packed offset, so the parts the
+    // consumer builds below describe the real layout.
+    if (valid && count && (!root || !element_type || !root->layout.resolved || root->layout.size != (u64)count * element_type->layout.size))
+    {
+        valid = false;
+    }
     bool result;
     if (!valid || !count)
     {
