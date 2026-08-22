@@ -823,6 +823,23 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11) | (1u << MACHINE_A64_X12),
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_A64_X10, MACHINE_A64_X13},
     },
+    // The V register is a fixed payload identity outside every allocatable
+    // file, exactly like the FMOV rows; the slot operand carries no
+    // register class. Ordering against V-register compute and staging
+    // comes from the scheduler's float-state chain.
+    [MACHINE_A64_VLOAD_FRAME] = {
+        .name = S8_INITIALIZER("a64_vload_frame"),
+        .operand_count = 1,
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 1,
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
+    },
+    [MACHINE_A64_VSTORE_FRAME] = {
+        .name = S8_INITIALIZER("a64_vstore_frame"),
+        .operand_count = 1,
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1051,6 +1068,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_LOAD_INCOMING] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 31,
     [MACHINE_A64_VA_SAVE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 32,
     [MACHINE_A64_VA_ARG] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 33,
+    [MACHINE_A64_VLOAD_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 34,
+    [MACHINE_A64_VSTORE_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 35,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

@@ -1079,7 +1079,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 60);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 62);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1866,7 +1866,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    for (int index = 0; index < count; index += 1) { total += __builtin_va_arg(arguments, long); }\n"
                                   "    __builtin_va_end(arguments); return total; }\n"
                                   "long vsum_caller(long a, long b) { return vsum(11, a, b, a + b, (long)1, (long)2, (long)3, (long)4,\n"
-                                  "    (long)5, (long)6, (long)7, a - b); }\n");
+                                  "    (long)5, (long)6, (long)7, a - b); }\n"
+                                  "typedef float MachineV4 __attribute__((vector_size(16)));\n"
+                                  "MachineV4 vec_pass(MachineV4 value) { return value; }\n"
+                                  "typedef struct MachineBig3 { long a; long b; long c; } MachineBig3;\n"
+                                  "long big_take(MachineBig3 value, long salt) { return value.a * 3 + value.c + salt; }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4178,7 +4182,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("union_tail"), S8_INITIALIZER("locals_array"),
             S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"), S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"),
             S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("stack_tail"),
-            S8_INITIALIZER("vsum"),
+            S8_INITIALIZER("vsum"), S8_INITIALIZER("vec_pass"), S8_INITIALIZER("big_take"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4464,6 +4468,20 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             s64 c;
         } MachineTestA64Big;
         typedef MachineTestA64Big MachineTestA64CallBig(s64);
+        // Sixteen-byte short vectors ride V0 in and out under AAPCS64 and
+        // the Darwin convention alike.
+        typedef float MachineTestA64V4 __attribute__((vector_size(16)));
+        typedef MachineTestA64V4 MachineTestA64CallV4(MachineTestA64V4);
+        // Matches the corpus MachineBig3 layout: a twenty-four-byte
+        // composite passes indirectly behind a caller-side copy that the
+        // host compiler stages, identically under both conventions.
+        typedef struct MachineTestA64Big3
+        {
+            s64 a;
+            s64 b;
+            s64 c;
+        } MachineTestA64Big3;
+        typedef s64 MachineTestA64CallBig3(MachineTestA64Big3, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names) && a64_none_executable.address; name_index += 1)
         {
             if (!a64_encoded[name_index].valid)
@@ -4501,6 +4519,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool is_many = string_equal(a64_supported_names[name_index], S8("six")) || string_equal(a64_supported_names[name_index], S8("seven"));
             bool is_stack_tail = string_equal(a64_supported_names[name_index], S8("stack_tail"));
             bool is_vsum = string_equal(a64_supported_names[name_index], S8("vsum"));
+            bool is_vec_pass = string_equal(a64_supported_names[name_index], S8("vec_pass"));
+            bool is_big_take = string_equal(a64_supported_names[name_index], S8("big_take"));
             bool is_loop = string_equal(a64_supported_names[name_index], S8("sum_to"));
             bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
                                string_equal(a64_supported_names[name_index], S8("bitnot")) ||
@@ -4602,6 +4622,29 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     memcpy(&machine_call7, &machine_address, sizeof(machine_call7));
                     all_equal &= none_call7(6, left, right, left + 1, right - 2, left ^ right, right - left) ==
                                  machine_call7(6, left, right, left + 1, right - 2, left ^ right, right - left);
+                }
+                else if (is_vec_pass)
+                {
+                    MachineTestA64CallV4* none_callv = 0;
+                    MachineTestA64CallV4* machine_callv = 0;
+                    memcpy(&none_callv, &none_address, sizeof(none_callv));
+                    memcpy(&machine_callv, &machine_address, sizeof(machine_callv));
+                    MachineTestA64V4 vector_probe = {(float)left, (float)right, (float)(left + 1), (float)(right - 3)};
+                    MachineTestA64V4 none_vector = none_callv(vector_probe);
+                    MachineTestA64V4 machine_vector = machine_callv(vector_probe);
+                    for (u32 lane = 0; lane < 4; lane += 1)
+                    {
+                        all_equal &= none_vector[lane] == machine_vector[lane];
+                    }
+                }
+                else if (is_big_take)
+                {
+                    MachineTestA64CallBig3* none_call_big3 = 0;
+                    MachineTestA64CallBig3* machine_call_big3 = 0;
+                    memcpy(&none_call_big3, &none_address, sizeof(none_call_big3));
+                    memcpy(&machine_call_big3, &machine_address, sizeof(machine_call_big3));
+                    MachineTestA64Big3 big_probe = {left, right, left ^ right};
+                    all_equal &= none_call_big3(big_probe, right - left) == machine_call_big3(big_probe, right - left);
                 }
                 else if (wide_result)
                 {

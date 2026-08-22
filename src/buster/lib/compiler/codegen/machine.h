@@ -591,6 +591,14 @@ typedef enum MachineOpcode
     // result) beside the X9/X11/X12 sequence scratches.
     MACHINE_A64_VA_SAVE, // slot ref; payload unused
     MACHINE_A64_VA_ARG,  // use list pointer, define scalar/slot result
+    // Sixteen-byte V-register frame transfer for the AAPCS64 vector ABI
+    // edges: like FMOV_TO_VEC/FMOV_FROM_VEC the V register is a fixed
+    // payload identity, not an allocatable operand — the payload packs it
+    // above a byte offset into the slot (offset | v << 24). Both rows ride
+    // the scheduler's float-state chain so no reorder can slide them
+    // across a staged argument register or a V0/V1 compute scratch.
+    MACHINE_A64_VLOAD_FRAME,  // slot ref source; v[payload>>24] = 16 bytes
+    MACHINE_A64_VSTORE_FRAME, // slot ref destination; 16 bytes = v[payload>>24]
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
