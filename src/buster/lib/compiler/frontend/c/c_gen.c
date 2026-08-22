@@ -15698,11 +15698,23 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL;
+        // The child's kind is known here, so run its first step now instead
+        // of returning to the dispatch loop: the prepare pass completes
+        // without suspending in the common case, and the loop's indirect
+        // dispatch of the child and of this frame's resume both disappear.
+        // A suspension leaves the child's continuation on the machine stack
+        // and resumes through the loop unchanged.
+        u32 mark = machine->frame_count;
         if (!c_ir_prepare_control_expressions_frame_push(builder, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        return;
+        c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
+        if (machine->frame_count != mark || machine->failed)
+        {
+            return;
+        }
     }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL)
     {
@@ -15716,11 +15728,17 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS;
+        u32 mark = machine->frame_count;
         if (!c_ir_prepare_calls_frame_push(builder, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        return;
+        c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
+        if (machine->frame_count != mark || machine->failed)
+        {
+            return;
+        }
     }
     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS);
     if (!machine->child_result.success)
@@ -16989,10 +17007,20 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     if (assignment >= end)
     {
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_CORE;
+        // Run the core now, off the dispatch loop; a completion is the
+        // CONDITION_LEAF_CORE resume above, inlined: a plain forward.
+        u32 mark = machine->frame_count;
         if (!c_ir_lower_expression_core_frame_push(builder, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
+        c_ir_lower_expression_core_step(builder);
+        if (machine->frame_count != mark || machine->failed)
+        {
+            return;
+        }
+        c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
         return;
     }
     if (assignment == start || assignment + 1 >= end)
@@ -17012,6 +17040,31 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     }
 }
 
+// Branch on a finished condition leaf: the CONDITION_CHILD resume and the
+// off-loop leaf completion in c_ir_lower_condition_step share this tail.
+// False means the frame was finished with a failure and the step must return.
+BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CIrLowerMachine* machine = &builder->lower_machine;
+    IrValueId condition = machine->child_result.value;
+    condition = machine->child_result.success ? c_ir_truth_value(builder, condition, frame->as.condition.source) : IR_VALUE_ID_INVALID;
+    IrBlockId targets[2] = {
+        frame->as.condition.leaf_true_block,
+        frame->as.condition.leaf_false_block,
+    };
+    bool branched = condition.value != IR_ID_UNDERLYING_INVALID &&
+                    c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source);
+    if (branched)
+    {
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+    }
+    else
+    {
+        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+    }
+    return branched;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -17020,19 +17073,10 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION);
     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_CHILD)
     {
-        IrValueId condition = machine->child_result.value;
-        condition = machine->child_result.success ? c_ir_truth_value(builder, condition, frame->as.condition.source) : IR_VALUE_ID_INVALID;
-        IrBlockId targets[2] = {
-            frame->as.condition.leaf_true_block,
-            frame->as.condition.leaf_false_block,
-        };
-        if (condition.value == IR_ID_UNDERLYING_INVALID ||
-            !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source))
+        if (!c_ir_lower_condition_branch_on_leaf(builder, frame))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
@@ -17335,11 +17379,23 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         frame->as.condition.leaf_true_block = task.true_block;
         frame->as.condition.leaf_false_block = task.false_block;
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_CHILD;
+        // Run the leaf now, off the dispatch loop; a completion branches on
+        // its value here and continues the task walk without a loop trip.
+        u32 mark = machine->frame_count;
         if (!c_ir_lower_condition_leaf_frame_push(builder, task.start, task.end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        return;
+        c_ir_lower_condition_leaf_step(builder);
+        if (machine->frame_count != mark || machine->failed)
+        {
+            return;
+        }
+        if (!c_ir_lower_condition_branch_on_leaf(builder, frame))
+        {
+            return;
+        }
     }
     c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
@@ -18151,10 +18207,25 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
         if (!c_ir_expression_has_root_logical(builder, frame->as.logical.start, frame->as.logical.end))
         {
             frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
+            // Run the core now, off the dispatch loop; a suspension resumes
+            // through the loop, and a completion is the LOGICAL_CORE resume
+            // above, inlined: this frame only forwards the core's result.
+            u32 mark = machine->frame_count;
             if (!c_ir_lower_expression_core_frame_push(builder, frame->as.logical.start, frame->as.logical.end))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
             }
+            c_ir_lower_expression_core_step(builder);
+            if (machine->frame_count != mark || machine->failed)
+            {
+                return;
+            }
+            if (!machine->child_result.success && !builder->failure_message.length)
+            {
+                builder->failure_message = S8("could not lower logical expression core");
+            }
+            c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
             return;
         }
         frame->as.logical.source =
@@ -19649,14 +19720,36 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         u32 colon = 0;
         u32 expression_end = 0;
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_VALUE;
-        bool pushed = !c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end)
-                          ? c_ir_lower_logical_value_frame_push(builder, start, end)
-                          : c_ir_lower_conditional_value_frame_push(builder, start, end);
-        if (!pushed)
+        if (c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+        {
+            if (!c_ir_lower_conditional_value_frame_push(builder, start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        // Run the logical value now, off the dispatch loop; a completion is
+        // the EXPRESSION_VALUE resume above, inlined: record the value and
+        // let the next iteration unwind the task list with it.
+        u32 mark = machine->frame_count;
+        if (!c_ir_lower_logical_value_frame_push(builder, start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
         }
-        return;
+        c_ir_lower_logical_value_step(builder);
+        if (machine->frame_count != mark || machine->failed)
+        {
+            return;
+        }
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->as.expression.value = machine->child_result.value;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        unwind = true;
     }
 }
 
