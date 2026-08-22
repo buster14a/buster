@@ -17002,6 +17002,43 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
+        // A prepared, emitted control expression that is this whole condition
+        // -- under however many redundant parentheses -- has already run its
+        // side effects; branch on its value instead of lowering the group
+        // again. This is the condition-position sibling of the reuse in
+        // c_ir_lower_expression_step: without it, `(x++ ? a : b) && c` runs
+        // the increment twice (tests/basic_c_conditional_operand.c).
+        bool reused_prepared = false;
+        u32 prepared_probe_start = task.start;
+        u32 prepared_probe_end = task.end;
+        while (!reused_prepared && prepared_probe_end > prepared_probe_start + 1 &&
+               c_token_is_punctuator(&builder->preprocess.tokens[prepared_probe_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_ir_matching_delimiter_cached(builder, prepared_probe_start, prepared_probe_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                             C_PUNCTUATOR_RIGHT_PARENTHESIS) == prepared_probe_end - 1)
+        {
+            CIrPreparedControlExpression* prepared = c_ir_prepared_control_expression_find(builder, prepared_probe_start);
+            if (prepared && prepared->emitted && prepared->close_index == prepared_probe_end - 1)
+            {
+                IrValueId condition = c_ir_truth_value(builder, prepared->result, frame->as.condition.source);
+                IrBlockId targets[2] = {task.true_block, task.false_block};
+                if (condition.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                reused_prepared = true;
+            }
+            else
+            {
+                prepared_probe_start += 1;
+                prepared_probe_end -= 1;
+            }
+        }
+        if (reused_prepared)
+        {
+            continue;
+        }
         while (task.start < task.end && c_token_is_punctuator(&builder->preprocess.tokens[task.start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, task.start, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);

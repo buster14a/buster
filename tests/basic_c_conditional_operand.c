@@ -160,6 +160,32 @@ static int compound_literal_condition_increment(int value)
     return pair.b;
 }
 
+// The parenthesized group as a *condition* rather than a whole operand: the
+// left operand of &&, an if condition, and a negation each lower through the
+// condition frames, which reuse the prepared group the same way.
+static int condition_position_logical_and(int value)
+{
+    conditions = 0;
+    return take((conditions++ ? 1 : 1) && make(value));
+}
+
+static int condition_position_if(void)
+{
+    conditions = 0;
+    int selected = 0;
+    if ((conditions++ ? 1 : 1))
+    {
+        selected = 5;
+    }
+    return selected;
+}
+
+static int condition_position_negated(void)
+{
+    conditions = 0;
+    return take(!(conditions++ ? 1 : 0));
+}
+
 // Both directions of every shape share one failure code, so the exit status
 // names the shape rather than the symptom.
 static int check(int (*shape)(int, int), int not_taken_result, int taken_result, int code)
@@ -285,6 +311,21 @@ int main(void)
     if (compound_literal_condition_increment(6) != 6 || conditions != 1)
     {
         return 20;
+    }
+    before = calls;
+    if (condition_position_logical_and(1) != 1 || conditions != 1 || calls != before + 1)
+    {
+        return 21;
+    }
+    if (condition_position_if() != 5 || conditions != 1)
+    {
+        return 22;
+    }
+    // The condition is false on its single evaluation, so the negation
+    // selects one.
+    if (condition_position_negated() != 1 || conditions != 1)
+    {
+        return 23;
     }
     return 0;
 }
