@@ -22619,7 +22619,7 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
                            : S8("GNU initializer ranges are only available in GNU dialects");
             }
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("goto")) && index + 1 < end &&
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO) && index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
         {
             if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
@@ -22636,7 +22636,8 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
             return S8("GNU labels-as-values are only available in GNU dialects");
         }
         if (token.kind == C_TOKEN_IDENTIFIER &&
-            (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))))
+            c_token_in_well_known_set(preprocess.spelling_base, token,
+                                      C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)))
         {
             if (c_parse_asm_goto_qualifier(preprocess, index, end) && !c_preprocess_dialect_is_gnu(preprocess.dialect))
             {
@@ -22644,7 +22645,7 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
                 return S8("GNU extended asm goto is only available in GNU dialects");
             }
         }
-        if (token.kind != C_TOKEN_IDENTIFIER || !string_equal(c_token_spelling(preprocess.spelling_base, token), S8("case")))
+        if (token.kind != C_TOKEN_IDENTIFIER || !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE))
         {
             continue;
         }
@@ -22691,7 +22692,7 @@ BUSTER_C_INTERNAL bool c_ir_static_assert_expression_range(CIntegerIrBuilder* bu
                                                               u32* expression_end_out)
 {
     if (start + 2 >= end || end > builder->preprocess.token_count || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER ||
-        !string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("_Static_assert")) ||
+        !c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[start], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT) ||
         !c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         return false;
@@ -22807,10 +22808,12 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
         {
             continue;
         }
-        bool control = string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("if")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("for")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("while")) ||
-                       string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("do")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("switch"));
+        bool control = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
+                                                 C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |
+                                                     C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
         task_capacity += control ? 4 : 0;
-        bool switch_label = string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("case")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("default"));
+        bool switch_label = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
+                                                      C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(DEFAULT));
         task_capacity += switch_label;
         switch_case_capacity += switch_label;
     }
