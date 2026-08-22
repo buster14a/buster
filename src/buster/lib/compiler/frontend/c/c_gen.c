@@ -9152,6 +9152,117 @@ BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
 };
 
+// The words whose operand is never evaluated, as a well-known set: a call
+// inside one must not be prepared by the discover scan below, or its side
+// effects run even though the operand itself only ever folds to a constant.
+#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
+    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
+     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+
+// Where the unevaluated operand of the sizeof or _Alignof word ending at
+// `cursor - 1` stops: the first token index past one unary-expression.
+// Prefix operators (and nested sizeof/_Alignof words, which continue the
+// same operand) come first, then either a parenthesized group -- a type name
+// or a parenthesized expression, indistinguishable here and skipped the same
+// way -- or a single primary token, then any postfix operators, with a brace
+// group directly after a parenthesized one covering the compound-literal
+// form. `sizeof (int) - 1` stays correct because a cast expression is not a
+// unary-expression: nothing may follow a type-name group, and none of the
+// postfix continuations below can. The walk only ever consumes shapes it
+// recognizes, so malformed input stops it where it stands rather than
+// swallowing an evaluated call after the operand.
+BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end)
+{
+    bool prefixes = true;
+    while (prefixes && cursor < end)
+    {
+        CToken token = builder->preprocess.tokens[cursor];
+        switch (token.punctuator)
+        {
+        case C_PUNCTUATOR_STAR:
+        case C_PUNCTUATOR_AMPERSAND:
+        case C_PUNCTUATOR_PLUS:
+        case C_PUNCTUATOR_MINUS:
+        case C_PUNCTUATOR_TILDE:
+        case C_PUNCTUATOR_EXCLAMATION:
+        case C_PUNCTUATOR_PLUS_PLUS:
+        case C_PUNCTUATOR_MINUS_MINUS:
+            cursor += 1;
+            break;
+        default:
+            if (token.kind == C_TOKEN_IDENTIFIER &&
+                c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+            {
+                cursor += 1;
+            }
+            else
+            {
+                prefixes = false;
+            }
+            break;
+        }
+    }
+    bool postfixes = false;
+    if (cursor < end)
+    {
+        CToken token = builder->preprocess.tokens[cursor];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close < end)
+            {
+                cursor = close + 1;
+                postfixes = true;
+                if (cursor < end && c_token_is_punctuator(&builder->preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 brace_close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                    postfixes = brace_close < end;
+                    cursor = postfixes ? brace_close + 1 : cursor;
+                }
+            }
+        }
+        else if (token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL)
+        {
+            cursor += 1;
+            postfixes = true;
+        }
+    }
+    while (postfixes && cursor < end)
+    {
+        CToken token = builder->preprocess.tokens[cursor];
+        switch (token.punctuator)
+        {
+        case C_PUNCTUATOR_LEFT_PARENTHESIS:
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            postfixes = close < end;
+            cursor = postfixes ? close + 1 : cursor;
+            break;
+        }
+        case C_PUNCTUATOR_LEFT_BRACKET:
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            postfixes = close < end;
+            cursor = postfixes ? close + 1 : cursor;
+            break;
+        }
+        case C_PUNCTUATOR_DOT:
+        case C_PUNCTUATOR_ARROW:
+            cursor += 2;
+            break;
+        case C_PUNCTUATOR_PLUS_PLUS:
+        case C_PUNCTUATOR_MINUS_MINUS:
+            cursor += 1;
+            break;
+        default:
+            postfixes = false;
+            break;
+        }
+    }
+    return cursor < end ? cursor : end;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -9180,6 +9291,15 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             active_call_count -= 1;
         }
         CToken token = builder->preprocess.tokens[index];
+        // A sizeof or _Alignof operand is unevaluated: skip it whole, so no
+        // call inside is prepared here. The skipped region is delimiter-
+        // balanced, so every scan state below survives the jump unchanged.
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            index = c_ir_unevaluated_operand_end(builder, index + 1, end) - 1;
+            continue;
+        }
         // One byte load answers this for the whole token stream: every token
         // the table does not name classifies as C_IR_LAZY_SCAN_OTHER and does
         // no work at all. A closing delimiter has already left the group it

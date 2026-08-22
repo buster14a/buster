@@ -3756,6 +3756,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // Unevaluated sizeof/_Alignof operands and enum constants over object
+    // sizeofs are both only observable at run time -- the wrong lowering
+    // still produces plausible constants -- so these fixtures run.
+    String8 c_runtime_fixture_paths[] = {
+        S8("tests/basic_c_sizeof_unevaluated.c"),
+    };
+    String8 c_runtime_fixture_names[] = {
+        S8("buster-c-sizeof-unevaluated"),
+    };
+    for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_runtime_fixture_paths); fixture_index += 1)
+    {
+        String8 c_runtime_fixture_path = buster_test_temporary_path(arguments->arena, c_runtime_fixture_names[fixture_index], S8(""));
+        String8 c_runtime_fixture_command_line[] = {
+            S8("-o"),
+            c_runtime_fixture_path,
+            c_runtime_fixture_paths[fixture_index],
+        };
+        CompilerDriverResult c_runtime_fixture = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_runtime_fixture_command_line)));
+        BUSTER_TEST(arguments, c_runtime_fixture.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_runtime_fixture.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_runtime_fixture_arguments[] = {
+                c_runtime_fixture_path,
+            };
+            ProcessSpawnResult c_runtime_fixture_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_runtime_fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, c_runtime_fixture_spawn.handle != 0);
+            if (c_runtime_fixture_spawn.handle)
+            {
+                ProcessWaitResult c_runtime_fixture_wait = os_process_wait_sync(arguments->arena, c_runtime_fixture_spawn);
+                BUSTER_TEST(arguments, c_runtime_fixture_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     // The calling-convention fixture runs natively, so the host's own ABI and
     // register allocator are executed rather than only inspected: on a
     // Windows runner that is the Win64 positional register assignment, the
