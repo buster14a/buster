@@ -140,11 +140,17 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 sou
                                        .data_layout = target_data_layout(target),
                                    });
     *parse_out = c_parse(arena, *preprocess_out);
+    CIRLowerResult result;
     if (preprocess_out->diagnostic_count || parse_out->diagnostic_count)
     {
-        return (CIRLowerResult){0};
+        result = (CIRLowerResult){0};
     }
-    return c_lower_to_ir(arena, source_path, *preprocess_out, *parse_out, target);
+    else
+    {
+        result = c_lower_to_ir(arena, source_path, *preprocess_out, *parse_out, target);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void c_test_append_source(char8* destination, u64 capacity, u64* length, String8 source)

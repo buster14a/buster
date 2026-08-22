@@ -1676,9 +1676,21 @@ BUSTER_GLOBAL_LOCAL s32 target_cpu_feature_name_compare(String8 left, String8 ri
         if (left.pointer[index] < right.pointer[index]) return -1;
         if (left.pointer[index] > right.pointer[index]) return 1;
     }
-    if (left.length < right.length) return -1;
-    if (left.length > right.length) return 1;
-    return 0;
+    s32 result;
+    if (left.length < right.length)
+    {
+        result = -1;
+    }
+    else if (left.length > right.length)
+    {
+        result = 1;
+    }
+    else
+    {
+        result = 0;
+    }
+
+    return result;
 }
 
 bool target_cpu_feature_names_are_sorted(void)
@@ -1733,11 +1745,17 @@ String8 target_cpu_features_to_string(Arena* arena, Target target)
             parts[part_count++] = entry.name;
         }
     }
+    String8 result;
     if (!part_count)
     {
-        return S8("none");
+        result = S8("none");
     }
-    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+    else
+    {
+        result = string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+    }
+
+    return result;
 }
 
 u32 target_vector_register_size(Target target)
@@ -1754,15 +1772,21 @@ u32 target_vector_register_size(Target target)
     TargetCpuFeatures wide_vector_features = target_cpu_features_from_array((TargetCpuFeature const[]){
         TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_1,
         TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512}, 4);
+    u32 result;
     if (target_cpu_features_any(target_cpu_features_intersection(features, wide_vector_features)))
     {
-        return 64;
+        result = 64;
     }
-    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
+    else if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_AVX))
     {
-        return 32;
+        result = 32;
     }
-    return target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2) ? 16 : 0;
+    else
+    {
+        result = target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2) ? 16 : 0;
+    }
+
+    return result;
 }
 
 TargetStringSplit target_to_split_string_os(Target target)

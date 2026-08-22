@@ -15,11 +15,17 @@ static Target a64_direct_simd_test_target(void)
 
 static BusterA64DirectSIMDArrangement a64_direct_simd_alternate_arrangement(BusterA64SemanticVMValue value)
 {
+    BusterA64DirectSIMDArrangement result;
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR)
     {
-        return value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B;
+        result = value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B;
     }
-    return value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8B : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B;
+    else
+    {
+        result = value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8B : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B;
+    }
+
+    return result;
 }
 
 static u32 a64_direct_simd_audit_mix(u32 value)

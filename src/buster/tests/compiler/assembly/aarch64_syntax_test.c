@@ -35,8 +35,17 @@ BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_string_equal(String8 left, String8 
 BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_display(u32 row_index, String8 expected, char8* bytes, u64 capacity)
 {
     BusterAarch64SyntaxOutput output = {.pointer = bytes, .capacity = capacity};
-    if (!buster_aarch64_syntax_print_row(row_index, (BusterAarch64SyntaxPrintRequest){0}, &output)) return false;
-    return aarch64_syntax_test_string_equal((String8){.pointer = output.pointer, .length = output.length}, expected);
+    bool result;
+    if (!buster_aarch64_syntax_print_row(row_index, (BusterAarch64SyntaxPrintRequest){0}, &output))
+    {
+        result = false;
+    }
+    else
+    {
+        result = aarch64_syntax_test_string_equal((String8){.pointer = output.pointer, .length = output.length}, expected);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_match_and_print_concrete(u32 row_index, String8 spelling)

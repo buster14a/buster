@@ -274,17 +274,19 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_contains(BusterX86MetadataS
     if (needle.length && value.length >= needle.length)
     {
         String8 span = buster_x86_metadata_string_span(value);
-        if (span.length < needle.length) return false;
-        for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
+        if (span.length >= needle.length)
         {
-            if ((u8)span.pointer[offset] != (u8)needle.pointer[0])
+            for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
             {
-                continue;
+                if ((u8)span.pointer[offset] != (u8)needle.pointer[0])
+                {
+                    continue;
+                }
+                bool equal = true;
+                for (u32 index = 1; index < needle.length && equal; index += 1)
+                    equal = (u8)span.pointer[offset + index] == (u8)needle.pointer[index];
+                if (equal) return true;
             }
-            bool equal = true;
-            for (u32 index = 1; index < needle.length && equal; index += 1)
-                equal = (u8)span.pointer[offset + index] == (u8)needle.pointer[index];
-            if (equal) return true;
         }
     }
 
@@ -296,15 +298,17 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_pattern_has_token(BusterX86Metadat
     if (token.length && value.length >= token.length)
     {
         String8 span = buster_x86_metadata_string_span(value);
-        if (span.length < token.length) return false;
-        for (u32 offset = 0; offset + token.length <= span.length; offset += 1)
+        if (span.length >= token.length)
         {
-            if (offset && (u8)span.pointer[offset - 1] != ' ') continue;
-            if (offset + token.length < span.length && (u8)span.pointer[offset + token.length] != ' ') continue;
-            bool equal = true;
-            for (u32 index = 0; index < token.length; index += 1)
-                equal &= (u8)span.pointer[offset + index] == (u8)token.pointer[index];
-            if (equal) return true;
+            for (u32 offset = 0; offset + token.length <= span.length; offset += 1)
+            {
+                if (offset && (u8)span.pointer[offset - 1] != ' ') continue;
+                if (offset + token.length < span.length && (u8)span.pointer[offset + token.length] != ' ') continue;
+                bool equal = true;
+                for (u32 index = 0; index < token.length; index += 1)
+                    equal &= (u8)span.pointer[offset + index] == (u8)token.pointer[index];
+                if (equal) return true;
+            }
         }
     }
 
@@ -1577,30 +1581,32 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_alias_matches(BusterX86Meta
     if (source_bytes && source_byte_count)
     {
         BusterX86MetadataForm form = {0};
-        if (!buster_x86_metadata_form(form_id, &form)) return false;
-        BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
-        for (u32 candidate_index = 0; candidate_index < candidates.count; candidate_index += 1)
+        if (buster_x86_metadata_form(form_id, &form))
         {
-            u32 candidate_id = UINT32_MAX;
-            BusterX86MetadataForm candidate = {0};
-            if (!buster_x86_metadata_candidate_at(candidates, candidate_index, &candidate_id) || candidate_id == form_id ||
-                !buster_x86_metadata_form(candidate_id, &candidate) || candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX ||
-                !x86_64_metadata_test_schema_equal(form_id, candidate_id))
-                continue;
-            u8 alias_bytes[32] = {0};
-            BusterX86MetadataRelocation alias_relocations[8] = {0};
-            BusterX86MetadataPhysicalQuery alias_query = physical;
-            BusterX86MetadataEmitResult alias = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-                .physical = alias_query,
-                .form_id = candidate_id,
-                .output = alias_bytes,
-                .output_capacity = BUSTER_ARRAY_LENGTH(alias_bytes),
-                .relocations = alias_relocations,
-                .relocation_capacity = BUSTER_ARRAY_LENGTH(alias_relocations),
-            });
-            if (alias.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && alias.relocation_count == 0 && alias.byte_count == source_byte_count &&
-                memcmp(alias_bytes, source_bytes, source_byte_count) == 0)
-                return true;
+            BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
+            for (u32 candidate_index = 0; candidate_index < candidates.count; candidate_index += 1)
+            {
+                u32 candidate_id = UINT32_MAX;
+                BusterX86MetadataForm candidate = {0};
+                if (!buster_x86_metadata_candidate_at(candidates, candidate_index, &candidate_id) || candidate_id == form_id ||
+                    !buster_x86_metadata_form(candidate_id, &candidate) || candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX ||
+                    !x86_64_metadata_test_schema_equal(form_id, candidate_id))
+                    continue;
+                u8 alias_bytes[32] = {0};
+                BusterX86MetadataRelocation alias_relocations[8] = {0};
+                BusterX86MetadataPhysicalQuery alias_query = physical;
+                BusterX86MetadataEmitResult alias = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = alias_query,
+                    .form_id = candidate_id,
+                    .output = alias_bytes,
+                    .output_capacity = BUSTER_ARRAY_LENGTH(alias_bytes),
+                    .relocations = alias_relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(alias_relocations),
+                });
+                if (alias.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && alias.relocation_count == 0 && alias.byte_count == source_byte_count &&
+                    memcmp(alias_bytes, source_bytes, source_byte_count) == 0)
+                    return true;
+            }
         }
     }
 
@@ -1611,16 +1617,25 @@ BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register_atom(Arena* are
                                                                        BusterX86MetadataPhysicalRegister register_value,
                                                                        BusterX86MetadataString atom)
 {
-    if (x86_64_metadata_test_register_is_bsr0((BusterX86MetadataOperand){
-            .kind = BUSTER_X86_METADATA_OPERAND_REGISTER,
-            .atom = atom,
-        }))
-        return S8("bsr0");
-    if (x86_64_metadata_test_string_contains(atom, S8("XED_REG_ST")))
-        return string_format(arena, S8("st({u8})"), register_value.index);
-    if (x86_64_metadata_test_string_equal(atom, S8("X87()")))
-        return register_value.index ? string_format(arena, S8("st({u8})"), register_value.index) : S8("st");
-    return x86_64_metadata_test_source_register(arena, register_value);
+    String8 result;
+    if (x86_64_metadata_test_register_is_bsr0((BusterX86MetadataOperand){ .kind = BUSTER_X86_METADATA_OPERAND_REGISTER, .atom = atom, }))
+    {
+        result = S8("bsr0");
+    }
+    else if (x86_64_metadata_test_string_contains(atom, S8("XED_REG_ST")))
+    {
+        result = string_format(arena, S8("st({u8})"), register_value.index);
+    }
+    else if (x86_64_metadata_test_string_equal(atom, S8("X87()")))
+    {
+        result = register_value.index ? string_format(arena, S8("st({u8})"), register_value.index) : S8("st");
+    }
+    else
+    {
+        result = x86_64_metadata_test_source_register(arena, register_value);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register(Arena* arena,
@@ -1676,12 +1691,33 @@ BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register(Arena* arena,
 BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_immediate(Arena* arena,
                                                                    BusterX86MetadataPhysicalOperand operand)
 {
-    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) return (String8){0};
-    if (operand.has_unsigned_value) return string_format(arena, S8("0x{u64:x,no_prefix}"), operand.unsigned_value);
-    if (!operand.has_value) return (String8){0};
-    if (operand.value >= 0) return string_format(arena, S8("0x{u64:x,no_prefix}"), (u64)operand.value);
-    if (operand.value == INT64_MIN) return string_format(arena, S8("-0x8000000000000000"));
-    return string_format(arena, S8("-0x{u64:x,no_prefix}"), (u64)-operand.value);
+    String8 result;
+    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        result = (String8){0};
+    }
+    else if (operand.has_unsigned_value)
+    {
+        result = string_format(arena, S8("0x{u64:x,no_prefix}"), operand.unsigned_value);
+    }
+    else if (!operand.has_value)
+    {
+        result = (String8){0};
+    }
+    else if (operand.value >= 0)
+    {
+        result = string_format(arena, S8("0x{u64:x,no_prefix}"), (u64)operand.value);
+    }
+    else if (operand.value == INT64_MIN)
+    {
+        result = string_format(arena, S8("-0x8000000000000000"));
+    }
+    else
+    {
+        result = string_format(arena, S8("-0x{u64:x,no_prefix}"), (u64)-operand.value);
+    }
+
+    return result;
 }
 
 typedef struct X86_64MetadataSourceQuery X86_64MetadataSourceQuery;
@@ -1963,8 +1999,17 @@ BUSTER_GLOBAL_LOCAL u16 x86_64_metadata_test_source_register_candidate(u8 physic
         candidates = short_registers;
         candidate_count = BUSTER_ARRAY_LENGTH(short_registers);
     }
-    if (!candidate_count) return 0;
-    return candidates[(ordinal + attempt) % candidate_count];
+    u16 result;
+    if (!candidate_count)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = candidates[(ordinal + attempt) % candidate_count];
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query(Arena* arena, u32 form_id,

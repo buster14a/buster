@@ -414,14 +414,12 @@ BUSTER_GLOBAL_LOCAL String8 ui_copy_string8_checked(Arena* arena, String8 source
     if (arena && ui_string8_source_is_valid(source) && source.length != 0)
     {
         u64 position = arena->position;
-        if (!ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+        if (ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
         {
-            return result;
+            result.pointer = arena_allocate(arena, char8, source.length);
+            result.length = source.length;
+            memcpy(result.pointer, source.pointer, source.length);
         }
-
-        result.pointer = arena_allocate(arena, char8, source.length);
-        result.length = source.length;
-        memcpy(result.pointer, source.pointer, source.length);
     }
 
     return result;
@@ -434,31 +432,29 @@ BUSTER_GLOBAL_LOCAL SliceString8 ui_copy_string8_slice_checked(Arena* arena, Sli
     {
         u64 position = arena->position;
         u64 descriptor_bytes = sources.length * sizeof(*sources.pointer);
-        if (!ui_arena_try_advance(arena, &position, descriptor_bytes, BUSTER_ALIGN_OF(String8)))
+        if (ui_arena_try_advance(arena, &position, descriptor_bytes, BUSTER_ALIGN_OF(String8)))
         {
-            return result;
-        }
-
-        u64 aggregate_length = 0;
-        for (u64 index = 0; index < sources.length; index += 1)
-        {
-            String8 source = sources.pointer[index];
-            if (!ui_string8_source_is_valid(source) || source.length > (u64)-1 - aggregate_length ||
-                !ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+            u64 aggregate_length = 0;
+            for (u64 index = 0; index < sources.length; index += 1)
             {
-                return result;
+                String8 source = sources.pointer[index];
+                if (!ui_string8_source_is_valid(source) || source.length > (u64)-1 - aggregate_length ||
+                    !ui_arena_try_advance(arena, &position, source.length, BUSTER_ALIGN_OF(char8)))
+                {
+                    return result;
+                }
+                aggregate_length += source.length;
             }
-            aggregate_length += source.length;
-        }
 
-        result.pointer = arena_allocate(arena, String8, sources.length);
-        result.length = sources.length;
-        for (u64 index = 0; index < sources.length; index += 1)
-        {
-            result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
-            if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
+            result.pointer = arena_allocate(arena, String8, sources.length);
+            result.length = sources.length;
+            for (u64 index = 0; index < sources.length; index += 1)
             {
-                BUSTER_CHECK(false);
+                result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
+                if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
+                {
+                    BUSTER_CHECK(false);
+                }
             }
         }
     }
@@ -1736,81 +1732,77 @@ BUSTER_GLOBAL_LOCAL String8 ui_tooltip_make_text(Arena* arena, String8 source, u
         u64 full_columns = ui_utf8_codepoint_count(source);
         u64 column_capacity = max_lines * max_columns;
         bool truncated = full_columns > column_capacity;
-        if (truncated && max_columns < 3)
+        if (!truncated || max_columns >= 3)
         {
-            return result;
-        }
-
-        u64 source_columns = truncated ? column_capacity - 3 : full_columns;
-        u64 output_capacity = source.length;
-        if (output_capacity > (u64)-1 - source.length || output_capacity + source.length > (u64)-1 - max_lines ||
-            output_capacity + source.length + max_lines > (u64)-1 - 4)
-        {
-            return result;
-        }
-        output_capacity += source.length + max_lines + 4;
-
-        u64 position = arena->position;
-        if (!ui_arena_try_advance(arena, &position, output_capacity, BUSTER_ALIGN_OF(char8)))
-        {
-            return result;
-        }
-
-        char8* output = arena_allocate(arena, char8, output_capacity);
-        u64 output_length = 0;
-        u64 source_position = 0;
-        u64 copied_columns = 0;
-        u64 line_count = 1;
-        u64 line_columns = 0;
-        u64 max_line_columns = 0;
-        while (source_position < source.length && copied_columns < source_columns)
-        {
-            u64 sequence_length = ui_utf8_sequence_length(source, source_position);
-            sequence_length = sequence_length ? sequence_length : 1;
-            if (line_columns == max_columns)
+            u64 source_columns = truncated ? column_capacity - 3 : full_columns;
+            u64 output_capacity = source.length;
+            if (output_capacity > (u64)-1 - source.length || output_capacity + source.length > (u64)-1 - max_lines ||
+                output_capacity + source.length + max_lines > (u64)-1 - 4)
             {
-                output[output_length++] = '\n';
-                line_count += 1;
-                line_columns = 0;
+                return result;
             }
+            output_capacity += source.length + max_lines + 4;
 
-            u32 codepoint = ui_utf8_codepoint_at(source, source_position);
-            if (codepoint == '\n')
+            u64 position = arena->position;
+            if (ui_arena_try_advance(arena, &position, output_capacity, BUSTER_ALIGN_OF(char8)))
             {
-                output[output_length++] = ' ';
+                char8* output = arena_allocate(arena, char8, output_capacity);
+                u64 output_length = 0;
+                u64 source_position = 0;
+                u64 copied_columns = 0;
+                u64 line_count = 1;
+                u64 line_columns = 0;
+                u64 max_line_columns = 0;
+                while (source_position < source.length && copied_columns < source_columns)
+                {
+                    u64 sequence_length = ui_utf8_sequence_length(source, source_position);
+                    sequence_length = sequence_length ? sequence_length : 1;
+                    if (line_columns == max_columns)
+                    {
+                        output[output_length++] = '\n';
+                        line_count += 1;
+                        line_columns = 0;
+                    }
+
+                    u32 codepoint = ui_utf8_codepoint_at(source, source_position);
+                    if (codepoint == '\n')
+                    {
+                        output[output_length++] = ' ';
+                    }
+                    else
+                    {
+                        memcpy(output + output_length, source.pointer + source_position, sequence_length);
+                        output_length += sequence_length;
+                    }
+                    source_position += sequence_length;
+                    copied_columns += 1;
+                    line_columns += 1;
+                    max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+                }
+
+                truncated = truncated || source_position < source.length;
+                if (truncated)
+                {
+                    if (line_columns + 3 > max_columns)
+                    {
+                        output[output_length++] = '\n';
+                        line_count += 1;
+                        line_columns = 0;
+                    }
+                    output[output_length++] = '.';
+                    output[output_length++] = '.';
+                    output[output_length++] = '.';
+                    line_columns += 3;
+                    max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
+                }
+
+                result.pointer = output;
+                result.length = output_length;
+                *line_count_out = line_count;
+                *max_line_columns_out = max_line_columns;
+                *truncated_out = truncated;
             }
-            else
-            {
-                memcpy(output + output_length, source.pointer + source_position, sequence_length);
-                output_length += sequence_length;
-            }
-            source_position += sequence_length;
-            copied_columns += 1;
-            line_columns += 1;
-            max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
         }
-
-        truncated = truncated || source_position < source.length;
-        if (truncated)
-        {
-            if (line_columns + 3 > max_columns)
-            {
-                output[output_length++] = '\n';
-                line_count += 1;
-                line_columns = 0;
-            }
-            output[output_length++] = '.';
-            output[output_length++] = '.';
-            output[output_length++] = '.';
-            line_columns += 3;
-            max_line_columns = BUSTER_MAX(max_line_columns, line_columns);
-        }
-
-        result.pointer = output;
-        result.length = output_length;
-        *line_count_out = line_count;
-        *max_line_columns_out = max_line_columns;
-        *truncated_out = truncated;
     }
 
     return result;
@@ -2969,17 +2961,16 @@ BUSTER_GLOBAL_LOCAL u64 ui_draw_command_upper_bound(UI_Box* root)
 BUSTER_GLOBAL_LOCAL void ui_draw_command_push(UI_DrawCommand command)
 {
     BUSTER_CHECK(ui_state != 0 && ui_state->draw_commands != 0);
-    if (!ui_state || !ui_state->draw_commands)
+    if (ui_state && ui_state->draw_commands)
     {
-        return;
+        if (ui_state->draw_command_count >= ui_state->draw_command_capacity)
+        {
+            ui_state->draw_commands_complete = false;
+            BUSTER_CHECK(false);
+            return;
+        }
+        ui_state->draw_commands[ui_state->draw_command_count++] = command;
     }
-    if (ui_state->draw_command_count >= ui_state->draw_command_capacity)
-    {
-        ui_state->draw_commands_complete = false;
-        BUSTER_CHECK(false);
-        return;
-    }
-    ui_state->draw_commands[ui_state->draw_command_count++] = command;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_draw_command_push_rect(F32Interval2 rect, float4* colors)
@@ -3143,20 +3134,19 @@ BUSTER_GLOBAL_LOCAL String8 ui_text_clip_to_rect(UI_Box* box, String8 text, floa
 
 BUSTER_GLOBAL_LOCAL void ui_draw_text_clipped(UI_Box* box, String8 text, float4 color, float2* position, F32Interval2 clip_rect)
 {
-    if (!box || text.length == 0)
+    if (box && text.length != 0)
     {
-        return;
-    }
-    text = ui_text_clip_to_rect(box, text, position, clip_rect);
-    if (text.length == 0)
-    {
-        return;
-    }
-    ui_draw_command_push_text(text, *position, color, clip_rect);
-    if (ui_state->rendering && ui_state->rendering_window)
-    {
-        rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, text, color, RENDER_FONT_TYPE_MONOSPACE,
-                                     float2_element(*position, AXIS2_X), float2_element(*position, AXIS2_Y));
+        text = ui_text_clip_to_rect(box, text, position, clip_rect);
+        if (text.length == 0)
+        {
+            return;
+        }
+        ui_draw_command_push_text(text, *position, color, clip_rect);
+        if (ui_state->rendering && ui_state->rendering_window)
+        {
+            rendering_window_render_text(ui_state->rendering, ui_state->rendering_window, text, color, RENDER_FONT_TYPE_MONOSPACE,
+                                         float2_element(*position, AXIS2_X), float2_element(*position, AXIS2_Y));
+        }
     }
 }
 
@@ -3167,173 +3157,171 @@ BUSTER_GLOBAL_LOCAL void ui_draw_text_unclipped(UI_Box* box, String8 text, float
 
 BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
 {
-    if (!box || !box->visible || !ui_rect_has_area(box->rect))
+    if (box && box->visible && ui_rect_has_area(box->rect))
     {
-        return;
-    }
-
-    F32Interval2 rect = ui_box_draw_rect(box, box->rect);
-    if (!ui_rect_has_area(rect))
-    {
-        return;
-    }
-
-    UI_Box* previous_draw_box = ui_state->draw_command_box;
-    ui_state->draw_command_box = box;
-
-    if (box->flags & UI_BoxFlag_DrawBackgroundBlur)
-    {
-        u32 radius = ui_background_blur_radius_clamp(box->background_blur_radius);
-        box->background_blur_radius = radius;
-        float4 corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
-        ui_draw_command_push_background_blur(box, rect, radius);
-        if (ui_state->rendering_window && !rendering_window_render_background_blur_rounded(ui_state->rendering_window, rect, radius, corner_radii))
+        F32Interval2 rect = ui_box_draw_rect(box, box->rect);
+        if (!ui_rect_has_area(rect))
         {
-            ui_state->draw_renderer_succeeded = false;
+            return;
         }
-    }
 
-    if (box->flags & UI_BoxFlag_DrawDropShadow)
-    {
-        F32Interval2 shadow = ui_box_draw_rect(box, ui_rect_make(rect.x0 + 4, rect.y0 + 4, rect.x1 + 4, rect.y1 + 4));
-        ui_draw_rect(shadow, float4_make(0.0f, 0.0f, 0.0f, 0.22f));
-    }
+        UI_Box* previous_draw_box = ui_state->draw_command_box;
+        ui_state->draw_command_box = box;
 
-    if (box->flags & UI_BoxFlag_DrawBackground)
-    {
-        float4 color = box->background_color;
-        if (box->flags & UI_BoxFlag_Disabled)
+        if (box->flags & UI_BoxFlag_DrawBackgroundBlur)
         {
-            float4_element(color, 3) *= 0.55f;
-        }
-        ui_draw_rect(rect, color);
-
-        if (box->flags & UI_BoxFlag_DrawHotEffects)
-        {
-            f32 t = box->hot_t * (1.0f - box->active_t);
-            if (t > 0.01f)
+            u32 radius = ui_background_blur_radius_clamp(box->background_blur_radius);
+            box->background_blur_radius = radius;
+            float4 corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
+            ui_draw_command_push_background_blur(box, rect, radius);
+            if (ui_state->rendering_window && !rendering_window_render_background_blur_rounded(ui_state->rendering_window, rect, radius, corner_radii))
             {
-                ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.08f * t));
+                ui_state->draw_renderer_succeeded = false;
             }
         }
 
-        if (box->flags & UI_BoxFlag_DrawActiveEffects)
+        if (box->flags & UI_BoxFlag_DrawDropShadow)
         {
-            f32 t = box->active_t;
-            if (t > 0.01f)
-            {
-                f32 h = BUSTER_CLAMP(1.0f, (rect.y1 - rect.y0) * 0.25f, box->font_size * 1.2f);
-                ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + h), float4_make(0.0f, 0.0f, 0.0f, 0.12f * t));
-                ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - h, rect.x1, rect.y1), float4_make(1.0f, 1.0f, 1.0f, 0.06f * t));
-            }
+            F32Interval2 shadow = ui_box_draw_rect(box, ui_rect_make(rect.x0 + 4, rect.y0 + 4, rect.x1 + 4, rect.y1 + 4));
+            ui_draw_rect(shadow, float4_make(0.0f, 0.0f, 0.0f, 0.22f));
         }
-    }
 
-    if (box->flags & UI_BoxFlag_DrawText)
-    {
-        u64 text_length = box->flags & UI_BoxFlag_DisableTextTrunc ? box->string.length : box->text_visible_length;
-        String8 text = string_slice(box->string, 0, BUSTER_MIN(text_length, box->string.length));
-        float2 p = ui_box_text_position(box);
-        F32Interval2 text_clip = ui_box_text_clip_rect(box);
-        float4 color = box->text_color;
-        if (box->flags & UI_BoxFlag_DrawTextWeak)
+        if (box->flags & UI_BoxFlag_DrawBackground)
         {
-            float4_element(color, 3) *= 0.55f;
-        }
-        if (box->fastpath_codepoint != 0 && text.length != 0)
-        {
-            u64 position = 0;
-            u64 column = 0;
-            while (position < text.length)
+            float4 color = box->background_color;
+            if (box->flags & UI_BoxFlag_Disabled)
             {
-                u64 sequence_length = ui_utf8_sequence_length(text, position);
-                sequence_length = sequence_length ? sequence_length : 1;
-                if (ui_utf8_codepoint_at(text, position) == box->fastpath_codepoint)
+                float4_element(color, 3) *= 0.55f;
+            }
+            ui_draw_rect(rect, color);
+
+            if (box->flags & UI_BoxFlag_DrawHotEffects)
+            {
+                f32 t = box->hot_t * (1.0f - box->active_t);
+                if (t > 0.01f)
                 {
-                    f32 x0 = float2_element(p, AXIS2_X) + (f32)column * box->font_size * 0.60f;
-                    F32Interval2 underline = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x0 + box->font_size * 0.60f, rect.y1));
-                    ui_draw_rect(underline, float4_make(0.35f, 0.65f, 1.0f, 0.65f));
-                    break;
+                    ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.08f * t));
                 }
-                position += sequence_length;
-                column += 1;
             }
-        }
-        text = ui_text_clip_to_rect(box, text, &p, text_clip);
-        ui_draw_text_clipped(box, text, color, &p, text_clip);
-        if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc))
-        {
-            f32 ellipsis_x = float2_element(p, AXIS2_X) + (f32)ui_utf8_codepoint_count(text) * box->font_size * 0.60f;
-            f32 ellipsis_width = box->font_size * 1.80f;
-            f32 ellipsis_right = BUSTER_MIN(box->rect.x1 - box->text_padding, text_clip.x1 - box->text_padding);
-            if (ellipsis_x + ellipsis_width <= ellipsis_right + 0.001f)
+
+            if (box->flags & UI_BoxFlag_DrawActiveEffects)
             {
-                float2 ellipsis_position = float2_make(ellipsis_x, float2_element(p, AXIS2_Y));
-                ui_draw_text_clipped(box, S8("..."), color, &ellipsis_position, text_clip);
+                f32 t = box->active_t;
+                if (t > 0.01f)
+                {
+                    f32 h = BUSTER_CLAMP(1.0f, (rect.y1 - rect.y0) * 0.25f, box->font_size * 1.2f);
+                    ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + h), float4_make(0.0f, 0.0f, 0.0f, 0.12f * t));
+                    ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - h, rect.x1, rect.y1), float4_make(1.0f, 1.0f, 1.0f, 0.06f * t));
+                }
             }
         }
-    }
 
-    if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges)
-    {
-        for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+        if (box->flags & UI_BoxFlag_DrawText)
         {
-            UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
-            u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
-            u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
-            u64 first = ui_utf8_columns_for_byte_offset(box->string, first_byte);
-            u64 last = ui_utf8_columns_for_byte_offset(box->string, last_byte);
-            if (last > first)
+            u64 text_length = box->flags & UI_BoxFlag_DisableTextTrunc ? box->string.length : box->text_visible_length;
+            String8 text = string_slice(box->string, 0, BUSTER_MIN(text_length, box->string.length));
+            float2 p = ui_box_text_position(box);
+            F32Interval2 text_clip = ui_box_text_clip_rect(box);
+            float4 color = box->text_color;
+            if (box->flags & UI_BoxFlag_DrawTextWeak)
             {
-                float2 text_position = ui_box_text_position(box);
-                f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
-                f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
-                F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
-                ui_draw_rect(highlight, box->border_color);
+                float4_element(color, 3) *= 0.55f;
+            }
+            if (box->fastpath_codepoint != 0 && text.length != 0)
+            {
+                u64 position = 0;
+                u64 column = 0;
+                while (position < text.length)
+                {
+                    u64 sequence_length = ui_utf8_sequence_length(text, position);
+                    sequence_length = sequence_length ? sequence_length : 1;
+                    if (ui_utf8_codepoint_at(text, position) == box->fastpath_codepoint)
+                    {
+                        f32 x0 = float2_element(p, AXIS2_X) + (f32)column * box->font_size * 0.60f;
+                        F32Interval2 underline = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x0 + box->font_size * 0.60f, rect.y1));
+                        ui_draw_rect(underline, float4_make(0.35f, 0.65f, 1.0f, 0.65f));
+                        break;
+                    }
+                    position += sequence_length;
+                    column += 1;
+                }
+            }
+            text = ui_text_clip_to_rect(box, text, &p, text_clip);
+            ui_draw_text_clipped(box, text, color, &p, text_clip);
+            if (box->text_truncated && !(box->flags & UI_BoxFlag_DisableTextTrunc))
+            {
+                f32 ellipsis_x = float2_element(p, AXIS2_X) + (f32)ui_utf8_codepoint_count(text) * box->font_size * 0.60f;
+                f32 ellipsis_width = box->font_size * 1.80f;
+                f32 ellipsis_right = BUSTER_MIN(box->rect.x1 - box->text_padding, text_clip.x1 - box->text_padding);
+                if (ellipsis_x + ellipsis_width <= ellipsis_right + 0.001f)
+                {
+                    float2 ellipsis_position = float2_make(ellipsis_x, float2_element(p, AXIS2_Y));
+                    ui_draw_text_clipped(box, S8("..."), color, &ellipsis_position, text_clip);
+                }
             }
         }
-    }
 
-    if (box->flags & UI_BoxFlag_DrawBorder)
-    {
-        ui_draw_border(rect, box->border_color, 1.0f);
-    }
-    if (box->flags & UI_BoxFlag_DrawSideTop)
-    {
-        ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + 1), box->border_color);
-    }
-    if (box->flags & UI_BoxFlag_DrawSideBottom)
-    {
-        ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - 1, rect.x1, rect.y1), box->border_color);
-    }
-    if (box->flags & UI_BoxFlag_DrawSideLeft)
-    {
-        ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x0 + 1, rect.y1), box->border_color);
-    }
-    if (box->flags & UI_BoxFlag_DrawSideRight)
-    {
-        ui_draw_rect(ui_rect_make(rect.x1 - 1, rect.y0, rect.x1, rect.y1), box->border_color);
-    }
-
-    if (box->flags & UI_BoxFlag_DrawOverlay)
-    {
-        ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.035f));
-        if (!(box->flags & UI_BoxFlag_DisableFocusOverlay) && (box->state_flags & (UI_BoxState_FocusActive | UI_BoxState_FocusEdit)))
+        if ((box->flags & UI_BoxFlag_HasFuzzyMatchRanges) && box->fuzzy_match_ranges)
         {
-            ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.05f));
+            for (u64 range_index = 0; range_index < box->fuzzy_match_range_count; range_index += 1)
+            {
+                UI_FuzzyMatchRange range = box->fuzzy_match_ranges[range_index];
+                u64 first_byte = BUSTER_MIN(range.first, box->text_visible_length);
+                u64 last_byte = BUSTER_MIN(range.one_past_last, box->text_visible_length);
+                u64 first = ui_utf8_columns_for_byte_offset(box->string, first_byte);
+                u64 last = ui_utf8_columns_for_byte_offset(box->string, last_byte);
+                if (last > first)
+                {
+                    float2 text_position = ui_box_text_position(box);
+                    f32 x0 = float2_element(text_position, AXIS2_X) + (f32)first * box->font_size * 0.60f;
+                    f32 x1 = float2_element(text_position, AXIS2_X) + (f32)last * box->font_size * 0.60f;
+                    F32Interval2 highlight = ui_box_draw_rect(box, ui_rect_make(x0, rect.y1 - 2.0f, x1, rect.y1));
+                    ui_draw_rect(highlight, box->border_color);
+                }
+            }
         }
-    }
-    if (!(box->flags & UI_BoxFlag_DisableFocusBorder) && (box->state_flags & UI_BoxState_FocusActive))
-    {
-        ui_draw_border(rect, float4_make(0.35f, 0.65f, 1.0f, 0.85f), 1.0f);
-    }
-    ui_draw_box_fades(box, rect);
 
-    if (box->flags & UI_BoxFlag_Debug)
-    {
-        ui_draw_border(rect, float4_make(1.0f, 0.0f, 1.0f, 0.65f), 1.0f);
+        if (box->flags & UI_BoxFlag_DrawBorder)
+        {
+            ui_draw_border(rect, box->border_color, 1.0f);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideTop)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x1, rect.y0 + 1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideBottom)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y1 - 1, rect.x1, rect.y1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideLeft)
+        {
+            ui_draw_rect(ui_rect_make(rect.x0, rect.y0, rect.x0 + 1, rect.y1), box->border_color);
+        }
+        if (box->flags & UI_BoxFlag_DrawSideRight)
+        {
+            ui_draw_rect(ui_rect_make(rect.x1 - 1, rect.y0, rect.x1, rect.y1), box->border_color);
+        }
+
+        if (box->flags & UI_BoxFlag_DrawOverlay)
+        {
+            ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.035f));
+            if (!(box->flags & UI_BoxFlag_DisableFocusOverlay) && (box->state_flags & (UI_BoxState_FocusActive | UI_BoxState_FocusEdit)))
+            {
+                ui_draw_rect(rect, float4_make(1.0f, 1.0f, 1.0f, 0.05f));
+            }
+        }
+        if (!(box->flags & UI_BoxFlag_DisableFocusBorder) && (box->state_flags & UI_BoxState_FocusActive))
+        {
+            ui_draw_border(rect, float4_make(0.35f, 0.65f, 1.0f, 0.85f), 1.0f);
+        }
+        ui_draw_box_fades(box, rect);
+
+        if (box->flags & UI_BoxFlag_Debug)
+        {
+            ui_draw_border(rect, float4_make(1.0f, 0.0f, 1.0f, 0.65f), 1.0f);
+        }
+        ui_state->draw_command_box = previous_draw_box;
     }
-    ui_state->draw_command_box = previous_draw_box;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_draw_tree(UI_Box* root)

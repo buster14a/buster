@@ -1663,95 +1663,94 @@ SliceString8 slice_string_from_posix_string_list(Arena* arena, PosixStringList s
 SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringList command_line)
 {
     SliceString8 result = {0};
-    if (!command_line)
+    if (command_line)
     {
-        return result;
-    }
+        u64 command_line_length = string16_length(command_line);
+        String8* strings = arena_allocate(arena, String8, command_line_length + 1);
+        u64 string_count = 0;
 
-    u64 command_line_length = string16_length(command_line);
-    String8* strings = arena_allocate(arena, String8, command_line_length + 1);
-    u64 string_count = 0;
-
-    for (u64 i = 0; i < command_line_length;)
-    {
-        while (i < command_line_length && (command_line[i] == ' ' || command_line[i] == '\t'))
+        for (u64 i = 0; i < command_line_length;)
         {
-            i += 1;
-        }
+            while (i < command_line_length && (command_line[i] == ' ' || command_line[i] == '\t'))
+            {
+                i += 1;
+            }
 
-        if (i >= command_line_length)
-        {
-            break;
-        }
-
-        char16* argument = arena_allocate(arena, char16, command_line_length - i + 1);
-        u64 argument_length = 0;
-        bool in_quotes = false;
-
-        while (i < command_line_length)
-        {
-            char16 c = command_line[i];
-            if (!in_quotes && (c == ' ' || c == '\t'))
+            if (i >= command_line_length)
             {
                 break;
             }
 
-            if (c == '\\')
+            char16* argument = arena_allocate(arena, char16, command_line_length - i + 1);
+            u64 argument_length = 0;
+            bool in_quotes = false;
+
+            while (i < command_line_length)
             {
-                u64 backslash_count = 0;
-                while (i < command_line_length && command_line[i] == '\\')
+                char16 c = command_line[i];
+                if (!in_quotes && (c == ' ' || c == '\t'))
                 {
-                    backslash_count += 1;
-                    i += 1;
+                    break;
                 }
 
-                if (i < command_line_length && command_line[i] == '"')
+                if (c == '\\')
                 {
-                    for (u64 backslash_i = 0; backslash_i < backslash_count / 2; backslash_i += 1)
+                    u64 backslash_count = 0;
+                    while (i < command_line_length && command_line[i] == '\\')
                     {
-                        argument[argument_length] = '\\';
-                        argument_length += 1;
+                        backslash_count += 1;
+                        i += 1;
                     }
 
-                    if (backslash_count & 1)
+                    if (i < command_line_length && command_line[i] == '"')
                     {
-                        argument[argument_length] = '"';
-                        argument_length += 1;
+                        for (u64 backslash_i = 0; backslash_i < backslash_count / 2; backslash_i += 1)
+                        {
+                            argument[argument_length] = '\\';
+                            argument_length += 1;
+                        }
+
+                        if (backslash_count & 1)
+                        {
+                            argument[argument_length] = '"';
+                            argument_length += 1;
+                        }
+                        else
+                        {
+                            in_quotes = !in_quotes;
+                        }
+                        i += 1;
                     }
                     else
                     {
-                        in_quotes = !in_quotes;
+                        for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
+                        {
+                            argument[argument_length] = '\\';
+                            argument_length += 1;
+                        }
                     }
+                }
+                else if (c == '"')
+                {
+                    in_quotes = !in_quotes;
                     i += 1;
                 }
                 else
                 {
-                    for (u64 backslash_i = 0; backslash_i < backslash_count; backslash_i += 1)
-                    {
-                        argument[argument_length] = '\\';
-                        argument_length += 1;
-                    }
+                    argument[argument_length] = c;
+                    argument_length += 1;
+                    i += 1;
                 }
             }
-            else if (c == '"')
-            {
-                in_quotes = !in_quotes;
-                i += 1;
-            }
-            else
-            {
-                argument[argument_length] = c;
-                argument_length += 1;
-                i += 1;
-            }
+
+            argument[argument_length] = 0;
+            strings[string_count] = string8_from_string16(arena, (String16){.pointer = argument, .length = argument_length}, true);
+            string_count += 1;
         }
 
-        argument[argument_length] = 0;
-        strings[string_count] = string8_from_string16(arena, (String16){.pointer = argument, .length = argument_length}, true);
-        string_count += 1;
+        result = (SliceString8){.pointer = strings, .length = string_count};
     }
 
-    result = (SliceString8){.pointer = strings, .length = string_count};
     return result;
 }
 

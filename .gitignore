@@ -19,3 +19,4 @@ imgui.ini
 /iso_root
 .codex
 /VDSO/
+__pycache__/

@@ -19,11 +19,17 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, Stri
         return 0;
     }
     CIRLowerResult lowered = c_lower_to_ir(arena, S8("machine-selection.c"), tokens, parse, target);
+    IrProgram* result;
     if (lowered.diagnostic_count)
     {
-        return 0;
+        result = 0;
     }
-    return lowered.program;
+    else
+    {
+        result = lowered.program;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrFunction* machine_selection_test_find(IrProgram* program, String8 name)
@@ -115,11 +121,17 @@ BUSTER_GLOBAL_LOCAL MachineSelectionTestOrderPair machine_selection_test_find_or
 
 BUSTER_GLOBAL_LOCAL u32 machine_selection_test_virtual_origin(MachineFunction const* function, u32 virtual_register)
 {
+    u32 result;
     if (!function || virtual_register >= function->virtual_register_count)
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return function->virtual_registers[virtual_register].typed_origin;
+    else
+    {
+        result = function->virtual_registers[virtual_register].typed_origin;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_test_ref_equal(MachineFunction const* before, MachineFunction const* after, MachineRef before_ref, MachineRef after_ref)

@@ -47,11 +47,17 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c(Arena* arena, String8 name
         return 0;
     }
     CIRLowerResult lowered = c_lower_to_ir(arena, name, tokens, parse, target);
+    IrProgram* result;
     if (lowered.diagnostic_count)
     {
-        return 0;
+        result = 0;
     }
-    return lowered.program;
+    else
+    {
+        result = lowered.program;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrFunction* machine_test_ir_function_find(IrModule* module, String8 name)
@@ -143,12 +149,14 @@ BUSTER_GLOBAL_LOCAL bool machine_test_source_token_at(MachineX64SourceSpan sourc
 
 BUSTER_GLOBAL_LOCAL bool machine_test_source_span_contains_sequence(MachineX64SourceSpan source, String8 sequence)
 {
-    if (!source.bytes || source.start > source.end || source.end > source.length || !sequence.length || sequence.length > source.end - source.start)
-        return false;
-    u8 const* bytes = source.bytes + source.start;
-    u64 length = source.end - source.start;
-    for (u64 offset = 0; offset + sequence.length <= length; offset += 1)
-        if (memcmp(bytes + offset, sequence.pointer, sequence.length) == 0) return true;
+    if (source.bytes && source.start <= source.end && source.end <= source.length && sequence.length && sequence.length <= source.end - source.start)
+    {
+        u8 const* bytes = source.bytes + source.start;
+        u64 length = source.end - source.start;
+        for (u64 offset = 0; offset + sequence.length <= length; offset += 1)
+            if (memcmp(bytes + offset, sequence.pointer, sequence.length) == 0) return true;
+    }
+
     return false;
 }
 
@@ -222,61 +230,71 @@ BUSTER_GLOBAL_LOCAL bool machine_test_source_function_body_at(MachineX64SourceSp
     while (cursor < source.end && (source.bytes[cursor] == ' ' || source.bytes[cursor] == '\t' || source.bytes[cursor] == '\r' ||
                                    source.bytes[cursor] == '\n'))
         cursor += 1;
-    if (cursor >= source.end || source.bytes[cursor] != '(') return false;
-    u64 parentheses = 0;
-    for (; cursor < source.end; cursor += 1)
+    if (cursor < source.end && source.bytes[cursor] == '(')
     {
-        if (source.bytes[cursor] == '(') parentheses += 1;
-        else if (source.bytes[cursor] == ')' && parentheses && --parentheses == 0)
+        u64 parentheses = 0;
+        for (; cursor < source.end; cursor += 1)
         {
-            cursor += 1;
-            break;
-        }
-    }
-    if (parentheses || cursor >= source.end) return false;
-    // Definitions in this codebase put the opening brace immediately after
-    // the parameter list (modulo whitespace).  Requiring that shape rejects
-    // calls such as x64_emit_foo(...) followed by a block and keeps prefix
-    // discovery independent of line numbers or call-site lists.
-    while (cursor < source.end && (source.bytes[cursor] == ' ' || source.bytes[cursor] == '\t' || source.bytes[cursor] == '\r' ||
-                                   source.bytes[cursor] == '\n'))
-        cursor += 1;
-    if (cursor >= source.end || source.bytes[cursor] != '{') return false;
-    u64 depth = 0;
-    for (u64 index = cursor; index < source.end; index += 1)
-    {
-        if (source.bytes[index] == '{') depth += 1;
-        else if (source.bytes[index] == '}')
-        {
-            if (!depth) break;
-            depth -= 1;
-            if (!depth)
+            if (source.bytes[cursor] == '(') parentheses += 1;
+            else if (source.bytes[cursor] == ')' && parentheses && --parentheses == 0)
             {
-                if (body)
+                cursor += 1;
+                break;
+            }
+        }
+        if (!parentheses && cursor < source.end)
+        {
+            // Definitions in this codebase put the opening brace immediately after
+            // the parameter list (modulo whitespace).  Requiring that shape rejects
+            // calls such as x64_emit_foo(...) followed by a block and keeps prefix
+            // discovery independent of line numbers or call-site lists.
+            while (cursor < source.end && (source.bytes[cursor] == ' ' || source.bytes[cursor] == '\t' || source.bytes[cursor] == '\r' ||
+                                           source.bytes[cursor] == '\n'))
+                cursor += 1;
+            if (cursor < source.end && source.bytes[cursor] == '{')
+            {
+                u64 depth = 0;
+                for (u64 index = cursor; index < source.end; index += 1)
                 {
-                    *body = (MachineX64SourceSpan){
-                        .bytes = source.bytes,
-                        .length = source.length,
-                        .start = cursor,
-                        .end = index + 1,
-                    };
+                    if (source.bytes[index] == '{') depth += 1;
+                    else if (source.bytes[index] == '}')
+                    {
+                        if (!depth) break;
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            if (body)
+                            {
+                                *body = (MachineX64SourceSpan){
+                                    .bytes = source.bytes,
+                                    .length = source.length,
+                                    .start = cursor,
+                                    .end = index + 1,
+                                };
+                            }
+                            return true;
+                        }
+                    }
                 }
-                return true;
             }
         }
     }
+
     return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_test_source_function_body_from(MachineX64SourceSpan source, String8 owner, u64 search_start,
                                                                  MachineX64SourceSpan* body)
 {
-    if (!owner.length || !source.bytes || source.start > source.end || source.end > source.length) return false;
-    u64 first_offset = BUSTER_MAX(search_start, source.start);
-    for (u64 offset = first_offset; offset + owner.length <= source.end; offset += 1)
+    if (owner.length && source.bytes && source.start <= source.end && source.end <= source.length)
     {
-        if (machine_test_source_function_body_at(source, owner, offset, body)) return true;
+        u64 first_offset = BUSTER_MAX(search_start, source.start);
+        for (u64 offset = first_offset; offset + owner.length <= source.end; offset += 1)
+        {
+            if (machine_test_source_function_body_at(source, owner, offset, body)) return true;
+        }
     }
+
     return false;
 }
 
@@ -294,21 +312,24 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_inverse(Machin
 
 BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_markers(MachineX64SourceSpan source, u64 start, u64 end)
 {
-    if (!source.bytes || start > end || end > source.end) return MACHINE_X64_SOURCE_ARCH_UNKNOWN;
-    String8 x86_name = S8("CPU_ARCH_X86_64");
-    String8 aarch64_name = S8("CPU_ARCH_AARCH64");
-    bool x86_found = false;
-    bool aarch64_found = false;
-    for (u64 offset = start; offset + x86_name.length <= end; offset += 1)
+    if (source.bytes && start <= end && end <= source.end)
     {
-        x86_found |= machine_test_source_token_at(source, offset, x86_name);
+        String8 x86_name = S8("CPU_ARCH_X86_64");
+        String8 aarch64_name = S8("CPU_ARCH_AARCH64");
+        bool x86_found = false;
+        bool aarch64_found = false;
+        for (u64 offset = start; offset + x86_name.length <= end; offset += 1)
+        {
+            x86_found |= machine_test_source_token_at(source, offset, x86_name);
+        }
+        for (u64 offset = start; offset + aarch64_name.length <= end; offset += 1)
+        {
+            aarch64_found |= machine_test_source_token_at(source, offset, aarch64_name);
+        }
+        if (x86_found && !aarch64_found) return MACHINE_X64_SOURCE_ARCH_X86;
+        if (aarch64_found && !x86_found) return MACHINE_X64_SOURCE_ARCH_AARCH64;
     }
-    for (u64 offset = start; offset + aarch64_name.length <= end; offset += 1)
-    {
-        aarch64_found |= machine_test_source_token_at(source, offset, aarch64_name);
-    }
-    if (x86_found && !aarch64_found) return MACHINE_X64_SOURCE_ARCH_X86;
-    if (aarch64_found && !x86_found) return MACHINE_X64_SOURCE_ARCH_AARCH64;
+
     return MACHINE_X64_SOURCE_ARCH_UNKNOWN;
 }
 
@@ -396,8 +417,17 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceArch machine_test_source_arch_for_writer(Mac
         }
     }
     MachineX64SourceArch marker_arch = machine_test_source_arch_markers(source, statement_start, writer_offset);
-    if (marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN) return marker_arch;
-    return default_arch;
+    MachineX64SourceArch result;
+    if (marker_arch != MACHINE_X64_SOURCE_ARCH_UNKNOWN)
+    {
+        result = marker_arch;
+    }
+    else
+    {
+        result = default_arch;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_test_source_scan_writers(MachineX64SourceSpan source, MachineX64SourceSpan body,

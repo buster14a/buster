@@ -27,28 +27,27 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, 
         u64 string_size;
         memcpy(&string_offset, image.pointer + string_header + 24, sizeof(string_offset));
         memcpy(&string_size, image.pointer + string_header + 32, sizeof(string_size));
-        if (string_offset > image.length || string_size > image.length - string_offset)
+        if (string_offset <= image.length && string_size <= image.length - string_offset)
         {
-            return false;
-        }
-        for (u16 section_index = 0; section_index < section_count; section_index += 1)
-        {
-            u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
-            u32 name_offset;
-            memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
-            if (name_offset >= string_size || string_size - name_offset <= name.length)
+            for (u16 section_index = 0; section_index < section_count; section_index += 1)
             {
-                continue;
+                u64 header = section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE;
+                u32 name_offset;
+                memcpy(&name_offset, image.pointer + header, sizeof(name_offset));
+                if (name_offset >= string_size || string_size - name_offset <= name.length)
+                {
+                    continue;
+                }
+                if (memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) != 0 ||
+                    image.pointer[string_offset + name_offset + name.length] != 0)
+                {
+                    continue;
+                }
+                memcpy(offset, image.pointer + header + 24, sizeof(*offset));
+                memcpy(size, image.pointer + header + 32, sizeof(*size));
+                memcpy(address, image.pointer + header + 16, sizeof(*address));
+                return *offset <= image.length && *size <= image.length - *offset;
             }
-            if (memcmp(image.pointer + string_offset + name_offset, name.pointer, name.length) != 0 ||
-                image.pointer[string_offset + name_offset + name.length] != 0)
-            {
-                continue;
-            }
-            memcpy(offset, image.pointer + header + 24, sizeof(*offset));
-            memcpy(size, image.pointer + header + 32, sizeof(*size));
-            memcpy(address, image.pointer + header + 16, sizeof(*address));
-            return *offset <= image.length && *size <= image.length - *offset;
         }
     }
 
@@ -75,11 +74,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 compiler_driver_test_elf_section_addr
     u64 offset = 0;
     u64 size = 0;
     u64 address = 0;
+    BUSTER_UNUSED_DECL u64 result;
     if (!compiler_driver_test_elf_section_find(image, name, &offset, &size, &address))
     {
-        return 0;
+        result = 0;
     }
-    return address;
+    else
+    {
+        result = address;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)

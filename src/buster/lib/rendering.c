@@ -135,15 +135,21 @@ BUSTER_GLOBAL_LOCAL int rendering_vulkan_device_name_compare(String8 left, Strin
             return 1;
         }
     }
+    int result;
     if (left.length < right.length)
     {
-        return -1;
+        result = -1;
     }
-    if (left.length > right.length)
+    else if (left.length > right.length)
     {
-        return 1;
+        result = 1;
     }
-    return 0;
+    else
+    {
+        result = 0;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool rendering_vulkan_device_is_better(RenderingVulkanDeviceCandidate candidate, RenderingVulkanDeviceCandidate current,
@@ -155,19 +161,25 @@ BUSTER_GLOBAL_LOCAL bool rendering_vulkan_device_is_better(RenderingVulkanDevice
     }
 
     int name_comparison = rendering_vulkan_device_name_compare(candidate.name, current.name);
+    bool result;
     if (name_comparison != 0)
     {
-        return name_comparison < 0;
+        result = name_comparison < 0;
     }
-    if (candidate.vendor_id != current.vendor_id)
+    else if (candidate.vendor_id != current.vendor_id)
     {
-        return candidate.vendor_id < current.vendor_id;
+        result = candidate.vendor_id < current.vendor_id;
     }
-    if (candidate.device_id != current.device_id)
+    else if (candidate.device_id != current.device_id)
     {
-        return candidate.device_id < current.device_id;
+        result = candidate.device_id < current.device_id;
     }
-    return candidate.enumeration_index < current.enumeration_index;
+    else
+    {
+        result = candidate.enumeration_index < current.enumeration_index;
+    }
+
+    return result;
 }
 
 RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates)
@@ -229,15 +241,21 @@ BUSTER_GLOBAL_LOCAL s32 rendering_clip_coordinate(f64 value, bool round_up)
         return INT32_MAX;
     }
     f64 rounded = round_up ? ceil_f64(value) : floor_f64(value);
+    s32 result;
     if (rounded <= (f64)INT32_MIN)
     {
-        return INT32_MIN;
+        result = INT32_MIN;
     }
-    if (rounded >= (f64)INT32_MAX)
+    else if (rounded >= (f64)INT32_MAX)
     {
-        return INT32_MAX;
+        result = INT32_MAX;
     }
-    return (s32)rounded;
+    else
+    {
+        result = (s32)rounded;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL s32 rendering_clip_target_extent(u32 extent)
@@ -578,52 +596,50 @@ void rendering_command_stream_set_scale(RenderingCommandStream* stream, Renderin
 
 void rendering_command_stream_push_clip(RenderingCommandStream* stream, F32Interval2 rect)
 {
-    if (!stream)
+    if (stream)
     {
-        return;
-    }
-    rendering_command_stream_ensure_clip_root(stream);
-    if (stream->clip_depth >= RENDERING_MAX_CLIP_DEPTH)
-    {
-        if (stream->clip_overflow_depth != UINT32_MAX)
+        rendering_command_stream_ensure_clip_root(stream);
+        if (stream->clip_depth >= RENDERING_MAX_CLIP_DEPTH)
         {
-            stream->clip_overflow_depth += 1;
+            if (stream->clip_overflow_depth != UINT32_MAX)
+            {
+                stream->clip_overflow_depth += 1;
+            }
+            rendering_command_stream_mark_overflow(stream);
+            rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_PUSH, stream->clip_stack[stream->clip_depth - 1]);
+            return;
         }
-        rendering_command_stream_mark_overflow(stream);
-        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_PUSH, stream->clip_stack[stream->clip_depth - 1]);
-        return;
+        RenderingClipRect requested = rendering_clip_rect_from_f32(rect, stream->scale, stream->target_size);
+        RenderingClipRect parent = stream->clip_stack[stream->clip_depth - 1];
+        RenderingClipRect clip = rendering_clip_rect_intersect(parent, requested);
+        stream->clip_stack[stream->clip_depth] = clip;
+        stream->clip_depth += 1;
+        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_PUSH, clip);
     }
-    RenderingClipRect requested = rendering_clip_rect_from_f32(rect, stream->scale, stream->target_size);
-    RenderingClipRect parent = stream->clip_stack[stream->clip_depth - 1];
-    RenderingClipRect clip = rendering_clip_rect_intersect(parent, requested);
-    stream->clip_stack[stream->clip_depth] = clip;
-    stream->clip_depth += 1;
-    rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_PUSH, clip);
 }
 
 void rendering_command_stream_pop_clip(RenderingCommandStream* stream)
 {
-    if (!stream)
+    if (stream)
     {
-        return;
+        rendering_command_stream_ensure_clip_root(stream);
+        if (stream->clip_overflow_depth)
+        {
+            stream->clip_overflow_depth -= 1;
+            rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_POP, stream->clip_stack[stream->clip_depth - 1]);
+            return;
+        }
+        if (stream->clip_depth > 1)
+        {
+            stream->clip_depth -= 1;
+        }
+        else
+        {
+            return;
+        }
+        RenderingClipRect clip = stream->clip_stack[stream->clip_depth - 1];
+        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_POP, clip);
     }
-    rendering_command_stream_ensure_clip_root(stream);
-    if (stream->clip_overflow_depth)
-    {
-        stream->clip_overflow_depth -= 1;
-        rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_POP, stream->clip_stack[stream->clip_depth - 1]);
-        return;
-    }
-    if (stream->clip_depth > 1)
-    {
-        stream->clip_depth -= 1;
-    }
-    else
-    {
-        return;
-    }
-    RenderingClipRect clip = stream->clip_stack[stream->clip_depth - 1];
-    rendering_command_stream_record_clip(stream, RENDERING_COMMAND_CLIP_POP, clip);
 }
 
 void rendering_command_stream_reset_clip(RenderingCommandStream* stream)
@@ -719,80 +735,77 @@ bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* strea
 void rendering_command_stream_record_rect(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture, u32 first_index,
                                            u32 index_count)
 {
-    if (!stream)
+    if (stream)
     {
-        return;
-    }
-
-    if (pipeline >= BUSTER_PIPELINE_COUNT)
-    {
-        rendering_command_stream_mark_overflow(stream);
-        stream->force_new_batch = true;
-        return;
-    }
-
-    if (first_index > RENDERING_MAX_INDEX_COUNT || index_count > RENDERING_MAX_INDEX_COUNT - first_index)
-    {
-        rendering_command_stream_mark_overflow(stream);
-        stream->force_new_batch = true;
-        return;
-    }
-
-    rendering_command_stream_ensure_clip_root(stream);
-    RenderingClipRect clip = stream->clip_stack[stream->clip_depth - 1];
-    RenderingCommand command = {
-        .kind = RENDERING_COMMAND_RECT,
-        .pipeline = pipeline,
-        .first_index = first_index,
-        .index_count = index_count,
-        .texture = texture,
-        .clip = clip,
-        .resources = stream->resources,
-        .target = stream->target,
-        .batch_index = UINT32_MAX,
-    };
-    if (index_count == 0 || rendering_clip_rect_is_empty(clip))
-    {
-        rendering_command_stream_push_command(stream, command);
-        stream->force_new_batch = true;
-        return;
-    }
-
-    bool compatible = !stream->force_new_batch && stream->batch_count != 0;
-    if (compatible)
-    {
-        RenderingBatch* previous = &stream->batches[stream->batch_count - 1];
-        compatible = previous->pipeline == command.pipeline && previous->texture.value == command.texture.value &&
-                     rendering_clip_rect_equal(previous->clip, command.clip) && previous->target == command.target &&
-                     memcmp(&previous->resources, &command.resources, sizeof(command.resources)) == 0 && previous->index_count <= UINT32_MAX - previous->first_index &&
-                     previous->first_index + previous->index_count == command.first_index && index_count <= UINT32_MAX - previous->index_count;
-    }
-    if (!compatible && stream->batch_count >= RENDERING_MAX_BATCH_COUNT)
-    {
-        rendering_command_stream_mark_overflow(stream);
-        stream->force_new_batch = true;
-        return;
-    }
-    if (!rendering_command_stream_push_command(stream, command))
-    {
-        return;
-    }
-    bool batched = false;
-    if (compatible)
-    {
-        stream->batches[stream->batch_count - 1].index_count += index_count;
-        stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
-        batched = true;
-    }
-    else
-    {
-        if (rendering_command_stream_push_batch(stream, command))
+        if (pipeline >= BUSTER_PIPELINE_COUNT)
         {
-            stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
-            batched = true;
+            rendering_command_stream_mark_overflow(stream);
+            stream->force_new_batch = true;
+            return;
+        }
+
+        if (first_index > RENDERING_MAX_INDEX_COUNT || index_count > RENDERING_MAX_INDEX_COUNT - first_index)
+        {
+            rendering_command_stream_mark_overflow(stream);
+            stream->force_new_batch = true;
+            return;
+        }
+
+        rendering_command_stream_ensure_clip_root(stream);
+        RenderingClipRect clip = stream->clip_stack[stream->clip_depth - 1];
+        RenderingCommand command = {
+            .kind = RENDERING_COMMAND_RECT,
+            .pipeline = pipeline,
+            .first_index = first_index,
+            .index_count = index_count,
+            .texture = texture,
+            .clip = clip,
+            .resources = stream->resources,
+            .target = stream->target,
+            .batch_index = UINT32_MAX,
+        };
+        if (index_count == 0 || rendering_clip_rect_is_empty(clip))
+        {
+            rendering_command_stream_push_command(stream, command);
+            stream->force_new_batch = true;
+            return;
+        }
+
+        bool compatible = !stream->force_new_batch && stream->batch_count != 0;
+        if (compatible)
+        {
+            RenderingBatch* previous = &stream->batches[stream->batch_count - 1];
+            compatible = previous->pipeline == command.pipeline && previous->texture.value == command.texture.value &&
+                         rendering_clip_rect_equal(previous->clip, command.clip) && previous->target == command.target &&
+                         memcmp(&previous->resources, &command.resources, sizeof(command.resources)) == 0 && previous->index_count <= UINT32_MAX - previous->first_index &&
+                         previous->first_index + previous->index_count == command.first_index && index_count <= UINT32_MAX - previous->index_count;
+        }
+        if (!compatible && stream->batch_count >= RENDERING_MAX_BATCH_COUNT)
+        {
+            rendering_command_stream_mark_overflow(stream);
+            stream->force_new_batch = true;
+            return;
+        }
+        if (rendering_command_stream_push_command(stream, command))
+        {
+            bool batched = false;
+            if (compatible)
+            {
+                stream->batches[stream->batch_count - 1].index_count += index_count;
+                stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
+                batched = true;
+            }
+            else
+            {
+                if (rendering_command_stream_push_batch(stream, command))
+                {
+                    stream->commands[stream->command_count - 1].batch_index = stream->batch_count - 1;
+                    batched = true;
+                }
+            }
+            stream->force_new_batch = !batched;
         }
     }
-    stream->force_new_batch = !batched;
 }
 
 void rendering_command_stream_record_clip(RenderingCommandStream* stream, RenderingCommandKind kind, RenderingClipRect clip)
@@ -1159,68 +1172,67 @@ RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStr
     if (rendering_command_stream_is_valid(stream) && events)
     {
         u32 event_count = rendering_command_stream_replay(stream, events, capacity);
-        if (event_count > capacity)
+        if (event_count <= capacity)
         {
-            return result;
-        }
-        result.valid = true;
-        result.event_count = event_count;
-        result.order_preserved = true;
-        result.resources_snapshot = true;
-        result.target_boundaries = true;
-        result.state_restored = true;
-        bool saw_blur = false;
-        bool blur_followed_by_draw = false;
-        u32 previous_command_index = 0;
-        for (u32 event_index = 0; event_index < event_count; event_index += 1)
-        {
-            RenderingReplayEvent event = events[event_index];
-            if (event_index && event.command_index <= previous_command_index)
+            result.valid = true;
+            result.event_count = event_count;
+            result.order_preserved = true;
+            result.resources_snapshot = true;
+            result.target_boundaries = true;
+            result.state_restored = true;
+            bool saw_blur = false;
+            bool blur_followed_by_draw = false;
+            u32 previous_command_index = 0;
+            for (u32 event_index = 0; event_index < event_count; event_index += 1)
             {
-                result.order_preserved = false;
+                RenderingReplayEvent event = events[event_index];
+                if (event_index && event.command_index <= previous_command_index)
+                {
+                    result.order_preserved = false;
+                }
+                previous_command_index = event.command_index;
+                switch (event.kind)
+                {
+                case RENDERING_REPLAY_DRAW:
+                    result.draw_count += 1;
+                    if (event.batch_index >= stream->batch_count ||
+                        memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
+                        event.target != stream->batches[event.batch_index].target)
+                    {
+                        result.resources_snapshot = false;
+                    }
+                    if (saw_blur)
+                    {
+                        blur_followed_by_draw = true;
+                        saw_blur = false;
+                    }
+                    break;
+                case RENDERING_REPLAY_BACKGROUND_BLUR:
+                    result.blur_pass_count += 3;
+                    saw_blur = true;
+                    break;
+                case RENDERING_REPLAY_TARGET:
+                    if (event.target != RENDERING_TARGET_BACKBUFFER)
+                    {
+                        result.target_boundaries = false;
+                    }
+                    break;
+                case RENDERING_REPLAY_CLIP_PUSH:
+                case RENDERING_REPLAY_CLIP_POP:
+                case RENDERING_REPLAY_FLUSH:
+                case RENDERING_REPLAY_RESOURCE:
+                    break;
+                case RENDERING_REPLAY_EVENT_KIND_COUNT:
+                    result.valid = false;
+                    break;
+                }
             }
-            previous_command_index = event.command_index;
-            switch (event.kind)
+            if (saw_blur)
             {
-            case RENDERING_REPLAY_DRAW:
-                result.draw_count += 1;
-                if (event.batch_index >= stream->batch_count ||
-                    memcmp(&event.resources, &stream->batches[event.batch_index].resources, sizeof(event.resources)) != 0 ||
-                    event.target != stream->batches[event.batch_index].target)
-                {
-                    result.resources_snapshot = false;
-                }
-                if (saw_blur)
-                {
-                    blur_followed_by_draw = true;
-                    saw_blur = false;
-                }
-                break;
-            case RENDERING_REPLAY_BACKGROUND_BLUR:
-                result.blur_pass_count += 3;
-                saw_blur = true;
-                break;
-            case RENDERING_REPLAY_TARGET:
-                if (event.target != RENDERING_TARGET_BACKBUFFER)
-                {
-                    result.target_boundaries = false;
-                }
-                break;
-            case RENDERING_REPLAY_CLIP_PUSH:
-            case RENDERING_REPLAY_CLIP_POP:
-            case RENDERING_REPLAY_FLUSH:
-            case RENDERING_REPLAY_RESOURCE:
-                break;
-            case RENDERING_REPLAY_EVENT_KIND_COUNT:
-                result.valid = false;
-                break;
+                blur_followed_by_draw = true;
             }
+            result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
         }
-        if (saw_blur)
-        {
-            blur_followed_by_draw = true;
-        }
-        result.state_restored = !result.blur_pass_count || blur_followed_by_draw;
     }
 
     return result;
@@ -1397,11 +1409,17 @@ BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_vertices(RenderingWindowHa
         return UINT32_MAX;
     }
     u32 vertex_offset = stream->vertex_count;
+    u32 result;
     if (!rendering_command_stream_add_vertices(stream, vertex_memory, vertex_count))
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return vertex_offset;
+    else
+    {
+        result = vertex_offset;
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_indices(RenderingWindowHandle* window, BusterPipeline pipeline_index, Sliceu32 indices)
@@ -1418,260 +1436,261 @@ BUSTER_GLOBAL_LOCAL u32 rendering_window_pipeline_add_indices(RenderingWindowHan
         return UINT32_MAX;
     }
     u32 first_index = stream->index_count;
+    u32 result;
     if (!rendering_command_stream_add_indices(stream, indices))
     {
-        return UINT32_MAX;
+        result = UINT32_MAX;
     }
-    return first_index;
+    else
+    {
+        result = first_index;
+    }
+
+    return result;
 }
 
 void rendering_window_render_rect(RenderingWindowHandle* window, RectDraw draw)
 {
-    if (!window)
+    if (window)
     {
-        return;
-    }
-    RenderingCommandStream* stream = rendering_window_command_stream(window);
-    if (!stream)
-    {
-        return;
-    }
-
-    f32 x0 = draw.vertex.x0;
-    f32 x1 = draw.vertex.x1;
-    f32 y0 = draw.vertex.y0;
-    f32 y1 = draw.vertex.y1;
-    f32 uv_x0 = draw.texture.x0;
-    f32 uv_x1 = draw.texture.x1;
-    f32 uv_y0 = draw.texture.y0;
-    f32 uv_y1 = draw.texture.y1;
-    if (x1 < x0)
-    {
-        f32 swap = x0;
-        x0 = x1;
-        x1 = swap;
-        swap = uv_x0;
-        uv_x0 = uv_x1;
-        uv_x1 = swap;
-    }
-    if (y1 < y0)
-    {
-        f32 swap = y0;
-        y0 = y1;
-        y1 = swap;
-        swap = uv_y0;
-        uv_y0 = uv_y1;
-        uv_y1 = swap;
-    }
-    f32 scale_x = stream->scale.x;
-    f32 scale_y = stream->scale.y;
-    float2 p0 = float2_make(x0 * scale_x, y0 * scale_y);
-    float2 uv0 = float2_make(uv_x0, uv_y0);
-    float2 extent = float2_make((x1 - x0) * scale_x, (y1 - y0) * scale_y);
-    float2 uv_extent = float2_make(uv_x1 - uv_x0, uv_y1 - uv_y0);
-    f32 corner_radius = 5.0f * (scale_x < scale_y ? scale_x : scale_y);
-    RectVertex vertices[] = {
+        RenderingCommandStream* stream = rendering_window_command_stream(window);
+        if (stream)
         {
-            .p0 = p0,
-            .uv0 = uv0,
-            .extent = extent,
-            .uv_extent = uv_extent,
-            .texture_index = draw.texture_index,
-            .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
-            .softness = 1.0,
-            .corner_radius = corner_radius,
-        },
-        {
-            .p0 = p0,
-            .uv0 = uv0,
-            .extent = extent,
-            .uv_extent = uv_extent,
-            .texture_index = draw.texture_index,
-            .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
-            .softness = 1.0,
-            .corner_radius = corner_radius,
-        },
-        {
-            .p0 = p0,
-            .uv0 = uv0,
-            .extent = extent,
-            .uv_extent = uv_extent,
-            .texture_index = draw.texture_index,
-            .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
-            .softness = 1.0,
-            .corner_radius = corner_radius,
-        },
-        {
-            .p0 = p0,
-            .uv0 = uv0,
-            .extent = extent,
-            .uv_extent = uv_extent,
-            .texture_index = draw.texture_index,
-            .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
-            .softness = 1.0,
-            .corner_radius = corner_radius,
-        },
-    };
-
-    u32 first_index = stream->index_count;
-    if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, first_index, 6,
-                                                        sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
-    {
-        rendering_command_stream_mark_overflow(stream);
-        return;
-    }
-    u64 vertex_position = stream->vertex_cpu->position;
-    u64 index_position = stream->index_cpu->position;
-    u32 vertex_count = stream->vertex_count;
-    u32 index_count = stream->index_count;
-    u32 command_count = stream->command_count;
-    u32 batch_count = stream->batch_count;
-    bool force_new_batch = stream->force_new_batch;
-    u32 previous_batch_index_count = batch_count ? stream->batches[batch_count - 1].index_count : 0;
-    u32 vertex_offset =
-        rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
-    if (vertex_offset == UINT32_MAX)
-    {
-        arena_set_position(stream->vertex_cpu, vertex_position);
-        arena_set_position(stream->index_cpu, index_position);
-        stream->vertex_count = vertex_count;
-        stream->index_count = index_count;
-        stream->force_new_batch = force_new_batch;
-        return;
-    }
-    u32 indices[] = {
-        vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2,
-    };
-    u32 recorded_first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
-    if (recorded_first_index != UINT32_MAX)
-    {
-        rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, recorded_first_index,
-                                             BUSTER_ARRAY_LENGTH(indices));
-        if (stream->command_count == command_count || stream->overflowed)
-        {
-            arena_set_position(stream->vertex_cpu, vertex_position);
-            arena_set_position(stream->index_cpu, index_position);
-            stream->vertex_count = vertex_count;
-            stream->index_count = index_count;
-            stream->command_count = command_count;
-            stream->batch_count = batch_count;
-            if (batch_count)
+            f32 x0 = draw.vertex.x0;
+            f32 x1 = draw.vertex.x1;
+            f32 y0 = draw.vertex.y0;
+            f32 y1 = draw.vertex.y1;
+            f32 uv_x0 = draw.texture.x0;
+            f32 uv_x1 = draw.texture.x1;
+            f32 uv_y0 = draw.texture.y0;
+            f32 uv_y1 = draw.texture.y1;
+            if (x1 < x0)
             {
-                stream->batches[batch_count - 1].index_count = previous_batch_index_count;
+                f32 swap = x0;
+                x0 = x1;
+                x1 = swap;
+                swap = uv_x0;
+                uv_x0 = uv_x1;
+                uv_x1 = swap;
             }
-            stream->force_new_batch = force_new_batch;
-            rendering_command_stream_mark_overflow(stream);
+            if (y1 < y0)
+            {
+                f32 swap = y0;
+                y0 = y1;
+                y1 = swap;
+                swap = uv_y0;
+                uv_y0 = uv_y1;
+                uv_y1 = swap;
+            }
+            f32 scale_x = stream->scale.x;
+            f32 scale_y = stream->scale.y;
+            float2 p0 = float2_make(x0 * scale_x, y0 * scale_y);
+            float2 uv0 = float2_make(uv_x0, uv_y0);
+            float2 extent = float2_make((x1 - x0) * scale_x, (y1 - y0) * scale_y);
+            float2 uv_extent = float2_make(uv_x1 - uv_x0, uv_y1 - uv_y0);
+            f32 corner_radius = 5.0f * (scale_x < scale_y ? scale_x : scale_y);
+            RectVertex vertices[] = {
+                {
+                    .p0 = p0,
+                    .uv0 = uv0,
+                    .extent = extent,
+                    .uv_extent = uv_extent,
+                    .texture_index = draw.texture_index,
+                    .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
+                    .softness = 1.0,
+                    .corner_radius = corner_radius,
+                },
+                {
+                    .p0 = p0,
+                    .uv0 = uv0,
+                    .extent = extent,
+                    .uv_extent = uv_extent,
+                    .texture_index = draw.texture_index,
+                    .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
+                    .softness = 1.0,
+                    .corner_radius = corner_radius,
+                },
+                {
+                    .p0 = p0,
+                    .uv0 = uv0,
+                    .extent = extent,
+                    .uv_extent = uv_extent,
+                    .texture_index = draw.texture_index,
+                    .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
+                    .softness = 1.0,
+                    .corner_radius = corner_radius,
+                },
+                {
+                    .p0 = p0,
+                    .uv0 = uv0,
+                    .extent = extent,
+                    .uv_extent = uv_extent,
+                    .texture_index = draw.texture_index,
+                    .colors = {draw.colors[0], draw.colors[1], draw.colors[2], draw.colors[3]},
+                    .softness = 1.0,
+                    .corner_radius = corner_radius,
+                },
+            };
+
+            u32 first_index = stream->index_count;
+            if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, first_index, 6,
+                                                                sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
+            {
+                rendering_command_stream_mark_overflow(stream);
+                return;
+            }
+            u64 vertex_position = stream->vertex_cpu->position;
+            u64 index_position = stream->index_cpu->position;
+            u32 vertex_count = stream->vertex_count;
+            u32 index_count = stream->index_count;
+            u32 command_count = stream->command_count;
+            u32 batch_count = stream->batch_count;
+            bool force_new_batch = stream->force_new_batch;
+            u32 previous_batch_index_count = batch_count ? stream->batches[batch_count - 1].index_count : 0;
+            u32 vertex_offset =
+                rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
+            if (vertex_offset == UINT32_MAX)
+            {
+                arena_set_position(stream->vertex_cpu, vertex_position);
+                arena_set_position(stream->index_cpu, index_position);
+                stream->vertex_count = vertex_count;
+                stream->index_count = index_count;
+                stream->force_new_batch = force_new_batch;
+                return;
+            }
+            u32 indices[] = {
+                vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2,
+            };
+            u32 recorded_first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
+            if (recorded_first_index != UINT32_MAX)
+            {
+                rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = draw.texture_index}, recorded_first_index,
+                                                     BUSTER_ARRAY_LENGTH(indices));
+                if (stream->command_count == command_count || stream->overflowed)
+                {
+                    arena_set_position(stream->vertex_cpu, vertex_position);
+                    arena_set_position(stream->index_cpu, index_position);
+                    stream->vertex_count = vertex_count;
+                    stream->index_count = index_count;
+                    stream->command_count = command_count;
+                    stream->batch_count = batch_count;
+                    if (batch_count)
+                    {
+                        stream->batches[batch_count - 1].index_count = previous_batch_index_count;
+                    }
+                    stream->force_new_batch = force_new_batch;
+                    rendering_command_stream_mark_overflow(stream);
+                }
+            }
+            else
+            {
+                arena_set_position(stream->vertex_cpu, vertex_position);
+                stream->vertex_count = vertex_count;
+                stream->force_new_batch = force_new_batch;
+            }
         }
-    }
-    else
-    {
-        arena_set_position(stream->vertex_cpu, vertex_position);
-        stream->vertex_count = vertex_count;
-        stream->force_new_batch = force_new_batch;
     }
 }
 
 void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color, RenderFontType font_type,
                                   f32 x_offset, f32 y_offset)
 {
-    if (!rendering || !window || (u32)font_type >= RENDER_FONT_TYPE_COUNT)
+    if (rendering && window && (u32)font_type < RENDER_FONT_TYPE_COUNT)
     {
-        return;
-    }
-    FontTextureAtlas* texture_atlas = &rendering->fonts[(u32)font_type];
-    if ((!string.pointer && string.length) || !texture_atlas->description.characters || !texture_atlas->description.kerning_tables)
-    {
-        return;
-    }
-    RenderingCommandStream* stream = rendering_window_command_stream(window);
-    if (!stream)
-    {
-        return;
-    }
-    s32 height = texture_atlas->description.ascent - texture_atlas->description.descent;
-    u32 texture_index = texture_atlas->texture.value;
-
-    for (u64 i = 0; i < string.length; i += 1)
-    {
-        u32 ch = (u32)string.pointer[i];
-        FontCharacter* character = &texture_atlas->description.characters[ch];
-        f32 scale_x = stream->scale.x;
-        f32 scale_y = stream->scale.y;
-        vec2 p0 = float2_make(x_offset * scale_x, (y_offset + (f32)(character->y_offset + height + texture_atlas->description.descent)) * scale_y);
-        vec2 uv0 = float2_make((f32)character->x, (f32)character->y);
-        vec2 extent = float2_make((f32)character->width * scale_x, (f32)character->height * scale_y);
-        vec2 uv_extent = float2_make((f32)character->width, (f32)character->height);
-        RectVertex vertices[] = {
-            {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
-            {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
-            {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
-            {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
-        };
-        u32 text_first_index = stream->index_count;
-        if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, text_first_index, 6,
-                                                            sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
+        FontTextureAtlas* texture_atlas = &rendering->fonts[(u32)font_type];
+        if ((string.pointer || !string.length) && texture_atlas->description.characters && texture_atlas->description.kerning_tables)
         {
-            rendering_command_stream_mark_overflow(stream);
-            return;
-        }
-        u64 text_vertex_position = stream->vertex_cpu->position;
-        u64 text_index_position = stream->index_cpu->position;
-        u32 text_vertex_count = stream->vertex_count;
-        u32 text_index_count = stream->index_count;
-        u32 text_command_count = stream->command_count;
-        u32 text_batch_count = stream->batch_count;
-        bool text_force_new_batch = stream->force_new_batch;
-        u32 text_previous_batch_index_count = text_batch_count ? stream->batches[text_batch_count - 1].index_count : 0;
-        u32 vertex_offset =
-            rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
-        if (vertex_offset == UINT32_MAX)
-        {
-            arena_set_position(stream->vertex_cpu, text_vertex_position);
-            arena_set_position(stream->index_cpu, text_index_position);
-            stream->vertex_count = text_vertex_count;
-            stream->index_count = text_index_count;
-            stream->force_new_batch = text_force_new_batch;
-            return;
-        }
-        u32 indices[] = {vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2};
-        u32 first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
-        if (first_index != UINT32_MAX)
-        {
-            rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, first_index,
-                                                 BUSTER_ARRAY_LENGTH(indices));
-            if (stream->command_count == text_command_count || stream->overflowed)
+            RenderingCommandStream* stream = rendering_window_command_stream(window);
+            if (!stream)
             {
-                arena_set_position(stream->vertex_cpu, text_vertex_position);
-                arena_set_position(stream->index_cpu, text_index_position);
-                stream->vertex_count = text_vertex_count;
-                stream->index_count = text_index_count;
-                stream->command_count = text_command_count;
-                stream->batch_count = text_batch_count;
-                if (text_batch_count)
-                {
-                    stream->batches[text_batch_count - 1].index_count = text_previous_batch_index_count;
-                }
-                stream->force_new_batch = text_force_new_batch;
-                rendering_command_stream_mark_overflow(stream);
                 return;
             }
-        }
-        else
-        {
-            arena_set_position(stream->vertex_cpu, text_vertex_position);
-            arena_set_position(stream->index_cpu, text_index_position);
-            stream->vertex_count = text_vertex_count;
-            stream->index_count = text_index_count;
-            stream->force_new_batch = text_force_new_batch;
-            return;
-        }
+            s32 height = texture_atlas->description.ascent - texture_atlas->description.descent;
+            u32 texture_index = texture_atlas->texture.value;
 
-        s32 kerning = 0;
-        if (i + 1 < string.length)
-        {
-            kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+            for (u64 i = 0; i < string.length; i += 1)
+            {
+                u32 ch = (u32)string.pointer[i];
+                FontCharacter* character = &texture_atlas->description.characters[ch];
+                f32 scale_x = stream->scale.x;
+                f32 scale_y = stream->scale.y;
+                vec2 p0 = float2_make(x_offset * scale_x, (y_offset + (f32)(character->y_offset + height + texture_atlas->description.descent)) * scale_y);
+                vec2 uv0 = float2_make((f32)character->x, (f32)character->y);
+                vec2 extent = float2_make((f32)character->width * scale_x, (f32)character->height * scale_y);
+                vec2 uv_extent = float2_make((f32)character->width, (f32)character->height);
+                RectVertex vertices[] = {
+                    {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
+                    {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
+                    {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
+                    {.p0 = p0, .uv0 = uv0, .extent = extent, .uv_extent = uv_extent, .texture_index = texture_index, .colors = {color, color, color, color}, .softness = 1.0},
+                };
+                u32 text_first_index = stream->index_count;
+                if (!rendering_command_stream_rect_allocation_fits(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, text_first_index, 6,
+                                                                    sizeof(vertices), BUSTER_ARRAY_LENGTH(vertices)))
+                {
+                    rendering_command_stream_mark_overflow(stream);
+                    return;
+                }
+                u64 text_vertex_position = stream->vertex_cpu->position;
+                u64 text_index_position = stream->index_cpu->position;
+                u32 text_vertex_count = stream->vertex_count;
+                u32 text_index_count = stream->index_count;
+                u32 text_command_count = stream->command_count;
+                u32 text_batch_count = stream->batch_count;
+                bool text_force_new_batch = stream->force_new_batch;
+                u32 text_previous_batch_index_count = text_batch_count ? stream->batches[text_batch_count - 1].index_count : 0;
+                u32 vertex_offset =
+                    rendering_window_pipeline_add_vertices(window, BUSTER_PIPELINE_RECT, BUSTER_ARRAY_TO_BYTE_SLICE(vertices), BUSTER_ARRAY_LENGTH(vertices));
+                if (vertex_offset == UINT32_MAX)
+                {
+                    arena_set_position(stream->vertex_cpu, text_vertex_position);
+                    arena_set_position(stream->index_cpu, text_index_position);
+                    stream->vertex_count = text_vertex_count;
+                    stream->index_count = text_index_count;
+                    stream->force_new_batch = text_force_new_batch;
+                    return;
+                }
+                u32 indices[] = {vertex_offset + 0, vertex_offset + 1, vertex_offset + 2, vertex_offset + 1, vertex_offset + 3, vertex_offset + 2};
+                u32 first_index = rendering_window_pipeline_add_indices(window, BUSTER_PIPELINE_RECT, (Sliceu32)BUSTER_ARRAY_TO_SLICE(indices));
+                if (first_index != UINT32_MAX)
+                {
+                    rendering_command_stream_record_rect(stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = texture_index}, first_index,
+                                                         BUSTER_ARRAY_LENGTH(indices));
+                    if (stream->command_count == text_command_count || stream->overflowed)
+                    {
+                        arena_set_position(stream->vertex_cpu, text_vertex_position);
+                        arena_set_position(stream->index_cpu, text_index_position);
+                        stream->vertex_count = text_vertex_count;
+                        stream->index_count = text_index_count;
+                        stream->command_count = text_command_count;
+                        stream->batch_count = text_batch_count;
+                        if (text_batch_count)
+                        {
+                            stream->batches[text_batch_count - 1].index_count = text_previous_batch_index_count;
+                        }
+                        stream->force_new_batch = text_force_new_batch;
+                        rendering_command_stream_mark_overflow(stream);
+                        return;
+                    }
+                }
+                else
+                {
+                    arena_set_position(stream->vertex_cpu, text_vertex_position);
+                    arena_set_position(stream->index_cpu, text_index_position);
+                    stream->vertex_count = text_vertex_count;
+                    stream->index_count = text_index_count;
+                    stream->force_new_batch = text_force_new_batch;
+                    return;
+                }
+
+                s32 kerning = 0;
+                if (i + 1 < string.length)
+                {
+                    kerning = (texture_atlas->description.kerning_tables + ch * 256)[(u32)string.pointer[i + 1]];
+                }
+                x_offset += (f32)character->advance + (f32)kerning;
+            }
         }
-        x_offset += (f32)character->advance + (f32)kerning;
     }
 }
 
