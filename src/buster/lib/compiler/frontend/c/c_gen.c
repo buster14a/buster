@@ -15368,6 +15368,15 @@ BUSTER_C_INTERNAL bool c_ir_tokens_start_aggregate_definition(CIntegerIrBuilder*
     return result;
 }
 
+// GNU folds sizeof over a function designator to 1 — clang and gcc agree —
+// while the IR function type's layout carries pointer size for its other
+// consumers, so every sizeof exit reads the size through this instead of
+// the layout directly.
+BUSTER_C_INTERNAL u64 c_ir_sizeof_operand_size(IrType* value)
+{
+    return value->kind == IR_TYPE_FUNCTION ? 1 : value->layout.size;
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
     u32 expression_start = start;
@@ -15527,7 +15536,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 IrType* value = ir_type_from_id(&builder->program->types, type);
                 if (value && value->layout.resolved)
                 {
-                    *size_out = value->layout.size;
+                    *size_out = c_ir_sizeof_operand_size(value);
                     if (alignment_out)
                     {
                         *alignment_out = value->layout.alignment;
@@ -15553,7 +15562,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
             if (expression && expression->layout.resolved)
             {
-                *size_out = expression->layout.size;
+                *size_out = c_ir_sizeof_operand_size(expression);
                 if (alignment_out)
                 {
                     *alignment_out = expression->layout.alignment;
@@ -15654,7 +15663,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
         IrType* value = ir_type_from_id(&builder->program->types, type);
         if (index == end && value && value->layout.resolved)
         {
-            *size_out = value->layout.size;
+            *size_out = c_ir_sizeof_operand_size(value);
             if (alignment_out)
             {
                 *alignment_out = value->layout.alignment;
@@ -16441,7 +16450,7 @@ c_ir_expression_core_loop:
             u64 value = 0;
             if (operand && operand->layout.resolved)
             {
-                value = is_sizeof ? operand->layout.size : operand->layout.alignment;
+                value = is_sizeof ? c_ir_sizeof_operand_size(operand) : operand->layout.alignment;
             }
             else if (is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
             {
