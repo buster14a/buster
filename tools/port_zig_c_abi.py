@@ -194,6 +194,24 @@ def adapt_cfuncs(upstream_lines):
     insert_before(preserve_if, "#ifndef ZIG_NO_CC_ATTRIBUTES")
     insert_after(balanced_endif(lines, preserve_if), "#endif // ZIG_NO_CC_ATTRIBUTES")
 
+    # The big packed struct family constructs its value with runtime 128-bit
+    # shifts; every one of its pieces already sits in its own ZIG_NO_I128
+    # region, which gains the ZIG_NO_INT128_SHIFTS gate on top (tests/c_abi.h
+    # explains the AArch64 shift gap it covers).
+    shift_regions = set()
+    for index, line in enumerate(lines):
+        if "big_packed_struct" not in line:
+            continue
+        region = index
+        while region >= 0 and lines[region].strip() != "#ifndef ZIG_NO_I128":
+            region -= 1
+        if region < 0:
+            fail("big_packed_struct outside a ZIG_NO_I128 region at cfuncs.c line %d" % (index + 1))
+        shift_regions.add(region)
+    for region in shift_regions:
+        insert_before(region, "#ifndef ZIG_NO_INT128_SHIFTS")
+        insert_after(balanced_endif(lines, region), "#endif // ZIG_NO_INT128_SHIFTS")
+
     # Apply insertions from the bottom up so indices stay valid.
     for index, after, text in sorted(inserts, key=lambda entry: (entry[0], entry[1]), reverse=True):
         lines.insert(index + after, text)

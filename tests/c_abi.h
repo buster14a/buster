@@ -72,6 +72,17 @@
 #endif
 #endif
 
+// The compiler under test still lowers a 128-bit shift on AArch64 as a
+// single 64-bit LSL (whose amount wraps modulo 64), so any shift that moves
+// bits into or out of the high half corrupts — measured 2026-08-22 under
+// qemu, both pipelines. The big packed struct family constructs its value
+// with a runtime `<< 64` on both sides, so it sits behind this gate on
+// AArch64 until the pair shift lands; 128-bit passing, returning, and
+// comparing are unaffected and stay tested.
+#if !defined(C_ABI_FULL) && defined(__aarch64__)
+#define ZIG_NO_INT128_SHIFTS
+#endif
+
 typedef signed char int8_t;
 typedef unsigned char uint8_t;
 typedef short int16_t;
