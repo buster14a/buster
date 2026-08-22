@@ -1434,6 +1434,13 @@ struct LinkElfSectionDescriptor
 // sections preserve their virtual and non-loaded representations. Debug
 // relocations are resolved statically here: 64-bit slots receive link-time
 // addresses and 32-bit slots receive offsets into the target debug section.
+// Whether `bytes` ends exactly where the arena will hand out its next byte, so
+// the block can be grown without being moved.
+BUSTER_GLOBAL_LOCAL bool link_arena_block_on_top(Arena* arena, u8* bytes, u64 length)
+{
+    return bytes + length == arena_get_byte_pointer_at_position(arena, arena->position);
+}
+
 BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecutableLinkResult* result, ObjectFile* object, u64 image_base,
                                                        u64 const* section_offsets, LinkElfSectionTableLayout layout)
 {
@@ -1614,8 +1621,25 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
         return;
     }
     u64 total_size = header_offset + (u64)section_count * BUSTER_LINK_ELF_SECTION_HEADER_SIZE;
-    u8* bytes = arena_allocate(arena, u8, total_size);
-    memcpy(bytes, result->executable.pointer, result->executable.length);
+    // The debug sections and the section table are appended to the image the
+    // writer above just finished, and `cursor` started at its end, so the block
+    // only ever grows. Every writer that reaches here allocated that image
+    // last, so the growth is a bump: taking the tail alone leaves the image
+    // where it is and copies nothing. Reallocating and copying instead moved
+    // 35 MB per self-host link and was 3,03% of the compile's fills from DRAM
+    // (audit 2026-08-22T084855Z). The copying form stays for the case where
+    // something else has allocated since — it is the same block either way.
+    u8* bytes = result->executable.pointer;
+    if (link_arena_block_on_top(arena, bytes, result->executable.length))
+    {
+        arena_allocate(arena, u8, total_size - result->executable.length);
+    }
+    else
+    {
+        bytes = arena_allocate(arena, u8, total_size);
+        memcpy(bytes, result->executable.pointer, result->executable.length);
+    }
+    // The tail is arena bytes, which a reused arena hands back dirty.
     memset(bytes + result->executable.length, 0, total_size - result->executable.length);
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
     {
