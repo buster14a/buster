@@ -564,6 +564,28 @@ compilation is explicitly enabled.
     `perf report` mis-symbolizing buster-produced `ET_EXEC` images by
     `-0x400000`; clang-built binaries are PIE and symbolize normally once the
     right address space is used.
+- **`tools/branch_miss_survey.py` ranks branch mispredictions by source line,
+  not by symbol.** `perf record -e branch-misses` is not a precise event: the
+  sample lands past the branch that caused it, so its histogram names the
+  function and three audits (`2026-08-22b`, `2026-08-22d`) paid to discover
+  that separately. Zen 3 and later carry the AMD Last Branch Record extension,
+  so `perf record -j any,u` captures the last sixteen branches of every sample
+  with a per-entry mispredict flag — the branch instruction's own address. The
+  script records that over the stage-1 self-host compile by default, tallies
+  the mispredicted records, symbolizes them through inline frames, and prints a
+  ranking per function and per line with each row's estimated absolute misses:
+
+  ```sh
+  ./build.sh build --config Release -t ide
+  tools/branch_miss_survey.py --repeat 3 --cross-check
+  ```
+
+  `--cross-check` re-profiles the same run with `branch-misses:u` and prints
+  that share beside each function, which is the check that the address mapping
+  is right: a branch record is a runtime address in a PIE and needs the
+  `p_vaddr - p_offset` skew above, and dropping it silently reports the
+  neighbouring functions. Profile any other workload by passing it after `--`.
+  `--self-test` covers the address math without needing `perf`.
 - **Validate any profiling method against a non-sampling ground truth before
   trusting it.** The cheap one here is direct timing: bracket the call sites
   under suspicion with `timestamp_take()`/`timestamp_ns_between()` and print
