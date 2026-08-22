@@ -4159,6 +4159,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("readp"),   S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"),
             S8_INITIALIZER("udiv"),    S8_INITIALIZER("shl"),    S8_INITIALIZER("sar"),    S8_INITIALIZER("shr"),
             S8_INITIALIZER("local_pair"), S8_INITIALIZER("kagg_take"), S8_INITIALIZER("big_make"),
+            S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("union_tail"), S8_INITIALIZER("locals_array"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4349,6 +4350,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_float_function, machine_a64_target);
             BUSTER_TEST(arguments, !a64_float_selected.supported);
         }
+        // An aggregate literal built and passed onward: kagg's call keeps it
+        // out of the raw-copy execution list, so it is asserted as selection
+        // coverage like with_call.
+        IrFunction* a64_kagg_function = machine_test_ir_function_find(machine_a64_module, S8("kagg"));
+        BUSTER_TEST(arguments, a64_kagg_function != 0);
+        if (a64_kagg_function)
+        {
+            MachineSelectResult a64_kagg_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_kagg_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_kagg_selected.supported);
+        }
         // Module wiring: MIR_STACK on the AArch64 target routes the subset
         // through the machine path and counts the rest.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
@@ -4441,6 +4453,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
                                string_equal(a64_supported_names[name_index], S8("bitnot")) ||
                                string_equal(a64_supported_names[name_index], S8("sar")) ||
+                               string_equal(a64_supported_names[name_index], S8("arr_lit")) ||
+                               string_equal(a64_supported_names[name_index], S8("bits")) ||
+                               string_equal(a64_supported_names[name_index], S8("union_tail")) ||
                                string_equal(a64_supported_names[name_index], S8("udiv")) || is_readp;
             bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
                                string_equal(a64_supported_names[name_index], S8("srem")) ||
