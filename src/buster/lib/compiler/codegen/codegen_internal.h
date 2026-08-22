@@ -113,6 +113,15 @@ struct CodegenCanonicalCallArgument
     u32 copy_offset;
     u32 copy_size;
     u32 copy_alignment;
+    // Win64 legalizes a bare vector wider than the model's widest register
+    // into one indirect reference per register-sized piece, each taking an
+    // argument slot of its own: registers while they last, stack eightbytes
+    // after, in the same call. piece_size is that register width and
+    // register_piece_count how many pieces landed in registers; part_count
+    // holds the total piece count. A single-reference argument keeps
+    // piece_size zero.
+    u32 windows_piece_size;
+    u32 windows_register_piece_count;
     u8 float_register;
     bool aggregate;
     bool on_stack;
@@ -133,6 +142,16 @@ struct CodegenCanonicalCallLayout
     u32 stack_alignment;
     u32 windows_stack_size;
     u32 windows_copy_storage_size;
+    // A hidden-pointer result whose type wants more than the sixteen bytes a
+    // frame slot is aligned to bounces through this outgoing-area slot: the
+    // callee is entitled to store through the pointer with alignment-checking
+    // moves (clang writes a wide vector back with vmovaps), so the caller
+    // hands it a rounded-up address and copies the bytes into the result's
+    // frame slot after the call. Zero size means the frame slot is handed
+    // over directly.
+    u32 windows_result_copy_offset;
+    u32 windows_result_copy_size;
+    u32 windows_result_copy_alignment;
     u32 simulated_registers;
     u32 simulated_float_registers;
     bool stack_padding;

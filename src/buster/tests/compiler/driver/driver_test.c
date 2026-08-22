@@ -2483,6 +2483,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(c_ymm_model_temporary);
         }
     }
+    // Vectors past 64 bytes at pinned CPU models, compile-only and
+    // Windows-only (no other convention accepts these signature types). The
+    // piece count of a wide argument and the direct-versus-hidden-pointer
+    // answer for a wide result both follow the model -- a 128-byte vector is
+    // eight references and a hidden-pointer result on nehalem, four and
+    // ymm0-3 on haswell, two and zmm0-1 on znver5 -- so each model must
+    // reach an object through both pipelines. The wine block below runs the
+    // same fixture at the pinned models.
+    {
+        String8 c_wide_model_flags[] = {S8("-march=nehalem"), S8("-march=haswell"), S8("-march=znver5")};
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(c_wide_model_flags) * 2; row += 1)
+        {
+            u32 model_index = row >> 1;
+            u32 canonical = row & 1;
+            TemporalArena c_wide_model_temporary = scratch_begin(&arguments->arena, 1);
+            String8 c_wide_model_path = buster_test_temporary_path(
+                c_wide_model_temporary.arena, S8("buster-c-vector-wide-model"),
+                string_format(c_wide_model_temporary.arena, S8("-{u32}-{u32}.o"), model_index, canonical));
+            String8 c_wide_model_command_line[] = {
+                canonical ? S8("-fno-register-allocator") : S8("-fregister-allocator=fast"),
+                S8("-c"),
+                S8("-target"),
+                S8("x86_64-pc-windows-msvc"),
+                c_wide_model_flags[model_index],
+                S8("-o"),
+                c_wide_model_path,
+                S8("tests/basic_c_vector_argument_wide.c"),
+            };
+            CompilerDriverResult c_wide_model = compiler_driver_execute_invocation(
+                c_wide_model_temporary.arena,
+                compiler_driver_parse_arguments(c_wide_model_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_wide_model_command_line)));
+            BUSTER_TEST(arguments, c_wide_model.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, c_wide_model.has_object);
+            scratch_end(c_wide_model_temporary);
+        }
+    }
     String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),
 #if BUSTER_WINDOWS
                                                                           S8(".exe"));
@@ -3909,6 +3945,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // a direct YMM0 result the way clang and MSVC do; the run proves
             // the callee's registers and the caller's expectations agree.
             S8("tests/basic_c_vector_argument_ymm.c"),
+            // Vectors past 64 bytes: pieced indirect arguments and the
+            // model-dependent direct-or-hidden-pointer result, at the host's
+            // model here and at the pinned sub-AVX-512 models below.
+            S8("tests/basic_c_vector_argument_wide.c"),
         };
         for (u32 fixture_index = 0; wine_available && fixture_index < BUSTER_ARRAY_LENGTH(wine_fixtures); fixture_index += 1)
         {
@@ -3939,6 +3979,48 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 }
             }
             scratch_end(wine_temporary);
+        }
+        // The wide fixture again at pinned sub-AVX-512 models, run under
+        // wine: the eight- and four-piece argument straddles and the
+        // hidden-pointer wide result only exist below the host's likely
+        // model, so the native row cannot reach them. nehalem needs SSE4.2
+        // and haswell AVX2, both of which every runner the suite executes on
+        // provides -- the -march=native rows above already assume at least
+        // as much.
+        String8 wine_wide_models[] = {S8("-march=nehalem"), S8("-march=haswell")};
+        for (u32 model_index = 0; wine_available && model_index < BUSTER_ARRAY_LENGTH(wine_wide_models); model_index += 1)
+        {
+            TemporalArena wine_wide_temporary = scratch_begin(&arguments->arena, 1);
+            String8 wine_wide_path = buster_test_temporary_path(wine_wide_temporary.arena, S8("buster-c-windows-wide"),
+                                                                string_format(wine_wide_temporary.arena, S8("-{u32}.exe"), model_index));
+            String8 wine_wide_command_line[] = {
+                S8("-g"),
+                S8("-target"),
+                S8("x86_64-pc-windows-msvc"),
+                wine_wide_models[model_index],
+                S8("-o"),
+                wine_wide_path,
+                S8("tests/basic_c_vector_argument_wide.c"),
+            };
+            CompilerDriverResult wine_wide_build = compiler_driver_execute_invocation(
+                wine_wide_temporary.arena,
+                compiler_driver_parse_arguments(wine_wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_command_line)));
+            BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);
+            if (wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 wine_wide_run_arguments[] = {
+                    S8("wine"),
+                    wine_wide_path,
+                };
+                ProcessSpawnResult wine_wide_run =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+                BUSTER_TEST(arguments, wine_wide_run.handle != 0);
+                if (wine_wide_run.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(wine_wide_temporary);
         }
     }
 #endif

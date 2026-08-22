@@ -2951,12 +2951,17 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                     // registers when it does not. The width only decides how many
                     // registers the result takes, which is the backend's question
                     // and not this one. Past 64 bytes clang's answer depends on
-                    // the CPU model, which this classification cannot see -- and
-                    // the C frontend refuses vector signature types past 64 bytes
-                    // anyway -- while below 8 clang's own shapes turn erratic (a
-                    // 4-byte vector rides EAX, a 2-byte one XMM0), so both ends
-                    // keep the reference the two sides of a buster build already
-                    // agree on.
+                    // the CPU model, which this classification cannot see, so
+                    // wider values keep the model-independent halves here and the
+                    // canonical backend finishes the contract per model: an
+                    // argument's single reference becomes one reference per
+                    // register-sized piece (codegen_canonical_x64_windows_vector_
+                    // argument_pieces) and a result's reference becomes up to
+                    // four direct registers (codegen_canonical_x64_windows_
+                    // vector_result). Below 8 bytes clang's own shapes turn
+                    // erratic (a 4-byte vector rides EAX, a 2-byte one XMM0), so
+                    // that end keeps the reference the two sides of a buster
+                    // build already agree on.
                     if (!is_result || size < 8 || size > 64)
                     {
                         value.part_count = 1;

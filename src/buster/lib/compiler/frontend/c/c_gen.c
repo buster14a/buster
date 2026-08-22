@@ -806,8 +806,8 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
     {
         return true;
     }
-    IrAbiValue abi = ir_type_abi_value(program, type_id, ir_abi_convention_for_target(target),
-                                       result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    IrAbiValue abi = ir_type_abi_value(program, type_id, convention, result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
     if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
     {
         if (!c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
@@ -821,8 +821,17 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
             return false;
         }
     }
-    return type->kind != IR_TYPE_FUNCTION && (type->kind != IR_TYPE_VECTOR || type->layout.size <= 64) &&
-           (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
+    // Win64 signatures carry a bare vector at any power-of-two width: past
+    // the widest register the backend legalizes it into one indirect
+    // reference per register-sized piece (results come back direct in up to
+    // four registers, through the hidden pointer past that), which is the
+    // contract clang and MSVC compile. Non-power-of-two lane counts scalarize
+    // in clang and stay refused, as does every other convention past 64
+    // bytes, where the piece story has not been brought up.
+    bool vector_supported = type->kind != IR_TYPE_VECTOR || type->layout.size <= 64 ||
+                            (convention == IR_ABI_CONVENTION_WIN64_X86_64 && type->layout.size <= (u64)UINT32_MAX &&
+                             !(type->layout.size & (type->layout.size - 1)));
+    return type->kind != IR_TYPE_FUNCTION && vector_supported && (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
 }
 
 BUSTER_C_INTERNAL bool c_ir_signature_body_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId return_type,

@@ -39,9 +39,16 @@
 // Non-power-of-two lane counts are rejected as function parameter and return
 // types.
 #define ZIG_NO_NON_POW2_VECTORS
-// Vectors wider than 64 bytes are rejected (the open wide-argument
-// legalization work).
+// Vectors wider than 64 bytes cross the boundary on Win64 x86-64 only:
+// that convention legalizes them the way clang and MSVC do (one indirect
+// reference per register-sized piece for an argument, up to four direct
+// registers or the hidden pointer for a result), while every other
+// convention still rejects the signature types. Target-keyed like the
+// F128/INT128_SHIFTS gates below, so both sides agree whichever compiler
+// builds them.
+#if !(defined(_WIN32) && defined(__x86_64__))
 #define ZIG_NO_WIDE_VECTORS
+#endif
 // long double supports transport only; comparisons count as the unsupported
 // wide floating-point arithmetic.
 #define ZIG_NO_LONG_DOUBLE

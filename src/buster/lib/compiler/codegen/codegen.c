@@ -3212,6 +3212,65 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const
     return size / width;
 }
 
+// How many indirect references a Win64 vector argument travels as on this
+// target: one per register-sized piece when the value is wider than the
+// model's widest register, one for the whole value otherwise (including
+// wrapping aggregates and the sub-eightbyte widths whose reference both
+// sides of a buster build already agree on). piece_size is the register
+// width exactly when the count is more than one. Zero pieces means the model
+// cannot split the width evenly, which no power-of-two signature type
+// produces.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size)
+{
+    *piece_size = 0;
+    if (!type || type->kind != IR_TYPE_VECTOR || !type->layout.resolved || type->layout.size < 8 || type->layout.size > UINT32_MAX ||
+        (type->layout.size & (type->layout.size - 1)))
+    {
+        return 1;
+    }
+    u32 register_size = 0;
+    u32 count = codegen_canonical_x64_vector_part_registers(target, (u32)type->layout.size, &register_size);
+    if (count > 1)
+    {
+        *piece_size = register_size;
+    }
+    return count;
+}
+
+// The backend's half of the Win64 wide-vector result contract. The
+// classification keeps a vector result past 64 bytes behind the reference
+// because whether it comes back directly depends on the CPU model, which a
+// classification keyed on convention alone cannot see: clang splits the value
+// into registers of the widest width the model owns and returns it directly
+// while at most four suffice (two zmm for 128 bytes on znver5, four ymm on
+// haswell), and through the caller's hidden pointer past that (128 bytes at
+// baseline is eight xmm-sized pieces, so it stays indirect). Every canonical
+// read of a result classification funnels through this rewrite so the caller
+// and callee sides of one build, and clang across the boundary, agree.
+BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_x64_windows_vector_result(IrProgram* program, IrTypeId type_id, CodegenAbi abi,
+                                                                                          Target const* target, CodegenCanonicalAbiValue value)
+{
+    if (abi == CODEGEN_ABI_X86_64_WINDOWS && value.indirect)
+    {
+        IrType* type = ir_type_from_id(&program->types, type_id);
+        if (type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size > 64 && type->layout.size <= UINT32_MAX &&
+            !(type->layout.size & (type->layout.size - 1)))
+        {
+            u32 register_size = 0;
+            u32 register_count = codegen_canonical_x64_vector_part_registers(target, (u32)type->layout.size, &register_size);
+            if (register_count && register_count <= 4)
+            {
+                value = (CodegenCanonicalAbiValue){.part_count = 1};
+                value.parts[0] = (CodegenCanonicalAbiPart){
+                    .abi_class = IR_ABI_CLASS_VECTOR,
+                    .size = (u32)type->layout.size,
+                };
+            }
+        }
+    }
+    return value;
+}
+
 // Whether this target hands the value over in the registers the classification
 // named. A part it has to split is one the psABI expected a single register to
 // hold, and the split is only available to a return, whose registers are its
@@ -3339,7 +3398,11 @@ bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type
         *part_count = (u32)(type->layout.size / 8);
         return true;
     }
-    if (type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size && type->layout.size <= 64)
+    // Any resolved vector is a copyable run of eightbytes to the canonical
+    // emitter; the width cap that used to sit here only protected paths that
+    // now size their copies from this count. How a wide vector crosses a call
+    // boundary is the ABI classification's question, not this one.
+    if (type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size && type->layout.size <= (u64)UINT32_MAX * 8)
     {
         *part_count = (u32)((type->layout.size + 7) / 8);
         return true;
@@ -3502,7 +3565,8 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
         return CODEGEN_ERROR_INVALID_IR;
     }
     layout->argument_count = argument_count;
-    layout->return_abi = codegen_canonical_aggregate_abi(program, instruction->canonical_type, abi, true, false);
+    layout->return_abi = codegen_canonical_x64_windows_vector_result(
+        program, instruction->canonical_type, abi, &target, codegen_canonical_aggregate_abi(program, instruction->canonical_type, abi, true, false));
     bool return_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, callee_type->return_type);
     if (return_contains_f80 && (abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
                                 !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, callee_type->return_type)))
@@ -3581,15 +3645,27 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
         {
             part_count = 1;
         }
+        u32 windows_piece_size = 0;
         if (windows_indirect)
         {
-            part_count = 1;
+            // A bare vector wider than the model's widest register legalizes
+            // into one reference per register-sized piece, the way clang and
+            // MSVC pass the same declaration: each piece is its own argument
+            // slot, so a 128-byte vector is two references on znver5 and
+            // eight at baseline. Wrapping aggregates keep the single
+            // reference, as do vectors the model carries whole.
+            part_count = codegen_canonical_x64_windows_vector_argument_pieces(&target, type, &windows_piece_size);
+            if (!part_count)
+            {
+                return CODEGEN_ERROR_UNSUPPORTED_ABI;
+            }
         }
         CodegenCanonicalCallArgument call_argument = {
             .abi = argument_abi,
             .type = type,
             .part_count = part_count,
             .stack_part_count = (u32)((type->layout.size + 7) / 8),
+            .windows_piece_size = windows_piece_size,
             .float_register = UINT8_MAX,
             .aggregate = aggregate,
             .windows_indirect = windows_indirect,
@@ -3643,6 +3719,22 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
             {
                 call_argument.on_stack = true;
                 argument_stack_parts = (type->layout.size + 7) / 8;
+            }
+        }
+        else if (windows_piece_size)
+        {
+            // Pieces are ordinary argument slots, so unlike every other
+            // multi-part shape they straddle: the leading pieces take the
+            // registers that remain and the tail continues on the stack in
+            // the same call, exactly as clang assigns them.
+            u32 available = layout->simulated_registers < register_count ? register_count - layout->simulated_registers : 0;
+            u32 register_pieces = BUSTER_MIN(part_count, available);
+            call_argument.windows_register_piece_count = register_pieces;
+            layout->simulated_registers += register_pieces;
+            if (register_pieces < part_count)
+            {
+                call_argument.on_stack = true;
+                argument_stack_parts = part_count - register_pieces;
             }
         }
         else
@@ -3725,6 +3817,36 @@ CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* p
                 call_argument->copy_alignment = (u32)copy_alignment;
             }
             copy_cursor += copy_size + copy_slack;
+        }
+        // The hidden-pointer result of an over-aligned type gets the same
+        // treatment as an indirect argument's copy: a slot reserved with room
+        // to round the sixteen-aligned stack pointer up to what the type
+        // asks, because the callee may store the result back with
+        // alignment-checking moves. The bytes come home to the result's
+        // ordinary frame slot right after the call.
+        if (layout->windows_indirect_return)
+        {
+            IrType* bounce_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            u64 bounce_alignment = bounce_type && bounce_type->layout.resolved ? codegen_canonical_x64_stack_argument_alignment(bounce_type) : 0;
+            if (bounce_type && bounce_type->layout.resolved && bounce_alignment > CODEGEN_X64_STACK_ALIGNMENT)
+            {
+                u64 bounce_size = bounce_type->layout.size;
+                u64 bounce_slack = bounce_alignment - CODEGEN_X64_STACK_ALIGNMENT;
+                u64 bounce_remainder = copy_cursor & (CODEGEN_X64_STACK_ALIGNMENT - 1);
+                if (bounce_remainder)
+                {
+                    copy_cursor += CODEGEN_X64_STACK_ALIGNMENT - bounce_remainder;
+                }
+                if (!bounce_size || bounce_size > UINT32_MAX || copy_cursor > UINT32_MAX || bounce_size > UINT32_MAX - copy_cursor ||
+                    bounce_slack > UINT32_MAX - copy_cursor - bounce_size)
+                {
+                    return CODEGEN_ERROR_CAPACITY;
+                }
+                layout->windows_result_copy_offset = (u32)copy_cursor;
+                layout->windows_result_copy_size = (u32)bounce_size;
+                layout->windows_result_copy_alignment = (u32)bounce_alignment;
+                copy_cursor += bounce_size + bounce_slack;
+            }
         }
         if (copy_cursor > UINT32_MAX - 15)
         {
@@ -5926,6 +6048,53 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_frame_to_rsp(CodegenBuffer* 
     return true;
 }
 
+// The reverse move: bytes a callee stored through an over-aligned
+// outgoing-area slot come home to a value's frame slot an eightbyte at a
+// time. R11 re-derives the rounded-up address the callee wrote through, the
+// same way the slot's address was staged before the call.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_rsp_to_frame(CodegenBuffer* buffer, u32 source_offset, u32 source_alignment,
+                                                                 u32 destination_offset, u32 frame_base_offset, u32 size)
+{
+    if (!buffer || !size || destination_offset > INT32_MAX || size > INT32_MAX)
+    {
+        return false;
+    }
+    if (!codegen_canonical_x64_rsp_address(buffer, X64_REGISTER_R11, source_offset, source_alignment))
+    {
+        return false;
+    }
+    u64 copied = 0;
+    while (copied < size)
+    {
+        s32 destination = codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)destination_offset + (s64)copied, frame_base_offset);
+        u32 chunk = codegen_canonical_copy_chunk((u64)size - copied, copied, copied);
+        if (buffer->error != CODEGEN_ERROR_NONE || copied > INT32_MAX)
+        {
+            return false;
+        }
+        u16 width = (u16)(chunk * 8);
+        BusterX86MetadataPhysicalOperand load_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, chunk <= 2 ? 32 : width),
+            codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R11, width, (s64)copied),
+        };
+        String8 load_mnemonic = chunk <= 2 ? S8("MOVZX") : S8("MOV");
+        if (!codegen_canonical_x64_metadata_emit(buffer, load_mnemonic, load_operands, BUSTER_ARRAY_LENGTH(load_operands)))
+        {
+            return false;
+        }
+        BusterX86MetadataPhysicalOperand store_operands[2] = {
+            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, width, destination),
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, width),
+        };
+        if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_operands, BUSTER_ARRAY_LENGTH(store_operands)))
+        {
+            return false;
+        }
+        copied += chunk;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_memory_operation_base(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,
                                                                            u32 base_register)
 {
@@ -6975,7 +7144,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
             }
         }
-        CodegenCanonicalAbiValue canonical_return_abi = codegen_canonical_aggregate_abi(program, canonical_return_type, result.abi, true, false);
+        CodegenCanonicalAbiValue canonical_return_abi = codegen_canonical_x64_windows_vector_result(
+            program, canonical_return_type, result.abi, &target, codegen_canonical_aggregate_abi(program, canonical_return_type, result.abi, true, false));
         bool windows_indirect_return = target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS && canonical_return_abi.indirect;
         bool system_v_indirect_return = target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && canonical_return_abi.indirect;
         bool x64_indirect_return = windows_indirect_return || system_v_indirect_return;
@@ -7996,6 +8166,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             bool prior_memory = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && prior_type &&
                                                 (prior_aggregate_abi.memory || (prior_aggregate && prior_type->layout.size > 16));
+                            if (result.abi == CODEGEN_ABI_X86_64_WINDOWS && prior_aggregate_abi.indirect)
+                            {
+                                // A pieced prior consumes one slot per piece,
+                                // registers first and stack eightbytes after,
+                                // by the same straddle the caller staged.
+                                u32 prior_piece_size = 0;
+                                u32 prior_pieces = codegen_canonical_x64_windows_vector_argument_pieces(&target, prior_type, &prior_piece_size);
+                                if (!prior_pieces)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                    return result;
+                                }
+                                if (prior_piece_size)
+                                {
+                                    u32 available = register_index < register_count ? register_count - register_index : 0;
+                                    u32 taken = BUSTER_MIN(prior_pieces, available);
+                                    register_index += taken;
+                                    if (taken < prior_pieces)
+                                    {
+                                        prior_stack_bytes =
+                                            codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 8) + (u64)(prior_pieces - taken) * 8;
+                                    }
+                                    continue;
+                                }
+                            }
                             if (prior_aggregate && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                             {
                                 prior_parts = 1;
@@ -8175,6 +8370,85 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                         }
                         u32 register_parts = windows_indirect ? 1 : part_count;
+                        if (windows_indirect)
+                        {
+                            u32 self_piece_size = 0;
+                            u32 self_pieces = codegen_canonical_x64_windows_vector_argument_pieces(&target, argument_type, &self_piece_size);
+                            if (!self_pieces)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                return result;
+                            }
+                            if (self_piece_size)
+                            {
+                                // Gather the pieces in slot order: the leading
+                                // references still sit in their argument
+                                // registers (read before the stack-piece
+                                // copies clobber RDX, which is one of them),
+                                // the tail was stored past the shadow space.
+                                // Each piece's bytes land at its offset in the
+                                // parameter's frame slot.
+                                u32 available = register_index < register_count ? register_count - register_index : 0;
+                                u32 register_pieces = BUSTER_MIN(self_pieces, available);
+                                u64 argument_stack_offset = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 8);
+                                for (u32 piece = 0; piece < self_pieces; piece += 1)
+                                {
+                                    u64 piece_value_offset = (u64)piece * self_piece_size;
+                                    if ((s64)result_displacement + (s64)piece_value_offset + self_piece_size > INT32_MAX)
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
+                                    X64Register piece_pointer = X64_REGISTER_RAX;
+                                    X64Register piece_data = X64_REGISTER_RDX;
+                                    if (piece < register_pieces)
+                                    {
+                                        piece_pointer = (X64Register)registers[register_index + piece];
+                                        piece_data = X64_REGISTER_RAX;
+                                    }
+                                    else
+                                    {
+                                        s64 slot_displacement =
+                                            (s64)48 + (s64)argument_stack_offset + (s64)(piece - register_pieces) * 8;
+                                        BusterX86MetadataPhysicalOperand piece_pointer_load_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                            codegen_canonical_x64_metadata_memory(
+                                                X64_REGISTER_RBP, 64,
+                                                codegen_canonical_x64_rebase_frame_displacement(&buffer, slot_displacement,
+                                                                                                canonical_x64_frame_base_offset)),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), piece_pointer_load_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(piece_pointer_load_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
+                                    }
+                                    for (u32 chunk = 0; chunk < self_piece_size / 8; chunk += 1)
+                                    {
+                                        BusterX86MetadataPhysicalOperand piece_load_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr(piece_data, 64),
+                                            codegen_canonical_x64_metadata_memory_relaxed(piece_pointer, 64, (s64)chunk * 8),
+                                        };
+                                        BusterX86MetadataPhysicalOperand piece_store_operands[2] = {
+                                            codegen_canonical_x64_metadata_memory(
+                                                X64_REGISTER_RBP, 64, result_displacement + (s32)piece_value_offset + (s32)(chunk * 8)),
+                                            codegen_canonical_x64_metadata_gpr(piece_data, 64),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), piece_load_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(piece_load_operands)) ||
+                                            !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), piece_store_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(piece_store_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
+                                    }
+                                }
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                        }
                         if (!aggregate)
                         {
                             IrType* parameter_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -10255,13 +10529,34 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
+                            // The variadic tail starts after the named
+                            // parameters' slots. Most named parameters take
+                            // one slot; a pieced vector takes one per piece.
+                            u64 named_slots = windows_indirect_return ? 1 : 0;
+                            for (u32 named_index = 0; named_index < canonical_function_type->parameter_count; named_index += 1)
+                            {
+                                u64 named_piece_count = 1;
+                                CodegenCanonicalAbiValue named_abi = codegen_canonical_aggregate_abi(
+                                    program, canonical_function_type->parameter_types[named_index], result.abi, false, false);
+                                if (named_abi.indirect)
+                                {
+                                    u32 named_piece_size = 0;
+                                    u32 named_pieces = codegen_canonical_x64_windows_vector_argument_pieces(
+                                        &target, ir_type_from_id(&program->types, canonical_function_type->parameter_types[named_index]),
+                                        &named_piece_size);
+                                    if (named_pieces)
+                                    {
+                                        named_piece_count = named_pieces;
+                                    }
+                                }
+                                named_slots += named_piece_count;
+                            }
                             BusterX86MetadataPhysicalOperand va_windows_address_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                                 codegen_canonical_x64_metadata_memory(
                                     X64_REGISTER_RBP, 64,
-                                    codegen_canonical_x64_rebase_frame_displacement(
-                                        &buffer, 16 + (s64)(canonical_function_type->parameter_count + (windows_indirect_return ? 1 : 0)) * 8,
-                                        canonical_x64_frame_base_offset)),
+                                    codegen_canonical_x64_rebase_frame_displacement(&buffer, 16 + (s64)named_slots * 8,
+                                                                                     canonical_x64_frame_base_offset)),
                             };
                             (void)codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), va_windows_address_operands,
                                                                       BUSTER_ARRAY_LENGTH(va_windows_address_operands));
@@ -10935,6 +11230,49 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     continue;
                                 }
                                 IrValueId argument = instruction->operands[argument_index + 1];
+                                if (arguments[argument_index].windows_piece_size)
+                                {
+                                    // The pieces that did not fit in registers
+                                    // continue as stack slots: each gets the
+                                    // rounded-up address of its slice of the
+                                    // caller-owned copy.
+                                    for (u32 piece = arguments[argument_index].windows_register_piece_count;
+                                         piece < arguments[argument_index].part_count; piece += 1)
+                                    {
+                                        if (!codegen_canonical_x64_rsp_address(&buffer, X64_REGISTER_RAX, arguments[argument_index].copy_offset,
+                                                                                arguments[argument_index].copy_alignment))
+                                        {
+                                            result.error = CODEGEN_ERROR_CAPACITY;
+                                            return result;
+                                        }
+                                        if (piece)
+                                        {
+                                            BusterX86MetadataPhysicalOperand piece_advance_operands[2] = {
+                                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                                codegen_canonical_x64_metadata_immediate((s64)piece * arguments[argument_index].windows_piece_size,
+                                                                                          32),
+                                            };
+                                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), piece_advance_operands,
+                                                                                       BUSTER_ARRAY_LENGTH(piece_advance_operands)))
+                                            {
+                                                result.error = buffer.error;
+                                                return result;
+                                            }
+                                        }
+                                        BusterX86MetadataPhysicalOperand piece_store_operands[2] = {
+                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RSP, 64, 32 + (s64)stack_index * 8),
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), piece_store_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(piece_store_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
+                                        stack_index += 1;
+                                    }
+                                    continue;
+                                }
                                 if (arguments[argument_index].windows_indirect)
                                 {
                                     if (!codegen_canonical_x64_rsp_address(&buffer, X64_REGISTER_RAX, arguments[argument_index].copy_offset,
@@ -10964,15 +11302,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (call_x64_indirect_return)
                         {
                             X64Register indirect_return_register = call_windows_indirect_return ? X64_REGISTER_RCX : X64_REGISTER_RDI;
-                            BusterX86MetadataPhysicalOperand indirect_return_operands[2] = {
-                                codegen_canonical_x64_metadata_gpr(indirect_return_register, 64),
-                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement),
-                            };
-                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), indirect_return_operands,
-                                                                       BUSTER_ARRAY_LENGTH(indirect_return_operands)))
+                            if (call_layout.windows_result_copy_size)
                             {
-                                result.error = buffer.error;
-                                return result;
+                                // An over-aligned result bounces through its
+                                // reserved outgoing-area slot: the callee may
+                                // store it back with alignment-checking moves
+                                // the sixteen-aligned frame slot cannot take.
+                                if (!codegen_canonical_x64_rsp_address(&buffer, indirect_return_register, call_layout.windows_result_copy_offset,
+                                                                        call_layout.windows_result_copy_alignment))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
+                            else
+                            {
+                                BusterX86MetadataPhysicalOperand indirect_return_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(indirect_return_register, 64),
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, result_displacement),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("LEA"), indirect_return_operands,
+                                                                           BUSTER_ARRAY_LENGTH(indirect_return_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                         }
                         IrType* call_callee_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
@@ -10989,8 +11343,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             CodegenCanonicalCallArgument* call_argument = arguments + argument_index - 1;
                             IrType* argument_type = call_argument->type;
                             CodegenCanonicalAbiValue argument_abi = call_argument->abi;
-                            u32 register_parts = call_argument->windows_indirect ? 1 : call_argument->part_count;
-                            if (call_argument->on_stack)
+                            // A pieced vector argument stages exactly the
+                            // pieces the layout put in registers; its tail is
+                            // already in the stack slots. Every other on-stack
+                            // argument has nothing to stage here.
+                            u32 register_parts = call_argument->windows_piece_size ? call_argument->windows_register_piece_count
+                                                 : call_argument->windows_indirect ? 1
+                                                                                    : call_argument->part_count;
+                            if (call_argument->on_stack && !(call_argument->windows_piece_size && call_argument->windows_register_piece_count))
                             {
                                 continue;
                             }
@@ -11134,11 +11494,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (call_argument->windows_indirect)
                             {
-                                u8 reg = registers[register_index++];
-                                if (!codegen_canonical_x64_rsp_address(&buffer, reg, call_argument->copy_offset, call_argument->copy_alignment))
+                                // One reference per register piece; a
+                                // single-reference argument is the loop's
+                                // one-piece case. Each register holds the
+                                // rounded-up copy address advanced to its
+                                // piece.
+                                for (u32 piece = 0; piece < register_parts; piece += 1)
                                 {
-                                    result.error = CODEGEN_ERROR_CAPACITY;
-                                    return result;
+                                    u8 reg = registers[register_index++];
+                                    if (!codegen_canonical_x64_rsp_address(&buffer, reg, call_argument->copy_offset, call_argument->copy_alignment))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
+                                    if (piece)
+                                    {
+                                        BusterX86MetadataPhysicalOperand piece_advance_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr((X64Register)reg, 64),
+                                            codegen_canonical_x64_metadata_immediate((s64)piece * call_argument->windows_piece_size, 32),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), piece_advance_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(piece_advance_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
+                                    }
                                 }
                                 continue;
                             }
@@ -11228,6 +11609,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .offset = call_offset + 1,
                                 .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
                             };
+                        }
+                        // Bring a bounced hidden-pointer result home before the
+                        // outgoing area it lives in is released. An unused
+                        // result stays in the slot; the bounce is what kept
+                        // the callee's store off the frame in that case.
+                        if (call_layout.windows_result_copy_size && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                            !codegen_canonical_x64_copy_rsp_to_frame(&buffer, call_layout.windows_result_copy_offset,
+                                                                     call_layout.windows_result_copy_alignment,
+                                                                     value_offsets[instruction->result.value], canonical_x64_frame_base_offset,
+                                                                     call_layout.windows_result_copy_size))
+                        {
+                            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
+                            return result;
                         }
                         if (windows_dynamic_call)
                         {
@@ -11386,8 +11780,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             u32 return_parts = 0;
                             bool aggregate_return = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &return_parts);
-                            CodegenCanonicalAbiValue aggregate_return_abi =
-                                codegen_canonical_aggregate_abi(program, instruction->canonical_type, result.abi, true, false);
+                            CodegenCanonicalAbiValue aggregate_return_abi = codegen_canonical_x64_windows_vector_result(
+                                program, instruction->canonical_type, result.abi, &target,
+                                codegen_canonical_aggregate_abi(program, instruction->canonical_type, result.abi, true, false));
                             if (aggregate_return_abi.part_count && !aggregate_return_abi.indirect)
                             {
                                 aggregate_return = true;
@@ -13499,8 +13894,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 return_parts = 0;
                             bool aggregate_return =
                                 codegen_canonical_integer_aggregate_parts(program, function->values[return_value.value].canonical_type, &return_parts);
-                            CodegenCanonicalAbiValue aggregate_return_abi =
-                                codegen_canonical_aggregate_abi(program, function->values[return_value.value].canonical_type, result.abi, true, false);
+                            CodegenCanonicalAbiValue aggregate_return_abi = codegen_canonical_x64_windows_vector_result(
+                                program, function->values[return_value.value].canonical_type, result.abi, &target,
+                                codegen_canonical_aggregate_abi(program, function->values[return_value.value].canonical_type, result.abi, true, false));
                             if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[return_value.value].canonical_type))
                             {
                                 if (result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
