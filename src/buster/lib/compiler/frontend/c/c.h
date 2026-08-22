@@ -411,6 +411,10 @@ struct CSourceMapRecovery
     // Must outlive every consumer of the tokens; a caller compiling many
     // units may destroy it once the unit's compilation is complete.
     Arena* spelling_arena;
+    // Owns the result's token array itself: the preprocessor streams output
+    // tokens into a private arena so each lands in its final slot once.
+    // Same lifetime contract as the spelling arena — destroy both together.
+    Arena* token_arena;
     IrSourceMap map;
     // Region-array capacity, kept across the respell pass that may append.
     u32 capacity;

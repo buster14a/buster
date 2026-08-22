@@ -2605,39 +2605,34 @@ struct CPreprocessTokenNode
     CPpToken token;
 };
 
-// The preprocessed output is a list of contiguous token ranges — one per
-// expansion-free logical line (referencing the line's staging array
-// directly) or per expanded line (materialized once from its node list) —
-// so final assembly is a few bulk copies instead of a per-token node walk.
-typedef struct CPreprocessTokenRange CPreprocessTokenRange;
-struct CPreprocessTokenRange
+// The preprocessed output stream. Tokens land in their final slots as lines
+// resolve: the stream is the tail of a dedicated commit-on-demand arena
+// (created beside the spelling arena in c_preprocess) that nothing else
+// allocates from, so successive reservations are contiguous and `base` is
+// the finished token array the moment the last line lands. A line reserves
+// its upper bound — its lexed token count, or an expansion's node count —
+// writes the tokens that survive the newline or pragma strip, and hands the
+// surplus slots back. This replaces a staging array per line plus a range
+// list copied into a final array at the end: the range after a line's
+// staging array never coalesced with the next line's, because the range
+// node itself was allocated between them, so the final copy was one
+// line-sized memcpy per line (269 K on the unity compile) walking a node
+// per line besides.
+typedef struct CTokenStream CTokenStream;
+struct CTokenStream
 {
-    CPreprocessTokenRange* next;
-    CToken* tokens;
-    u64 count;
+    Arena* arena;
+    CToken* base;
 };
 
-BUSTER_C_INTERNAL void c_preprocess_output_append_range(Arena* arena, CPreprocessTokenRange** first, CPreprocessTokenRange** last, CToken* tokens, u64 count)
+BUSTER_C_INTERNAL CToken* c_token_stream_reserve(CTokenStream* stream, u64 token_count)
 {
-    if (*last && (*last)->tokens + (*last)->count == tokens)
-    {
-        (*last)->count += count;
-        return;
-    }
-    CPreprocessTokenRange* range = arena_allocate(arena, CPreprocessTokenRange, 1);
-    *range = (CPreprocessTokenRange){
-        .tokens = tokens,
-        .count = count,
-    };
-    if (*last)
-    {
-        (*last)->next = range;
-    }
-    else
-    {
-        *first = range;
-    }
-    *last = range;
+    return arena_allocate(stream->arena, CToken, token_count);
+}
+
+BUSTER_C_INTERNAL void c_token_stream_shrink(CTokenStream* stream, u64 surplus_token_count)
+{
+    arena_set_position(stream->arena, stream->arena->position - surplus_token_count * sizeof(CToken));
 }
 
 typedef enum CMacroExpansionTaskKind
@@ -4598,12 +4593,11 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_marker(CPreprocessPragmaContext conte
 // offset) get their spellings copied to fresh space offsets under an
 // expansion source-map entry; one invocation's tokens share one stamped
 // location, so runs of equal locations share one entry.
-BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(Arena* arena, CPreprocessPragmaContext context, CSpellingSpace* space, CSourceMap* map,
+BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaContext context, CSpellingSpace* space, CSourceMap* map,
                                                             CPreprocessTokenNode* first_line, u64 line_output_count,
-                                                            CPreprocessTokenRange** first_output_range, CPreprocessTokenRange** last_output_range,
-                                                            u64* output_count)
+                                                            CTokenStream* token_stream, u64* output_count)
 {
-    CToken* tokens = arena_allocate(arena, CToken, line_output_count);
+    CToken* tokens = c_token_stream_reserve(token_stream, line_output_count);
     u64 count = 0;
     u64 foreign_length = 0;
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
@@ -4650,11 +4644,8 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(Arena* arena, CPreproc
         tokens[count] = item.token;
         count += 1;
     }
-    if (count)
-    {
-        c_preprocess_output_append_range(arena, first_output_range, last_output_range, tokens, count);
-        *output_count += count;
-    }
+    c_token_stream_shrink(token_stream, line_output_count - count);
+    *output_count += count;
 }
 
 BUSTER_C_INTERNAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first, Arena* arena, CToken** tokens_out)
@@ -5492,8 +5483,24 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .reserved_size = BUSTER_GB(1),
         .flags = {.pool_reuse = 1},
     });
-    if (!spelling_arena)
+    // The output token stream gets the same private-arena treatment as the
+    // spelling space, and for the same reason: the final token count is
+    // unknown until the last line lands, and the caller's arena interleaves
+    // every other preprocessing allocation between output appends. A private
+    // reservation keeps the stream contiguous, so every surviving token is
+    // written into its final slot exactly once instead of staged per line
+    // and copied at the end.
+    Arena* token_arena = spelling_arena ? arena_create((ArenaCreation){
+                                              .reserved_size = BUSTER_GB(1),
+                                              .flags = {.pool_reuse = 1},
+                                          })
+                                        : 0;
+    if (!token_arena)
     {
+        if (spelling_arena)
+        {
+            arena_destroy(spelling_arena, 1);
+        }
         return result;
     }
     CSpellingSpace space_storage = {
@@ -5504,6 +5511,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CSourceMapRecovery* recovery = arena_allocate(arena, CSourceMapRecovery, 1);
     *recovery = (CSourceMapRecovery){
         .spelling_arena = spelling_arena,
+        .token_arena = token_arena,
     };
     result.recovery = recovery;
     result.spelling_base = space->base;
@@ -5827,8 +5835,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
-    CPreprocessTokenRange* first_output_range = 0;
-    CPreprocessTokenRange* last_output_range = 0;
+    CTokenStream token_stream = {
+        .arena = token_arena,
+        .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+    };
     u64 output_count = 0;
     CPragmaPackStack* pack_stack = 0;
     CMacroPushMacro* macro_push_stack = 0;
@@ -6315,69 +6325,72 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             }
             logical_end = next_line_end;
         }
-        CToken* logical_tokens = arena_allocate(arena, CToken, logical_end - token_index);
-        u32 logical_token_count = 0;
-        for (u64 scan = token_index; scan < logical_end; scan += 1)
-        {
-            if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
-            {
-                logical_tokens[logical_token_count] = lex.tokens[scan];
-                logical_token_count += 1;
-            }
-        }
         // A line whose identifiers name no defined macro expands to itself,
-        // so its staging array is the output range and the expansion
-        // machinery (a task node and an output node per token) is skipped.
-        // Locations are not materialized at all on this path: the file's
-        // source-map entry recovers them from the offsets on demand.
+        // so its lexed tokens stream straight to the output with the
+        // newlines stripped and the expansion machinery (a task node and an
+        // output node per token) is skipped. Locations are not materialized
+        // at all on this path: the file's source-map entry recovers them
+        // from the offsets on demand.
         bool needs_expansion = false;
-        for (u32 scan = 0; scan < logical_token_count && !needs_expansion; scan += 1)
+        for (u64 scan = token_index; scan < logical_end && !needs_expansion; scan += 1)
         {
-            CToken logical_token = logical_tokens[scan];
-            if (logical_token.kind == C_TOKEN_IDENTIFIER)
+            if (lex.tokens[scan].kind == C_TOKEN_IDENTIFIER)
             {
-                CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &logical_tokens[scan]);
+                CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
                 needs_expansion = line_macro && line_macro->definition.defined;
             }
         }
-        if (logical_token_count && map.regions[source_frame->map_entry].source == UINT32_MAX)
+        // The line holds at least one token: this path is only entered on a
+        // token that is neither a newline nor the end of the file.
+        if (map.regions[source_frame->map_entry].source == UINT32_MAX)
         {
             map.regions[source_frame->map_entry].source = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
         }
         if (!needs_expansion)
         {
-            if (logical_token_count)
+            // Pragmas cannot fire inside a text line on this path (only
+            // directive lines and _Pragma markers change pack state), so
+            // one sample covers the whole batch.
+            c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
+            CToken* line_output = c_token_stream_reserve(&token_stream, logical_end - token_index);
+            u64 written = 0;
+            for (u64 scan = token_index; scan < logical_end; scan += 1)
             {
-                // Pragmas cannot fire inside a text line on this path (only
-                // directive lines and _Pragma markers change pack state), so
-                // one sample covers the whole batch.
-                c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
-                c_preprocess_output_append_range(arena, &first_output_range, &last_output_range, logical_tokens, logical_token_count);
-                output_count += logical_token_count;
+                if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                {
+                    line_output[written] = lex.tokens[scan];
+                    written += 1;
+                }
             }
+            c_token_stream_shrink(&token_stream, (logical_end - token_index) - written);
+            output_count += written;
         }
         else
         {
             u32 token_file = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
-            CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, logical_token_count);
-            for (u32 scan = 0; scan < logical_token_count; scan += 1)
+            CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, logical_end - token_index);
+            u32 wrapped_count = 0;
+            for (u64 scan = token_index; scan < logical_end; scan += 1)
             {
-                CSourceLocation location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, logical_tokens[scan]));
-                location.file = token_file;
-                wrapped_tokens[scan] = (CPpToken){
-                    .token = logical_tokens[scan],
-                    .location = location,
-                };
+                if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                {
+                    CSourceLocation location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, lex.tokens[scan]));
+                    location.file = token_file;
+                    wrapped_tokens[wrapped_count] = (CPpToken){
+                        .token = lex.tokens[scan],
+                        .location = location,
+                    };
+                    wrapped_count += 1;
+                }
             }
             CPreprocessTokenNode* first_line = 0;
             CPreprocessTokenNode* last_line = 0;
             u64 line_output_count = 0;
-            expansion_ok = c_preprocess_expand(arena, space, symbol_table, first_macro, wrapped_tokens, logical_token_count, &first_line, &last_line,
+            expansion_ok = c_preprocess_expand(arena, space, symbol_table, first_macro, wrapped_tokens, wrapped_count, &first_line, &last_line,
                                                &line_output_count, expansion_limit, &result);
             if (expansion_ok)
             {
-                c_preprocess_process_expanded_line(arena, pragma_context, space, &map, first_line, line_output_count, &first_output_range, &last_output_range,
-                                                   &output_count);
+                c_preprocess_process_expanded_line(pragma_context, space, &map, first_line, line_output_count, &token_stream, &output_count);
             }
         }
         source_frame->token_index = logical_end;
@@ -6386,22 +6399,17 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             break;
         }
     }
-    result.tokens = arena_allocate(arena, CToken, output_count + 1);
-    u64 output_index = 0;
-    for (CPreprocessTokenRange* range = first_output_range; range; range = range->next)
-    {
-        memcpy(result.tokens + output_index, range->tokens, sizeof(*result.tokens) * range->count);
-        output_index += range->count;
-    }
-    result.tokens[output_index++] = (CToken){
+    CToken* end_of_file = c_token_stream_reserve(&token_stream, 1);
+    *end_of_file = (CToken){
         .offset = root_lex.tokens[root_lex.token_count - 1].offset,
         .kind = C_TOKEN_END_OF_FILE,
     };
-    result.token_count = output_index;
+    result.tokens = token_stream.base;
+    result.token_count = output_count + 1;
     result.pack_changes = pack_changes.changes;
     result.pack_change_count = pack_changes.count;
-    // The stream is contiguous by now, so the spellings sum in one linear
-    // pass rather than one add per token as the ranges were appended.
+    // The stream is contiguous, so the spellings sum in one linear pass
+    // rather than one add per token as the lines were appended.
     result.preprocessed.tokens = output_count;
     for (u64 token_index = 0; token_index < output_count; token_index += 1)
     {
