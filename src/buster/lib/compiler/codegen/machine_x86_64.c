@@ -4245,33 +4245,44 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32* value_use_counts = value_facts.use_counts;
     u32* value_def_blocks = value_facts.definition_blocks;
     u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    // Cleared as four streams and then filled from the row side, because a
+    // local is a property of its defining row and only a minority of rows
+    // define one. Asking the question per value instead — read
+    // `values[i].definition`, then follow it into `instructions[]` — is a
+    // random 64-byte fetch per value for the two fields `opcode` and `result`,
+    // and it was the single hottest line in the 2026-08-22T084855Z cache-miss
+    // survey: 6,17% of the compile's DRAM fills there, 23,58% in this
+    // function. The row scan reads the same bytes in address order, and the
+    // walk immediately below wants them next.
+    memset(promotable_locals, 0, sizeof(*promotable_locals) * function->value_count);
+    memset(value_last_use_ordinals, 0, sizeof(*value_last_use_ordinals) * function->value_count);
+    memset(local_store_counts, 0, sizeof(*local_store_counts) * function->value_count);
+    memset(value_def_ordinals, 0, sizeof(*value_def_ordinals) * function->value_count);
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
-        promotable_locals[value_index] = 0;
-        value_last_use_ordinals[value_index] = 0;
-        local_store_counts[value_index] = 0;
-        value_def_ordinals[value_index] = 0;
-        IrInstructionId definition = function->values[value_index].definition;
-        if (definition.value < function->instruction_count)
+        IrInstruction* instruction = function->instructions + instruction_index;
+        // The value's own definition still has to agree: a popped row keeps
+        // its opcode, so the round trip is what makes this the same set the
+        // per-value form selected.
+        if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count ||
+            function->values[instruction->result.value].definition.value != instruction_index)
         {
-            IrInstruction* instruction = function->instructions + definition.value;
-            if (instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
-            {
-                IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-                if (machine_x64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
-                {
-                    promotable_locals[value_index] = (u8)local_type->layout.size;
-                }
-                // Vector locals promote under the same rule: a 64-byte value
-                // whose address never leaves a same-width load or store lives
-                // in a ZMM-class register and its accesses become vector
-                // copies, which is where the kernels' named chunk variables
-                // stop round-tripping through the frame.
-                else if (machine_x64_type_is_vector_register(local_type) && machine_x64_simd_supported(selector.target, IR_SIMD_SPLAT_BYTE))
-                {
-                    promotable_locals[value_index] = 64;
-                }
-            }
+            continue;
+        }
+        u32 value_index = instruction->result.value;
+        IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+        if (machine_x64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
+        {
+            promotable_locals[value_index] = (u8)local_type->layout.size;
+        }
+        // Vector locals promote under the same rule: a 64-byte value whose
+        // address never leaves a same-width load or store lives in a ZMM-class
+        // register and its accesses become vector copies, which is where the
+        // kernels' named chunk variables stop round-tripping through the
+        // frame.
+        else if (machine_x64_type_is_vector_register(local_type) && machine_x64_simd_supported(selector.target, IR_SIMD_SPLAT_BYTE))
+        {
+            promotable_locals[value_index] = 64;
         }
     }
     // The one walk over the linked rows.  Besides the value facts below it
