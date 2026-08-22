@@ -750,6 +750,9 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
     return true;
 }
 
+BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                          u32* index_out);
+
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                              CTypeId requested, u64* size_out, u32* alignment_out)
 {
@@ -924,10 +927,23 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         CParseResult operand_parse = *result;
                         // Callers inside the explicit type-parse machine pass no
                         // machine, because its frame stack cannot be reentered;
-                        // their sizeof-bounded arrays stay unresolved instead.
-                        CTypeId operand_type = machine && !depth && close > operand_start
-                                                   ? c_parse_scalar_type(machine, &operand_parse, preprocess, operand_start, close, &operand_type_index)
-                                                   : C_TYPE_ID_INVALID;
+                        // their operands resolve through the machineless base
+                        // type instead — typedef, named tag, or primitive, with
+                        // no declarator suffixes — so an enum constant like
+                        // `sizeof(char[sizeof(T)])` folds rather than failing
+                        // its whole enum.
+                        CTypeId operand_type;
+                        if (!depth && close > operand_start)
+                        {
+                            operand_type = machine ? c_parse_scalar_type(machine, &operand_parse, preprocess, operand_start, close, &operand_type_index)
+                                                   : c_parse_machineless_base_type(&operand_parse, preprocess,
+                                                                                    result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                                                    operand_start, close, &operand_type_index);
+                        }
+                        else
+                        {
+                            operand_type = C_TYPE_ID_INVALID;
+                        }
                         bool pointer_type = false;
                         while (operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index < close)
                         {
@@ -964,9 +980,18 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         }
                         else if (operand_resolved && operand_type.value < operand_parse.type_count)
                         {
+                            // Kind-matching answers only for kinds whose layout
+                            // the kind alone determines. A struct, union,
+                            // array, or vector operand that has not resolved
+                            // yet must stay unresolved for this pass — matching
+                            // any same-kind type folds a neighbouring type's
+                            // size into the bound — and the fixpoint retries it
+                            // once the real layout lands.
                             CTypeKind operand_kind = operand_parse.types[operand_type.value].kind;
                             operand_resolved = false;
-                            for (u32 candidate_index = 0; candidate_index < type_count; candidate_index += 1)
+                            bool kind_determines_layout = operand_kind != C_TYPE_STRUCT && operand_kind != C_TYPE_UNION &&
+                                                          operand_kind != C_TYPE_ARRAY && operand_kind != C_TYPE_VECTOR;
+                            for (u32 candidate_index = 0; kind_determines_layout && candidate_index < type_count; candidate_index += 1)
                             {
                                 if (result->types[candidate_index].kind == operand_kind && resolved[candidate_index])
                                 {
@@ -977,7 +1002,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                                     break;
                                 }
                             }
-                            if (!operand_resolved)
+                            if (!operand_resolved && kind_determines_layout)
                             {
                                 operand_resolved = c_parse_builtin_type_layout(preprocess.target, operand_kind, &operand_size, &operand_alignment);
                             }
@@ -1041,16 +1066,42 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                     if (token.kind == C_TOKEN_IDENTIFIER)
                     {
                         CEntity* constant = c_parse_first_constant_entity(result, c_token_spelling(preprocess.spelling_base, token));
-                        if (!constant)
+                        bool constant_is_negative = false;
+                        u64 constant_value = 0;
+                        bool folded_constant = constant != 0;
+                        if (constant)
+                        {
+                            constant_is_negative = constant->constant_is_negative;
+                            constant_value = constant->constant_value;
+                        }
+                        else
+                        {
+                            // A member of an enum still being declared is not an
+                            // entity yet; the member table already holds every
+                            // enumerator declared before this bound, so
+                            // `enum { N = 5, E = sizeof(int[N]) }` folds.
+                            String8 name = c_token_spelling(preprocess.spelling_base, token);
+                            for (u32 member_index = 0; member_index < result->enum_member_count && !folded_constant; member_index += 1)
+                            {
+                                CEnumMember* member = &result->enum_members[member_index];
+                                if (string_equal(member->name, name))
+                                {
+                                    constant_is_negative = member->is_negative;
+                                    constant_value = member->value;
+                                    folded_constant = true;
+                                }
+                            }
+                        }
+                        if (!folded_constant)
                         {
                             unresolved_identifier = true;
                             break;
                         }
-                        if (constant->constant_is_negative)
+                        if (constant_is_negative)
                         {
                             bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
                         }
-                        bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant->constant_value),
+                        bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant_value),
                                                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
                         continue;
                     }
@@ -6186,6 +6237,46 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParse
                                         declarator_start);
 }
 
+// The base type of a machineless sizeof/_Alignof operand: a (qualified)
+// typedef name, a named struct/union/enum tag, or a primitive spelling.
+// `*index_out` lands past what was consumed. The type-parse machine is never
+// entered, so this is callable from inside one of its steps — which is what
+// lets a sizeof inside an array bound resolve while an enum body is being
+// evaluated (the machine-bearing path uses c_parse_scalar_type instead).
+BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                          u32* index_out)
+{
+    u32 index = start;
+    CTypeId type = c_parse_qualified_typedef_type(result, preprocess, scope, start, end, &index);
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        u32 tag_index = c_parse_skip_attributes(preprocess, start, end);
+        String8 tag_word = tag_index < end && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER
+                               ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[tag_index])
+                               : (String8){0};
+        CTypeKind tag_kind = string_equal(tag_word, S8("struct"))  ? C_TYPE_STRUCT
+                             : string_equal(tag_word, S8("union")) ? C_TYPE_UNION
+                             : string_equal(tag_word, S8("enum"))  ? C_TYPE_ENUM
+                                                                   : C_TYPE_INVALID;
+        if (tag_kind != C_TYPE_INVALID)
+        {
+            u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, end);
+            if (name_index < end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
+            {
+                type = c_parse_aggregate_lookup(result, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]));
+                index = c_parse_skip_attributes(preprocess, name_index + 1, end);
+            }
+        }
+    }
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        index = start;
+        type = c_parse_primitive_type(result, preprocess, start, end, &index);
+    }
+    *index_out = index;
+    return type;
+}
+
 // How many elements a brace initializer spells, counted from its tokens
 // alone — for the inferred-length arrays c_parse_infer_file_array_bounds has
 // not reached yet when a sizeof inside an enum-constant initializer needs
@@ -6522,32 +6613,7 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
     // them in a copy so an operand never mutates the caller's type table.
     CParseResult operand_parse = *result;
     u32 index = start;
-    CTypeId type = c_parse_qualified_typedef_type(&operand_parse, preprocess, scope, start, end, &index);
-    if (type.value == C_ID_UNDERLYING_INVALID)
-    {
-        u32 tag_index = c_parse_skip_attributes(preprocess, start, end);
-        String8 tag_word = tag_index < end && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER
-                               ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[tag_index])
-                               : (String8){0};
-        CTypeKind tag_kind = string_equal(tag_word, S8("struct"))  ? C_TYPE_STRUCT
-                             : string_equal(tag_word, S8("union")) ? C_TYPE_UNION
-                             : string_equal(tag_word, S8("enum"))  ? C_TYPE_ENUM
-                                                                   : C_TYPE_INVALID;
-        if (tag_kind != C_TYPE_INVALID)
-        {
-            u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, end);
-            if (name_index < end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
-            {
-                type = c_parse_aggregate_lookup(&operand_parse, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]));
-                index = c_parse_skip_attributes(preprocess, name_index + 1, end);
-            }
-        }
-    }
-    if (type.value == C_ID_UNDERLYING_INVALID)
-    {
-        index = start;
-        type = c_parse_primitive_type(&operand_parse, preprocess, start, end, &index);
-    }
+    CTypeId type = c_parse_machineless_base_type(&operand_parse, preprocess, scope, start, end, &index);
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
         return c_parse_sizeof_operand_expression_layout(arena, &operand_parse, preprocess, scope, start, end, size_out, alignment_out);

@@ -43,6 +43,26 @@ enum
     SELF_SIZE = sizeof(SELF_BASE),
 };
 
+// Array type names inside the enum evaluator, whose bounds spell an earlier
+// enumerator of the same enum, a nested sizeof, or a named struct tag. These
+// resolve through the machineless base type inside c_parse_type_layout's
+// bound walk, because the enum evaluator runs inside the type-parse machine
+// and cannot reenter it.
+typedef unsigned short BoundElement;
+struct BoundTag
+{
+    long long wide[3];
+};
+
+enum
+{
+    BOUND_SELF = 5,
+    BOUND_BY_SELF = sizeof(int[BOUND_SELF]),
+    BOUND_BY_SIZEOF = sizeof(char[sizeof(BoundElement)]),
+    BOUND_BY_TAG = sizeof(char[sizeof(struct BoundTag)]),
+    BOUND_PLAIN = sizeof(char[3]),
+};
+
 int main(void)
 {
     int result = 0;
@@ -77,6 +97,14 @@ int main(void)
     else if (SELF_BASE != 7 || SELF_SIZE != sizeof(int))
     {
         result = 8;
+    }
+    else if (BOUND_BY_SELF != 20 || BOUND_BY_SIZEOF != 2)
+    {
+        result = 9;
+    }
+    else if (BOUND_BY_TAG != 24 || BOUND_PLAIN != 3)
+    {
+        result = 10;
     }
     return result;
 }
