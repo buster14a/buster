@@ -160,6 +160,27 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, simd512_equal_word(free_file.vector, simd512_splat(UINT8_MAX)) == 0xAAAA);
     BUSTER_TEST(arguments, simd512_equal_word(value, simd512_zero()) == 0);
 
+    // The dword splat reaches every lane with a value no byte splat can
+    // spell, and the dword compare is unsigned and strict: 0x80000000 is
+    // above every small value, not below it, and nothing is below itself.
+    SimdTestLanes splat_probe;
+    splat_probe.vector = simd512_splat_word(0x01020304u);
+    lanes_match = true;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match = lanes_match && splat_probe.words[word] == 0x01020304u;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+    SimdTestLanes ascending;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        ascending.words[word] = word;
+    }
+    BUSTER_TEST(arguments, simd512_less_word(ascending.vector, simd512_splat_word(5)) == 0x001F);
+    BUSTER_TEST(arguments, simd512_less_word(ascending.vector, ascending.vector) == 0);
+    BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(UINT32_C(0x80000000)), simd512_splat_word(1)) == 0);
+    BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(1), simd512_splat_word(UINT32_C(0x80000000))) == 0xFFFF);
+
     // vpermt2b indexes a 128-byte table split across two vectors; the indices
     // count down from 127, so lane 0 selects the last byte of the high half.
     lanes_match = true;

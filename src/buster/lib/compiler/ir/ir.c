@@ -15,6 +15,7 @@
 #include <buster/lib/compiler/ir/ir.h>
 
 #include <buster/lib/file.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
@@ -44,6 +45,101 @@ IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id)
     return table->sources + id.value;
 }
 
+// The two source-map searches, and the one shape they share: the greatest
+// index in `[low, high)` whose key is <= the probe, over a non-decreasing key
+// array whose first entry already satisfies that.  Both were bracketed by a
+// page index long before this, so the span reaching here is short -- 1,43
+// steps per region search and 2,04 per checkpoint search, measured over the
+// self-host unit -- and the branch deciding each step is a coin flip no
+// predictor can learn: the two loops held 5,07% of all stage-1 branch misses
+// in the `2026-08-22T082003Z` survey.
+//
+// A 16-lane dword compare answers a span of up to 16 keys with no branch at
+// all: every key <= the probe sets its mask bit, and because the array is
+// non-decreasing those bits are the low run of the mask, so their population
+// count is the distance from `low` to the answer.  A masked load supplies the
+// short spans, so nothing is read past the end of the array.  The bisection
+// stays for the tail above one vector, written branchlessly for the same
+// reason -- as a mask off the sign bit of a subtraction, because Clang
+// if-converts both `probe : low` and `half & -(u32)(a <= b)` straight back
+// into a `ja` over a `mov`.  The subtraction is done in 64 bits so two u32
+// operands cannot wrap into the sign.
+#if BUSTER_SIMD_512
+BUSTER_GLOBAL_LOCAL u32 ir_source_search_vector(void const* words, u32 low, u32 span, u32 stride_words, u32 probe)
+{
+    // `stride_words` is 1 for a dense u32 array and 2 for the region keys,
+    // whose `start` is every other dword of an 8-byte record; the lane mask
+    // drops the interleaved `source` dwords.
+    u32 lanes = span * stride_words;
+    Mask64 valid = mask64_prefix(lanes);
+    Mask64 bytes_valid = mask64_prefix(lanes * 4);
+    Simd512 loaded = simd512_load_masked(words, bytes_valid);
+    // `simd512_less_word` is strict, so the covered lanes are the complement
+    // of "probe < key" inside the valid lanes.
+    Mask64 covered = valid & ~simd512_less_word(simd512_splat_word(probe), loaded);
+    if (stride_words == 2)
+    {
+        covered &= (Mask64)0x5555;
+    }
+    u32 count = mask64_count(covered);
+    return low + count - (count != 0);
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u32 ir_source_search_offsets(u32 const* offsets, u32 low, u32 high, u32 probe)
+{
+    u32 span = high - low;
+#if BUSTER_SIMD_512
+    while (span > 16)
+    {
+        u32 half = span >> 1;
+        u32 middle = low + half;
+        low += half & (u32)(((s64)offsets[middle] - (s64)probe - 1) >> 63);
+        span -= half;
+    }
+    if (span)
+    {
+        low = ir_source_search_vector(offsets + low, low, span, 1, probe);
+    }
+#else
+    while (span > 1)
+    {
+        u32 half = span >> 1;
+        u32 middle = low + half;
+        low += half & (u32)(((s64)offsets[middle] - (s64)probe - 1) >> 63);
+        span -= half;
+    }
+#endif
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_source_search_keys(IrSourceRegionKey const* keys, u32 low, u32 high, u32 probe)
+{
+    u32 span = high - low;
+#if BUSTER_SIMD_512
+    while (span > 8)
+    {
+        u32 half = span >> 1;
+        u32 middle = low + half;
+        low += half & (u32)(((s64)keys[middle].start - (s64)probe - 1) >> 63);
+        span -= half;
+    }
+    if (span)
+    {
+        low = ir_source_search_vector(keys + low, low, span, 2, probe);
+    }
+#else
+    while (span > 1)
+    {
+        u32 half = span >> 1;
+        u32 middle = low + half;
+        low += half & (u32)(((s64)keys[middle].start - (s64)probe - 1) >> 63);
+        span -= half;
+    }
+#endif
+    return low;
+}
+
 // Greatest region whose start is <= offset; keys[0] starts at 0, so the
 // search always lands. The page index brackets it to the regions starting
 // within one page, so a miss costs one load and a couple of steps.
@@ -66,19 +162,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_map_find(IrSourceMap const* map, u32 offset)
             high = bracket < high ? bracket : high;
         }
     }
-    while (low + 1 < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (keys[middle].start <= offset)
-        {
-            low = middle;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low;
+    return ir_source_search_keys(keys, low, high, offset);
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_source_map_key_contains(IrSourceRegionKey const* keys, u32 index, u32 offset)
@@ -154,19 +238,7 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
                 high = bracket < high ? bracket : high;
             }
         }
-        while (low + 1 < high)
-        {
-            u32 middle = low + (high - low) / 2;
-            if (offsets[middle] <= local)
-            {
-                low = middle;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-        cursor = low;
+        cursor = ir_source_search_offsets(offsets, low, high, local);
         if (checkpoint_cursor)
         {
             *checkpoint_cursor = cursor;
@@ -330,11 +402,13 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
     case IR_SIMD_STORE_MASKED:
         return (IrSimdShape){.operand_count = 3};
     case IR_SIMD_SPLAT_BYTE:
+    case IR_SIMD_SPLAT_WORD:
         return (IrSimdShape){.operand_count = 1, .has_result = true};
     case IR_SIMD_COMPARE_EQUAL_BYTE:
     case IR_SIMD_COMPARE_LESS_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
     case IR_SIMD_COMPARE_EQUAL_WORD:
+    case IR_SIMD_COMPARE_LESS_WORD:
         return (IrSimdShape){.operand_count = 2, .has_result = true};
     case IR_SIMD_SIGN_MASK_BYTE:
         return (IrSimdShape){.operand_count = 1, .has_result = true};
@@ -391,6 +465,10 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.ternary_word");
     case IR_SIMD_COMPARE_EQUAL_WORD:
         return S8("simd.compare_equal_word");
+    case IR_SIMD_SPLAT_WORD:
+        return S8("simd.splat_word");
+    case IR_SIMD_COMPARE_LESS_WORD:
+        return S8("simd.compare_less_word");
     case IR_SIMD_COUNT:
         break;
     }
@@ -456,6 +534,12 @@ BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_byte(IrProgram* program, IrTypeId id)
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_word(IrProgram* program, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(&program->types, id);
+    return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_address(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
@@ -506,10 +590,13 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
                    ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
         case IR_SIMD_SPLAT_BYTE:
             return ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_WORD:
+            return ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
         case IR_SIMD_COMPARE_EQUAL_BYTE:
         case IR_SIMD_COMPARE_LESS_BYTE:
         case IR_SIMD_TEST_MASK_BYTE:
         case IR_SIMD_COMPARE_EQUAL_WORD:
+        case IR_SIMD_COMPARE_LESS_WORD:
             return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
         case IR_SIMD_SIGN_MASK_BYTE:
             return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);

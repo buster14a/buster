@@ -206,6 +206,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  One instruction where a
 //                                                  chain would be three.
 //   simd512_equal_word(left, right)             -> Mask64
+//   simd512_splat_word(value)                   -> Simd512, u32 in all lanes
+//   simd512_less_word(left, right)              -> Mask64, unsigned per u32
 //                                                  vpcmpeqd: one bit per u32
 //                                                  lane in the low sixteen,
 //                                                  the rest zero -- a compare
@@ -255,6 +257,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
 #define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
 #define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
+#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
+#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
 
 #elif BUSTER_SIMD_512
 
@@ -276,6 +280,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_shift_left_word(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
 #define simd512_ternary_word(a, b, c, table) ((Simd512)_mm512_ternarylogic_epi32((__m512i)(a), (__m512i)(b), (__m512i)(c), (table)))
 #define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_splat_word(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
+#define simd512_less_word(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
 
 #else
 
@@ -295,6 +301,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_shift_left_word(value, count) simd512_shift_left_word_fallback((value), (count))
 #define simd512_ternary_word(a, b, c, table) simd512_ternary_word_fallback((a), (b), (c), (table))
 #define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
+#define simd512_splat_word(value) simd512_splat_word_fallback(value)
+#define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 {
@@ -528,6 +536,37 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_word_fallback(Simd51
         bool equal = left.bytes[word * 4] == right.bytes[word * 4] && left.bytes[word * 4 + 1] == right.bytes[word * 4 + 1] &&
                      left.bytes[word * 4 + 2] == right.bytes[word * 4 + 2] && left.bytes[word * 4 + 3] == right.bytes[word * 4 + 3];
         result |= equal ? (Mask64)1 << word : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_word_lane_fallback(Simd512 value, u32 lane)
+{
+    // Little-endian lane assembly, matching what the hardware forms read: the
+    // fallback stores the same bytes a vector load would have.
+    return (u32)value.bytes[lane * 4] | ((u32)value.bytes[lane * 4 + 1] << 8) | ((u32)value.bytes[lane * 4 + 2] << 16) |
+           ((u32)value.bytes[lane * 4 + 3] << 24);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 value)
+{
+    Simd512 result;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        result.bytes[lane * 4] = (u8)value;
+        result.bytes[lane * 4 + 1] = (u8)(value >> 8);
+        result.bytes[lane * 4 + 2] = (u8)(value >> 16);
+        result.bytes[lane * 4 + 3] = (u8)(value >> 24);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_word_fallback(Simd512 left, Simd512 right)
+{
+    Mask64 result = 0;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        result |= simd512_word_lane_fallback(left, lane) < simd512_word_lane_fallback(right, lane) ? (Mask64)1 << lane : 0;
     }
     return result;
 }

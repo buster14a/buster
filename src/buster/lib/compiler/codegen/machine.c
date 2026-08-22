@@ -541,6 +541,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL},
     },
+    [MACHINE_X64_VSPLATD] = {
+        .name = S8_INITIALIZER("x64_vsplatd"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL},
+    },
     [MACHINE_X64_VPCMP_MASK] = {
         .name = S8_INITIALIZER("x64_vpcmp_mask"),
         .operand_count = 3,

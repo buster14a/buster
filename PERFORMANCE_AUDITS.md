@@ -53,6 +53,7 @@ keep current.
 ## Audits, newest first
 
 - [`2026-08-22T091548Z`](docs/performance-audits/2026-08-22T091548Z.md) — take the three cache-miss leads: the promoted-member memset, the selector's per-value prepass, and the linker's image copy
+- [`2026-08-22T091007Z`](docs/performance-audits/2026-08-22T091007Z.md) — the source-map searches take the dword vocabulary: vpcmpud answers a span of sixteen keys with no branch
 - [`2026-08-22T084855Z`](docs/performance-audits/2026-08-22T084855Z.md) — survey the stage-1 cache misses: one per-value prepass, one per-field-access memset, and the copy sites that own a fifth of them
 - [`2026-08-22T082003Z`](docs/performance-audits/2026-08-22T082003Z.md) — the 2026-08-22 branch-miss survey, re-measured per source line with the LBR mispredict flag
 - [`2026-08-22f`](docs/performance-audits/2026-08-22f.md) — no lever in the intern probe loop or the entity scope walk: both hash tables measured at their floor, and one nearby branch measured on four trees and rejected

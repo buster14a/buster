@@ -1227,6 +1227,7 @@ typedef enum CIrSimdArgument
     C_IR_SIMD_ARGUMENT_MASK,
     C_IR_SIMD_ARGUMENT_VECTOR,
     C_IR_SIMD_ARGUMENT_BYTE,
+    C_IR_SIMD_ARGUMENT_WORD,
     C_IR_SIMD_ARGUMENT_IMMEDIATE,
 } CIrSimdArgument;
 
@@ -1292,6 +1293,11 @@ BUSTER_C_INTERNAL CIrSimdBuiltin const c_ir_simd_builtins[] = {
       256 },
     { S8_INITIALIZER("__builtin_buster_simd_equal_word"),
       IR_SIMD_COMPARE_EQUAL_WORD,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_word"), IR_SIMD_SPLAT_WORD, { C_IR_SIMD_ARGUMENT_WORD }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_less_word"),
+      IR_SIMD_COMPARE_LESS_WORD,
       { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
       0 },
 };
@@ -9584,10 +9590,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_simd_result_type(CIntegerIrBuilder* builder, IrS
     case IR_SIMD_SIGN_MASK_BYTE:
     case IR_SIMD_TEST_MASK_BYTE:
     case IR_SIMD_COMPARE_EQUAL_WORD:
+    case IR_SIMD_COMPARE_LESS_WORD:
         return builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
     case IR_SIMD_LOAD:
     case IR_SIMD_LOAD_MASKED:
     case IR_SIMD_SPLAT_BYTE:
+    case IR_SIMD_SPLAT_WORD:
     case IR_SIMD_PERMUTE2_BYTE:
     case IR_SIMD_COMPRESS_BYTE:
     case IR_SIMD_WIDEN_BYTE_TO_WORD:
@@ -9635,6 +9643,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_simd_coerce_argument(CIntegerIrBuilder* builder
     case C_IR_SIMD_ARGUMENT_BYTE:
         return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
                    ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_CHAR], source)
+                   : IR_VALUE_ID_INVALID;
+    case C_IR_SIMD_ARGUMENT_WORD:
+        return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+                   ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_INT], source)
                    : IR_VALUE_ID_INVALID;
     case C_IR_SIMD_ARGUMENT_VECTOR:
         return type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size == 64 ? value : IR_VALUE_ID_INVALID;

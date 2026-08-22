@@ -432,9 +432,11 @@ typedef enum MachineOpcode
     MACHINE_X64_VSTORE_PTR_MASKED,    // use address, use mask, use vec
     MACHINE_X64_VCOMPRESS_STORE_PTR,  // use address, use mask, use vec
     MACHINE_X64_VSPLATB,      // def vec, use general; vpbroadcastb from r32
+    MACHINE_X64_VSPLATD,      // def vec, use general; vpbroadcastd from r32
     // Lane compares producing a Mask64 in a general register; payload is
-    // 0 = vpcmpeqb, 1 = vpcmpub/lt-unsigned, 2 = vptestmb, 3 = vpcmpeqd
-    // (16 mask bits, rest zeroed by the compare).
+    // 0 = vpcmpeqb, 1 = vpcmpub/lt-unsigned, 2 = vptestmb, 3 = vpcmpeqd,
+    // 4 = vpcmpud/lt-unsigned. The two dword compares write 16 mask bits
+    // and zero the rest of the k register.
     MACHINE_X64_VPCMP_MASK,   // def general mask, use vec, use vec
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the
@@ -556,11 +558,11 @@ typedef enum MachineOpcode
 // projection of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; the authority and
 // neutral-patch records below keep every remaining producer explicit while
 // migration work moves instruction construction behind metadata.
-#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 122u
+#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 123u
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
-#define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 49u
+#define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 50u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 26u
-#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 77u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 78u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT 19u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 26u

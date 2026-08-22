@@ -48,6 +48,8 @@ typedef u64 Mask64;
 #define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
 #define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
 #define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
+#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
+#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
 #define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
 
 #define mask64_prefix(count) ((count) >= 64 ? ~(Mask64)0 : (((Mask64)1 << (count)) - 1))
@@ -581,6 +583,44 @@ int main(void)
     if (simd512_equal_word(free_file.vector, simd512_splat(255)) != 0xAAAA)
     {
         return 63;
+    }
+    // The dword splat reaches all sixteen lanes with a value no byte splat
+    // can spell, and the unsigned compare is strict and does not sign-extend:
+    // 0x80000000 is above, not below, every small value.
+    Lanes splat_probe;
+    splat_probe.vector = simd512_splat_word(0x01020304u);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        if (splat_probe.words[word] != 0x01020304u)
+        {
+            return 64;
+        }
+    }
+    Lanes ascending;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        ascending.words[word] = word;
+    }
+    if (simd512_less_word(ascending.vector, simd512_splat_word(5)) != 0x001F)
+    {
+        return 65;
+    }
+    if (simd512_less_word(ascending.vector, ascending.vector) != 0)
+    {
+        return 66;
+    }
+    Lanes high_bit;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        high_bit.words[word] = 0x80000000u;
+    }
+    if (simd512_less_word(high_bit.vector, simd512_splat_word(1)) != 0)
+    {
+        return 67;
+    }
+    if (simd512_less_word(simd512_splat_word(1), high_bit.vector) != 0xFFFF)
+    {
+        return 68;
     }
     return 0;
 }

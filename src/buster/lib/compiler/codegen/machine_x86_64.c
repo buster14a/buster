@@ -3018,11 +3018,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
             break;
         }
         case IR_SIMD_SPLAT_BYTE:
+        case IR_SIMD_SPLAT_WORD:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                           .opcode = MACHINE_X64_VSPLATB,
+                                                           .opcode = operation == IR_SIMD_SPLAT_BYTE ? MACHINE_X64_VSPLATB : MACHINE_X64_VSPLATD,
                                                        });
             machine_x64_define(selector, result_register, row);
             break;
@@ -3031,14 +3032,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
         case IR_SIMD_COMPARE_LESS_BYTE:
         case IR_SIMD_TEST_MASK_BYTE:
         case IR_SIMD_COMPARE_EQUAL_WORD:
+        case IR_SIMD_COMPARE_LESS_WORD:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? 0u : operation == IR_SIMD_COMPARE_LESS_BYTE ? 1u
-                                                                      : operation == IR_SIMD_TEST_MASK_BYTE   ? 2u
-                                                                                                              : 3u,
+                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE  ? 0u
+                                                                      : operation == IR_SIMD_COMPARE_LESS_BYTE  ? 1u
+                                                                      : operation == IR_SIMD_TEST_MASK_BYTE     ? 2u
+                                                                      : operation == IR_SIMD_COMPARE_EQUAL_WORD ? 3u
+                                                                                                                : 4u,
                                                            .opcode = MACHINE_X64_VPCMP_MASK,
                                                        });
             machine_x64_define(selector, result_register, row);
@@ -5281,6 +5285,7 @@ enum
     MACHINE_X64_VPSLLD_EXACT_FORM_ID = 7702u,
     MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID = 7740u,
     MACHINE_X64_VSPLATB_EXACT_FORM_ID = 5841u,
+    MACHINE_X64_VSPLATD_EXACT_FORM_ID = 7534u,
     MACHINE_X64_XCHG_EXACT_FORM_ID = 9837u,
     MACHINE_X64_CMPXCHG_EXACT_FORM_ID = 10280u,
     MACHINE_X64_SUB_RSP_EXACT_FORM_ID = 9285u,
@@ -5366,6 +5371,9 @@ typedef enum MachineX64ExactOperandProjection
     MACHINE_X64_EXACT_OPERAND_FIXED_RSP,
     MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD,
     MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT,
+    // The constant 1: the unsigned less-than predicate of the vpcmp*u* forms,
+    // for rows whose payload is already spent on the variant index.
+    MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS,
     MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO,
     MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO,
     MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO,
@@ -5449,6 +5457,7 @@ typedef enum MachineX64ExactPlanId
     MACHINE_X64_EXACT_PLAN_VPORD,
     MACHINE_X64_EXACT_PLAN_VPXORD,
     MACHINE_X64_EXACT_PLAN_VSPLATB,
+    MACHINE_X64_EXACT_PLAN_VSPLATD,
     MACHINE_X64_EXACT_PLAN_VPTERNLOGD,
     MACHINE_X64_EXACT_PLAN_XCHG,
     MACHINE_X64_EXACT_PLAN_CMPXCHG,
@@ -6108,6 +6117,11 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {512, 32},
         .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
     },
+    [49] = {
+        .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 49, .key = {MACHINE_X64_VSPLATD_EXACT_FORM_ID, UINT64_C(0xf65793e9357098c7)},
+        .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {512, 32},
+        .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+    },
     [33] = {
         .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 33, .key = {MACHINE_X64_VPTERNLOGD_EXACT_FORM_ID, UINT64_C(0x61fc34c1d8f6da45)},
         .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD}, .operand_widths = {512, 512, 512, 8},
@@ -6456,6 +6470,17 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_test_seq
 };
 // vpcmpeqd writes 16 mask bits and zeroes the rest of k1, so the shared
 // 64-bit KMOVQ step delivers the exact Mask64 the dword compare defines.
+// vpcmpud takes its predicate as an immediate, and the vpcmp family already
+// spends the machine payload on the variant index, so the predicate cannot
+// ride the payload the way vpcmpub's does (there payload 1 happens to be the
+// unsigned-less predicate too). MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS
+// carries it instead.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_less_word_sequence_steps[] = {
+    {.key = {7550u, UINT64_C(0xbd651626b11cf5bf)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
+     .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS}, .operand_widths = {64, 512, 512, 8}},
+    {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
+};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_equal_word_sequence_steps[] = {
     {.key = {7540u, UINT64_C(0x2c3485903430167f)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
      .operand_count = 3, .operand_slots = {0, 1, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512, 512}},
@@ -6470,6 +6495,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpcmp_seque
     {.step_count = 2, .steps = machine_x64_vpcmp_less_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_test_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_equal_word_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_less_word_sequence_steps},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovb2m_sequence_steps[] = {
     {.key = {6183u, UINT64_C(0x845181de5363cb8d)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
@@ -6518,7 +6544,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     [36] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 36, .variant_count = 1, .variants = machine_x64_vload_ptr_masked_sequence_variants},
     [37] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 37, .variant_count = 1, .variants = machine_x64_vstore_ptr_masked_sequence_variants},
     [38] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 38, .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
-    [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 4, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
+    [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 5, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
     [40] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 40, .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
     [41] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 41, .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
     [42] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 42, .variant_count = 1, .variants = machine_x64_vcompressb_sequence_variants},
@@ -6620,6 +6646,7 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_family_exact_plan_id_by_recipe[MACHINE_
     [34] = MACHINE_X64_EXACT_PLAN_XCHG,
     [35] = MACHINE_X64_EXACT_PLAN_CMPXCHG,
     [46] = MACHINE_X64_EXACT_PLAN_SUB_RSP,
+    [49] = MACHINE_X64_EXACT_PLAN_VSPLATD,
 };
 
 BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_id_for_recipe_variant(MachineEmitRecipeCategory category, u16 recipe_index, u32 variant_index)
@@ -8879,6 +8906,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT:
             operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(payload, width);
             break;
+        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS:
+            operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(1, width);
+            break;
         case MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO:
             operands[operand_index] = machine_x64_exact_relative_operand(0, width);
             break;
@@ -9095,6 +9125,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
                 break;
             case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_CONSTANT:
                 operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(payload, width);
+                break;
+            case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS:
+                operands[operand_index] = machine_x64_exact_unsigned_immediate_operand(1, width);
                 break;
             case MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO:
                 operands[operand_index] = machine_x64_exact_relative_operand(0, width);
