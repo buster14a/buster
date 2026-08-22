@@ -846,6 +846,14 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {0},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
     },
+    // Pure V0/V1 compute between its chunk loads and store: no register
+    // operands, no clobber mask (no allocatable file contains V0/V1), and
+    // ordering comes from the scheduler's float-state chain.
+    [MACHINE_A64_VARITH] = {
+        .name = S8_INITIALIZER("a64_varith"),
+        .operand_count = 0,
+        .operand_info = {0},
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1076,6 +1084,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_VA_ARG] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 33,
     [MACHINE_A64_VLOAD_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 34,
     [MACHINE_A64_VSTORE_FRAME] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 35,
+    [MACHINE_A64_VARITH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 36,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

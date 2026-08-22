@@ -599,6 +599,14 @@ typedef enum MachineOpcode
     // across a staged argument register or a V0/V1 compute scratch.
     MACHINE_A64_VLOAD_FRAME,  // slot ref source; v[payload>>24] = 16 bytes
     MACHINE_A64_VSTORE_FRAME, // slot ref destination; 16 bytes = v[payload>>24]
+    // Sixteen-byte NEON three-same arithmetic over the fixed V0/V1 compute
+    // scratches: v0 = v0 op v1, Q form. The payload packs the lane-size
+    // log2 above an operation selector (0 add, 1 sub, 2 mul, 3 and, 4 orr,
+    // 5 eor, 6 fadd, 7 fsub, 8 fmul, 9 fdiv). Like the FMOV and
+    // VLOAD/VSTORE rows the V registers are fixed identities outside every
+    // allocatable file; ordering between the row and its chunk loads and
+    // store comes from the scheduler's float-state chain.
+    MACHINE_A64_VARITH, // payload = (lane_log2 << 8) | operation
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

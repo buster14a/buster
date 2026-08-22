@@ -1007,6 +1007,83 @@ BUSTER_GLOBAL_LOCAL void machine_a64_select_remainder_expansion(MachineA64Select
     machine_a64_define(selector, result_register, subtract_row);
 }
 
+// Vector arithmetic over slot-backed values: the canonical emitter
+// scalarizes lane by lane through V0, the machine rows run the NEON
+// three-same word per sixteen-byte chunk through the fixed V0/V1 compute
+// scratches — no vector register file is involved. Only the
+// NEON-encodable set selects (add/sub/mul, the bitwise trio, and float
+// add/sub/mul/div); divisions, remainders, shifts, and comparisons keep
+// the canonical per-lane path.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_vector_binary(MachineA64Selector* selector, IrInstruction* instruction, IrType* vector)
+{
+    IrProgram* program = selector->program;
+
+    bool selected = false;
+    IrType* element = ir_type_from_id(&program->types, vector->element_type);
+    u32 left_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 right_slot = selector->value_stack_slots[instruction->operands[1].value];
+    u32 result_slot = instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < selector->function->value_count
+                          ? selector->value_stack_slots[instruction->result.value]
+                          : UINT32_MAX;
+    bool shaped = element && (element->kind == IR_TYPE_INTEGER || element->kind == IR_TYPE_FLOAT) &&
+                  (element->bit_width == 8 || element->bit_width == 16 || element->bit_width == 32 || element->bit_width == 64) &&
+                  vector->layout.resolved && (u64)(element->bit_width / 8) * vector->element_count == vector->layout.size &&
+                  vector->layout.size % 16 == 0 && vector->layout.size <= INT32_MAX && left_slot != UINT32_MAX && right_slot != UINT32_MAX &&
+                  result_slot != UINT32_MAX;
+    if (shaped)
+    {
+        u32 lane_log2 = element->bit_width == 8 ? 0 : element->bit_width == 16 ? 1 : element->bit_width == 32 ? 2 : 3;
+        u32 operation = UINT32_MAX;
+        if (element->kind == IR_TYPE_FLOAT && element->bit_width >= 32)
+        {
+            operation = instruction->binary_operation == IR_BINARY_VECTOR_FLOAT_ADD        ? 6
+                        : instruction->binary_operation == IR_BINARY_VECTOR_FLOAT_SUBTRACT ? 7
+                        : instruction->binary_operation == IR_BINARY_VECTOR_FLOAT_MULTIPLY ? 8
+                        : instruction->binary_operation == IR_BINARY_VECTOR_FLOAT_DIVIDE   ? 9
+                                                                                           : UINT32_MAX;
+        }
+        else if (element->kind == IR_TYPE_INTEGER)
+        {
+            // No 64-bit-lane NEON multiply exists; those functions keep
+            // the canonical path whole.
+            operation = instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_ADD           ? 0
+                        : instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_SUBTRACT    ? 1
+                        : instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_MULTIPLY    ? (lane_log2 == 3 ? UINT32_MAX : 2)
+                        : instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_BITWISE_AND ? 3
+                        : instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_BITWISE_OR  ? 4
+                        : instruction->binary_operation == IR_BINARY_VECTOR_INTEGER_BITWISE_XOR ? 5
+                                                                                                : UINT32_MAX;
+        }
+        if (operation != UINT32_MAX)
+        {
+            selected = true;
+            for (u32 chunk_offset = 0; chunk_offset < (u32)vector->layout.size; chunk_offset += 16)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, left_slot)},
+                                                     .payload = chunk_offset,
+                                                     .opcode = MACHINE_A64_VLOAD_FRAME,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, right_slot)},
+                                                     .payload = chunk_offset | (1u << 24),
+                                                     .opcode = MACHINE_A64_VLOAD_FRAME,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .payload = (lane_log2 << 8) | operation,
+                                                     .opcode = MACHINE_A64_VARITH,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot)},
+                                                     .payload = chunk_offset,
+                                                     .opcode = MACHINE_A64_VSTORE_FRAME,
+                                                 });
+            }
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_binary(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -1015,9 +1092,20 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_binary(MachineA64Selector* selector,
     bool selected = false;
     u32 left_register;
     u32 right_register;
+    // Vector operands are slot-backed with no result register: they
+    // dispatch before the register path, and the type read is safe only
+    // behind its own id bound-checks.
+    IrType* vector_operand_type = instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count &&
+                                          instruction->operands[1].value < function->value_count
+                                      ? ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type)
+                                      : 0;
+    if (vector_operand_type && vector_operand_type->kind == IR_TYPE_VECTOR)
+    {
+        selected = machine_a64_select_vector_binary(selector, instruction, vector_operand_type);
+    }
     // The operand lookups bound the value ids, which is what makes the type
     // read below safe; nothing here may be hoisted above them.
-    if (result_register != UINT32_MAX && machine_a64_operand_register(selector, instruction->operands[0], &left_register) &&
+    else if (result_register != UINT32_MAX && machine_a64_operand_register(selector, instruction->operands[0], &left_register) &&
         machine_a64_operand_register(selector, instruction->operands[1], &right_register))
     {
         IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
@@ -3307,7 +3395,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
                 else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
-                          instruction->opcode == IR_OPCODE_VA_ARG) &&
+                          instruction->opcode == IR_OPCODE_VA_ARG ||
+                          (instruction->opcode == IR_OPCODE_BINARY && value_type && value_type->kind == IR_TYPE_VECTOR)) &&
                          value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                          (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                           value_type->kind == IR_TYPE_VECTOR ||
@@ -5512,6 +5601,28 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     frame_area, placement->stack_slot_offsets[vector_slot] - (instruction->payload & 0x00ffffffu));
                 machine_a64_emit_vector_frame_memory(&encoder, instruction->payload >> 24, vector_offset,
                                                      instruction->opcode == MACHINE_A64_VSTORE_FRAME);
+            }
+            break;
+            case MACHINE_A64_VARITH:
+            {
+                // NEON three-same v0 = v0 op v1, Q form; base words
+                // verified against llvm-mc. Integer forms take the lane
+                // size at bits 23:22; the float forms keep their fixed
+                // size field and take the double bit at 22.
+                u32 varith_lane_log2 = (instruction->payload >> 8) & 0x3u;
+                u32 varith_operation = instruction->payload & 0xffu;
+                u32 varith_double_bit = varith_lane_log2 == 3 ? 0x00400000u : 0;
+                u32 varith_word = varith_operation == 0   ? 0x4e218400u | (varith_lane_log2 << 22)
+                                  : varith_operation == 1 ? 0x6e218400u | (varith_lane_log2 << 22)
+                                  : varith_operation == 2 ? 0x4e219c00u | (varith_lane_log2 << 22)
+                                  : varith_operation == 3 ? 0x4e211c00u
+                                  : varith_operation == 4 ? 0x4ea11c00u
+                                  : varith_operation == 5 ? 0x6e211c00u
+                                  : varith_operation == 6 ? 0x4e21d400u | varith_double_bit
+                                  : varith_operation == 7 ? 0x4ea1d400u | varith_double_bit
+                                  : varith_operation == 8 ? 0x6e21dc00u | varith_double_bit
+                                                          : 0x6e21fc00u | varith_double_bit;
+                machine_a64_emit(&encoder, varith_word);
             }
             break;
             case MACHINE_A64_VA_SAVE:
