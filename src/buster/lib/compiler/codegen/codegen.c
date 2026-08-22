@@ -11308,7 +11308,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 // reserved outgoing-area slot: the callee may
                                 // store it back with alignment-checking moves
                                 // the sixteen-aligned frame slot cannot take.
-                                if (!codegen_canonical_x64_rsp_address(&buffer, indirect_return_register, call_layout.windows_result_copy_offset,
+                                // The cast is not redundant: an unfixed enum is
+                                // unsigned under the Itanium ABI and signed
+                                // under the MS one, so a host-Windows build
+                                // sees a sign conversion here that a Linux one
+                                // does not.
+                                if (!codegen_canonical_x64_rsp_address(&buffer, (u32)indirect_return_register, call_layout.windows_result_copy_offset,
                                                                         call_layout.windows_result_copy_alignment))
                                 {
                                     result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
