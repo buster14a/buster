@@ -1870,7 +1870,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "typedef float MachineV4 __attribute__((vector_size(16)));\n"
                                   "MachineV4 vec_pass(MachineV4 value) { return value; }\n"
                                   "typedef struct MachineBig3 { long a; long b; long c; } MachineBig3;\n"
-                                  "long big_take(MachineBig3 value, long salt) { return value.a * 3 + value.c + salt; }\n");
+                                  "long big_take(MachineBig3 value, long salt) { return value.a * 3 + value.c + salt; }\n"
+                                  "typedef struct MachineFPair { double left; double right; } MachineFPair;\n"
+                                  "double fpair_tail(double a, double b, double c, double d, double e, double f, double g, double h,\n"
+                                  "    MachineFPair tail) { return a + b + c + d + e + f + g + h + tail.left * 2 + tail.right; }\n"
+                                  "typedef struct MachinePair2 { long low; long high; } MachinePair2;\n"
+                                  "long pair_spill(long a, long b, long c, long d, long e, long f, long g, MachinePair2 tail) {\n"
+                                  "    return a + b + c + d + e + f + g + tail.low * 5 + tail.high; }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
@@ -4183,6 +4189,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"), S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"),
             S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("stack_tail"),
             S8_INITIALIZER("vsum"), S8_INITIALIZER("vec_pass"), S8_INITIALIZER("big_take"),
+            S8_INITIALIZER("fpair_tail"), S8_INITIALIZER("pair_spill"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
@@ -4482,6 +4489,23 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             s64 c;
         } MachineTestA64Big3;
         typedef s64 MachineTestA64CallBig3(MachineTestA64Big3, s64);
+        // Stack-passed aggregate shapes with nothing after them, so the
+        // subset's open-file quirks never diverge from the host compiler's
+        // conventions: the HFA lands at the stack base once V0-V7 are
+        // full, and the two-part pair lands there once X0-X6 leave one
+        // integer register short.
+        typedef struct MachineTestA64FPair
+        {
+            double left;
+            double right;
+        } MachineTestA64FPair;
+        typedef double MachineTestA64CallFPairTail(double, double, double, double, double, double, double, double, MachineTestA64FPair);
+        typedef struct MachineTestA64Pair2
+        {
+            s64 low;
+            s64 high;
+        } MachineTestA64Pair2;
+        typedef s64 MachineTestA64CallPairSpill(s64, s64, s64, s64, s64, s64, s64, MachineTestA64Pair2);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names) && a64_none_executable.address; name_index += 1)
         {
             if (!a64_encoded[name_index].valid)
@@ -4521,6 +4545,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool is_vsum = string_equal(a64_supported_names[name_index], S8("vsum"));
             bool is_vec_pass = string_equal(a64_supported_names[name_index], S8("vec_pass"));
             bool is_big_take = string_equal(a64_supported_names[name_index], S8("big_take"));
+            bool is_fpair_tail = string_equal(a64_supported_names[name_index], S8("fpair_tail"));
+            bool is_pair_spill = string_equal(a64_supported_names[name_index], S8("pair_spill"));
             bool is_loop = string_equal(a64_supported_names[name_index], S8("sum_to"));
             bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
                                string_equal(a64_supported_names[name_index], S8("bitnot")) ||
@@ -4645,6 +4671,25 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     memcpy(&machine_call_big3, &machine_address, sizeof(machine_call_big3));
                     MachineTestA64Big3 big_probe = {left, right, left ^ right};
                     all_equal &= none_call_big3(big_probe, right - left) == machine_call_big3(big_probe, right - left);
+                }
+                else if (is_fpair_tail)
+                {
+                    MachineTestA64CallFPairTail* none_call_fpair = 0;
+                    MachineTestA64CallFPairTail* machine_call_fpair = 0;
+                    memcpy(&none_call_fpair, &none_address, sizeof(none_call_fpair));
+                    memcpy(&machine_call_fpair, &machine_address, sizeof(machine_call_fpair));
+                    MachineTestA64FPair fpair_probe = {(double)left, (double)right};
+                    all_equal &= none_call_fpair(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, fpair_probe) ==
+                                 machine_call_fpair(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, fpair_probe);
+                }
+                else if (is_pair_spill)
+                {
+                    MachineTestA64CallPairSpill* none_call_pair = 0;
+                    MachineTestA64CallPairSpill* machine_call_pair = 0;
+                    memcpy(&none_call_pair, &none_address, sizeof(none_call_pair));
+                    memcpy(&machine_call_pair, &machine_address, sizeof(machine_call_pair));
+                    MachineTestA64Pair2 pair_probe = {left, right};
+                    all_equal &= none_call_pair(1, 2, 3, 4, 5, 6, 7, pair_probe) == machine_call_pair(1, 2, 3, 4, 5, 6, 7, pair_probe);
                 }
                 else if (wide_result)
                 {

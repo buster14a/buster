@@ -314,14 +314,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
 }
 
 // Consecutive-register assignment per class: integer parts take the next
-// X argument register, float parts the next V register. A scalar past its
-// register file — or an indirect argument's pointer, which is just an
-// integer part here — takes the next sequential eight-byte stack part:
-// the exact simulation the canonical caller and parameter capture both
-// run, including its quirk that integer overflow does not close the file
-// for a later narrower argument. Register-aggregate, HFA, and vector
-// overflow stays outside the subset, so those fail the placement instead
-// of spilling.
+// X argument register, float parts the next V register. Whatever no
+// longer fits takes sequential eight-byte stack parts — a scalar or an
+// indirect argument's pointer as one part, a register aggregate, HFA, or
+// vector as its eightbyte images. The exact simulation the canonical
+// caller and parameter capture both run, including both its quirks:
+// integer overflow leaves the X file open for a later narrower argument,
+// while an HFA or vector that overflows closes the V file behind it.
 BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape, u32* integer_count, u32* float_count, u32* stack_part_count,
                                                     MachineA64ArgumentPlacement* placement)
 {
@@ -350,6 +349,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         placement->on_stack = 1;
         placement->first_stack_part = (u16)*stack_part_count;
         *stack_part_count += 1;
+    }
+    else if (float_parts == shape->part_count)
+    {
+        // An HFA or vector past the V file goes to the stack as its
+        // eightbyte images — and the canonical caller closes the V file
+        // behind it, so no later float argument may take a register the
+        // skipped value did not. The integer file has no such rule.
+        *float_count = 8;
+        placement->on_stack = 1;
+        placement->first_stack_part = (u16)*stack_part_count;
+        *stack_part_count += shape->byte_size / 8;
+    }
+    else if (integer_parts == shape->part_count)
+    {
+        // A register aggregate past the X file: its eightbytes go to the
+        // stack and the file stays open, the same quirk scalars follow.
+        placement->on_stack = 1;
+        placement->first_stack_part = (u16)*stack_part_count;
+        *stack_part_count += shape->byte_size / 8;
     }
     else
     {
@@ -1607,15 +1625,42 @@ BUSTER_GLOBAL_LOCAL void machine_a64_stage_call_arguments(MachineA64Selector* se
         for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
         {
             MachineA64ArgumentPlacement* argument_placement = plan->argument_placements + argument_index;
-            if (argument_placement->on_stack)
+            if (!argument_placement->on_stack)
             {
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
-                                                     .payload = (u32)argument_placement->first_stack_part * 8u,
-                                                     .opcode = MACHINE_A64_STORE_FRAME64,
-                                                 });
+                continue;
             }
+            MachineA64ValueShape* stack_shape = plan->argument_shapes + argument_index;
+            if (stack_shape->aggregate && !stack_shape->indirect)
+            {
+                // An aggregate, HFA, or vector on the stack is its
+                // eightbyte images at sequential offsets, bounced through
+                // fresh vregs from the value's slot — the pre-pass runs
+                // before any register staging, so the bounces are free to
+                // land anywhere.
+                for (u32 part_index = 0; part_index < stack_shape->byte_size / 8; part_index += 1)
+                {
+                    u32 bounce_register = machine_a64_synthesize_register(selector);
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, plan->argument_slots[argument_index])},
+                                                         .payload = part_index * 8u,
+                                                         .opcode = MACHINE_A64_LOAD_FRAME,
+                                                     });
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                         .payload = ((u32)argument_placement->first_stack_part + part_index) * 8u,
+                                                         .opcode = MACHINE_A64_STORE_FRAME64,
+                                                     });
+                }
+                continue;
+            }
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
+                                                 .payload = (u32)argument_placement->first_stack_part * 8u,
+                                                 .opcode = MACHINE_A64_STORE_FRAME64,
+                                             });
         }
     }
     if (plan->return_shape.indirect)
@@ -3385,6 +3430,41 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         MachineA64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
                         u32 next_integer = parameter_placement->first_integer;
                         u32 next_float = parameter_placement->first_float;
+                        if (parameter_placement->on_stack && shape->aggregate && !shape->indirect)
+                        {
+                            // A stack-passed aggregate, HFA, or vector: its
+                            // eightbyte images read back from the caller's
+                            // outgoing area into the value's slot during the
+                            // integer pass — the loads touch no argument
+                            // register of either class.
+                            if (!float_pass)
+                            {
+                                u32 slot = selector.value_stack_slots[argument_value];
+                                if (slot == UINT32_MAX)
+                                {
+                                    machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                    break;
+                                }
+                                for (u32 part_index = 0; part_index < shape->byte_size / 8; part_index += 1)
+                                {
+                                    u32 incoming_register = machine_a64_synthesize_register(&selector);
+                                    u32 incoming_row = machine_a64_select_row(
+                                        &selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
+                                                       .payload = 16u + ((u32)parameter_placement->first_stack_part + part_index) * 8u,
+                                                       .opcode = MACHINE_A64_LOAD_INCOMING,
+                                                   });
+                                    machine_a64_define(&selector, incoming_register, incoming_row);
+                                    machine_a64_select_row(&selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, incoming_register)},
+                                                                          .payload = part_index * 8u,
+                                                                          .opcode = MACHINE_A64_STORE_FRAME64,
+                                                                      });
+                                }
+                            }
+                            continue;
+                        }
                         if (shape->vector)
                         {
                             // The whole incoming V register stores straight
