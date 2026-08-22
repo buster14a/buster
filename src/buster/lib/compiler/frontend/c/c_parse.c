@@ -11682,6 +11682,30 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             {
                 existing->is_definition |= declaration->is_definition;
             }
+            // The composite of `char pad[]` and `char pad[5]` is the complete
+            // array (C11 6.2.7p3): a redeclaration that completes an entity
+            // first declared with an unbounded array adopts its type — later
+            // declarations, sizeof, and the symbol's layout all read the
+            // entity's type, not the declaration's. A defining redeclaration
+            // whose own bound is inferred from its initializer counts too:
+            // lowering infers the bound on the definition's type, so the
+            // entity must share that type object to see the inference.
+            if (entity_kind == C_ENTITY_OBJECT && existing->type.value < result.type_count && declaration->type.value < result.type_count)
+            {
+                CType* existing_type = &result.types[existing->type.value];
+                CType* declared_type = &result.types[declaration->type.value];
+                if (existing_type->kind == C_TYPE_ARRAY && declared_type->kind == C_TYPE_ARRAY &&
+                    existing_type->array_bound < result.array_bound_count && declared_type->array_bound < result.array_bound_count)
+                {
+                    CArrayBound existing_bound = result.array_bounds[existing_type->array_bound];
+                    CArrayBound declared_bound = result.array_bounds[declared_type->array_bound];
+                    if (!existing_bound.token_count && !existing_bound.is_star && !existing_bound.has_inferred_count &&
+                        (declared_bound.token_count || declaration->is_definition))
+                    {
+                        existing->type = declaration->type;
+                    }
+                }
+            }
             continue;
         }
         if (conflicting && !(kind == C_DECLARATION_FUNCTION && conflicting->kind == C_ENTITY_FUNCTION && overloadable))

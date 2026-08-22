@@ -3887,6 +3887,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_vector_initializer_cross.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, c_vector_initializer_cross.has_object);
     }
+    // Incomplete extern arrays: `extern char pad[]` completed later in the
+    // same unit (spelled bound, braced inference, string inference, either
+    // declaration order) lowers with the composite type, and one never
+    // completed lowers as an import — the two-file link resolves it against
+    // the companion definition unit.
+    String8 c_extern_incomplete_path = buster_test_temporary_path(arguments->arena, S8("buster-c-extern-incomplete-array"),
+#if BUSTER_WINDOWS
+                                                                  S8(".exe"));
+#else
+                                                                  S8(""));
+#endif
+    String8 c_extern_incomplete_command_line[] = {
+        S8("-o"),
+        c_extern_incomplete_path,
+        S8("tests/basic_c_extern_incomplete_array.c"),
+        S8("tests/basic_c_extern_incomplete_array_def.c"),
+    };
+    CompilerDriverResult c_extern_incomplete = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_extern_incomplete_command_line)));
+    BUSTER_TEST(arguments, c_extern_incomplete.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_extern_incomplete.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_extern_incomplete_arguments[] = {
+            c_extern_incomplete_path,
+        };
+        ProcessSpawnResult c_extern_incomplete_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_extern_incomplete_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_extern_incomplete_spawn.handle != 0);
+        if (c_extern_incomplete_spawn.handle)
+        {
+            ProcessWaitResult c_extern_incomplete_wait = os_process_wait_sync(arguments->arena, c_extern_incomplete_spawn);
+            BUSTER_TEST(arguments, c_extern_incomplete_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
     // compiles its body out where the vocabulary is unavailable; that is what

@@ -31882,10 +31882,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         IrTypeId type = c_type_ir_map[entity->type.value];
         IrType* type_value = ir_type_from_id(&program->types, type);
-        if (!type_value)
-        {
-            continue;
-        }
         CDeclaration* definition = 0;
         CDeclaration* first = 0;
         bool internal = false;
@@ -31921,6 +31917,41 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             continue;
         }
         if (!definition && !object_referenced[entity_index])
+        {
+            continue;
+        }
+        if (!type_value && !definition && entity->type.value < parse.type_count)
+        {
+            // `extern char pad[];` with no completing declaration in this unit:
+            // the incomplete array never maps, but the import still lowers.
+            // The symbol takes a zero-length array of the mapped element type —
+            // indexing gets its element layout while c_type_ir_map stays
+            // unmapped, so sizeof over the entity keeps failing as it must.
+            CType* c_type = &parse.types[entity->type.value];
+            if (c_type->kind == C_TYPE_ARRAY && c_type->array_bound < parse.array_bound_count && c_type->element_type.value < parse.type_count)
+            {
+                CArrayBound bound = parse.array_bounds[c_type->array_bound];
+                IrType* element_type = ir_type_from_id(&program->types, c_type_ir_map[c_type->element_type.value]);
+                if (!bound.token_count && !bound.is_star && !bound.has_inferred_count && element_type && element_type->layout.resolved)
+                {
+                    type = ir_program_add_type(program, (IrType){
+                                                            .name = S8("array"),
+                                                            .element_type = c_type_ir_map[c_type->element_type.value],
+                                                            .return_type = IR_TYPE_ID_INVALID,
+                                                            .layout =
+                                                                {
+                                                                    .size = 0,
+                                                                    .alignment = element_type->layout.alignment,
+                                                                    .resolved = true,
+                                                                },
+                                                            .kind = IR_TYPE_ARRAY,
+                                                            .element_count = 0,
+                                                        });
+                    type_value = ir_type_from_id(&program->types, type);
+                }
+            }
+        }
+        if (!type_value)
         {
             continue;
         }
