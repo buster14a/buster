@@ -54,6 +54,7 @@ keep current.
 
 - [`2026-08-22T140940Z`](docs/performance-audits/2026-08-22T140940Z.md) — SIMD-first lexing evaluated against the landed compaction emitter: a census of the stage-1 workload, the window pipeline's lane utilization, and 64-byte-stride escape scans (stage 1 -37,0 M instructions)
 - [`2026-08-22T141319Z`](docs/performance-audits/2026-08-22T141319Z.md) — the two indirect dispatches of the branch-miss survey: the lowering machine stops re-dispatching its fixed chains, and the selector's switch is measured in place
+- [`2026-08-22T144241Z`](docs/performance-audits/2026-08-22T144241Z.md) — re-rank both miss surveys on post-497/499/500/501 main, then stop the IR lowering re-deriving what the parse pass already indexed
 - [`2026-08-22T122232Z`](docs/performance-audits/2026-08-22T122232Z.md) — the two 2026-08-08g-era stage-1 leads re-derived: the specifier-word ladders move to the interned symbol id, and the 2-byte token record is recorded dead
 - [`2026-08-22T120206Z`](docs/performance-audits/2026-08-22T120206Z.md) — stream preprocessed tokens into their final array instead of staging ranges that never coalesced
 - [`2026-08-22T120959Z`](docs/performance-audits/2026-08-22T120959Z.md) — attribute the include amplification per header, then drop guard-shaped re-includes unread
