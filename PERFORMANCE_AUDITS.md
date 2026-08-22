@@ -53,6 +53,7 @@ keep current.
 ## Audits, newest first
 
 - [`2026-08-22T190355Z`](docs/performance-audits/2026-08-22T190355Z.md) — give the AArch64 selector a compact row layout and candidate list
+- [`2026-08-22T195224Z`](docs/performance-audits/2026-08-22T195224Z.md) — the frame machine's statement machines become self-loops and places run off the loop
 - [`2026-08-22T140940Z`](docs/performance-audits/2026-08-22T140940Z.md) — SIMD-first lexing evaluated against the landed compaction emitter: a census of the stage-1 workload, the window pipeline's lane utilization, and 64-byte-stride escape scans (stage 1 -37,0 M instructions)
 - [`2026-08-22T141319Z`](docs/performance-audits/2026-08-22T141319Z.md) — the two indirect dispatches of the branch-miss survey: the lowering machine stops re-dispatching its fixed chains, and the selector's switch is measured in place
 - [`2026-08-22T144241Z`](docs/performance-audits/2026-08-22T144241Z.md) — re-rank both miss surveys on post-497/499/500/501 main, then stop the IR lowering re-deriving what the parse pass already indexed
