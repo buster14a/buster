@@ -474,6 +474,63 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE float4 float4_make(f32 x, f
     return result;
 }
 
+// A memcpy whose count is a runtime value is a libc call, and the x86 metadata
+// emitters copy encodings one to fifteen bytes long — about 405 K such calls
+// per self-host compile, each moving four to five bytes. Three overlapping
+// power-of-two moves cover every count up to sixteen without a call.
+//
+// Every load and store here stays inside [0, count) — each offset is derived
+// from the count itself — so this reads and writes exactly the bytes memcpy
+// would, and is a drop-in for it at any size: counts past sixteen fall through
+// to memcpy, so a caller that grows past the fast range stays correct.
+//
+// Measure before adding a call site. The same substitution in
+// machine_x64_emit_variable_memory_encoding and machine_x64_emit_exact_recipe
+// cost +48,7 M stage-1 instructions on its own, and those two sites are what
+// put the five-site variant at +43,8 M instructions and +20,8 M L1d loads over
+// eleven pairs (0/11). Expanding the sequence inside those hot encoders
+// perturbed their register allocation, and the reloads cost far more than the
+// 2,2 M calls it removed. The win here is the call, not the copy sequence — a
+// site whose surrounding function is already register-hungry loses either way.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE void memory_copy_small(void* destination, void const* source, u64 count)
+{
+    u8* to = (u8*)destination;
+    u8 const* from = (u8 const*)source;
+    if (count >= 8)
+    {
+        if (count <= 16)
+        {
+            u64 head;
+            u64 tail;
+            memcpy(&head, from, sizeof(head));
+            memcpy(&tail, from + count - sizeof(tail), sizeof(tail));
+            memcpy(to, &head, sizeof(head));
+            memcpy(to + count - sizeof(tail), &tail, sizeof(tail));
+        }
+        else
+        {
+            memcpy(to, from, count);
+        }
+    }
+    else if (count >= 4)
+    {
+        u32 head;
+        u32 tail;
+        memcpy(&head, from, sizeof(head));
+        memcpy(&tail, from + count - sizeof(tail), sizeof(tail));
+        memcpy(to, &head, sizeof(head));
+        memcpy(to + count - sizeof(tail), &tail, sizeof(tail));
+    }
+    else if (count)
+    {
+        // 1, 2 and 3 bytes: the ends plus the middle, which repeat for the
+        // shorter counts rather than needing a case of their own.
+        to[0] = from[0];
+        to[count >> 1] = from[count >> 1];
+        to[count - 1] = from[count - 1];
+    }
+}
+
 #define EACH_SLICE_INT(i, s)                                                                                                                                   \
     u64 i = 0;                                                                                                                                                 \
     i < (s).length;                                                                                                                                            \

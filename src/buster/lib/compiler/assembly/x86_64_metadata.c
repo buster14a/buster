@@ -6813,7 +6813,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             result->status = BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
             return true;
         }
-        if (byte_count) memcpy(output, plan->machine_fast_template, byte_count);
+        if (byte_count) memory_copy_small(output, plan->machine_fast_template, byte_count);
         if (relative)
         {
             u32 offset = plan->machine_fast_template_relative_offset;
@@ -7158,7 +7158,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             result->status = BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
             return true;
         }
-        if (byte_count) memcpy(output, bytes, byte_count);
+        if (byte_count) memory_copy_small(output, bytes, byte_count);
         result->byte_count = byte_count;
         result->status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
     }
@@ -8552,7 +8552,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
         result.status = BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY;
         return result;
     }
-    if (scratch.byte_count) memcpy(query.output, scratch.bytes, scratch.byte_count);
+    if (scratch.byte_count) memory_copy_small(query.output, scratch.bytes, scratch.byte_count);
     if (scratch.relocation_count) memcpy(query.relocations, scratch.relocations, scratch.relocation_count * sizeof(*scratch.relocations));
     result.byte_count = scratch.byte_count;
     result.relocation_count = scratch.relocation_count;
