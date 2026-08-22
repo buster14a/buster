@@ -2391,6 +2391,19 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wide_vector_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // sizeof over an inline aggregate definition must be rejected, never
+    // folded from the expression-type prediction's int guess (see the
+    // fixture's header); the assertion is only that no object is produced.
+    String8 c_sizeof_anonymous_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-anonymous"), S8(""));
+    String8 c_sizeof_anonymous_command_line[] = {
+        S8("-o"),
+        c_sizeof_anonymous_path,
+        S8("tests/basic_c_sizeof_anonymous_aggregate.c"),
+    };
+    CompilerDriverResult c_sizeof_anonymous = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_command_line)));
+    BUSTER_TEST(arguments, c_sizeof_anonymous.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, !c_sizeof_anonymous.has_object);
     // 256-bit vector arguments, once through the default pipeline and once
     // through the canonical emitter, whose VMOVDQU move is the shape the
     // default pipeline only reaches through per-function fallback.

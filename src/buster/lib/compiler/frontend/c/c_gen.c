@@ -15062,6 +15062,39 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     return false;
 }
 
+// Is this token range an inline struct/union/enum *definition* — the
+// keyword, an optional tag, and its brace body — rather than a reference to
+// a named tag? The sizeof fold has no path that resolves such a definition,
+// and the expression-type prediction it would otherwise fall through to
+// guesses int, so a definition operand must fail the fold instead of
+// silently misfolding (found by tools/differential_c_harness.py, family
+// sizeof_expr; the same shape in expression position is already rejected
+// with an unbound-identifier diagnostic).
+BUSTER_C_INTERNAL bool c_ir_tokens_start_aggregate_definition(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = false;
+    // The compound-literal spelling puts the definition one token in:
+    // `(struct { ... }){0}`. A parenthesized reference like `(struct S)` has
+    // no brace where the test below looks, so seeing through the parenthesis
+    // cannot claim one.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        start += 1;
+    }
+    if (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+        c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[start],
+                                  C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)))
+    {
+        u32 brace_probe = start + 1;
+        if (brace_probe < end && builder->preprocess.tokens[brace_probe].kind == C_TOKEN_IDENTIFIER)
+        {
+            brace_probe += 1;
+        }
+        result = brace_probe < end && c_token_is_punctuator(&builder->preprocess.tokens[brace_probe], C_PUNCTUATOR_LEFT_BRACE);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
     u32 expression_start = start;
@@ -15093,6 +15126,10 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 normalized = true;
             }
         }
+    }
+    if (c_ir_tokens_start_aggregate_definition(builder, start, end))
+    {
+        return false;
     }
     bool whole_range_string = !dereference_count && start < end;
     for (u32 literal_index = start; whole_range_string && literal_index < end; literal_index += 1)
@@ -15134,6 +15171,12 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                     *alignment_out = literal->layout.alignment;
                 }
                 return true;
+            }
+            // A compound literal whose type is an inline aggregate definition
+            // never resolves above, and no later path can size it either.
+            if (initializer_close == end - 1 && c_ir_tokens_start_aggregate_definition(builder, start + 1, type_close))
+            {
+                return false;
             }
         }
     }
@@ -16009,7 +16052,12 @@ c_ir_expression_core_loop:
             }
             else if (is_sizeof)
             {
-                IrTypeId expression_type = c_ir_predict_expression_type(builder, operand_start, operand_end);
+                // The prediction guesses int for an operand it cannot type; an
+                // inline aggregate definition is such an operand, and a guess
+                // for one silently misfolds the size, so it fails here instead.
+                IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end)
+                                               ? IR_TYPE_ID_INVALID
+                                               : c_ir_predict_expression_type(builder, operand_start, operand_end);
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
                 if (!expression || !expression->layout.resolved)
                 {
