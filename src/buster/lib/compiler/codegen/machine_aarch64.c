@@ -381,7 +381,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
     else if (integer_parts == shape->part_count)
     {
         // A register aggregate past the X file: its eightbytes go to the
-        // stack and the file stays open, the same quirk scalars follow.
+        // stack, and AAPCS64 C.12 closes the integer file behind it (NGRN
+        // becomes 8), so no later scalar may take a register the skipped
+        // composite did not — clang lays out `7 x u64, {u64,u64}, u64` with
+        // both the pair and the trailing scalar on the stack.
+        *integer_count = 8;
         placement->on_stack = 1;
         placement->first_stack_part = (u16)*stack_part_count;
         *stack_part_count += shape->byte_size / 8;

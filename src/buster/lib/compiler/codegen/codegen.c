@@ -13753,7 +13753,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
-                            if (prior_aggregate && prior_type && prior_type->layout.size > 16)
+                            bool prior_indirect = prior_aggregate && prior_type && prior_type->layout.size > 16;
+                            if (prior_indirect)
                             {
                                 prior_parts = 1;
                             }
@@ -13763,6 +13764,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
+                                // AAPCS64 C.12: a composite that does not fit
+                                // the remaining integer registers closes the
+                                // file as it goes to the stack.
+                                if (prior_aggregate && !prior_indirect)
+                                {
+                                    register_index = 8;
+                                }
                                 prior_stack_parts += prior_parts;
                             }
                         }
@@ -14636,7 +14644,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrType* parameter = ir_type_from_id(&program->types, parameter_type);
                             u32 part_count = 1;
                             bool aggregate = codegen_canonical_integer_aggregate_parts(program, parameter_type, &part_count);
-                            if (aggregate && parameter && parameter->layout.size > 16)
+                            bool parameter_indirect = aggregate && parameter && parameter->layout.size > 16;
+                            if (parameter_indirect)
                             {
                                 part_count = 1;
                             }
@@ -14646,6 +14655,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
+                                // AAPCS64 C.12: a spilled composite closes the
+                                // integer file; the overflow area starts after
+                                // every stack part this walk counts.
+                                if (aggregate && !parameter_indirect)
+                                {
+                                    gp_count = 8;
+                                }
                                 stack_parts += part_count;
                             }
                         }
@@ -14875,6 +14891,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
+                                // AAPCS64 C.12: a composite that does not fit
+                                // the remaining integer registers closes the
+                                // file (NGRN becomes 8) as it goes to the
+                                // stack, so later scalars may not take the
+                                // registers it skipped. A scalar only lands
+                                // here with the file already full.
+                                if (!unnamed_variadic && aggregate && !indirect)
+                                {
+                                    simulated_registers = 8;
+                                }
                                 argument_on_stack[argument_array_index] = true;
                                 argument_stack_offset[argument_array_index] = stack_part_count;
                                 stack_part_count += part_count;
