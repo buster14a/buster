@@ -630,6 +630,10 @@ typedef enum MachineOpcode
     // the destination register free. Linux/Android targets only — Darwin
     // thread locals keep the canonical tlv-call path.
     MACHINE_A64_LEA_TLS, // def; payload = call-target index
+    // Dynamic stack allocation, the canonical emitter's page-probed loop
+    // on its fixed X9/X10 pair: X9 carries the byte count in (destroyed
+    // by the loop), X10 the aligned result pointer out.
+    MACHINE_A64_STACK_ALLOCATE, // def result (X10), use size (X9); payload = alignment
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

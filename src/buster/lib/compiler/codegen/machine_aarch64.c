@@ -193,6 +193,11 @@ struct MachineA64Selector
     IrOpcode failed_opcode;
     bool supported;
     bool returns_value;
+    // A selected dynamic allocation moves the stack pointer below the
+    // fixed outgoing argument area, whose base every call with stack
+    // parts reads as its own stack pointer — the finalize check rejects
+    // the pair whole.
+    bool stack_allocate_selected;
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_scalar_register(IrType* type)
@@ -671,8 +676,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_local(MachineA64Selector* selector, 
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_save(MachineA64Selector* selector, u32 result_register)
 {
-    // With STACK_ALLOCATE outside the subset, SP is constant after the
-    // prologue, so save/restore pairs reduce to exact SP copies.
+    // Save/restore pairs are exact SP copies; only a selected
+    // STACK_ALLOCATE moves SP between them.
     bool selected = false;
     if (result_register != UINT32_MAX)
     {
@@ -697,6 +702,39 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_restore(MachineA64Selector* se
                                              .opcode = MACHINE_A64_WRITE_SP,
                                          });
         selected = true;
+    }
+    return selected;
+}
+
+// Dynamic stack allocation as one constrained row: the size travels in
+// through X9 and the aligned pointer comes back in X10, with the
+// canonical page-probed loop expanded whole in the encoder. Whether the
+// function also stages outgoing stack arguments is only known once every
+// call has selected, so the outgoing-area collision is rejected at
+// finalize rather than here.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_allocate(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    bool selected = false;
+    u32 size_register;
+    if (result_register != UINT32_MAX && instruction->immediate_count && instruction->immediates && instruction->operand_count >= 1)
+    {
+        u64 requested_alignment = instruction->immediates[0];
+        // An out-of-range request lands on zero, which the power-of-two
+        // test below rejects along with every other unusable alignment.
+        u32 stack_alignment = requested_alignment <= UINT32_MAX ? BUSTER_MAX((u32)requested_alignment, 16u) : 0;
+        if (stack_alignment && (stack_alignment & (stack_alignment - 1u)) == 0 &&
+            machine_a64_operand_register(selector, instruction->operands[0], &size_register))
+        {
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
+                                                           .payload = stack_alignment,
+                                                           .opcode = MACHINE_A64_STACK_ALLOCATE,
+                                                       });
+            machine_a64_define(selector, result_register, row);
+            selector->stack_allocate_selected = true;
+            selected = true;
+        }
     }
     return selected;
 }
@@ -3017,6 +3055,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         case IR_OPCODE_STACK_RESTORE:
             selected = machine_a64_select_stack_restore(selector, instruction);
             break;
+        case IR_OPCODE_STACK_ALLOCATE:
+            selected = machine_a64_select_stack_allocate(selector, instruction, result_register);
+            break;
         case IR_OPCODE_ARGUMENT:
             selected = machine_a64_select_argument(selector, instruction, result_register);
             break;
@@ -4134,6 +4175,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             selected_rows += block_row_count;
             machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
+        }
+        // A dynamic allocation moves the stack pointer below the fixed
+        // outgoing argument area, whose base every call with stack parts
+        // reads as its own stack pointer — the pair cannot coexist, and
+        // which calls need the area is only known now.
+        if (selector.supported && selector.stack_allocate_selected && selector.outgoing_slot != UINT32_MAX)
+        {
+            machine_a64_reject(&selector, IR_OPCODE_STACK_ALLOCATE);
         }
         if (!selector.supported)
         {
@@ -5420,6 +5469,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // ld(a)xr, cmp, b.ne, st(l)xr, cbnz, clrex.
             capacity64 += 24;
             break;
+        case MACHINE_A64_STACK_ALLOCATE:
+            // Two mask materializations plus the eleven-word canonical
+            // probe loop.
+            capacity64 += 80;
+            break;
         default:
             capacity64 += 12;
         }
@@ -5897,6 +5951,28 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // dmb ish, the canonical thread-fence word.
                 machine_a64_emit(&encoder, 0xd5033bbfu);
                 break;
+            case MACHINE_A64_STACK_ALLOCATE:
+            {
+                // The canonical page-probed loop verbatim: align the X9
+                // byte count up through the X10 mask, probe and drop SP a
+                // page at a time, take the sub-page tail, and hand the
+                // new stack pointer back in X10.
+                u64 alloc_mask = (u64)instruction->payload - 1;
+                machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, alloc_mask);
+                machine_a64_emit(&encoder, 0x8b0a0129u);
+                machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, ~alloc_mask);
+                machine_a64_emit(&encoder, 0x8a0a0129u);
+                machine_a64_emit(&encoder, 0xf140053fu);
+                machine_a64_emit(&encoder, 0x540000a3u);
+                machine_a64_emit(&encoder, 0xd14007ffu);
+                machine_a64_emit(&encoder, 0xf94003ffu);
+                machine_a64_emit(&encoder, 0xd1400529u);
+                machine_a64_emit(&encoder, 0x17fffffbu);
+                machine_a64_emit(&encoder, 0xcb2963ffu);
+                machine_a64_emit(&encoder, 0xf94003ffu);
+                machine_a64_emit(&encoder, 0x910003eau);
+            }
+            break;
             case MACHINE_A64_VA_SAVE:
             {
                 // The canonical prologue's X0-X7 snapshot, addressed like

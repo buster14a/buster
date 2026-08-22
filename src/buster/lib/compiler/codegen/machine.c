@@ -900,6 +900,18 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
     },
+    // The canonical page-probe loop runs on X9/X10; the size use in X9 is
+    // destroyed by the loop's countdown, which the clobber declares — the
+    // x86-64 xchg lesson.
+    [MACHINE_A64_STACK_ALLOCATE] = {
+        .name = S8_INITIALIZER("a64_stack_allocate"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
+        .clobber_mask = 1u << MACHINE_A64_X9,
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_A64_X10, MACHINE_A64_X9},
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1137,6 +1149,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_ATOMIC_CAS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 40,
     [MACHINE_A64_ATOMIC_FENCE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 41,
     [MACHINE_A64_LEA_TLS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 42,
+    [MACHINE_A64_STACK_ALLOCATE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 43,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
