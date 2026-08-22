@@ -825,6 +825,8 @@ cross-reference each other by them — and stay as written.
   fast. Adding to it means adding an `IrSimdOperation`, its arity in
   `ir_simd_operation_shape`, its validation, its EVEX lowering in
   `codegen_canonical_x64_simd_operation`, the builtin in `c_ir_simd_builtins`,
+  its spelling in `c_symbol_predefined` (`c_source.c` — without it the
+  self-hosted stages fail with "could not lower unbound identifier"),
   a fallback, and a case in `tests/basic_c_simd.c`; the shape table is the
   single source of truth that keeps a new operation from being half-taught to
   the pipeline. Two consequences are worth knowing before writing a kernel.

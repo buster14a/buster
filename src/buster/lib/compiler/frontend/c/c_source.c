@@ -1400,12 +1400,14 @@ BUSTER_C_INTERNAL void c_lex_scalar(CLexState* state)
 // forward-seeking cursor (escape parity per the simdjson backslash algorithm);
 // multi-character punctuators legalize through a bit-channel vpermi2b NFA
 // (three per-position tables AND-ed, one channel per punctuator family);
-// preprocessing-number extents fall out of one count-trailing-ones over a
-// continuation mask; and every complete token then materializes at once —
-// vpcompressb pulls start and end positions of an iota vector through the
-// token-boundary masks, a byte subtract yields all lengths, and the kind and
-// punctuator vectors compress by the same starts mask before widening
-// interleaved stores write the 12-byte CToken rows eight at a time.
+// preprocessing-number extents resolve by carry propagation over a
+// continuation mask — all of a window's numbers at once when numbers are its
+// only extent class, a count-trailing-ones cursor query otherwise; and every
+// complete token then materializes at once — vpcompressb pulls start and end
+// positions of an iota vector through the token-boundary masks, a byte
+// subtract yields all lengths, and the kind and punctuator vectors compress
+// by the same starts mask before masked widening interleaved stores write
+// the 12-byte CToken rows sixteen at a time.
 //
 // Windows always begin at an item boundary, so no lexer state crosses a
 // window: the item touching a window's last byte is deferred and rescanned by
@@ -1445,13 +1447,14 @@ BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_nfa_first[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_nfa_second[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_nfa_third[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_iota[64];
-BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_rotate_eight[64];
 // Two-character spellings, keyed by densely numbered first and second bytes so
-// the whole cross product fits one cache line instead of a 64 KB table.
-BUSTER_C_INTERNAL u8 c_lex_pair_row[128];
-BUSTER_C_INTERNAL u8 c_lex_pair_column[128];
-BUSTER_C_INTERNAL u8 c_lex_pair_punctuators[C_LEX_PAIR_TABLE_SIZE][C_LEX_PAIR_TABLE_SIZE];
-BUSTER_C_INTERNAL u8 c_lex_triple_punctuators[128];
+// the whole cross product fits one cache line instead of a 64 KB table.  The
+// emitter reads the keys and the cross product as vpermi2b tables, so all
+// four arrays are vector-aligned.
+BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_pair_row[128];
+BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_pair_column[128];
+BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_pair_punctuators[C_LEX_PAIR_TABLE_SIZE][C_LEX_PAIR_TABLE_SIZE];
+BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_triple_punctuators[128];
 BUSTER_C_INTERNAL bool c_lex_compact_tables_built;
 
 // Every spelling table below is derived from c_punctuator_spellings, so a new
@@ -1464,7 +1467,6 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
     for (u32 index = 0; index < 64; index += 1)
     {
         c_lex_iota[index] = (u8)index;
-        c_lex_rotate_eight[index] = (u8)((index + 8) & 63);
     }
     memset(c_lex_pair_row, 0xFF, sizeof(c_lex_pair_row));
     memset(c_lex_pair_column, 0xFF, sizeof(c_lex_pair_column));
@@ -1549,25 +1551,27 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
     return c_lex_mask_below(high) & ~c_lex_mask_below(low);
 }
 
-// Eight finished rows: the compressed start, length, kind and punctuator
-// bytes widen to 32-bit lanes (masked, so lanes 8..15 stay zero), the
-// metadata dword assembles as length | kind<<16 | punctuator<<24, and two
-// vpermi2d interleave offsets, zero symbol dwords and metadata into the 24
-// dwords of eight 12-byte CToken rows — 64 stored bytes plus a 32-byte
-// tail, no slop. The symbol dword is zero at lex time and comes from the
-// offset vector's masked-off upper lanes.
+// Sixteen finished rows: the compressed start, length, kind and punctuator
+// bytes widen to 32-bit lanes, the metadata dword assembles as
+// length | kind<<16 | punctuator<<24, and three masked vpermi2d interleave
+// offsets and metadata into the 48 dwords of sixteen 12-byte CToken rows —
+// 192 stored bytes.  The zero symbol dwords come from the permutes' own
+// zeroing masks rather than from sacrificial zero lanes, which is what
+// lets one pass cover sixteen rows where the earlier eight-row form spent
+// the offset vector's masked-off upper lanes as its zero source.
 BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, __m512i starts, __m512i lengths, __m512i kinds, __m512i punctuators, __m512i base,
-                                                        __m512i index_low, __m512i index_high)
+                                                        __m512i index_0, __m512i index_1, __m512i index_2)
 {
-    __m512i start_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(starts));
-    __m512i length_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(lengths));
-    __m512i kind_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(kinds));
-    __m512i punctuator_wide = _mm512_maskz_cvtepu8_epi32(0x00FF, _mm512_castsi512_si128(punctuators));
-    __m512i offsets = _mm512_maskz_add_epi32(0x00FF, start_wide, base);
+    __m512i start_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(starts));
+    __m512i length_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
+    __m512i kind_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds));
+    __m512i punctuator_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(punctuators));
+    __m512i offsets = _mm512_add_epi32(start_wide, base);
     __m512i metadata = _mm512_or_si512(length_wide, _mm512_or_si512(_mm512_slli_epi32(kind_wide, 16), _mm512_slli_epi32(punctuator_wide, 24)));
     u32* dwords = (u32*)out;
-    _mm512_storeu_si512((__m512i*)dwords, _mm512_permutex2var_epi32(offsets, index_low, metadata));
-    _mm256_storeu_si256((__m256i*)(dwords + 16), _mm512_castsi512_si256(_mm512_permutex2var_epi32(offsets, index_high, metadata)));
+    _mm512_storeu_si512((__m512i*)dwords, _mm512_maskz_permutex2var_epi32(0xDB6D, offsets, index_0, metadata));
+    _mm512_storeu_si512((__m512i*)(dwords + 16), _mm512_maskz_permutex2var_epi32(0x6DB6, offsets, index_1, metadata));
+    _mm512_storeu_si512((__m512i*)(dwords + 32), _mm512_maskz_permutex2var_epi32(0xB6DB, offsets, index_2, metadata));
 }
 
 BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
@@ -1590,9 +1594,13 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
     const __m512i nfa_third_low = _mm512_load_si512((const __m512i*)c_lex_nfa_third);
     const __m512i nfa_third_high = _mm512_load_si512((const __m512i*)(c_lex_nfa_third + 64));
     const __m512i iota = _mm512_load_si512((const __m512i*)c_lex_iota);
-    const __m512i rotate_eight = _mm512_load_si512((const __m512i*)c_lex_rotate_eight);
-    const __m512i row_index_low = _mm512_setr_epi32(0, 8, 16, 1, 9, 17, 2, 10, 18, 3, 11, 19, 4, 12, 20, 5);
-    const __m512i row_index_high = _mm512_setr_epi32(13, 21, 6, 14, 22, 7, 15, 23, 0, 0, 0, 0, 0, 0, 0, 0);
+    // The 16-row interleave: dword d of the 48 stored holds row d/3's offset
+    // (d%3 == 0), zeroed symbol (1) or metadata (2); offsets sit in the
+    // permute's first source, metadata in lanes 16..31 of its second, and
+    // the symbol dwords take any index because the store masks zero them.
+    const __m512i row_index_0 = _mm512_setr_epi32(0, 0, 16, 1, 0, 17, 2, 0, 18, 3, 0, 19, 4, 0, 20, 5);
+    const __m512i row_index_1 = _mm512_setr_epi32(0, 21, 6, 0, 22, 7, 0, 23, 8, 0, 24, 9, 0, 25, 10, 0);
+    const __m512i row_index_2 = _mm512_setr_epi32(26, 11, 0, 27, 12, 0, 28, 13, 0, 29, 14, 0, 30, 15, 0, 31);
 
     u64 offset = 0;
     while (offset < source.length)
@@ -1673,12 +1681,21 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         // its last dot would otherwise seed the number in `...5`.  Every other
         // spelling is built from bytes no item can begin with, so the cursor
         // below needs no other punctuator.
-        u64 extent_candidates = (number_seed | line_comment_open | block_comment_open | quote | apostrophe | ellipsis) & valid;
+        u64 other_candidates = (line_comment_open | block_comment_open | quote | apostrophe | ellipsis) & valid;
 
         // Numbers, comments, literals and ellipses are the only items that can
-        // swallow another item's bytes, so one left-to-right cursor over their
-        // candidate starts resolves all four; identifiers, punctuators and
-        // whitespace then fall out of pure mask arithmetic below.
+        // swallow another item's bytes.  A window whose candidates are all
+        // number seeds — the dominant class, 93% of cursor iterations in the
+        // 2026-08-22T140940Z census — resolves every extent at once by carry
+        // propagation: adding each continuation run's first seed to the
+        // continuation mask carries through the run, and the flipped bits are
+        // exactly that number's span.  The first seed of a run is itself one
+        // addition — run starts ripple through the continuation bytes below
+        // the first seed and land on it, while later seeds (the digit after
+        // `5.` or `1e+`) sit on cleared sum bits.  Mixed windows keep the
+        // left-to-right cursor, whose order is what resolves the precedence
+        // among the four classes; identifiers, punctuators and whitespace
+        // fall out of pure mask arithmetic below either way.
         u64 comment_span = 0;
         u64 comment_starts = 0;
         u64 literal_span = 0;
@@ -1688,6 +1705,26 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         u64 character_starts = 0;
         u64 defer_at = 64;
         u64 trigger_at = 64;
+        u64 extent_candidates = 0;
+        if (!other_candidates)
+        {
+            u64 seeds = number_seed & valid;
+            u64 run_starts = number_continue & ~(number_continue << 1);
+            number_starts = ((number_continue & ~seeds) + run_starts) & seeds;
+            number_span = ((number_continue + number_starts) ^ number_continue) & number_continue;
+            // A number reaching the window's last byte may continue into the
+            // next window; defer it exactly as the cursor would have.
+            if (!at_end_of_file && (number_span >> 63))
+            {
+                defer_at = (u64)(63 - __builtin_clzll(number_starts));
+                number_starts &= ~((u64)1 << defer_at);
+                number_span &= c_lex_mask_below(defer_at);
+            }
+        }
+        else
+        {
+            extent_candidates = (number_seed & valid) | other_candidates;
+        }
         u64 cursor = 0;
         for (u64 rest = extent_candidates; rest; rest = extent_candidates & ~c_lex_mask_below(cursor))
         {
@@ -1846,35 +1883,58 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         // Newlines are tokens wherever they appear, block comments included.
         u64 newline_starts = line_feed & valid;
 
-        // Maximal munch over the punctuator runs.  A punctuator byte with no
-        // punctuator neighbour cannot be part of a longer spelling, so only
-        // the clustered ones need the left-greedy walk.
-        _Alignas(64) u8 punctuators[64];
-        _mm512_store_si512((__m512i*)punctuators, single_vector);
+        // Maximal munch over the punctuator runs.  A run holding no pair,
+        // triple or quad candidate is nothing but single-byte tokens, so the
+        // left-greedy walk runs only when a longer spelling opens somewhere
+        // in the operator set — and it resolves starts alone: the ids blend
+        // in registers below rather than patching an in-memory copy of the
+        // singles vector and reloading it through the store queue.
         u64 operators = punctuator_byte & available;
-        u64 operator_starts = operators & ~(operators << 1) & ~(operators >> 1);
-        for (u64 clustered = operators & ~operator_starts; clustered;)
+        u64 multi = (punctuator2 | punctuator3 | punctuator4) & operators;
+        u64 operator_starts = operators;
+        __m512i punctuator_vector = single_vector;
+        if (multi)
         {
-            u64 start = (u64)__builtin_ctzll(clustered);
-            u64 bit = (u64)1 << start;
-            u64 spelling_length = 1;
-            operator_starts |= bit;
-            if (punctuator4 & bit)
+            operator_starts = operators & ~(operators << 1) & ~(operators >> 1);
+            for (u64 clustered = operators & ~operator_starts; clustered;)
             {
-                spelling_length = 4;
-                punctuators[start] = (u8)C_PUNCTUATOR_HASH_HASH_DIGRAPH;
+                u64 start = (u64)__builtin_ctzll(clustered);
+                u64 bit = (u64)1 << start;
+                u64 spelling_length = (punctuator4 & bit) ? 4 : (punctuator3 & bit) ? 3 : (punctuator2 & bit) ? 2 : 1;
+                operator_starts |= bit;
+                clustered &= ~c_lex_mask_below(start + spelling_length);
             }
-            else if (punctuator3 & bit)
-            {
-                spelling_length = 3;
-                punctuators[start] = c_lex_triple_punctuators[(u8)it[start]];
-            }
-            else if (punctuator2 & bit)
-            {
-                spelling_length = 2;
-                punctuators[start] = c_lex_pair_punctuators[c_lex_pair_row[(u8)it[start]]][c_lex_pair_column[(u8)it[start + 1]]];
-            }
-            clustered &= ~c_lex_mask_below(start + spelling_length);
+            // The five blends (2026-08-10b's lead): pair ids come from the
+            // same 16x16 cross-product table the scalar walk indexed,
+            // addressed by the dense row and column keys of a spelling's two
+            // bytes; triples index their first-byte table; the quad is the
+            // one %:%: spelling.  Ids land on every candidate lane, start or
+            // not, and the starts mask below selects the real ones, so the
+            // rest may hold any table byte.  Every pair-candidate lane has
+            // assigned keys — the NFA only legalizes spellings the tables
+            // hold, which c_test_frontend_lex_differential proves
+            // exhaustively — and the keys are at most 15, so the 16-bit
+            // shift cannot carry a lane's row into its neighbour.
+            const __m512i pair_row_low = _mm512_load_si512((const __m512i*)c_lex_pair_row);
+            const __m512i pair_row_high = _mm512_load_si512((const __m512i*)(c_lex_pair_row + 64));
+            const __m512i pair_column_low = _mm512_load_si512((const __m512i*)c_lex_pair_column);
+            const __m512i pair_column_high = _mm512_load_si512((const __m512i*)(c_lex_pair_column + 64));
+            __m512i pair_rows = _mm512_maskz_permutex2var_epi8((__mmask64)punctuator2, pair_row_low, chunk0, pair_row_high);
+            __m512i pair_columns = _mm512_maskz_permutex2var_epi8((__mmask64)punctuator2, pair_column_low, chunk1, pair_column_high);
+            __m512i pair_index = _mm512_or_si512(_mm512_slli_epi16(pair_rows, 4), pair_columns);
+            const __m512i pair_table_0 = _mm512_load_si512((const __m512i*)&c_lex_pair_punctuators[0][0]);
+            const __m512i pair_table_1 = _mm512_load_si512((const __m512i*)&c_lex_pair_punctuators[4][0]);
+            const __m512i pair_table_2 = _mm512_load_si512((const __m512i*)&c_lex_pair_punctuators[8][0]);
+            const __m512i pair_table_3 = _mm512_load_si512((const __m512i*)&c_lex_pair_punctuators[12][0]);
+            __m512i pair_ids = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(pair_table_0, pair_index, pair_table_1),
+                                                    _mm512_movepi8_mask(pair_index),
+                                                    _mm512_permutex2var_epi8(pair_table_2, pair_index, pair_table_3));
+            const __m512i triple_low = _mm512_load_si512((const __m512i*)c_lex_triple_punctuators);
+            const __m512i triple_high = _mm512_load_si512((const __m512i*)(c_lex_triple_punctuators + 64));
+            __m512i triple_ids = _mm512_maskz_permutex2var_epi8((__mmask64)punctuator3, triple_low, chunk0, triple_high);
+            punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator2, pair_ids);
+            punctuator_vector = _mm512_mask_mov_epi8(punctuator_vector, (__mmask64)punctuator3, triple_ids);
+            punctuator_vector = _mm512_mask_set1_epi8(punctuator_vector, (__mmask64)punctuator4, (char)C_PUNCTUATOR_HASH_HASH_DIGRAPH);
         }
 
         // Nothing left over may reach the emitter: a byte that is neither a
@@ -1982,30 +2042,33 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             __m512i kinds = _mm512_maskz_compress_epi8((__mmask64)start_mask, kind_vector);
             // A non-punctuator start keeps whatever its first byte spells —
             // `.` opening a number, say — so the field is cleared first.
-            __m512i punctuator_vector = _mm512_maskz_mov_epi8((__mmask64)operator_starts, _mm512_load_si512((const __m512i*)punctuators));
-            __m512i punctuator_ids = _mm512_maskz_compress_epi8((__mmask64)start_mask, punctuator_vector);
+            __m512i punctuator_ids =
+                _mm512_maskz_compress_epi8((__mmask64)start_mask, _mm512_maskz_mov_epi8((__mmask64)operator_starts, punctuator_vector));
 
             CToken* out = result->tokens + result->token_count;
             __m512i base = _mm512_set1_epi32((s32)(u32)((u64)translated_offset + offset));
-            // Eight rows per pass, tail rows included: the token array carries
-            // eight slots of slack and the next window overwrites them.  The
-            // first pass is unconditional on purpose — guarding it on a
-            // non-empty window measured +2.0 M stage-1 instructions, because a
-            // window with no token at all needs 64 bytes of whitespace or
-            // comment, which escapes to the scalar scanner long before it
-            // reaches here.
+            // Sixteen rows per pass, tail rows included: the token array
+            // carries sixteen slots of slack and the next window overwrites
+            // them.  76% of emitting windows carry 15 or fewer tokens (the
+            // 2026-08-22T140940Z census), so the mean window is one pass
+            // where the 8-row store was two plus a lane rotation.  The first
+            // pass is unconditional on purpose — guarding it on a non-empty
+            // window measured +2.0 M stage-1 instructions, because a window
+            // with no token at all needs 64 bytes of whitespace or comment,
+            // which escapes to the scalar scanner long before it reaches
+            // here.
             for (u32 written = 0;;)
             {
-                c_lex_store_rows(out + written, start_positions, lengths, kinds, punctuator_ids, base, row_index_low, row_index_high);
-                written += 8;
+                c_lex_store_rows(out + written, start_positions, lengths, kinds, punctuator_ids, base, row_index_0, row_index_1, row_index_2);
+                written += 16;
                 if (written >= count)
                 {
                     break;
                 }
-                start_positions = _mm512_permutexvar_epi8(rotate_eight, start_positions);
-                lengths = _mm512_permutexvar_epi8(rotate_eight, lengths);
-                kinds = _mm512_permutexvar_epi8(rotate_eight, kinds);
-                punctuator_ids = _mm512_permutexvar_epi8(rotate_eight, punctuator_ids);
+                start_positions = _mm512_alignr_epi32(start_positions, start_positions, 4);
+                lengths = _mm512_alignr_epi32(lengths, lengths, 4);
+                kinds = _mm512_alignr_epi32(kinds, kinds, 4);
+                punctuator_ids = _mm512_alignr_epi32(punctuator_ids, punctuator_ids, 4);
             }
             result->token_count += count;
             offset += bound;
@@ -2132,9 +2195,9 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         result.checkpoint_count = translated.checkpoint_count;
         result.translated_offset = translated.translated_offset;
         // One token per byte bounds the stream including the end marker exactly as
-        // the scalar loop needs; eight more absorb the tail rows of the emitter's
+        // the scalar loop needs; sixteen more absorb the tail rows of the emitter's
         // full-width interleaved stores, which the next window overwrites.
-        result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 8);
+        result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 16);
         if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
         {
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
