@@ -6098,7 +6098,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_rsp_to_frame(CodegenBuffer* 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_memory_operation_base(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,
                                                                            u32 base_register)
 {
-    u32 scale = size == 16 ? 16 : size == 8 ? 8 : size == 4 ? 4 : 0;
+    // The b and h forms carry the one- and two-byte short vectors AAPCS64
+    // hands the low bytes of a V register. Without them the HFA capture
+    // path — whose part classification already routes a vector here —
+    // emitted nothing at all and left the parameter's slot zero, since
+    // its callers do not check this helper's result.
+    u32 scale = size == 16 ? 16 : size == 8 ? 8 : size == 4 ? 4 : size == 2 ? 2 : size == 1 ? 1 : 0;
     if (!scale || offset % scale || register_number > 31)
     {
         return false;
@@ -6109,7 +6114,16 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_memory_operation_base(Codeg
         codegen_canonical_a64_base_address(buffer, 16, base_register, offset);
         offset = 0;
     }
-    u32 instruction = store ? (size == 16 ? 0x3d8003e0 : size == 8 ? 0xfd0003e0 : 0xbd0003e0) : (size == 16 ? 0x3dc003e0 : size == 8 ? 0xfd4003e0 : 0xbd4003e0);
+    u32 instruction = store ? (size == 16   ? 0x3d8003e0
+                               : size == 8  ? 0xfd0003e0
+                               : size == 4  ? 0xbd0003e0
+                               : size == 2  ? 0x7d0003e0
+                                            : 0x3d0003e0)
+                            : (size == 16   ? 0x3dc003e0
+                               : size == 8  ? 0xfd4003e0
+                               : size == 4  ? 0xbd4003e0
+                               : size == 2  ? 0x7d4003e0
+                                            : 0x3d4003e0);
     codegen_emit_u32(buffer, (instruction & ~(31u << 5)) | ((offset / scale) << 10) | ((indirect ? 16u : base_register) << 5) | register_number);
     return true;
 }
