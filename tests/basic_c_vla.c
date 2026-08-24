@@ -82,6 +82,51 @@ static int check_parameter(int rows, int columns, int values[static rows][column
     return 0;
 }
 
+static long bound_global = 1;
+enum { bound_enumerator = 2 };
+
+// This helper is named only by the function-designator expression in the
+// parameter below.  Binding that token must also keep the internal function in
+// the emitted module even though no body call reaches it.
+static long bound_designator_helper(void)
+{
+    return 0;
+}
+
+// Names in an array parameter's bound live in the declarator rather than in the
+// body.  The object, function designator, and enumerator all occur in the
+// second dimension here, where lowering needs their bound entities to compute
+// the row stride.
+static int check_identifier_bound_parameters(int rows, int columns, int object_values[rows][bound_global + columns],
+                                             int function_values[rows][(long)&bound_designator_helper - (long)&bound_designator_helper + columns],
+                                             int enum_values[rows][bound_enumerator + columns])
+{
+    if (sizeof(object_values[0]) != (unsigned long long)(bound_global + columns) * sizeof(int))
+    {
+        return 1;
+    }
+    object_values[0][bound_global + columns - 1] = 17;
+    if (object_values[0][bound_global + columns - 1] != 17)
+    {
+        return 2;
+    }
+    if (sizeof(function_values[0]) != (unsigned long long)columns * sizeof(int))
+    {
+        return 3;
+    }
+    function_values[0][columns - 1] = 19;
+    if (function_values[0][columns - 1] != 19)
+    {
+        return 4;
+    }
+    if (sizeof(enum_values[0]) != (unsigned long long)(bound_enumerator + columns) * sizeof(int))
+    {
+        return 5;
+    }
+    enum_values[0][bound_enumerator + columns - 1] = 23;
+    return enum_values[0][bound_enumerator + columns - 1] == 23 ? 0 : 6;
+}
+
 // Neither a constant array bound nor an absent one is a variable-length array,
 // and the C lowering skips the VLA layout for both shapes rather than folding
 // them: the parameter decays to a pointer, and every answer below has to come
@@ -294,6 +339,16 @@ int main(void)
         if (over_vla != 0)
         {
             return 70 + over_vla;
+        }
+    }
+    {
+        int object_values[2][5] = {{0}};
+        int function_values[2][3] = {{0}};
+        int enum_values[2][5] = {{0}};
+        int identifier_bound = check_identifier_bound_parameters(2, 3, object_values, function_values, enum_values);
+        if (identifier_bound != 0)
+        {
+            return 100 + identifier_bound;
         }
     }
     {

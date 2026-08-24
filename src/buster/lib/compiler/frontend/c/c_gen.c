@@ -32213,6 +32213,35 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             token_function_declarations[token_index] = declaration_index;
         }
+        // A variable-length array parameter's bound is evaluated in the
+        // function entry block, but its tokens precede body_start.  Attribute
+        // those tokens to this definition as well, so a function named only by
+        // a bound is a dependency of the enclosing function rather than an
+        // outside-body reference that keeps it alive unconditionally.
+        for (u32 parameter_index = 0; parameter_index < declaration.parameter_count; parameter_index += 1)
+        {
+            CParameter parameter = parse.parameters[declaration.parameter_start + parameter_index];
+            for (CTypeId type_id = parameter.type;
+                 type_id.value < parse.type_count && parse.types[type_id.value].kind == C_TYPE_ARRAY;
+                 type_id = parse.types[type_id.value].element_type)
+            {
+                CType array_type = parse.types[type_id.value];
+                if (array_type.array_bound >= parse.array_bound_count)
+                {
+                    continue;
+                }
+                CArrayBound bound = parse.array_bounds[array_type.array_bound];
+                u64 bound_end = (u64)bound.token_start + bound.token_count;
+                if (bound_end > preprocess.token_count)
+                {
+                    bound_end = preprocess.token_count;
+                }
+                for (u64 token_index = bound.token_start; token_index < bound_end; token_index += 1)
+                {
+                    token_function_declarations[token_index] = declaration_index;
+                }
+            }
+        }
     }
     bool* function_referenced_outside = arena_allocate(arena, bool, parse.entity_count);
     memset(function_referenced_outside, 0, sizeof(*function_referenced_outside) * parse.entity_count);
@@ -32589,61 +32618,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         function_dependency_targets[function_dependency_count] = candidate_index;
         function_dependency_next[function_dependency_count] = function_dependency_heads[owner_index];
         function_dependency_heads[owner_index] = function_dependency_count++;
-    }
-    // A variable-length array parameter's bound is evaluated once at entry, but
-    // its tokens live in the declarator and the parser records no identifier
-    // use for them, so `void f(long n, char a[g(n)])` never reaches the loop
-    // above and a static `g` would be dropped as unreferenced.  Mark such a
-    // callee needed outright: that is exactly what the loop above does for a
-    // use it cannot attribute to a body, and a declarator token is outside
-    // every body range.  Every identifier in the bound counts, not only the
-    // ones a `(` follows, because `a[(long)&g - (long)&g + 1]` names g too.
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        CDeclaration* declaration = parse.declarations + declaration_index;
-        CIrSignature* signature = signatures + declaration_index;
-        if (declaration->kind != C_DECLARATION_FUNCTION || !declaration->is_definition || !signature->valid)
-        {
-            continue;
-        }
-        for (u32 parameter_index = 0; parameter_index < signature->parameter_count; parameter_index += 1)
-        {
-            for (CTypeId type_id = signature->parameters[parameter_index].type;
-                 type_id.value < parse.type_count && parse.types[type_id.value].kind == C_TYPE_ARRAY;
-                 type_id = parse.types[type_id.value].element_type)
-            {
-                u32 bound_index = parse.types[type_id.value].array_bound;
-                if (bound_index >= parse.array_bound_count)
-                {
-                    continue;
-                }
-                CArrayBound bound = parse.array_bounds[bound_index];
-                u64 bound_end = (u64)bound.token_start + bound.token_count;
-                if (bound_end > preprocess.token_count)
-                {
-                    bound_end = preprocess.token_count;
-                }
-                for (u64 token_index = bound.token_start; token_index < bound_end; token_index += 1)
-                {
-                    CToken token = preprocess.tokens[token_index];
-                    if (token.kind != C_TOKEN_IDENTIFIER)
-                    {
-                        continue;
-                    }
-                    CEntityId entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
-                    if (entity.value >= parse.entity_count)
-                    {
-                        continue;
-                    }
-                    u32 candidate_index = entity_function_declarations[entity.value];
-                    if (candidate_index != UINT32_MAX && !function_needed[candidate_index])
-                    {
-                        function_needed[candidate_index] = true;
-                        function_worklist[function_worklist_count++] = candidate_index;
-                    }
-                }
-            }
-        }
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {

@@ -12265,6 +12265,38 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         for (u32 parameter_index = 0; parameter_index < declaration->parameter_count; parameter_index += 1)
         {
             CParameter* parameter = &result.parameters[declaration->parameter_start + parameter_index];
+            // A parameter's array bounds are expressions in the declarator,
+            // not part of the function body.  Bind them while the parameter
+            // scope is being built, after the preceding parameters have been
+            // added but before this parameter itself is visible: the scope of
+            // a parameter name starts after its declarator, so `int a[a]`
+            // must not accidentally resolve the inner `a` to itself.  Global
+            // objects, functions, and enumerators are already in file scope;
+            // c_parse_bind_auto_initializer_identifiers has the ordinary
+            // expression filtering (member/tag names and offsetof) needed by
+            // this token range as well.  Prototype-only declarations never
+            // lower a bound, so leave their references out of the emitted
+            // function reachability graph.
+            for (CTypeId type_id = declaration->is_definition ? parameter->type : C_TYPE_ID_INVALID;
+                 type_id.value < result.type_count && result.types[type_id.value].kind == C_TYPE_ARRAY;
+                 type_id = result.types[type_id.value].element_type)
+            {
+                CType array_type = result.types[type_id.value];
+                if (array_type.array_bound >= result.array_bound_count)
+                {
+                    continue;
+                }
+                CArrayBound bound = result.array_bounds[array_type.array_bound];
+                u64 bound_end = (u64)bound.token_start + bound.token_count;
+                if (bound_end > preprocess.token_count)
+                {
+                    bound_end = preprocess.token_count;
+                }
+                if (bound.token_start < bound_end)
+                {
+                    c_parse_bind_auto_initializer_identifiers(arena, &result, preprocess, scope, bound.token_start, (u32)bound_end);
+                }
+            }
             if (!parameter->name.length)
             {
                 continue;
