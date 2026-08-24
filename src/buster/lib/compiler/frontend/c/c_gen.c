@@ -32970,7 +32970,30 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 // above; this test therefore only ever adds the one-dimensional
                 // constant bound.
                 bool constant_bound = parameter.type.value < parse.type_count && c_type_ir_map[parameter.type.value].value != IR_ID_UNDERLYING_INVALID;
-                if (!fixed_inner_array && !constant_bound)
+                // An unspecified outermost bound — `u8 slots[]`, which is how
+                // main's argv and envp are spelled — has no constant to detect,
+                // so the test above cannot see it, but its layout is nearly
+                // empty anyway. c_ir_lower_vla_layout_step discards an absent
+                // outermost bound for a parameter, leaving dimension_counts[0]
+                // and therefore suffix_sizes[0] invalid, so all it emits is the
+                // one CONSTANT element size in suffix_sizes[1]. Skip it on the
+                // same grounds: the parameter is a pointer, `sizeof slots` is
+                // that pointer's, and `sizeof slots[0]` and `slots[i]` both
+                // reach the same answer through local->type's element.
+                // One dimension only. `u8 slots[][n]` genuinely needs
+                // suffix_sizes[1] to index through, and `u8 slots[][3]` is a
+                // pointer to a mapped array, so it took fixed_inner_array
+                // above. The element type must map for the same reason the
+                // layout step demands a resolved element layout.
+                CArrayBound outermost_bound = parameter_type->array_bound < parse.array_bound_count
+                                                  ? c_ir_vla_bound_expression(preprocess, parse.array_bounds[parameter_type->array_bound])
+                                                  : (CArrayBound){0};
+                bool unspecified_bound = parameter_type->array_bound < parse.array_bound_count && !outermost_bound.has_inferred_count &&
+                                         (!outermost_bound.token_count || outermost_bound.is_star) &&
+                                         parameter_type->element_type.value < parse.type_count &&
+                                         parse.types[parameter_type->element_type.value].kind != C_TYPE_ARRAY &&
+                                         c_type_ir_map[parameter_type->element_type.value].value != IR_ID_UNDERLYING_INVALID;
+                if (!fixed_inner_array && !constant_bound && !unspecified_bound)
                 {
                     CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
                     CIrVlaLayout layout = {0};

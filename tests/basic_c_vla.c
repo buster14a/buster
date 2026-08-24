@@ -82,11 +82,14 @@ static int check_parameter(int rows, int columns, int values[static rows][column
     return 0;
 }
 
-// A constant array bound is not a variable-length array, and the C lowering
-// skips the VLA layout for this shape rather than folding it: the parameter
-// decays to a pointer, and every answer below has to come from that pointer
-// type instead of from a runtime layout the skip no longer builds.
-static int check_constant_bound_parameter(unsigned char slots[2], unsigned char matrix[2][3])
+// Neither a constant array bound nor an absent one is a variable-length array,
+// and the C lowering skips the VLA layout for both shapes rather than folding
+// them: the parameter decays to a pointer, and every answer below has to come
+// from that pointer type instead of from a runtime layout the skip no longer
+// builds.  `open[]` is main's argv/envp spelling, and `rows[][3]` is the
+// two-dimensional absent bound, which is a pointer to a constant-bound array
+// and was always skipped.
+static int check_constant_bound_parameter(unsigned char slots[2], unsigned char matrix[2][3], unsigned char open[], unsigned char rows[][3])
 {
     if (sizeof(slots) != sizeof(unsigned char*))
     {
@@ -119,6 +122,55 @@ static int check_constant_bound_parameter(unsigned char slots[2], unsigned char 
     if (matrix[1][2] != 6)
     {
         return 8;
+    }
+    if (sizeof(open) != sizeof(unsigned char*))
+    {
+        return 9;
+    }
+    if (sizeof(open[0]) != 1)
+    {
+        return 10;
+    }
+    if (open[1] - open[0] != 1)
+    {
+        return 11;
+    }
+    if (open + 2 - open != 2)
+    {
+        return 12;
+    }
+    if (sizeof(rows) != sizeof(unsigned char*))
+    {
+        return 13;
+    }
+    if (sizeof(rows[0]) != 3)
+    {
+        return 14;
+    }
+    if (rows[1][2] != 6)
+    {
+        return 15;
+    }
+    return 0;
+}
+
+// The absent outermost bound keeps its layout whenever an inner bound is a real
+// runtime value: `cells[][columns]` still needs the row stride to index
+// through, so the one-dimensional skip above must not reach it.
+static int check_unspecified_bound_over_vla(int columns, unsigned char cells[][columns])
+{
+    if (sizeof(cells) != sizeof(unsigned char*))
+    {
+        return 1;
+    }
+    if (sizeof(cells[0]) != (unsigned long long)columns)
+    {
+        return 2;
+    }
+    cells[1][2] = 23;
+    if (cells[1][2] != 23)
+    {
+        return 3;
     }
     return 0;
 }
@@ -195,10 +247,18 @@ int main(void)
     {
         unsigned char slots[2] = {4, 5};
         unsigned char grid[2][3] = {{1, 2, 3}, {4, 5, 6}};
-        int constant_bound = check_constant_bound_parameter(slots, grid);
+        int constant_bound = check_constant_bound_parameter(slots, grid, slots, grid);
         if (constant_bound != 0)
         {
             return 50 + constant_bound;
+        }
+    }
+    {
+        unsigned char cells[2][3] = {{0, 0, 0}, {0, 0, 0}};
+        int over_vla = check_unspecified_bound_over_vla(3, cells);
+        if (over_vla != 0)
+        {
+            return 70 + over_vla;
         }
     }
     return 0;
