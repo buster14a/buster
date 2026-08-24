@@ -934,6 +934,30 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {0},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
     },
+    [MACHINE_X64_LEA_BLOCK] = {
+        .name = S8_INITIALIZER("x64_lea_block"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    [MACHINE_X64_INDIRECT_BRANCH] = {
+        .name = S8_INITIALIZER("x64_indirect_branch"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
+    [MACHINE_A64_LEA_BLOCK] = {
+        .name = S8_INITIALIZER("a64_lea_block"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    [MACHINE_A64_INDIRECT_BRANCH] = {
+        .name = S8_INITIALIZER("a64_indirect_branch"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
 };
 
 // Every opcode receives a recipe identity independent of the metadata row's
@@ -1175,6 +1199,10 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_SWITCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 44,
     [MACHINE_A64_VLOAD_FRAME_SIZED] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 45,
     [MACHINE_A64_VSTORE_FRAME_SIZED] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 46,
+    [MACHINE_X64_LEA_BLOCK] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 47,
+    [MACHINE_X64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 48,
+    [MACHINE_A64_LEA_BLOCK] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 49,
+    [MACHINE_A64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 50,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
@@ -1572,7 +1600,8 @@ void machine_function_stamp_frequency_classes(MachineFunction* function)
                     u32 head = machine_ref_payload(instruction->operands[slot]);
                     head_ends[head] = head_ends[head] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[head], block_index);
                 }
-                if (function->target && instruction->opcode == function->target->switch_opcode)
+                if (function->target && (instruction->opcode == function->target->switch_opcode || instruction->opcode == MACHINE_X64_INDIRECT_BRANCH ||
+                                         instruction->opcode == MACHINE_A64_INDIRECT_BRANCH))
                 {
                     for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
                     {
@@ -1650,7 +1679,8 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
     if ((function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
         (function->block_count && !function->blocks) || (function->edge_count && !function->edges) ||
         (function->block_parameter_count && !function->block_parameters) ||
-        (function->edge_copy_source_count && !function->edge_copy_sources))
+        (function->edge_copy_source_count && !function->edge_copy_sources) ||
+        (function->switch_case_count && !function->switch_cases))
     {
         result.error = MACHINE_VERIFY_EDGE_RANGE;
         return result;
@@ -1732,6 +1762,36 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             {
                 result.error = MACHINE_VERIFY_OPCODE;
                 return result;
+            }
+            // Switch and computed-goto terminators share the compact target
+            // side table.  Block-address rows carry one block index directly;
+            // reject malformed ranges before placement/encoding can turn them
+            // into an out-of-function pointer or branch target.
+            if (instruction->opcode == MACHINE_X64_LEA_BLOCK || instruction->opcode == MACHINE_A64_LEA_BLOCK)
+            {
+                if (instruction->payload >= function->block_count)
+                {
+                    result.error = MACHINE_VERIFY_EDGE_RANGE;
+                    return result;
+                }
+            }
+            else if (instruction->opcode == MACHINE_X64_SWITCH || instruction->opcode == MACHINE_A64_SWITCH ||
+                     instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+            {
+                if (instruction->payload > function->switch_case_count || instruction->flags > function->switch_case_count - instruction->payload ||
+                    ((instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH) && instruction->flags == 0))
+                {
+                    result.error = MACHINE_VERIFY_EDGE_RANGE;
+                    return result;
+                }
+                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                {
+                    if (function->switch_cases[instruction->payload + case_index].target_block >= function->block_count)
+                    {
+                        result.error = MACHINE_VERIFY_EDGE_RANGE;
+                        return result;
+                    }
+                }
             }
             bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
             bool is_last = offset == block->instruction_count - 1;

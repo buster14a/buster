@@ -1109,7 +1109,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 73);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 77);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1331,7 +1331,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 166);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 168);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
@@ -2283,7 +2283,231 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         if (goto_function)
         {
             MachineSelectResult goto_selected = machine_select_canonical_function(arguments->arena, machine_program, goto_function, machine_target);
-            BUSTER_TEST(arguments, !goto_selected.supported);
+            BUSTER_TEST(arguments, goto_selected.supported);
+            if (goto_selected.supported)
+            {
+                MachineStackPlacement goto_placement = machine_stack_placement_build(arguments->arena, &goto_selected.function);
+                MachineEncodeResult goto_encoded = machine_encode_x86_64(arguments->arena, &goto_selected.function, &goto_placement);
+                BUSTER_TEST(arguments, goto_placement.valid);
+                BUSTER_TEST(arguments, goto_encoded.valid && goto_encoded.byte_count != 0);
+            }
+        }
+        // Computed-goto census: each shape below keeps the complete IR target
+        // set on the machine terminator and exercises a different label-value
+        // provenance path (forward/backward, conditional, array storage,
+        // switch selection, and a label address without an indirect branch).
+        // The same fixture is selected, verified, placed, and encoded on both
+        // backends; the module then runs through NONE/MIR_STACK/FAST/QUALITY
+        // so every allocator sees the same successor population.
+        String8 label_fixture_source = S8(
+            "int labels_one(int v) { void* p = v ? &&one : &&two; goto *p; one: return 1; two: return 2; }\n"
+            "int labels_three(int v) { void* p; if (v < 0) p = &&neg; else if (v) p = &&pos; else p = &&zero; goto *p; neg: return -1; pos: return 1; zero: return 0; }\n"
+            "int labels_four(int v) { void* p = &&a; if (v == 1) p = &&b; if (v == 2) p = &&c; if (v == 3) p = &&d; goto *p; a: return 10; b: return 11; c: return 12; d: return 13; }\n"
+            "int labels_loop(int v) { void* p = &&loop; loop: if (v-- > 0) goto *p; return v; }\n"
+            "int labels_forward(int v) { void* p = &&done; if (v) goto *p; return 9; done: return 7; }\n"
+            "int labels_array(int v) { void* p[2] = {&&zero, &&one}; goto *p[v & 1]; zero: return 0; one: return 1; }\n"
+            "int labels_switch(int v) { void* p; switch (v & 3) { case 0: p = &&a; break; case 1: p = &&b; break; case 2: p = &&c; break; default: p = &&d; break; } goto *p; a: return 20; b: return 21; c: return 22; d: return 23; }\n"
+            "int labels_conditional(int v) { goto *(v ? &&yes : &&no); yes: return 1; no: return 0; }\n"
+            "int labels_address_only(int v) { void* p = &&target; return p == &&target ? v : 0; target: return 1; }\n"
+            "int labels_compare(int v) { void* p = &&target; if (p == &&target) goto *p; target: return v; }\n");
+        IrProgram* label_fixture_program = machine_test_compile_c(arguments->arena, S8("machine-label-fixtures.c"), label_fixture_source, machine_target);
+        BUSTER_TEST(arguments, label_fixture_program && label_fixture_program->module_count);
+        if (label_fixture_program && label_fixture_program->module_count)
+        {
+            IrModule* label_fixture_module = label_fixture_program->modules;
+            String8 label_fixture_names[] = {
+                S8_INITIALIZER("labels_one"), S8_INITIALIZER("labels_three"), S8_INITIALIZER("labels_four"),
+                S8_INITIALIZER("labels_loop"), S8_INITIALIZER("labels_forward"), S8_INITIALIZER("labels_array"),
+                S8_INITIALIZER("labels_switch"), S8_INITIALIZER("labels_conditional"), S8_INITIALIZER("labels_address_only"),
+                S8_INITIALIZER("labels_compare"),
+            };
+            u32 fixture_label_rows = 0;
+            u32 fixture_indirect_rows = 0;
+            for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(label_fixture_names); fixture_index += 1)
+            {
+                IrFunction* fixture_function = machine_test_ir_function_find(label_fixture_module, label_fixture_names[fixture_index]);
+                BUSTER_TEST(arguments, fixture_function != 0);
+                if (!fixture_function)
+                {
+                    continue;
+                }
+                MachineSelectResult fixture_selected =
+                    machine_select_canonical_function(arguments->arena, label_fixture_program, fixture_function, machine_target);
+                BUSTER_TEST_RAW(arguments, fixture_selected.supported && fixture_selected.selector_certified,
+                                string_format(arguments->arena, S8("label fixture {S8} select opcode {u32}"), label_fixture_names[fixture_index],
+                                              (u32)fixture_selected.failed_opcode));
+                if (!fixture_selected.supported)
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, machine_verify_function(&fixture_selected.function).error == MACHINE_VERIFY_NONE);
+                MachineOpcode fixture_label_opcode = machine_target.cpu_arch == CPU_ARCH_AARCH64 ? MACHINE_A64_LEA_BLOCK : MACHINE_X64_LEA_BLOCK;
+                MachineOpcode fixture_indirect_opcode =
+                    machine_target.cpu_arch == CPU_ARCH_AARCH64 ? MACHINE_A64_INDIRECT_BRANCH : MACHINE_X64_INDIRECT_BRANCH;
+                for (u32 row_index = 0; row_index < fixture_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = fixture_selected.function.instructions + row_index;
+                    if (row->opcode == fixture_label_opcode)
+                    {
+                        fixture_label_rows += 1;
+                        BUSTER_TEST(arguments, row->payload < fixture_selected.function.block_count);
+                    }
+                    if (row->opcode != fixture_indirect_opcode)
+                    {
+                        continue;
+                    }
+                    fixture_indirect_rows += 1;
+                    BUSTER_TEST(arguments, row->flags != 0 && row->payload <= fixture_selected.function.switch_case_count &&
+                                               row->flags <= fixture_selected.function.switch_case_count - row->payload);
+                    u32 owner_block = UINT32_MAX;
+                    for (u32 block_index = 0; block_index < fixture_selected.function.block_count; block_index += 1)
+                    {
+                        MachineBlock* block = fixture_selected.function.blocks + block_index;
+                        if (row_index >= block->first_instruction && row_index < block->first_instruction + block->instruction_count)
+                        {
+                            owner_block = block_index;
+                            break;
+                        }
+                    }
+                    BUSTER_TEST(arguments, owner_block != UINT32_MAX);
+                    for (u32 case_index = 0; owner_block != UINT32_MAX && case_index < row->flags; case_index += 1)
+                    {
+                        u32 target_block = fixture_selected.function.switch_cases[row->payload + case_index].target_block;
+                        bool edge_found = false;
+                        for (u32 edge_index = 0; edge_index < fixture_selected.function.edge_count; edge_index += 1)
+                        {
+                            MachineEdge* edge = fixture_selected.function.edges + edge_index;
+                            edge_found |= edge->source_block == owner_block && edge->destination_block == target_block;
+                        }
+                        BUSTER_TEST(arguments, edge_found);
+                    }
+                }
+                MachineStackPlacement fixture_stack = machine_stack_placement_build(arguments->arena, &fixture_selected.function);
+                BUSTER_TEST(arguments, fixture_stack.valid);
+                MachineEncodeResult fixture_encoded = machine_target.cpu_arch == CPU_ARCH_AARCH64
+                                                           ? machine_encode_aarch64(arguments->arena, &fixture_selected.function, &fixture_stack)
+                                                           : machine_encode_x86_64(arguments->arena, &fixture_selected.function, &fixture_stack);
+                BUSTER_TEST_RAW(arguments, fixture_encoded.valid && fixture_encoded.byte_count != 0,
+                                string_format(arguments->arena, S8("label fixture {S8} encode"), label_fixture_names[fixture_index]));
+            }
+            BUSTER_TEST(arguments, fixture_label_rows >= BUSTER_ARRAY_LENGTH(label_fixture_names));
+            BUSTER_TEST(arguments, fixture_indirect_rows >= BUSTER_ARRAY_LENGTH(label_fixture_names) - 1);
+            CodegenRegisterAllocatorMode fixture_modes[] = {
+                CODEGEN_REGISTER_ALLOCATOR_NONE,
+                CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                CODEGEN_REGISTER_ALLOCATOR_FAST,
+                CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+            };
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(fixture_modes); mode_index += 1)
+            {
+                CodegenModule fixture_module = codegen_generate_canonical_module(
+                    arguments->arena, label_fixture_program, label_fixture_module, machine_target,
+                    (CodegenModuleOptions){.register_allocator = (u8)fixture_modes[mode_index]});
+                BUSTER_TEST_RAW(arguments, fixture_module.error == CODEGEN_ERROR_NONE && fixture_module.statistics.fallback_function_count == 0,
+                                string_format(arguments->arena, S8("label fixture mode {S8} fallback {u32}"),
+                                              codegen_register_allocator_mode_string(fixture_modes[mode_index]),
+                                              fixture_module.statistics.fallback_function_count));
+                BUSTER_TEST(arguments, fixture_module.relocation_count == 0);
+            }
+        }
+        Target label_fixture_a64_target = {
+            .cpu_arch = CPU_ARCH_AARCH64,
+            .os = OPERATING_SYSTEM_LINUX,
+        };
+        IrProgram* label_fixture_a64_program =
+            machine_test_compile_c(arguments->arena, S8("machine-label-fixtures-a64.c"), label_fixture_source, label_fixture_a64_target);
+        BUSTER_TEST(arguments, label_fixture_a64_program && label_fixture_a64_program->module_count);
+        if (label_fixture_a64_program && label_fixture_a64_program->module_count)
+        {
+            IrModule* label_fixture_a64_module = label_fixture_a64_program->modules;
+            String8 label_fixture_a64_names[] = {
+                S8_INITIALIZER("labels_one"), S8_INITIALIZER("labels_three"), S8_INITIALIZER("labels_four"),
+                S8_INITIALIZER("labels_loop"), S8_INITIALIZER("labels_forward"), S8_INITIALIZER("labels_array"),
+                S8_INITIALIZER("labels_switch"), S8_INITIALIZER("labels_conditional"), S8_INITIALIZER("labels_address_only"),
+                S8_INITIALIZER("labels_compare"),
+            };
+            u32 a64_label_rows = 0;
+            u32 a64_indirect_rows = 0;
+            for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(label_fixture_a64_names); fixture_index += 1)
+            {
+                IrFunction* fixture_function = machine_test_ir_function_find(label_fixture_a64_module, label_fixture_a64_names[fixture_index]);
+                BUSTER_TEST(arguments, fixture_function != 0);
+                if (!fixture_function)
+                {
+                    continue;
+                }
+                MachineSelectResult fixture_selected =
+                    machine_select_canonical_function(arguments->arena, label_fixture_a64_program, fixture_function, label_fixture_a64_target);
+                BUSTER_TEST_RAW(arguments, fixture_selected.supported && fixture_selected.selector_certified,
+                                string_format(arguments->arena, S8("a64 label fixture {S8} select opcode {u32}"),
+                                              label_fixture_a64_names[fixture_index], (u32)fixture_selected.failed_opcode));
+                if (!fixture_selected.supported)
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, machine_verify_function(&fixture_selected.function).error == MACHINE_VERIFY_NONE);
+                for (u32 row_index = 0; row_index < fixture_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = fixture_selected.function.instructions + row_index;
+                    if (row->opcode == MACHINE_A64_LEA_BLOCK)
+                    {
+                        a64_label_rows += 1;
+                        BUSTER_TEST(arguments, row->payload < fixture_selected.function.block_count);
+                    }
+                    if (row->opcode != MACHINE_A64_INDIRECT_BRANCH)
+                    {
+                        continue;
+                    }
+                    a64_indirect_rows += 1;
+                    BUSTER_TEST(arguments, row->flags != 0 && row->payload <= fixture_selected.function.switch_case_count &&
+                                               row->flags <= fixture_selected.function.switch_case_count - row->payload);
+                    u32 owner_block = UINT32_MAX;
+                    for (u32 block_index = 0; block_index < fixture_selected.function.block_count; block_index += 1)
+                    {
+                        MachineBlock* block = fixture_selected.function.blocks + block_index;
+                        if (row_index >= block->first_instruction && row_index < block->first_instruction + block->instruction_count)
+                        {
+                            owner_block = block_index;
+                            break;
+                        }
+                    }
+                    for (u32 case_index = 0; owner_block != UINT32_MAX && case_index < row->flags; case_index += 1)
+                    {
+                        u32 target_block = fixture_selected.function.switch_cases[row->payload + case_index].target_block;
+                        bool edge_found = false;
+                        for (u32 edge_index = 0; edge_index < fixture_selected.function.edge_count; edge_index += 1)
+                        {
+                            MachineEdge* edge = fixture_selected.function.edges + edge_index;
+                            edge_found |= edge->source_block == owner_block && edge->destination_block == target_block;
+                        }
+                        BUSTER_TEST(arguments, edge_found);
+                    }
+                }
+                MachineStackPlacement fixture_stack = machine_stack_placement_build(arguments->arena, &fixture_selected.function);
+                BUSTER_TEST(arguments, fixture_stack.valid);
+                MachineEncodeResult fixture_encoded = machine_encode_aarch64(arguments->arena, &fixture_selected.function, &fixture_stack);
+                BUSTER_TEST_RAW(arguments, fixture_encoded.valid && fixture_encoded.byte_count != 0,
+                                string_format(arguments->arena, S8("a64 label fixture {S8} encode"), label_fixture_a64_names[fixture_index]));
+            }
+            BUSTER_TEST(arguments, a64_label_rows >= BUSTER_ARRAY_LENGTH(label_fixture_a64_names));
+            BUSTER_TEST(arguments, a64_indirect_rows >= BUSTER_ARRAY_LENGTH(label_fixture_a64_names) - 1);
+            CodegenRegisterAllocatorMode fixture_modes[] = {
+                CODEGEN_REGISTER_ALLOCATOR_NONE,
+                CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                CODEGEN_REGISTER_ALLOCATOR_FAST,
+                CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+            };
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(fixture_modes); mode_index += 1)
+            {
+                CodegenModule fixture_module = codegen_generate_canonical_module(
+                    arguments->arena, label_fixture_a64_program, label_fixture_a64_module, label_fixture_a64_target,
+                    (CodegenModuleOptions){.register_allocator = (u8)fixture_modes[mode_index]});
+                BUSTER_TEST_RAW(arguments, fixture_module.error == CODEGEN_ERROR_NONE && fixture_module.statistics.fallback_function_count == 0,
+                                string_format(arguments->arena, S8("a64 label fixture mode {S8} fallback {u32}"),
+                                              codegen_register_allocator_mode_string(fixture_modes[mode_index]),
+                                              fixture_module.statistics.fallback_function_count));
+                BUSTER_TEST(arguments, fixture_module.relocation_count == 0);
+            }
         }
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
@@ -2884,7 +3108,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, mir_module.statistics.exact_successes == mir_module.statistics.exact_attempts);
         BUSTER_TEST(arguments, mir_module.statistics.exact_failures == 0);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 2,
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 1,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
         IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
         if (mir_add_function)
@@ -4546,7 +4770,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult a64_goto_selected =
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_goto_function, machine_a64_target);
-            BUSTER_TEST(arguments, !a64_goto_selected.supported);
+            BUSTER_TEST(arguments, a64_goto_selected.supported);
+            if (a64_goto_selected.supported)
+            {
+                MachineStackPlacement a64_goto_placement = machine_stack_placement_build(arguments->arena, &a64_goto_selected.function);
+                MachineEncodeResult a64_goto_encoded =
+                    machine_encode_aarch64(arguments->arena, &a64_goto_selected.function, &a64_goto_placement);
+                BUSTER_TEST(arguments, a64_goto_placement.valid && a64_goto_encoded.valid && a64_goto_encoded.byte_count != 0);
+            }
         }
         // An aggregate literal built and passed onward: kagg's call keeps it
         // out of the raw-copy execution list, so it is asserted as selection

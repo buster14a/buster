@@ -521,7 +521,8 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_edge_can_move(MachineFunction* function, M
     MachineBlock const* source_block = function->blocks + edge->source_block;
     MachineInstruction const* terminator = function->instructions + source_block->first_instruction + source_block->instruction_count - 1u;
     MachineOpcodeInfo const* info = machine_opcode_info(terminator->opcode);
-    if (!info || (function->target && terminator->opcode == function->target->switch_opcode))
+    if (!info || (function->target && (terminator->opcode == function->target->switch_opcode || terminator->opcode == MACHINE_X64_INDIRECT_BRANCH ||
+                                       terminator->opcode == MACHINE_A64_INDIRECT_BRANCH)))
     {
         return false;
     }
@@ -1083,6 +1084,24 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         }
                     }
                 }
+                if (instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+                {
+                    if (instruction->payload > function->switch_case_count ||
+                        instruction->flags > function->switch_case_count - instruction->payload)
+                    {
+                        return prepass;
+                    }
+                    for (u32 target_index = 0; target_index < instruction->flags; target_index += 1)
+                    {
+                        u32 successor = function->switch_cases[instruction->payload + target_index].target_block;
+                        if (successor >= function->block_count)
+                        {
+                            return prepass;
+                        }
+                        prepass.predecessor_offsets[successor + 1] += 1;
+                        backward_edge_count += successor <= block_index;
+                    }
+                }
                 if (!constrained && !(info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) && !info->clobber_mask &&
                     !(operand_masks & ((MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_PHYSICAL_SHIFT) |
                                        (MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_BLOCK_SHIFT))))
@@ -1161,6 +1180,22 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                             prepass.definition_blocks[machine_ref_payload(ref)] != block_index)
                         {
                             prepass.escapes[machine_ref_payload(ref)] = 1;
+                        }
+                    }
+                }
+                if (instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+                {
+                    for (u32 target_index = 0; target_index < instruction->flags; target_index += 1)
+                    {
+                        u32 successor = function->switch_cases[instruction->payload + target_index].target_block;
+                        prepass.predecessor_list[predecessor_cursors[successor]++] = block_index;
+                        prepass.cold_blocks[successor] = 1;
+                        if (successor <= block_index)
+                        {
+                            u32 loop_start = function->blocks[successor].first_instruction;
+                            u32 loop_end = block->first_instruction + block->instruction_count - 1;
+                            prepass.loop_spans[prepass.loop_span_count] = ((u64)loop_start << 32) | loop_end;
+                            prepass.loop_span_count += 1;
                         }
                     }
                 }
@@ -1969,7 +2004,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     // consumed. A forward, not-yet-cold successor takes the
                     // state as it stands: the snapshot recorded below is what
                     // its own contract construction conforms retroactively.
-                    if (instruction->opcode == description->switch_opcode)
+                    if (instruction->opcode == description->switch_opcode || instruction->opcode == MACHINE_X64_INDIRECT_BRANCH ||
+                        instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
                     {
                         // Case targets and the default are all cold, so one
                         // conform to the empty contract serves every edge the

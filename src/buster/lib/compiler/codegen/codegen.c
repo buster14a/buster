@@ -7398,6 +7398,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u32 unwind_action_capacity = 0;
         u32 machine_simd_operation_count = 0;
         u32 machine_stack_frame_size = 0;
+        u32* machine_block_offsets = 0;
         bool machine_function_emitted = false;
         // Selection is attempted before canonical-only frame, ABI, and call
         // metadata is built. A supported machine function never needs that
@@ -7749,18 +7750,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
              options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
             (target.cpu_arch == CPU_ARCH_X86_64 || (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
         {
-            bool label_address_target = false;
-            for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
-            {
-                label_address_target |= result.relocations[label_address_relocation_indices[side_index]].symbol.value == function->symbol.value;
-            }
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
-            if (!label_address_target)
-            {
-                selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target);
-                machine_simd_operation_count = selected.simd_operation_count;
-            }
+            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target);
+            machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
                 u32 reason = selected.failed_opcode <= IR_OPCODE_COUNT ? (u32)selected.failed_opcode : (u32)IR_OPCODE_COUNT;
@@ -7983,6 +7976,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
+                            if (label_address_relocation_count)
+                            {
+                                machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
+                                memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                            }
                             machine_stack_frame_size = placement.frame_size;
                             result.statistics.allocator_reload_count += placement.reload_count;
                             result.statistics.allocator_spill_count += placement.spill_count;
@@ -8090,6 +8088,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
+                            if (label_address_relocation_count)
+                            {
+                                machine_block_offsets = arena_allocate(machine_scratch.arena, u32, function->block_count);
+                                memcpy(machine_block_offsets, encoded.block_offsets, sizeof(u32) * function->block_count);
+                            }
                             machine_stack_frame_size = placement.frame_size;
                             result.statistics.allocator_reload_count += placement.reload_count;
                             result.statistics.allocator_spill_count += placement.spill_count;
@@ -8108,6 +8111,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         if (machine_function_emitted)
         {
+            for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
+            {
+                CodegenModuleRelocation* relocation = result.relocations + label_address_relocation_indices[side_index];
+                if (relocation->symbol.value != function->symbol.value)
+                {
+                    continue;
+                }
+                if (!machine_block_offsets || relocation->label_block.value >= function->block_count)
+                {
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
+                s64 block_addend = (s64)machine_block_offsets[relocation->label_block.value];
+                if (block_addend > 0 && relocation->addend > INT64_MAX - block_addend)
+                {
+                    result.error = CODEGEN_ERROR_CAPACITY;
+                    return result;
+                }
+                if (block_addend < 0 && relocation->addend < INT64_MIN - block_addend)
+                {
+                    result.error = CODEGEN_ERROR_CAPACITY;
+                    return result;
+                }
+                relocation->addend += block_addend;
+                relocation->label_address = false;
+            }
             // Canonical emission accounts for SIMD operations while lowering
             // each row. The machine path bypasses that code, so preserve the
             // same source-IR statistic once its encoded function is kept.

@@ -648,6 +648,13 @@ typedef enum MachineOpcode
     // the scheduler's float-state chain like their q siblings.
     MACHINE_A64_VLOAD_FRAME_SIZED,  // slot ref source
     MACHINE_A64_VSTORE_FRAME_SIZED, // slot ref destination
+    // Intra-function block address materialization.  The payload is a block
+    // index (not a MACHINE_REF_BLOCK operand): it is a reloc-free fixup
+    // resolved after final layout, so this value does not create a CFG edge.
+    MACHINE_X64_LEA_BLOCK,           // def general; payload = block index
+    MACHINE_X64_INDIRECT_BRANCH,     // use general; payload/flags = switch_cases range; terminator
+    MACHINE_A64_LEA_BLOCK,           // def general; payload = block index
+    MACHINE_A64_INDIRECT_BRANCH,     // use general; payload/flags = switch_cases range; terminator
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -857,6 +864,11 @@ struct MachineSwitchCase
     u32 target_block;
     u32 reserved;
 };
+// SWITCH rows use value/target_block pairs.  INDIRECT_BRANCH rows reuse the
+// same compact side table as a target-set stream: value is ignored, payload
+// is the first row, and flags is the number of block targets.  Keeping the
+// target list out of MachineInstruction operands makes it explicit that the
+// list is CFG metadata rather than a data-flow operand.
 BUSTER_CT_CHECK(sizeof(MachineSwitchCase) == 16);
 
 // AArch64 condition codes as encoded in B.cond and CSINC.

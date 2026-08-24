@@ -3671,6 +3671,125 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_branch(MachineX64Selector* selector,
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_label_address(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    bool selected = result_register != UINT32_MAX && instruction->target_count == 1 && instruction->targets &&
+                    instruction->targets[0].value < selector->function->block_count;
+    if (selected)
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                          .payload = instruction->targets[0].value,
+                                                          .opcode = MACHINE_X64_LEA_BLOCK,
+                                                      });
+        machine_x64_define(selector, result_register, row);
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_indirect_branch(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    bool selected = instruction->operand_count == 1 && instruction->target_count != 0 && instruction->targets;
+    u32 target_register = UINT32_MAX;
+    if (selected)
+    {
+        selected = machine_x64_operand_register(selector, instruction->operands[0], &target_register);
+    }
+    if (selected)
+    {
+        u32 first_target = selector->switch_cases.total_count;
+        for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+        {
+            if (instruction->targets[target_index].value >= selector->function->block_count)
+            {
+                selected = false;
+                break;
+            }
+            MachineSwitchCase* target_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
+            *target_row = (MachineSwitchCase){.target_block = instruction->targets[target_index].value};
+        }
+        if (selected)
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, target_register)},
+                                                         .payload = first_target,
+                                                         .flags = instruction->target_count,
+                                                         .opcode = MACHINE_X64_INDIRECT_BRANCH,
+                                                     });
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_selector_edge_exists(MachineFunctionBuilder* builder, u32 source_block, u32 destination_block)
+{
+    for (MachineBuilderChunk* chunk = builder->edges.first; chunk; chunk = chunk->next)
+    {
+        MachineEdge* edges = (MachineEdge*)(chunk + 1);
+        for (u32 index = 0; index < chunk->count; index += 1)
+        {
+            if (edges[index].source_block == source_block && edges[index].destination_block == destination_block)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_indirect_edges(MachineX64Selector* selector)
+{
+    IrFunction* function = selector->function;
+    bool valid = true;
+    for (u32 source_block = 0; source_block < function->block_count && valid; source_block += 1)
+    {
+        IrBlock* source = function->blocks + source_block;
+        if (source->last_instruction.value >= function->instruction_count)
+        {
+            continue;
+        }
+        IrInstruction* terminator = function->instructions + source->last_instruction.value;
+        if (terminator->opcode != IR_OPCODE_INDIRECT_BRANCH)
+        {
+            continue;
+        }
+        for (u32 target_index = 0; target_index < terminator->target_count && valid; target_index += 1)
+        {
+            u32 destination_block = terminator->targets[target_index].value;
+            if (destination_block >= function->block_count || machine_x64_selector_edge_exists(&selector->builder, source_block, destination_block))
+            {
+                continue;
+            }
+            IrBlock* destination = function->blocks + destination_block;
+            u32 copy_offset = selector->builder.edge_copy_sources.total_count;
+            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
+            {
+                IrIncoming* incoming = parameter->first_incoming;
+                while (incoming && incoming->predecessor.value != source_block)
+                {
+                    incoming = incoming->next;
+                }
+                if (!incoming || incoming->value.value >= function->value_count || selector->value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                {
+                    valid = false;
+                    break;
+                }
+                machine_builder_edge_copy_source(
+                    &selector->builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[incoming->value.value]));
+            }
+            if (valid)
+            {
+                machine_builder_edge(&selector->builder,
+                                     (MachineEdge){.source_block = source_block,
+                                                   .destination_block = destination_block,
+                                                   .copy_offset = copy_offset,
+                                                   .copy_count = (u16)destination->parameter_count});
+            }
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_read_modify_write(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -4133,6 +4252,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             break;
         case IR_OPCODE_BRANCH:
             selected = machine_x64_select_branch(selector, instruction);
+            break;
+        case IR_OPCODE_LABEL_ADDRESS:
+            selected = machine_x64_select_label_address(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_INDIRECT_BRANCH:
+            selected = machine_x64_select_indirect_branch(selector, instruction);
             break;
         case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
             selected = machine_x64_select_atomic_read_modify_write(selector, instruction, result_register);
@@ -5243,6 +5368,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                .copy_offset = copy_offset,
                                                .copy_count = (u16)destination->parameter_count});
         }
+    }
+    if (!machine_x64_select_indirect_edges(&selector))
+    {
+        return (MachineSelectResult){.failed_opcode = IR_OPCODE_INDIRECT_BRANCH};
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;
@@ -8019,6 +8148,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
     operand.width = operand.reg.width = 64;
     (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("IDIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    for (u32 register_index = 0; register_index < 16; register_index += 1)
+    {
+        operand = machine_x64_exact_gpr_operand(register_index, 64);
+        (void)machine_x64_metadata_shape_cache_add(S8("JMP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void)
@@ -8154,6 +8288,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_memory(void)
         },
     };
     (void)machine_x64_metadata_shape_cache_add(S8("MOV"), fs_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    BusterX86MetadataPhysicalOperand rip_operands[2] = {
+        machine_x64_exact_gpr_operand(0, 64), machine_x64_exact_rip_memory_operand(),
+    };
+    for (u32 register_index = 0; register_index < 16; register_index += 1)
+    {
+        rip_operands[0] = machine_x64_exact_gpr_operand(register_index, 64);
+        (void)machine_x64_metadata_shape_cache_add(S8("LEA"), rip_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_relative(void)
@@ -9090,6 +9232,8 @@ struct MachineX64BranchFixup
 {
     u32 patch_offset;
     u32 block;
+    bool label_address;
+    u8 reserved[3];
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* encoder, MachineX64PreparedExactOpcode const* entry,
@@ -9706,6 +9850,27 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         }
                         (void)machine_x64_emit_metadata_register(&encoder, S8("CALL"), operand_registers[0], 64, 0);
                     }
+                    break; case MACHINE_X64_LEA_BLOCK:
+                    {
+                        u32 branch_start = encoder.count;
+                        u32 destination = operand_registers[0];
+                        BusterX86MetadataPhysicalOperand operands[2] = {
+                            machine_x64_exact_gpr_operand(destination, 64), machine_x64_exact_rip_memory_operand(),
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("LEA"), operands, 2,
+                                                                     (BusterX86MetadataFeatureInput){0},
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                        *fixup = (MachineX64BranchFixup){
+                            .patch_offset = branch_start + 3,
+                            .block = instruction->payload,
+                            .label_address = true,
+                        };
+                    }
+                    break; case MACHINE_X64_INDIRECT_BRANCH:
+                    {
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("JMP"), operand_registers[0], 64, 0);
+                    }
                     break; case MACHINE_X64_LEA_TLS:
                     {
                         // mov dest, fs:[0] — the thread pointer — then
@@ -10157,15 +10322,35 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         machine_x64_exact_counters_assign(&result, exact_counters);
         return result;
     }
+    bool fixups_valid = true;
     for (MachineBuilderChunk* chunk = fixups.first; chunk; chunk = chunk->next)
     {
         MachineX64BranchFixup* rows = (MachineX64BranchFixup*)(chunk + 1);
         for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
         {
             MachineX64BranchFixup* fixup = rows + row_index;
-            u32 displacement = result.block_offsets[fixup->block] - (fixup->patch_offset + 4);
-            memcpy(encoder.bytes + fixup->patch_offset, &displacement, sizeof(displacement));
+            if (fixup->label_address)
+            {
+                s64 displacement = (s64)result.block_offsets[fixup->block] - (s64)(fixup->patch_offset + 4u);
+                if (displacement < INT32_MIN || displacement > INT32_MAX)
+                {
+                    fixups_valid = false;
+                    continue;
+                }
+                s32 encoded_displacement = (s32)displacement;
+                memcpy(encoder.bytes + fixup->patch_offset, &encoded_displacement, sizeof(encoded_displacement));
+            }
+            else
+            {
+                u32 displacement = result.block_offsets[fixup->block] - (fixup->patch_offset + 4);
+                memcpy(encoder.bytes + fixup->patch_offset, &displacement, sizeof(displacement));
+            }
         }
+    }
+    if (!fixups_valid)
+    {
+        machine_x64_exact_counters_assign(&result, exact_counters);
+        return result;
     }
     result.call_sites = arena_allocate(arena, MachineCallSite, call_sites.total_count);
     result.call_site_count = call_sites.total_count;

@@ -2863,6 +2863,125 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector,
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_label_address(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    bool selected = result_register != UINT32_MAX && instruction->target_count == 1 && instruction->targets &&
+                    instruction->targets[0].value < selector->function->block_count;
+    if (selected)
+    {
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                          .payload = instruction->targets[0].value,
+                                                          .opcode = MACHINE_A64_LEA_BLOCK,
+                                                      });
+        machine_a64_define(selector, result_register, row);
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_indirect_branch(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    bool selected = instruction->operand_count == 1 && instruction->target_count != 0 && instruction->targets;
+    u32 target_register = UINT32_MAX;
+    if (selected)
+    {
+        selected = machine_a64_operand_register(selector, instruction->operands[0], &target_register);
+    }
+    if (selected)
+    {
+        u32 first_target = selector->switch_cases.total_count;
+        for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+        {
+            if (instruction->targets[target_index].value >= selector->function->block_count)
+            {
+                selected = false;
+                break;
+            }
+            MachineSwitchCase* target_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
+            *target_row = (MachineSwitchCase){.target_block = instruction->targets[target_index].value};
+        }
+        if (selected)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, target_register)},
+                                                         .payload = first_target,
+                                                         .flags = instruction->target_count,
+                                                         .opcode = MACHINE_A64_INDIRECT_BRANCH,
+                                                     });
+        }
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_selector_edge_exists(MachineFunctionBuilder* builder, u32 source_block, u32 destination_block)
+{
+    for (MachineBuilderChunk* chunk = builder->edges.first; chunk; chunk = chunk->next)
+    {
+        MachineEdge* edges = (MachineEdge*)(chunk + 1);
+        for (u32 index = 0; index < chunk->count; index += 1)
+        {
+            if (edges[index].source_block == source_block && edges[index].destination_block == destination_block)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_indirect_edges(MachineA64Selector* selector)
+{
+    IrFunction* function = selector->function;
+    bool valid = true;
+    for (u32 source_block = 0; source_block < function->block_count && valid; source_block += 1)
+    {
+        IrBlock* source = function->blocks + source_block;
+        if (source->last_instruction.value >= function->instruction_count)
+        {
+            continue;
+        }
+        IrInstruction* terminator = function->instructions + source->last_instruction.value;
+        if (terminator->opcode != IR_OPCODE_INDIRECT_BRANCH)
+        {
+            continue;
+        }
+        for (u32 target_index = 0; target_index < terminator->target_count && valid; target_index += 1)
+        {
+            u32 destination_block = terminator->targets[target_index].value;
+            if (destination_block >= function->block_count || machine_a64_selector_edge_exists(&selector->builder, source_block, destination_block))
+            {
+                continue;
+            }
+            IrBlock* destination = function->blocks + destination_block;
+            u32 copy_offset = selector->builder.edge_copy_sources.total_count;
+            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
+            {
+                IrIncoming* incoming = parameter->first_incoming;
+                while (incoming && incoming->predecessor.value != source_block)
+                {
+                    incoming = incoming->next;
+                }
+                if (!incoming || incoming->value.value >= function->value_count || selector->value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                {
+                    valid = false;
+                    break;
+                }
+                machine_builder_edge_copy_source(
+                    &selector->builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[incoming->value.value]));
+            }
+            if (valid)
+            {
+                machine_builder_edge(&selector->builder,
+                                     (MachineEdge){.source_block = source_block,
+                                                   .destination_block = destination_block,
+                                                   .copy_offset = copy_offset,
+                                                   .copy_count = (u16)destination->parameter_count});
+            }
+        }
+    }
+    return valid;
+}
+
 // A fused condition re-selects the chain's innermost comparison here,
 // immediately before BCC: only allocator edits can land between the flags
 // define and its use, and every edit form is a flag-preserving instruction
@@ -3215,6 +3334,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             break;
         case IR_OPCODE_BRANCH:
             selected = machine_a64_select_branch(selector, instruction);
+            break;
+        case IR_OPCODE_LABEL_ADDRESS:
+            selected = machine_a64_select_label_address(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_INDIRECT_BRANCH:
+            selected = machine_a64_select_indirect_branch(selector, instruction);
             break;
         case IR_OPCODE_BRANCH_IF:
             selected = machine_a64_select_branch_if(selector, instruction);
@@ -4308,6 +4433,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                    .copy_count = (u16)destination->parameter_count});
             }
         }
+        if (!machine_a64_select_indirect_edges(&selector))
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_INDIRECT_BRANCH};
+        }
         result.function = machine_function_builder_finish(arena, &selector.builder);
         result.function.target = &machine_aarch64_description;
         result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
@@ -4384,7 +4513,8 @@ struct MachineA64BranchFixup
     // direct path still patches the exact word emitted by the MC encoder.
     u8 condition;
     u8 expanded;
-    u16 reserved;
+    bool label_address;
+    u8 reserved;
 };
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit(MachineA64Encoder* encoder, u32 word)
@@ -4428,6 +4558,11 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_mc(MachineA64Encoder* encoder, A64MCIn
 #define MACHINE_A64_LONG_BRANCH_WORDS 7u
 #define MACHINE_A64_LONG_BRANCH_BYTES (MACHINE_A64_LONG_BRANCH_WORDS * 4u)
 #define MACHINE_A64_LONG_CONDITIONAL_BYTES (4u + MACHINE_A64_LONG_BRANCH_BYTES)
+// A block pointer uses the same PC-relative anchor as a long branch, but
+// stops after the ADD (there is no BR).  Its six fixed words are patched after
+// branch relaxation so insertions elsewhere cannot invalidate the address.
+#define MACHINE_A64_BLOCK_ADDRESS_WORDS 6u
+#define MACHINE_A64_BLOCK_ADDRESS_BYTES (MACHINE_A64_BLOCK_ADDRESS_WORDS * 4u)
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_form(MachineA64Encoder* encoder, u32 form_id, u32 const* field_values, u32 field_count);
 
@@ -5181,7 +5316,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_expand_fixup(MachineA64Encoder* encod
                                                         u32 block_count, u32* row_offsets, u32 row_count, MachineBuilderStream* fixups,
                                                         MachineBuilderStream* call_sites, MachineBuilderStream* epilogs, u8 expansion_kind)
 {
-    if (!encoder || !fixup || !expansion_kind || expansion_kind > 2 || fixup->expanded >= expansion_kind || encoder->count < 4 ||
+    if (!encoder || !fixup || fixup->label_address || !expansion_kind || expansion_kind > 2 || fixup->expanded >= expansion_kind || encoder->count < 4 ||
         fixup->patch_offset > encoder->count - 4 || fixup->opcode == A64_OPCODE_INVALID)
     {
         return false;
@@ -5302,6 +5437,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
                 {
                     return false;
                 }
+                if (fixup->label_address)
+                {
+                    if (encoder->count < MACHINE_A64_BLOCK_ADDRESS_BYTES || fixup->patch_offset > encoder->count - MACHINE_A64_BLOCK_ADDRESS_BYTES)
+                    {
+                        return false;
+                    }
+                    continue;
+                }
                 if (fixup->opcode == A64_OPCODE_B && fixup->expanded)
                 {
                     continue;
@@ -5405,6 +5548,26 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, 
             if (fixup->block >= block_count || encoder->count < 4 || fixup->patch_offset > encoder->count - 4)
             {
                 return false;
+            }
+            if (fixup->label_address)
+            {
+                if (encoder->count < MACHINE_A64_BLOCK_ADDRESS_BYTES || fixup->patch_offset > encoder->count - MACHINE_A64_BLOCK_ADDRESS_BYTES)
+                {
+                    return false;
+                }
+                s64 displacement = (s64)(u64)block_offsets[fixup->block] - (s64)(u64)fixup->patch_offset;
+                u64 encoded_displacement = (u64)displacement;
+                if (!encoder->sparse)
+                {
+                    u32 words[4] = {
+                        UINT32_C(0xd2800000) | ((u32)(encoded_displacement & 0xffffu) << 5) | MACHINE_A64_X17,
+                        UINT32_C(0xf2800000) | (UINT32_C(1) << 21) | ((u32)((encoded_displacement >> 16) & 0xffffu) << 5) | MACHINE_A64_X17,
+                        UINT32_C(0xf2800000) | (UINT32_C(2) << 21) | ((u32)((encoded_displacement >> 32) & 0xffffu) << 5) | MACHINE_A64_X17,
+                        UINT32_C(0xf2800000) | (UINT32_C(3) << 21) | ((u32)((encoded_displacement >> 48) & 0xffffu) << 5) | MACHINE_A64_X17,
+                    };
+                    memcpy(encoder->bytes + fixup->patch_offset + 4, words, sizeof(words));
+                }
+                continue;
             }
             if (fixup->expanded == 0)
             {
@@ -5555,6 +5718,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // taken edge may require inverse-cond + long transfer, and its
             // fallthrough edge may independently require a long transfer.
             capacity64 += MACHINE_A64_LONG_CONDITIONAL_BYTES + MACHINE_A64_LONG_BRANCH_BYTES;
+            break;
+        case MACHINE_A64_LEA_BLOCK:
+            capacity64 += MACHINE_A64_BLOCK_ADDRESS_BYTES;
+            break;
+        case MACHINE_A64_INDIRECT_BRANCH:
+            capacity64 += 4;
             break;
         case MACHINE_A64_COPY_FRAME_FROM_FRAME:
         case MACHINE_A64_COPY_FRAME_FROM_PTR:
@@ -6247,6 +6416,40 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                                                });
             }
             break;
+            case MACHINE_A64_LEA_BLOCK:
+            {
+                u32 address_offset = encoder.count;
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                       .operands = {
+                                                           {.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER},
+                                                           {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                                                       },
+                                                       .opcode = A64_OPCODE_ADR,
+                                                       .operand_count = 2,
+                                                   });
+                machine_a64_emit(&encoder, UINT32_C(0xd2800000) | MACHINE_A64_X17);
+                machine_a64_emit(&encoder, UINT32_C(0xf2800000) | (UINT32_C(1) << 21) | MACHINE_A64_X17);
+                machine_a64_emit(&encoder, UINT32_C(0xf2800000) | (UINT32_C(2) << 21) | MACHINE_A64_X17);
+                machine_a64_emit(&encoder, UINT32_C(0xf2800000) | (UINT32_C(3) << 21) | MACHINE_A64_X17);
+                u32 fields[] = {operand_registers[0], operand_registers[0], 0, MACHINE_A64_X17};
+                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+                MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+                *fixup = (MachineA64BranchFixup){
+                    .patch_offset = address_offset,
+                    .block = instruction->payload,
+                    .opcode = A64_OPCODE_INVALID,
+                    .condition = 0xff,
+                    .label_address = true,
+                };
+            }
+            break;
+            case MACHINE_A64_INDIRECT_BRANCH:
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER}},
+                                                   .opcode = A64_OPCODE_BR,
+                                                   .operand_count = 1,
+                                               });
+                break;
             case MACHINE_A64_BCC:
             {
                 MachineA64BranchFixup* taken = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
