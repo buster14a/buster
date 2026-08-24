@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-24T131758Z`](docs/performance-audits/2026-08-24T131758Z.md) — same-arena single-chunk machine streams alias their live payload instead of flattening
 - [`2026-08-24T092849Z`](docs/performance-audits/2026-08-24T092849Z.md) — a parameter's outermost suffix size is dead in every case: the VLA parameter layout stops emitting the whole-object multiply
 - [`2026-08-24T093352Z`](docs/performance-audits/2026-08-24T093352Z.md) — an absent array bound is not a variable-length array either — main's argv and envp lose their layout, and a null control puts a number on the build-shift floor that hid two sites
 - [`2026-08-24T085746Z`](docs/performance-audits/2026-08-24T085746Z.md) — a constant array bound is not a variable-length array: the array-parameter layout stops emitting a multiply of two constants into every entry block

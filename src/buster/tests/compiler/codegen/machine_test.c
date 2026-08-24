@@ -1422,6 +1422,27 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, function.instructions[0].opcode == MACHINE_OPCODE_SKELETON_COPY);
     BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
 
+    // A one-chunk stream is already contiguous in the builder arena. Finish
+    // must publish its live payload directly rather than copying it, while
+    // retaining the ordinary row values and block layout.
+    MachineFunctionBuilder alias_builder = machine_function_builder_begin(arguments->arena);
+    machine_builder_virtual_register(&alias_builder, (MachineVirtualRegister){
+                                                            .definition_point = MACHINE_POINT_INVALID,
+                                                            .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                        });
+    machine_builder_block_begin(&alias_builder);
+    machine_builder_instruction(&alias_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
+    machine_builder_block_end(&alias_builder, (MachineBlock){0});
+    MachineBuilderChunk* alias_instruction_chunk = alias_builder.instructions.first;
+    MachineBuilderChunk* alias_virtual_register_chunk = alias_builder.virtual_registers.first;
+    MachineBuilderChunk* alias_block_chunk = alias_builder.blocks.first;
+    MachineFunction alias_function = machine_function_builder_finish(arguments->arena, &alias_builder);
+    BUSTER_TEST(arguments, alias_function.instructions == (MachineInstruction*)(alias_instruction_chunk + 1));
+    BUSTER_TEST(arguments, alias_function.virtual_registers == (MachineVirtualRegister*)(alias_virtual_register_chunk + 1));
+    BUSTER_TEST(arguments, alias_function.blocks == (MachineBlock*)(alias_block_chunk + 1));
+    BUSTER_TEST(arguments, alias_function.instruction_count == 1 && alias_function.instructions[0].opcode == MACHINE_OPCODE_SKELETON_RETURN);
+    BUSTER_TEST(arguments, machine_verify_function(&alias_function).error == MACHINE_VERIFY_NONE);
+
     // The chunked builder must survive chunk boundaries: enough rows to
     // spill across several 16 KiB chunks, flattened back in exact order.
     u32 large_count = 3000;
@@ -1439,8 +1460,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                     .opcode = MACHINE_OPCODE_SKELETON_RETURN,
                                                 });
     machine_builder_block_end(&large_builder, (MachineBlock){0});
+    MachineBuilderChunk* large_instruction_chunk = large_builder.instructions.first;
     MachineFunction large = machine_function_builder_finish(arguments->arena, &large_builder);
     BUSTER_TEST(arguments, large.instruction_count == large_count);
+    BUSTER_TEST(arguments, large.instructions != (MachineInstruction*)(large_instruction_chunk + 1));
     bool payloads_ordered = true;
     for (u32 index = 0; index < large.instruction_count; index += 1)
     {
@@ -1448,6 +1471,23 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, payloads_ordered);
     BUSTER_TEST(arguments, machine_verify_function(&large).error == MACHINE_VERIFY_NONE);
+
+    // A caller may deliberately finish into a different arena and release
+    // the builder arena immediately. That path must copy even a one-chunk
+    // stream so the returned function owns only the finish arena.
+    Arena* cross_builder_arena = arena_create((ArenaCreation){0});
+    Arena* cross_function_arena = arena_create((ArenaCreation){0});
+    MachineFunctionBuilder cross_builder = machine_function_builder_begin(cross_builder_arena);
+    machine_builder_block_begin(&cross_builder);
+    machine_builder_instruction(&cross_builder, (MachineInstruction){.payload = 17, .opcode = MACHINE_OPCODE_SKELETON_RETURN});
+    machine_builder_block_end(&cross_builder, (MachineBlock){0});
+    MachineBuilderChunk* cross_instruction_chunk = cross_builder.instructions.first;
+    MachineFunction cross_function = machine_function_builder_finish(cross_function_arena, &cross_builder);
+    MachineInstruction* cross_payload = (MachineInstruction*)(cross_instruction_chunk + 1);
+    BUSTER_TEST(arguments, cross_function.instructions != cross_payload && cross_function.instructions[0].payload == 17);
+    BUSTER_TEST(arguments, arena_destroy(cross_builder_arena, 1));
+    BUSTER_TEST(arguments, cross_function.instructions[0].opcode == MACHINE_OPCODE_SKELETON_RETURN && cross_function.instructions[0].payload == 17);
+    BUSTER_TEST(arguments, arena_destroy(cross_function_arena, 1));
 
     // Verifier rejections. Each case mutates a fresh valid function so a
     // single detected defect cannot mask another.

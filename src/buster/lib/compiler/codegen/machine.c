@@ -1389,6 +1389,27 @@ void machine_stream_flatten(MachineBuilderStream* stream, void* destination)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void* machine_stream_materialize(Arena* arena, Arena* builder_arena, MachineBuilderStream* stream, u64 alignment)
+{
+    void* result;
+    // A builder is finished before its selector returns, and the temporal
+    // arena that owns its chunks stays live through every consumer of the
+    // returned MachineFunction.  With one chunk, the payload is already the
+    // exact contiguous row span; alias it only when the caller kept that same
+    // arena.  A different destination arena must receive a copy so callers
+    // may release the builder arena independently.
+    if (arena == builder_arena && stream->first && stream->first == stream->last)
+    {
+        result = (void*)(stream->first + 1);
+    }
+    else
+    {
+        result = arena_allocate_bytes(arena, arena_array_size(stream->element_size, stream->total_count), alignment);
+        machine_stream_flatten(stream, result);
+    }
+    return result;
+}
+
 MachineFunctionBuilder machine_function_builder_begin(Arena* arena)
 {
     MachineFunctionBuilder builder = {
@@ -1488,12 +1509,14 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
     BUSTER_CHECK(builder->block_parameters.total_count == 0 || builder->block_parameters.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     BUSTER_CHECK(builder->edge_copy_sources.total_count == 0 || builder->edge_copy_sources.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     MachineFunction function = {
-        .instructions = arena_allocate(arena, MachineInstruction, builder->instructions.total_count),
-        .virtual_registers = arena_allocate(arena, MachineVirtualRegister, builder->virtual_registers.total_count),
-        .blocks = arena_allocate(arena, MachineBlock, builder->blocks.total_count),
-        .edges = arena_allocate(arena, MachineEdge, builder->edges.total_count),
-        .block_parameters = arena_allocate(arena, MachineBlockParameter, builder->block_parameters.total_count),
-        .edge_copy_sources = arena_allocate(arena, MachineRef, builder->edge_copy_sources.total_count),
+        .instructions = (MachineInstruction*)machine_stream_materialize(arena, builder->arena, &builder->instructions, BUSTER_ALIGN_OF(MachineInstruction)),
+        .virtual_registers = (MachineVirtualRegister*)machine_stream_materialize(arena, builder->arena, &builder->virtual_registers,
+                                                                                   BUSTER_ALIGN_OF(MachineVirtualRegister)),
+        .blocks = (MachineBlock*)machine_stream_materialize(arena, builder->arena, &builder->blocks, BUSTER_ALIGN_OF(MachineBlock)),
+        .edges = (MachineEdge*)machine_stream_materialize(arena, builder->arena, &builder->edges, BUSTER_ALIGN_OF(MachineEdge)),
+        .block_parameters = (MachineBlockParameter*)machine_stream_materialize(arena, builder->arena, &builder->block_parameters,
+                                                                                 BUSTER_ALIGN_OF(MachineBlockParameter)),
+        .edge_copy_sources = (MachineRef*)machine_stream_materialize(arena, builder->arena, &builder->edge_copy_sources, BUSTER_ALIGN_OF(MachineRef)),
         .instruction_count = builder->instructions.total_count,
         .virtual_register_count = builder->virtual_registers.total_count,
         .block_count = builder->blocks.total_count,
@@ -1501,12 +1524,6 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
         .block_parameter_count = builder->block_parameters.total_count,
         .edge_copy_source_count = builder->edge_copy_sources.total_count,
     };
-    machine_stream_flatten(&builder->instructions, function.instructions);
-    machine_stream_flatten(&builder->virtual_registers, function.virtual_registers);
-    machine_stream_flatten(&builder->blocks, function.blocks);
-    machine_stream_flatten(&builder->edges, function.edges);
-    machine_stream_flatten(&builder->block_parameters, function.block_parameters);
-    machine_stream_flatten(&builder->edge_copy_sources, function.edge_copy_sources);
     return function;
 }
 

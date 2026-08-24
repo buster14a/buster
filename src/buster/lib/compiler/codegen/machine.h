@@ -1043,10 +1043,12 @@ struct MachineTargetDescription
     u8 vector_slot_scratch[4];
 };
 
-// The contiguous per-function machine streams the builder flattens into.
-// Owned by whatever arena the caller passed to `machine_function_builder_finish`;
-// intended to live in a temporal scope released after encoding. The
-// immediate pool and stack-slot table are cold selector-owned side arrays:
+// The contiguous per-function machine streams the builder materializes. When
+// a stream fits one chunk and the finish arena is the builder arena, its rows
+// alias that chunk's payload; the builder arena therefore remains live until
+// encoding is complete. Multi-chunk streams and cross-arena finishes are
+// copied into the finish arena. The immediate pool and stack-slot table are
+// cold selector-owned side arrays:
 // MACHINE_REF_IMMEDIATE payloads index `immediates`, MACHINE_REF_STACK_SLOT
 // payloads index `stack_slot_sizes` (slot offsets are frame-layout output,
 // not selection output).
@@ -1371,9 +1373,11 @@ struct MachineEncodeResult
 
 // Chunked construction: one selection pass appends rows into fixed-size arena
 // chunks while exact counts accumulate, then one sequential flatten produces
-// the contiguous final arrays. This avoids both per-row heap allocation and
-// gross contiguous over-reservation, which commits pages under Buster's
-// arenas. Chunk size is a measured default, not a contract.
+// contiguous final arrays for multi-chunk streams. A single chunk is already
+// contiguous and is retained in place by the builder finish. This avoids both
+// per-row heap allocation and gross contiguous over-reservation, which commits
+// pages under Buster's arenas. Chunk size is a measured default, not a
+// contract.
 #define MACHINE_BUILDER_CHUNK_BYTES BUSTER_KB(16)
 
 typedef struct MachineBuilderChunk MachineBuilderChunk;
