@@ -4147,147 +4147,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* selector, IrInstruction* instruction)
-{
-    IrFunction* function = selector->function;
-    bool selected = false;
-    bool fused_dead = false;
-    u32 result_register = UINT32_MAX;
-    if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
-    {
-        // A branch-fusion chain member selects into nothing: the branch
-        // re-selects the compare at its own row, and the member's only
-        // consumer is the chain. Every marked member is pure.
-        fused_dead = selector->fused_dead[instruction->result.value];
-        result_register = selector->value_virtual_registers[instruction->result.value];
-    }
-    if (fused_dead)
-    {
-        selected = true;
-    }
-    else
-    {
-        switch (instruction->opcode)
-        {
-        case IR_OPCODE_VA_ARG:
-            selected = machine_x64_select_va_arg(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_VA_START:
-            selected = machine_x64_select_va_start(selector, instruction);
-            break;
-        case IR_OPCODE_VA_COPY:
-            selected = machine_x64_select_va_copy(selector, instruction);
-            break;
-        case IR_OPCODE_VA_END:
-            selected = machine_x64_select_va_end(selector, instruction);
-            break;
-        case IR_OPCODE_LOCAL:
-            selected = machine_x64_select_local(selector, instruction);
-            break;
-        case IR_OPCODE_STACK_SAVE:
-            selected = machine_x64_select_stack_save(selector, result_register);
-            break;
-        case IR_OPCODE_STACK_ALLOCATE:
-            selected = machine_x64_select_stack_allocate(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_STACK_RESTORE:
-            selected = machine_x64_select_stack_restore(selector, instruction);
-            break;
-        case IR_OPCODE_ARGUMENT:
-            selected = machine_x64_select_argument(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_CONSTANT_INTEGER:
-        case IR_OPCODE_CONSTANT_FLOAT:
-            selected = machine_x64_select_constant(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_CAST:
-            selected = machine_x64_select_cast(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_UNARY:
-            selected = machine_x64_select_unary(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_BINARY:
-            selected = machine_x64_select_binary(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_DEREFERENCE:
-            selected = machine_x64_select_dereference(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_GLOBAL:
-            selected = machine_x64_select_global_address(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_ADDRESS_OF:
-            selected = machine_x64_select_address_of(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_FIELD:
-            selected = machine_x64_select_field(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_DEBUG_TRAP:
-            selected = machine_x64_select_debug_trap(selector);
-            break;
-        case IR_OPCODE_AGGREGATE:
-            selected = machine_x64_select_aggregate(selector, instruction);
-            break;
-        case IR_OPCODE_ARRAY:
-            selected = machine_x64_select_array(selector, instruction);
-            break;
-        case IR_OPCODE_INDEX:
-            selected = machine_x64_select_index(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_LOAD:
-        case IR_OPCODE_ATOMIC_LOAD:
-            selected = machine_x64_select_load(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_STORE:
-        case IR_OPCODE_ATOMIC_STORE:
-            selected = machine_x64_select_store(selector, instruction);
-            break;
-        case IR_OPCODE_FUNCTION:
-            selected = machine_x64_select_function(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_SIMD:
-            selected = machine_x64_select_simd(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_CALL:
-            selected = machine_x64_select_call(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_BRANCH:
-            selected = machine_x64_select_branch(selector, instruction);
-            break;
-        case IR_OPCODE_LABEL_ADDRESS:
-            selected = machine_x64_select_label_address(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_INDIRECT_BRANCH:
-            selected = machine_x64_select_indirect_branch(selector, instruction);
-            break;
-        case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
-            selected = machine_x64_select_atomic_read_modify_write(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
-            selected = machine_x64_select_atomic_compare_exchange(selector, instruction, result_register);
-            break;
-        case IR_OPCODE_ATOMIC_FENCE:
-            selected = machine_x64_select_atomic_fence(selector, instruction);
-            break;
-        case IR_OPCODE_UNREACHABLE:
-            selected = machine_x64_select_unreachable(selector);
-            break;
-        case IR_OPCODE_SWITCH:
-            selected = machine_x64_select_switch(selector, instruction);
-            break;
-        case IR_OPCODE_BRANCH_IF:
-            selected = machine_x64_select_branch_if(selector, instruction);
-            break;
-        case IR_OPCODE_RETURN:
-            selected = machine_x64_select_return(selector, instruction);
-            break;
-        default:
-            selected = false;
-            break;
-        }
-    }
-    return selected;
-}
-
 // The rows the alias sweeps and the branch-fusion pass act on.  Everything
 // else those passes visited only to fall through, so the prepass walk records
 // where these sit and the two passes read that list instead of the rows.
@@ -5328,7 +5187,142 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     .offset = mark_source.offset,
                 };
             }
-            if (!machine_x64_select_instruction(&selector, instruction))
+            bool instruction_selected = false;
+            bool fused_dead = false;
+            u32 result_register = UINT32_MAX;
+            if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
+            {
+                // A branch-fusion chain member selects into nothing: the branch
+                // re-selects the compare at its own row, and the member's only
+                // consumer is the chain. Every marked member is pure.
+                fused_dead = selector.fused_dead[instruction->result.value];
+                result_register = selector.value_virtual_registers[instruction->result.value];
+            }
+            if (fused_dead)
+            {
+                instruction_selected = true;
+            }
+            else
+            {
+                switch (instruction->opcode)
+                {
+                case IR_OPCODE_VA_ARG:
+                    instruction_selected = machine_x64_select_va_arg(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_VA_START:
+                    instruction_selected = machine_x64_select_va_start(&selector, instruction);
+                    break;
+                case IR_OPCODE_VA_COPY:
+                    instruction_selected = machine_x64_select_va_copy(&selector, instruction);
+                    break;
+                case IR_OPCODE_VA_END:
+                    instruction_selected = machine_x64_select_va_end(&selector, instruction);
+                    break;
+                case IR_OPCODE_LOCAL:
+                    instruction_selected = machine_x64_select_local(&selector, instruction);
+                    break;
+                case IR_OPCODE_STACK_SAVE:
+                    instruction_selected = machine_x64_select_stack_save(&selector, result_register);
+                    break;
+                case IR_OPCODE_STACK_ALLOCATE:
+                    instruction_selected = machine_x64_select_stack_allocate(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_STACK_RESTORE:
+                    instruction_selected = machine_x64_select_stack_restore(&selector, instruction);
+                    break;
+                case IR_OPCODE_ARGUMENT:
+                    instruction_selected = machine_x64_select_argument(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_CONSTANT_INTEGER:
+                case IR_OPCODE_CONSTANT_FLOAT:
+                    instruction_selected = machine_x64_select_constant(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_CAST:
+                    instruction_selected = machine_x64_select_cast(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_UNARY:
+                    instruction_selected = machine_x64_select_unary(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_BINARY:
+                    instruction_selected = machine_x64_select_binary(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_DEREFERENCE:
+                    instruction_selected = machine_x64_select_dereference(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_GLOBAL:
+                    instruction_selected = machine_x64_select_global_address(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_ADDRESS_OF:
+                    instruction_selected = machine_x64_select_address_of(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_FIELD:
+                    instruction_selected = machine_x64_select_field(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_DEBUG_TRAP:
+                    instruction_selected = machine_x64_select_debug_trap(&selector);
+                    break;
+                case IR_OPCODE_AGGREGATE:
+                    instruction_selected = machine_x64_select_aggregate(&selector, instruction);
+                    break;
+                case IR_OPCODE_ARRAY:
+                    instruction_selected = machine_x64_select_array(&selector, instruction);
+                    break;
+                case IR_OPCODE_INDEX:
+                    instruction_selected = machine_x64_select_index(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_LOAD:
+                case IR_OPCODE_ATOMIC_LOAD:
+                    instruction_selected = machine_x64_select_load(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_STORE:
+                case IR_OPCODE_ATOMIC_STORE:
+                    instruction_selected = machine_x64_select_store(&selector, instruction);
+                    break;
+                case IR_OPCODE_FUNCTION:
+                    instruction_selected = machine_x64_select_function(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_SIMD:
+                    instruction_selected = machine_x64_select_simd(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_CALL:
+                    instruction_selected = machine_x64_select_call(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_BRANCH:
+                    instruction_selected = machine_x64_select_branch(&selector, instruction);
+                    break;
+                case IR_OPCODE_LABEL_ADDRESS:
+                    instruction_selected = machine_x64_select_label_address(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_INDIRECT_BRANCH:
+                    instruction_selected = machine_x64_select_indirect_branch(&selector, instruction);
+                    break;
+                case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+                    instruction_selected = machine_x64_select_atomic_read_modify_write(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+                    instruction_selected = machine_x64_select_atomic_compare_exchange(&selector, instruction, result_register);
+                    break;
+                case IR_OPCODE_ATOMIC_FENCE:
+                    instruction_selected = machine_x64_select_atomic_fence(&selector, instruction);
+                    break;
+                case IR_OPCODE_UNREACHABLE:
+                    instruction_selected = machine_x64_select_unreachable(&selector);
+                    break;
+                case IR_OPCODE_SWITCH:
+                    instruction_selected = machine_x64_select_switch(&selector, instruction);
+                    break;
+                case IR_OPCODE_BRANCH_IF:
+                    instruction_selected = machine_x64_select_branch_if(&selector, instruction);
+                    break;
+                case IR_OPCODE_RETURN:
+                    instruction_selected = machine_x64_select_return(&selector, instruction);
+                    break;
+                default:
+                    instruction_selected = false;
+                    break;
+                }
+            }
+            if (!instruction_selected)
             {
                 machine_x64_reject(&selector, instruction->opcode);
                 break;
