@@ -239,6 +239,68 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         .layout = {.size = 32, .alignment = 16, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
     });
 
+    IrField* abi_struct_f64x2_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_struct_f64x2_fields[0] = (IrField){.type = abi_f64, .offset = 0};
+    abi_struct_f64x2_fields[1] = (IrField){.type = abi_f64, .offset = 8};
+    IrTypeId abi_struct_f64x2 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = abi_struct_f64x2_fields,
+        .field_count = 2,
+        .layout = {.size = 16, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+    IrTypeId abi_union_f64[4];
+    u32 abi_union_f64_count = (u32)(sizeof(abi_union_f64) / sizeof(abi_union_f64[0]));
+    for (u32 index = 0; index < abi_union_f64_count; index += 1)
+    {
+        IrField* fields = arena_allocate(arguments->arena, IrField, index + 1);
+        for (u32 field_index = 0; field_index <= index; field_index += 1)
+        {
+            fields[field_index] = (IrField){.type = abi_f64, .offset = 0};
+        }
+        abi_union_f64[index] = ir_program_add_type(&abi_program, (IrType){
+            .kind = IR_TYPE_UNION,
+            .fields = fields,
+            .field_count = index + 1,
+            .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+        });
+    }
+    IrField* abi_union_float_double_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_union_float_double_fields[0] = (IrField){.type = abi_f32, .offset = 0};
+    abi_union_float_double_fields[1] = (IrField){.type = abi_f64, .offset = 0};
+    IrTypeId abi_union_float_double = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_UNION,
+        .fields = abi_union_float_double_fields,
+        .field_count = 2,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+    IrField* abi_union_double_integer_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_union_double_integer_fields[0] = (IrField){.type = abi_f64, .offset = 0};
+    abi_union_double_integer_fields[1] = (IrField){.type = abi_integer, .offset = 0};
+    IrTypeId abi_union_double_integer = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_UNION,
+        .fields = abi_union_double_integer_fields,
+        .field_count = 2,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+    IrField* abi_union_struct_f64x2_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_union_struct_f64x2_fields[0] = (IrField){.type = abi_struct_f64x2, .offset = 0};
+    abi_union_struct_f64x2_fields[1] = (IrField){.type = abi_f64, .offset = 0};
+    IrTypeId abi_union_struct_f64x2 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_UNION,
+        .fields = abi_union_struct_f64x2_fields,
+        .field_count = 2,
+        .layout = {.size = 16, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+    IrField* abi_struct_union_f64_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_struct_union_f64_fields[0] = (IrField){.type = abi_union_f64[0], .offset = 0};
+    abi_struct_union_f64_fields[1] = (IrField){.type = abi_f64, .offset = 8};
+    IrTypeId abi_struct_union_f64 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = abi_struct_union_f64_fields,
+        .field_count = 2,
+        .layout = {.size = 16, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+
     IrAbiValue abi_f80_argument = ir_type_abi_value(&abi_program, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
     IrAbiValue abi_f80_variadic = ir_type_abi_value(&abi_program, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
     IrAbiValue abi_f80_result = ir_type_abi_value(&abi_program, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
@@ -311,6 +373,48 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, abi_struct_large_argument.parts[0].abi_class == IR_ABI_CLASS_MEMORY && abi_struct_large_argument.parts[0].size == 32);
     BUSTER_TEST(arguments, abi_struct_large_result.part_count == 1 && abi_struct_large_result.indirect && !abi_struct_large_result.memory);
     BUSTER_TEST(arguments, abi_struct_large_result.parts[0].abi_class == IR_ABI_CLASS_POINTER && abi_struct_large_result.parts[0].size == 8);
+
+    for (u32 index = 0; index < abi_union_f64_count; index += 1)
+    {
+        IrAbiValue argument = ir_type_abi_value(&abi_program, abi_union_f64[index], IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+        IrAbiValue result_value = ir_type_abi_value(&abi_program, abi_union_f64[index], IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+        BUSTER_TEST(arguments, argument.part_count == 1 && !argument.indirect && !argument.memory && argument.parts[0].abi_class == IR_ABI_CLASS_FLOAT &&
+                                     argument.parts[0].value_offset == 0 && argument.parts[0].size == 8);
+        BUSTER_TEST(arguments, result_value.part_count == 1 && !result_value.indirect && !result_value.memory && result_value.parts[0].abi_class == IR_ABI_CLASS_FLOAT &&
+                                       result_value.parts[0].value_offset == 0 && result_value.parts[0].size == 8);
+    }
+    IrAbiValue abi_union_float_double_aapcs = ir_type_abi_value(&abi_program, abi_union_float_double, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_union_float_double_result = ir_type_abi_value(&abi_program, abi_union_float_double, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+    IrAbiValue abi_union_double_integer_aapcs = ir_type_abi_value(&abi_program, abi_union_double_integer, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_union_double_integer_result = ir_type_abi_value(&abi_program, abi_union_double_integer, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, abi_union_float_double_aapcs.part_count == 1 && !abi_union_float_double_aapcs.indirect && !abi_union_float_double_aapcs.memory &&
+                                 abi_union_float_double_aapcs.parts[0].abi_class == IR_ABI_CLASS_INTEGER && abi_union_float_double_aapcs.parts[0].size == 8);
+    BUSTER_TEST(arguments, abi_union_float_double_result.part_count == 1 && !abi_union_float_double_result.indirect && !abi_union_float_double_result.memory &&
+                                 abi_union_float_double_result.parts[0].abi_class == IR_ABI_CLASS_INTEGER && abi_union_float_double_result.parts[0].size == 8);
+    BUSTER_TEST(arguments, abi_union_double_integer_aapcs.part_count == 1 && !abi_union_double_integer_aapcs.indirect && !abi_union_double_integer_aapcs.memory &&
+                                 abi_union_double_integer_aapcs.parts[0].abi_class == IR_ABI_CLASS_INTEGER && abi_union_double_integer_aapcs.parts[0].size == 8);
+    BUSTER_TEST(arguments, abi_union_double_integer_result.part_count == 1 && !abi_union_double_integer_result.indirect && !abi_union_double_integer_result.memory &&
+                                 abi_union_double_integer_result.parts[0].abi_class == IR_ABI_CLASS_INTEGER && abi_union_double_integer_result.parts[0].size == 8);
+    IrAbiValue abi_union_struct_f64x2_aapcs = ir_type_abi_value(&abi_program, abi_union_struct_f64x2, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_union_struct_f64x2_result = ir_type_abi_value(&abi_program, abi_union_struct_f64x2, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+    IrAbiValue abi_struct_union_f64_aapcs = ir_type_abi_value(&abi_program, abi_struct_union_f64, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_struct_union_f64_result = ir_type_abi_value(&abi_program, abi_struct_union_f64, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, abi_union_struct_f64x2_aapcs.part_count == 2 && !abi_union_struct_f64x2_aapcs.indirect && !abi_union_struct_f64x2_aapcs.memory &&
+                                 abi_union_struct_f64x2_aapcs.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_union_struct_f64x2_aapcs.parts[0].size == 8 &&
+                                 abi_union_struct_f64x2_aapcs.parts[1].abi_class == IR_ABI_CLASS_FLOAT && abi_union_struct_f64x2_aapcs.parts[1].value_offset == 8 &&
+                                 abi_union_struct_f64x2_aapcs.parts[1].size == 8);
+    BUSTER_TEST(arguments, abi_union_struct_f64x2_result.part_count == 2 && !abi_union_struct_f64x2_result.indirect && !abi_union_struct_f64x2_result.memory &&
+                                 abi_union_struct_f64x2_result.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_union_struct_f64x2_result.parts[0].size == 8 &&
+                                 abi_union_struct_f64x2_result.parts[1].abi_class == IR_ABI_CLASS_FLOAT && abi_union_struct_f64x2_result.parts[1].value_offset == 8 &&
+                                 abi_union_struct_f64x2_result.parts[1].size == 8);
+    BUSTER_TEST(arguments, abi_struct_union_f64_aapcs.part_count == 2 && !abi_struct_union_f64_aapcs.indirect && !abi_struct_union_f64_aapcs.memory &&
+                                 abi_struct_union_f64_aapcs.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_union_f64_aapcs.parts[0].size == 8 &&
+                                 abi_struct_union_f64_aapcs.parts[1].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_union_f64_aapcs.parts[1].value_offset == 8 &&
+                                 abi_struct_union_f64_aapcs.parts[1].size == 8);
+    BUSTER_TEST(arguments, abi_struct_union_f64_result.part_count == 2 && !abi_struct_union_f64_result.indirect && !abi_struct_union_f64_result.memory &&
+                                 abi_struct_union_f64_result.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_union_f64_result.parts[0].size == 8 &&
+                                 abi_struct_union_f64_result.parts[1].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_union_f64_result.parts[1].value_offset == 8 &&
+                                 abi_struct_union_f64_result.parts[1].size == 8);
 
     IrAbiValue abi_f32_systemv = ir_type_abi_value(&abi_program, abi_f32, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
     IrAbiValue abi_f64_systemv = ir_type_abi_value(&abi_program, abi_f64, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);

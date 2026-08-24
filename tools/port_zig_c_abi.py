@@ -212,7 +212,162 @@ def adapt_cfuncs(upstream_lines):
         "#include \"c_abi.h\"",
         "",
     ]
-    return header + lines[body_start:]
+    # Keep the focused AAPCS64 union cases in the generated C half of the
+    # pairing.  They are handwritten ABI probes rather than part of the
+    # machine-regular upstream corpus, so retain them in this template instead
+    # of editing the generated c_abi_cfuncs.c output directly.
+    union_hfa_fixture = r"""
+typedef union
+{
+    double a;
+} Union_f64_1;
+typedef union
+{
+    double a;
+    double b;
+} Union_f64_2;
+typedef union
+{
+    double a;
+    double b;
+    double c;
+} Union_f64_3;
+typedef union
+{
+    double a;
+    double b;
+    double c;
+    double d;
+} Union_f64_4;
+typedef union
+{
+    float a;
+    double b;
+} Union_float_double;
+typedef union
+{
+    double a;
+    int32_t b;
+} Union_double_int;
+typedef union
+{
+    struct
+    {
+        double a;
+        double b;
+    } s;
+    double d;
+} Union_struct_f64x2;
+typedef struct
+{
+    Union_f64_1 u;
+    double b;
+} Struct_union_f64;
+
+Union_f64_1 zig_ret_union_f64_1(void);
+void zig_union_f64_1(Union_f64_1, size_t);
+Union_f64_2 zig_ret_union_f64_2(void);
+void zig_union_f64_2(Union_f64_2, size_t);
+Union_f64_3 zig_ret_union_f64_3(void);
+void zig_union_f64_3(Union_f64_3, size_t);
+Union_f64_4 zig_ret_union_f64_4(void);
+void zig_union_f64_4(Union_f64_4, size_t);
+Union_float_double zig_ret_union_float_double(void);
+void zig_union_float_double(Union_float_double, size_t);
+Union_double_int zig_ret_union_double_int(void);
+void zig_union_double_int(Union_double_int, size_t);
+Union_struct_f64x2 zig_ret_union_struct_f64x2(void);
+void zig_union_struct_f64x2(Union_struct_f64x2, size_t);
+Struct_union_f64 zig_ret_struct_union_f64(void);
+void zig_struct_union_f64(Struct_union_f64, size_t);
+
+Union_f64_1 c_ret_union_f64_1(void) {
+    return (Union_f64_1){ .a = 4 };
+}
+void c_union_f64_1(Union_f64_1 x, size_t i) {
+    assert_or_panic(x.a == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_f64_1().a == 1);
+    zig_union_f64_1((Union_f64_1){ .a = 2 }, 3);
+}
+
+Union_f64_2 c_ret_union_f64_2(void) {
+    return (Union_f64_2){ .a = 4 };
+}
+void c_union_f64_2(Union_f64_2 x, size_t i) {
+    assert_or_panic(x.a == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_f64_2().a == 1);
+    zig_union_f64_2((Union_f64_2){ .a = 2 }, 3);
+}
+
+Union_f64_3 c_ret_union_f64_3(void) {
+    return (Union_f64_3){ .a = 4 };
+}
+void c_union_f64_3(Union_f64_3 x, size_t i) {
+    assert_or_panic(x.a == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_f64_3().a == 1);
+    zig_union_f64_3((Union_f64_3){ .a = 2 }, 3);
+}
+
+Union_f64_4 c_ret_union_f64_4(void) {
+    return (Union_f64_4){ .a = 4 };
+}
+void c_union_f64_4(Union_f64_4 x, size_t i) {
+    assert_or_panic(x.a == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_f64_4().a == 1);
+    zig_union_f64_4((Union_f64_4){ .a = 2 }, 3);
+}
+
+Union_float_double c_ret_union_float_double(void) {
+    return (Union_float_double){ .b = 4 };
+}
+void c_union_float_double(Union_float_double x, size_t i) {
+    assert_or_panic(x.b == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_float_double().b == 1);
+    zig_union_float_double((Union_float_double){ .b = 2 }, 3);
+}
+
+Union_double_int c_ret_union_double_int(void) {
+    return (Union_double_int){ .a = 4 };
+}
+void c_union_double_int(Union_double_int x, size_t i) {
+    assert_or_panic(x.a == 5);
+    assert_or_panic(i == 6);
+    assert_or_panic(zig_ret_union_double_int().a == 1);
+    zig_union_double_int((Union_double_int){ .a = 2 }, 3);
+}
+
+Union_struct_f64x2 c_ret_union_struct_f64x2(void) {
+    return (Union_struct_f64x2){ .s = { .a = 4, .b = 5 } };
+}
+void c_union_struct_f64x2(Union_struct_f64x2 x, size_t i) {
+    assert_or_panic(x.s.a == 6);
+    assert_or_panic(x.s.b == 7);
+    assert_or_panic(i == 8);
+    Union_struct_f64x2 y = zig_ret_union_struct_f64x2();
+    assert_or_panic(y.s.a == 1);
+    assert_or_panic(y.s.b == 2);
+    zig_union_struct_f64x2((Union_struct_f64x2){ .s = { .a = 2, .b = 3 } }, 4);
+}
+
+Struct_union_f64 c_ret_struct_union_f64(void) {
+    return (Struct_union_f64){ .u = { .a = 4 }, .b = 5 };
+}
+void c_struct_union_f64(Struct_union_f64 x, size_t i) {
+    assert_or_panic(x.u.a == 6);
+    assert_or_panic(x.b == 7);
+    assert_or_panic(i == 8);
+    Struct_union_f64 y = zig_ret_struct_union_f64();
+    assert_or_panic(y.u.a == 1);
+    assert_or_panic(y.b == 2);
+    zig_struct_union_f64((Struct_union_f64){ .u = { .a = 2 }, .b = 3 }, 4);
+}
+""".strip("\n").splitlines()
+    return header + lines[body_start:] + union_hfa_fixture
 
 
 # --- main.zig translation ---------------------------------------------------

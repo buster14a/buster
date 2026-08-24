@@ -608,6 +608,195 @@ void zig_big_union(BigUnion x)
     assert_or_panic(x.a.e == 5);
 }
 
+// AAPCS64 treats union alternatives as overlapping choices when deciding
+// whether the value is a homogeneous floating-point aggregate. Repeating a
+// scalar double therefore stays one V-register, while a nested all-double
+// struct contributes its largest alternative. Mixed float/double and
+// double/integer unions remain integer aggregates. Keep these pairs beside
+// the upstream fixtures: each C return/argument also crosses back through the
+// zig_* implementation in c_abi_cfuncs.c, so both directions are exercised.
+typedef union
+{
+    double a;
+} Union_f64_1;
+typedef union
+{
+    double a;
+    double b;
+} Union_f64_2;
+typedef union
+{
+    double a;
+    double b;
+    double c;
+} Union_f64_3;
+typedef union
+{
+    double a;
+    double b;
+    double c;
+    double d;
+} Union_f64_4;
+typedef union
+{
+    float a;
+    double b;
+} Union_float_double;
+typedef union
+{
+    double a;
+    int32_t b;
+} Union_double_int;
+typedef union
+{
+    struct
+    {
+        double a;
+        double b;
+    } s;
+    double d;
+} Union_struct_f64x2;
+typedef struct
+{
+    Union_f64_1 u;
+    double b;
+} Struct_union_f64;
+
+#define DECLARE_UNION_HFA_TEST(name, type)                                                                                              \
+    type c_ret_##name(void);                                                                                                            \
+    void c_##name(type, size_t);                                                                                                        \
+    type zig_ret_##name(void);                                                                                                          \
+    void zig_##name(type, size_t)
+
+DECLARE_UNION_HFA_TEST(union_f64_1, Union_f64_1);
+DECLARE_UNION_HFA_TEST(union_f64_2, Union_f64_2);
+DECLARE_UNION_HFA_TEST(union_f64_3, Union_f64_3);
+DECLARE_UNION_HFA_TEST(union_f64_4, Union_f64_4);
+DECLARE_UNION_HFA_TEST(union_float_double, Union_float_double);
+DECLARE_UNION_HFA_TEST(union_double_int, Union_double_int);
+DECLARE_UNION_HFA_TEST(union_struct_f64x2, Union_struct_f64x2);
+DECLARE_UNION_HFA_TEST(struct_union_f64, Struct_union_f64);
+
+Union_f64_1 zig_ret_union_f64_1(void)
+{
+    return (Union_f64_1){.a = 1};
+}
+void zig_union_f64_1(Union_f64_1 s, size_t i)
+{
+    assert_or_panic(s.a == 2);
+    assert_or_panic(i == 3);
+}
+Union_f64_2 zig_ret_union_f64_2(void)
+{
+    return (Union_f64_2){.a = 1};
+}
+void zig_union_f64_2(Union_f64_2 s, size_t i)
+{
+    assert_or_panic(s.a == 2);
+    assert_or_panic(i == 3);
+}
+Union_f64_3 zig_ret_union_f64_3(void)
+{
+    return (Union_f64_3){.a = 1};
+}
+void zig_union_f64_3(Union_f64_3 s, size_t i)
+{
+    assert_or_panic(s.a == 2);
+    assert_or_panic(i == 3);
+}
+Union_f64_4 zig_ret_union_f64_4(void)
+{
+    return (Union_f64_4){.a = 1};
+}
+void zig_union_f64_4(Union_f64_4 s, size_t i)
+{
+    assert_or_panic(s.a == 2);
+    assert_or_panic(i == 3);
+}
+Union_float_double zig_ret_union_float_double(void)
+{
+    return (Union_float_double){.b = 1};
+}
+void zig_union_float_double(Union_float_double s, size_t i)
+{
+    assert_or_panic(s.b == 2);
+    assert_or_panic(i == 3);
+}
+Union_double_int zig_ret_union_double_int(void)
+{
+    return (Union_double_int){.a = 1};
+}
+void zig_union_double_int(Union_double_int s, size_t i)
+{
+    assert_or_panic(s.a == 2);
+    assert_or_panic(i == 3);
+}
+Union_struct_f64x2 zig_ret_union_struct_f64x2(void)
+{
+    return (Union_struct_f64x2){.s = {.a = 1, .b = 2}};
+}
+void zig_union_struct_f64x2(Union_struct_f64x2 s, size_t i)
+{
+    assert_or_panic(s.s.a == 2);
+    assert_or_panic(s.s.b == 3);
+    assert_or_panic(i == 4);
+}
+Struct_union_f64 zig_ret_struct_union_f64(void)
+{
+    return (Struct_union_f64){.u = {.a = 1}, .b = 2};
+}
+void zig_struct_union_f64(Struct_union_f64 s, size_t i)
+{
+    assert_or_panic(s.u.a == 2);
+    assert_or_panic(s.b == 3);
+    assert_or_panic(i == 4);
+}
+
+static void test_union_hfa_matrix(void)
+{
+    c_abi_current_test = "union f64 HFA 1";
+    Union_f64_1 union_f64_1 = c_ret_union_f64_1();
+    assert_or_panic(union_f64_1.a == 4);
+    c_union_f64_1((Union_f64_1){.a = 5}, 6);
+
+    c_abi_current_test = "union f64 HFA 2";
+    Union_f64_2 union_f64_2 = c_ret_union_f64_2();
+    assert_or_panic(union_f64_2.a == 4);
+    c_union_f64_2((Union_f64_2){.a = 5}, 6);
+
+    c_abi_current_test = "union f64 HFA 3";
+    Union_f64_3 union_f64_3 = c_ret_union_f64_3();
+    assert_or_panic(union_f64_3.a == 4);
+    c_union_f64_3((Union_f64_3){.a = 5}, 6);
+
+    c_abi_current_test = "union f64 HFA 4";
+    Union_f64_4 union_f64_4 = c_ret_union_f64_4();
+    assert_or_panic(union_f64_4.a == 4);
+    c_union_f64_4((Union_f64_4){.a = 5}, 6);
+
+    c_abi_current_test = "union float double";
+    Union_float_double union_float_double = c_ret_union_float_double();
+    assert_or_panic(union_float_double.b == 4);
+    c_union_float_double((Union_float_double){.b = 5}, 6);
+
+    c_abi_current_test = "union double int";
+    Union_double_int union_double_int = c_ret_union_double_int();
+    assert_or_panic(union_double_int.a == 4);
+    c_union_double_int((Union_double_int){.a = 5}, 6);
+
+    c_abi_current_test = "union nested struct f64";
+    Union_struct_f64x2 union_struct_f64x2 = c_ret_union_struct_f64x2();
+    assert_or_panic(union_struct_f64x2.s.a == 4);
+    assert_or_panic(union_struct_f64x2.s.b == 5);
+    c_union_struct_f64x2((Union_struct_f64x2){.s = {.a = 6, .b = 7}}, 8);
+
+    c_abi_current_test = "struct nested union f64";
+    Struct_union_f64 struct_union_f64 = c_ret_struct_union_f64();
+    assert_or_panic(struct_union_f64.u.a == 4);
+    assert_or_panic(struct_union_f64.b == 5);
+    c_struct_union_f64((Struct_union_f64){.u = {.a = 6}, .b = 7}, 8);
+}
+
 typedef struct
 {
     uint32_t a;
@@ -1371,6 +1560,7 @@ int main(void)
     test_struct_i32_i32();
     test_big_struct();
     test_big_union();
+    test_union_hfa_matrix();
     test_med_struct_mixed();
     test_small_packed_struct();
 #ifndef ZIG_NO_I128

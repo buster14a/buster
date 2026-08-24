@@ -2753,60 +2753,155 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
 
 BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId root_type, IrTypeId* element_out, u32* count_out)
 {
+    typedef enum IrHomogeneousFloatTaskOperation
+    {
+        IR_HOMOGENEOUS_FLOAT_TASK_TYPE,
+        IR_HOMOGENEOUS_FLOAT_TASK_SUM,
+        IR_HOMOGENEOUS_FLOAT_TASK_MAX,
+    } IrHomogeneousFloatTaskOperation;
+    typedef struct IrHomogeneousFloatTask IrHomogeneousFloatTask;
+    struct IrHomogeneousFloatTask
+    {
+        IrTypeId type;
+        u32 child_count;
+        IrHomogeneousFloatTaskOperation operation;
+    };
+    typedef struct IrHomogeneousFloatShape IrHomogeneousFloatShape;
+    struct IrHomogeneousFloatShape
+    {
+        IrTypeId element;
+        u32 count;
+    };
+
     TemporalArena temporary = scratch_begin(0, 0);
     u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
-    IrTypeId* tasks = arena_allocate(temporary.arena, IrTypeId, capacity);
+    IrHomogeneousFloatTask* tasks = arena_allocate(temporary.arena, IrHomogeneousFloatTask, capacity);
+    IrHomogeneousFloatShape* shapes = arena_allocate(temporary.arena, IrHomogeneousFloatShape, capacity);
     u32 task_count = 1;
-    u32 count = 0;
-    IrTypeId element = IR_TYPE_ID_INVALID;
-    tasks[0] = root_type;
+    u32 shape_count = 0;
+    tasks[0] = (IrHomogeneousFloatTask){
+        .type = root_type,
+        .operation = IR_HOMOGENEOUS_FLOAT_TASK_TYPE,
+    };
     bool valid = true;
     while (task_count && valid)
     {
-        IrTypeId type_id = tasks[--task_count];
-        IrType* type = ir_type_from_id(&program->types, type_id);
-        if (!type)
+        IrHomogeneousFloatTask task = tasks[--task_count];
+        if (task.operation == IR_HOMOGENEOUS_FLOAT_TASK_TYPE)
         {
-            valid = false;
-        }
-        else if (type->kind == IR_TYPE_FLOAT)
-        {
-            if (element.value != IR_ID_UNDERLYING_INVALID && element.value != type_id.value)
-            {
-                valid = false;
-                break;
-            }
-            element = type_id;
-            count += 1;
-            if (count > IR_ABI_MAX_PARTS)
+            IrType* type = ir_type_from_id(&program->types, task.type);
+            if (!type)
             {
                 valid = false;
             }
-        }
-        else if (type->kind == IR_TYPE_ARRAY)
-        {
-            if (!type->element_count || type->element_count > capacity - task_count)
+            else if (type->kind == IR_TYPE_FLOAT)
+            {
+                if (shape_count >= capacity)
+                {
+                    valid = false;
+                }
+                else
+                {
+                    shapes[shape_count++] = (IrHomogeneousFloatShape){
+                        .element = task.type,
+                        .count = 1,
+                    };
+                }
+            }
+            else if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+            {
+                u64 child_count = type->kind == IR_TYPE_ARRAY ? type->element_count : type->field_count;
+                if (!child_count || task_count >= capacity || child_count > (u64)(capacity - task_count - 1))
+                {
+                    valid = false;
+                }
+                else
+                {
+                    // AAPCS64 treats a union's alternatives as overlapping
+                    // choices: every alternative must have the same floating
+                    // element type, but only the largest alternative consumes
+                    // V registers. Repeated scalar members therefore keep a
+                    // one-register HFA instead of multiplying the count.
+                    IrHomogeneousFloatTaskOperation operation = type->kind == IR_TYPE_UNION ? IR_HOMOGENEOUS_FLOAT_TASK_MAX
+                                                                                              : IR_HOMOGENEOUS_FLOAT_TASK_SUM;
+                    tasks[task_count++] = (IrHomogeneousFloatTask){
+                        .child_count = (u32)child_count,
+                        .operation = operation,
+                    };
+                    if (type->kind == IR_TYPE_ARRAY)
+                    {
+                        for (u64 index = child_count; index; index -= 1)
+                        {
+                            tasks[task_count++] = (IrHomogeneousFloatTask){
+                                .type = type->element_type,
+                                .operation = IR_HOMOGENEOUS_FLOAT_TASK_TYPE,
+                            };
+                        }
+                    }
+                    else
+                    {
+                        for (u32 index = (u32)child_count; index; index -= 1)
+                        {
+                            tasks[task_count++] = (IrHomogeneousFloatTask){
+                                .type = type->fields[index - 1].type,
+                                .operation = IR_HOMOGENEOUS_FLOAT_TASK_TYPE,
+                            };
+                        }
+                    }
+                }
+            }
+            else
             {
                 valid = false;
-                break;
-            }
-            for (u64 index = 0; index < type->element_count; index += 1)
-            {
-                tasks[task_count++] = type->element_type;
-            }
-        }
-        else if (type->kind == IR_TYPE_STRUCT && type->field_count && type->field_count <= capacity - task_count)
-        {
-            for (u32 index = 0; index < type->field_count; index += 1)
-            {
-                tasks[task_count++] = type->fields[index].type;
             }
         }
         else
         {
-            valid = false;
+            if (shape_count < task.child_count)
+            {
+                valid = false;
+            }
+            else
+            {
+                u32 first_shape = shape_count - task.child_count;
+                IrTypeId element = IR_TYPE_ID_INVALID;
+                u32 count = 0;
+                for (u32 index = 0; index < task.child_count; index += 1)
+                {
+                    IrHomogeneousFloatShape shape = shapes[first_shape + index];
+                    if (!shape.count || (element.value != IR_ID_UNDERLYING_INVALID && element.value != shape.element.value))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    element = shape.element;
+                    if (task.operation == IR_HOMOGENEOUS_FLOAT_TASK_MAX)
+                    {
+                        count = BUSTER_MAX(count, shape.count);
+                    }
+                    else if (shape.count > IR_ABI_MAX_PARTS - count)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    else
+                    {
+                        count += shape.count;
+                    }
+                }
+                shape_count = first_shape;
+                if (valid)
+                {
+                    shapes[shape_count++] = (IrHomogeneousFloatShape){
+                        .element = element,
+                        .count = count,
+                    };
+                }
+            }
         }
     }
+    IrTypeId element = shape_count == 1 ? shapes[0].element : IR_TYPE_ID_INVALID;
+    u32 count = shape_count == 1 ? shapes[0].count : 0;
     scratch_end(temporary);
     IrType* root = ir_type_from_id(&program->types, root_type);
     IrType* element_type = element.value != IR_ID_UNDERLYING_INVALID ? ir_type_from_id(&program->types, element) : 0;
