@@ -9822,8 +9822,15 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         BUSTER_CHECK(active_call_count < active_capacity);
         active_calls[active_call_count++] = prepared_call_index;
-        BUSTER_CHECK(callee_start >= builder->body_token_start && callee_start - builder->body_token_start < builder->body_token_count);
-        builder->prepared_call_indices[callee_start - builder->body_token_start] = prepared_call_index;
+        // The token->call index spans the body alone.  A variable-length array
+        // parameter's bound is lowered from the declarator, whose tokens sit
+        // below body_token_start, so a call discovered there simply does not
+        // get a fast slot: c_ir_prepared_call_find already answers an
+        // out-of-body token with a linear scan over the prepared calls.
+        if (callee_start >= builder->body_token_start && callee_start - builder->body_token_start < builder->body_token_count)
+        {
+            builder->prepared_call_indices[callee_start - builder->body_token_start] = prepared_call_index;
+        }
         if (builtin_generic)
         {
             index = close;
@@ -32583,6 +32590,61 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         function_dependency_next[function_dependency_count] = function_dependency_heads[owner_index];
         function_dependency_heads[owner_index] = function_dependency_count++;
     }
+    // A variable-length array parameter's bound is evaluated once at entry, but
+    // its tokens live in the declarator and the parser records no identifier
+    // use for them, so `void f(long n, char a[g(n)])` never reaches the loop
+    // above and a static `g` would be dropped as unreferenced.  Mark such a
+    // callee needed outright: that is exactly what the loop above does for a
+    // use it cannot attribute to a body, and a declarator token is outside
+    // every body range.  Every identifier in the bound counts, not only the
+    // ones a `(` follows, because `a[(long)&g - (long)&g + 1]` names g too.
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = parse.declarations + declaration_index;
+        CIrSignature* signature = signatures + declaration_index;
+        if (declaration->kind != C_DECLARATION_FUNCTION || !declaration->is_definition || !signature->valid)
+        {
+            continue;
+        }
+        for (u32 parameter_index = 0; parameter_index < signature->parameter_count; parameter_index += 1)
+        {
+            for (CTypeId type_id = signature->parameters[parameter_index].type;
+                 type_id.value < parse.type_count && parse.types[type_id.value].kind == C_TYPE_ARRAY;
+                 type_id = parse.types[type_id.value].element_type)
+            {
+                u32 bound_index = parse.types[type_id.value].array_bound;
+                if (bound_index >= parse.array_bound_count)
+                {
+                    continue;
+                }
+                CArrayBound bound = parse.array_bounds[bound_index];
+                u64 bound_end = (u64)bound.token_start + bound.token_count;
+                if (bound_end > preprocess.token_count)
+                {
+                    bound_end = preprocess.token_count;
+                }
+                for (u64 token_index = bound.token_start; token_index < bound_end; token_index += 1)
+                {
+                    CToken token = preprocess.tokens[token_index];
+                    if (token.kind != C_TOKEN_IDENTIFIER)
+                    {
+                        continue;
+                    }
+                    CEntityId entity = c_parse_lookup_entity_token(&parse, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
+                    if (entity.value >= parse.entity_count)
+                    {
+                        continue;
+                    }
+                    u32 candidate_index = entity_function_declarations[entity.value];
+                    if (candidate_index != UINT32_MAX && !function_needed[candidate_index])
+                    {
+                        function_needed[candidate_index] = true;
+                        function_worklist[function_worklist_count++] = candidate_index;
+                    }
+                }
+            }
+        }
+    }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {
         CEntity entity = parse.entities[entity_index];
@@ -32792,7 +32854,25 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
         u32 body_end = declaration.body_start + declaration.body_token_count;
-        for (u32 token_index = declaration.body_start; token_index < body_end; token_index += 1)
+        // A variable-length array parameter's bound is lowered into the entry
+        // block before the body is, and its tokens live in the declarator, not
+        // the body: `void f(int n, int a[g(n)])` prepares a call whose `(` this
+        // scan would never see.  Over-counting a capacity only sizes an arena
+        // block, so the scan just starts at the declaration -- but only for the
+        // declarators that can carry a bound at all: scanning every
+        // definition's specifiers and parameter list unconditionally measured
+        // 0,05% of a self-compile's instructions for nothing, twice what the
+        // gated form costs.  A definition's token_start always precedes its
+        // body_start; the minimum keeps the span below non-negative if one
+        // ever does not.
+        bool array_parameter = false;
+        for (u32 parameter_index = 0; parameter_index < signatures[declaration_index].parameter_count && !array_parameter; parameter_index += 1)
+        {
+            CType* parameter_type = c_type_from_id(&parse, signatures[declaration_index].parameters[parameter_index].type);
+            array_parameter = parameter_type && parameter_type->kind == C_TYPE_ARRAY;
+        }
+        u32 declaration_start = array_parameter ? BUSTER_MIN(declaration.token_start, declaration.body_start) : declaration.body_start;
+        for (u32 token_index = declaration_start; token_index < body_end; token_index += 1)
         {
             CToken token = preprocess.tokens[token_index];
             bool open_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
@@ -32800,7 +32880,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             prepared_control_expression_capacity += open_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
         }
         u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
-        u64 lower_frame_capacity = lowering_capacity;
+        // The frame stack is the one lowering capacity a parameter bound draws
+        // on, because the parameter loop runs it on an empty machine: give it
+        // the declarator's tokens as well, so a bound that nests deeper than
+        // the body is long does not exhaust the stack.  The other consumers of
+        // lowering_capacity are per-value arrays the bound does not widen.
+        u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
         if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || prepared_call_capacity > UINT32_MAX ||
             prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {

@@ -175,6 +175,41 @@ static int check_unspecified_bound_over_vla(int columns, unsigned char cells[][c
     return 0;
 }
 
+static int bound_calls = 0;
+
+static long counted_bound(long value)
+{
+    bound_calls += 1;
+    return value;
+}
+
+// A parameter's array bound is an expression the callee evaluates on entry,
+// once per call, and its tokens live in the declarator instead of in the body.
+// A call there is prepared and lowered like any other call, into the entry
+// block, before the body runs; it used to index the body's token-to-call table
+// out of range and abort the compiler.  The outermost dimension is evaluated
+// too, even though the parameter decays to a pointer and nothing ever reads
+// that count -- clang evaluates it, so this fixture counts it.  counted_bound
+// is static and named nowhere but this declarator, so it also covers the
+// reachability pass that decides which internal functions get emitted.
+static int check_call_bound_parameter(long rows, long columns, int values[counted_bound(rows)][counted_bound(columns)])
+{
+    if (sizeof(values) != sizeof(int*))
+    {
+        return 1;
+    }
+    if (sizeof(values[0]) != (unsigned long long)columns * sizeof(int))
+    {
+        return 2;
+    }
+    values[rows - 1][columns - 1] = 23;
+    if (values[rows - 1][columns - 1] != 23)
+    {
+        return 3;
+    }
+    return 0;
+}
+
 static int check_nested(int rows, int columns)
 {
     int values[rows][columns];
@@ -259,6 +294,27 @@ int main(void)
         if (over_vla != 0)
         {
             return 70 + over_vla;
+        }
+    }
+    {
+        int grid[3][4];
+        int call_bound = check_call_bound_parameter(3, 4, grid);
+        if (call_bound != 0)
+        {
+            return 80 + call_bound;
+        }
+        if (bound_calls != 2)
+        {
+            return 84;
+        }
+        call_bound = check_call_bound_parameter(3, 4, grid);
+        if (call_bound != 0)
+        {
+            return 90 + call_bound;
+        }
+        if (bound_calls != 4)
+        {
+            return 94;
         }
     }
     return 0;
