@@ -1024,6 +1024,67 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == 4);
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_failures == 0);
     }
+    // Keep a canonical-IR witness for the AArch64 i128 count extension. The
+    // GNU clzll/ctzll spellings normally describe 64-bit operands; Buster's
+    // frontend deliberately preserves an i128 operand width, so this test
+    // checks the IR type directly and then runs the canonical emitter. The
+    // runtime fixture exercises the resulting pair stores separately.
+    String8 i128_count_source = S8(
+        "typedef unsigned __int128 U128;\n"
+        "void count_i128(U128 value, U128 *leading, U128 *trailing) {\n"
+        "    *leading = __builtin_clzll(value);\n"
+        "    *trailing = __builtin_ctzll(value);\n"
+        "}\n");
+    Target i128_count_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_GENERIC,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    CPreprocessResult i128_count_tokens = c_preprocess(arguments->arena, i128_count_source, (CPreprocessOptions){0});
+    CParseResult i128_count_parse = c_parse(arguments->arena, i128_count_tokens);
+    CIRLowerResult i128_count_ir = c_lower_to_ir(arguments->arena, S8("aarch64-i128-count.c"), i128_count_tokens, i128_count_parse, i128_count_target);
+    BUSTER_TEST(arguments, i128_count_tokens.error_count == 0);
+    BUSTER_TEST(arguments, i128_count_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, i128_count_ir.diagnostic_count == 0);
+    if (i128_count_ir.program)
+    {
+        bool saw_leading = false;
+        bool saw_trailing = false;
+        for (u32 module_index = 0; module_index < i128_count_ir.program->module_count; module_index += 1)
+        {
+            IrModule* module = i128_count_ir.program->modules + module_index;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    bool count_instruction = instruction->opcode == IR_OPCODE_UNARY &&
+                                             (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                                              instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS);
+                    if (!count_instruction)
+                    {
+                        continue;
+                    }
+                    IrType* result_type = ir_type_from_id(&i128_count_ir.program->types, instruction->canonical_type);
+                    IrType* operand_type = instruction->operand_count ?
+                                               ir_type_from_id(&i128_count_ir.program->types,
+                                                               function->values[instruction->operands[0].value].canonical_type)
+                                                                     : 0;
+                    BUSTER_TEST(arguments, result_type && result_type->kind == IR_TYPE_INTEGER && result_type->bit_width == 128);
+                    BUSTER_TEST(arguments, operand_type && operand_type->kind == IR_TYPE_INTEGER && operand_type->bit_width == 128);
+                    saw_leading |= instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+                    saw_trailing |= instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, saw_leading && saw_trailing);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(i128_count_ir.program, i128_count_ir.program->modules).error == IR_VALIDATION_NONE);
+        CodegenModule i128_count_codegen = codegen_generate_canonical_module(
+            arguments->arena, i128_count_ir.program, i128_count_ir.program->modules, i128_count_target,
+            (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE});
+        BUSTER_TEST(arguments, i128_count_codegen.error == CODEGEN_ERROR_NONE);
+    }
     String8 canonical_windows_c_source = S8(
         "typedef void *va_list;\n"
         "struct Pair { int left; int right; };\n"

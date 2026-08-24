@@ -6629,6 +6629,377 @@ BUSTER_GLOBAL_LOCAL void c_a64_store_high(CCanonicalEmitter* emitter, u32 regist
     (void)codegen_canonical_a64_frame_memory_operation(emitter->buffer, register_number, result_offset + 8, 8, true, false);
 }
 
+// Patches one local AArch64 branch after its target has been emitted. The
+// canonical emitter uses this for the fixed-shape loops inside one IR row;
+// ordinary IR block branches continue through CCanonicalBranchPatch below.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_patch_local_branch(CodegenBuffer* buffer, u32 branch_offset, u32 target_offset, bool conditional)
+{
+    bool result = false;
+    if (buffer && buffer->error == CODEGEN_ERROR_NONE && branch_offset <= UINT32_MAX - 4 && branch_offset + 4 <= buffer->count && target_offset <= UINT32_MAX)
+    {
+        s64 delta = (s64)target_offset - (s64)branch_offset;
+        s64 minimum = conditional ? -(s64)(1 << 20) : -(s64)(1 << 27);
+        s64 maximum = conditional ? (s64)(1 << 20) : (s64)(1 << 27);
+        if ((delta & 3) || delta < minimum || delta >= maximum)
+        {
+            buffer->error = CODEGEN_ERROR_CAPACITY;
+        }
+        else
+        {
+            u32 instruction = 0;
+            memcpy(&instruction, buffer->bytes + branch_offset, sizeof(instruction));
+            u32 immediate_mask = conditional ? UINT32_C(0x00ffffe0) : UINT32_C(0x03ffffff);
+            if (instruction & immediate_mask)
+            {
+                // A local patch must start from the zero-immediate template;
+                // silently OR-ing onto an old displacement would corrupt the
+                // loop target while still producing a decodable branch.
+                buffer->error = CODEGEN_ERROR_INVALID_IR;
+            }
+            else
+            {
+                u32 immediate = (u32)(delta >> 2);
+                instruction |= conditional ? (immediate & 0x7ffff) << 5 : immediate & 0x03ffffff;
+                memcpy(buffer->bytes + branch_offset, &instruction, sizeof(instruction));
+                result = true;
+            }
+        }
+    }
+    else if (buffer && buffer->error == CODEGEN_ERROR_NONE)
+    {
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+    }
+    return result;
+}
+
+// Emits the canonical 128-bit divide/remainder loop. Inputs arrive in
+// x9:x10 (dividend) and x11:x12 (divisor), low eightbyte first. The loop
+// shifts one dividend bit into x13:x14, subtracts the divisor when the
+// partial remainder is large enough, and accumulates the quotient in x0:x1.
+// Signed operations normalize both operands before the loop and restore the
+// quotient/remainder sign afterwards; unsigned operations use the same loop
+// without that normalization. On success the selected result is x9:x10.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_i128_divide(CodegenBuffer* buffer, bool signed_division, bool remainder_result)
+{
+    bool result = false;
+    if (buffer)
+    {
+        if (signed_division)
+        {
+            // x15/x16 retain the operand sign masks; the pair XOR/subtract
+            // turns each negative operand into its unsigned magnitude.
+            codegen_emit_u32(buffer, 0x937ffd4f); // asr x15, x10, #63
+            codegen_emit_u32(buffer, 0xca0f0129); // eor x9, x9, x15
+            codegen_emit_u32(buffer, 0xca0f014a); // eor x10, x10, x15
+            codegen_emit_u32(buffer, 0xeb0f0129); // subs x9, x9, x15
+            codegen_emit_u32(buffer, 0xda0f014a); // sbc x10, x10, x15
+            codegen_emit_u32(buffer, 0x937ffd90); // asr x16, x12, #63
+            codegen_emit_u32(buffer, 0xca10016b); // eor x11, x11, x16
+            codegen_emit_u32(buffer, 0xca10018c); // eor x12, x12, x16
+            codegen_emit_u32(buffer, 0xeb10016b); // subs x11, x11, x16
+            codegen_emit_u32(buffer, 0xda10018c); // sbc x12, x12, x16
+            codegen_emit_u32(buffer, 0xca1001f1); // eor x17, x15, x16
+        }
+
+        // x0:x1 quotient, x13:x14 partial remainder, x2 iteration count.
+        codegen_emit_u32(buffer, 0xaa1f03e0); // mov x0, xzr
+        codegen_emit_u32(buffer, 0xaa1f03e1); // mov x1, xzr
+        codegen_emit_u32(buffer, 0xaa1f03ed); // mov x13, xzr
+        codegen_emit_u32(buffer, 0xaa1f03ee); // mov x14, xzr
+        a64_emit_constant_compact(buffer, 2, 128);
+        u32 loop_offset = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0xab090129); // adds x9, x9, x9
+        codegen_emit_u32(buffer, 0xba0a014a); // adcs x10, x10, x10
+        codegen_emit_u32(buffer, 0xba0d01ad); // adcs x13, x13, x13
+        codegen_emit_u32(buffer, 0xba0e01ce); // adcs x14, x14, x14
+        codegen_emit_u32(buffer, 0xab000000); // adds x0, x0, x0
+        codegen_emit_u32(buffer, 0xba010021); // adcs x1, x1, x1
+        codegen_emit_u32(buffer, 0xeb0c01df); // cmp x14, x12
+        u32 high_less_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000003); // b.lo skip_subtract
+        u32 high_greater_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000008); // b.hi subtract
+        codegen_emit_u32(buffer, 0xeb0b01bf); // cmp x13, x11
+        u32 low_less_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000003); // b.lo skip_subtract
+        u32 subtract_offset = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0xeb0b01ad); // subs x13, x13, x11
+        codegen_emit_u32(buffer, 0xda0c01ce); // sbc x14, x14, x12
+        codegen_emit_u32(buffer, 0xb2400000); // orr x0, x0, #1
+        u32 skip_subtract = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0xf1000442); // subs x2, x2, #1
+        u32 loop_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000001); // b.ne loop
+        codegen_canonical_a64_patch_local_branch(buffer, high_less_branch, skip_subtract, true);
+        codegen_canonical_a64_patch_local_branch(buffer, high_greater_branch, subtract_offset, true);
+        codegen_canonical_a64_patch_local_branch(buffer, low_less_branch, skip_subtract, true);
+        codegen_canonical_a64_patch_local_branch(buffer, loop_branch, loop_offset, true);
+
+        if (signed_division)
+        {
+            if (remainder_result)
+            {
+                codegen_emit_u32(buffer, 0xca0f01ad); // eor x13, x13, x15
+                codegen_emit_u32(buffer, 0xca0f01ce); // eor x14, x14, x15
+                codegen_emit_u32(buffer, 0xeb0f01ad); // subs x13, x13, x15
+                codegen_emit_u32(buffer, 0xda0f01ce); // sbc x14, x14, x15
+            }
+            else
+            {
+                codegen_emit_u32(buffer, 0xca110000); // eor x0, x0, x17
+                codegen_emit_u32(buffer, 0xca110021); // eor x1, x1, x17
+                codegen_emit_u32(buffer, 0xeb110000); // subs x0, x0, x17
+                codegen_emit_u32(buffer, 0xda110021); // sbc x1, x1, x17
+            }
+        }
+        if (remainder_result)
+        {
+            codegen_emit_u32(buffer, 0xaa0d03e9); // mov x9, x13
+            codegen_emit_u32(buffer, 0xaa0e03ea); // mov x10, x14
+        }
+        else
+        {
+            codegen_emit_u32(buffer, 0xaa0003e9); // mov x9, x0
+            codegen_emit_u32(buffer, 0xaa0103ea); // mov x10, x1
+        }
+        result = buffer->error == CODEGEN_ERROR_NONE;
+    }
+    return result;
+}
+
+// Converts an i128 pair in a frame slot to an AArch64 scalar FP value. The
+// halves are converted as an unsigned magnitude, with an integer sticky-bit
+// combine before the final double conversion. Converting the halves
+// independently and adding them can double-round a halfway value (the low
+// half's sticky bit would have been lost by ucvtf), so the common path first
+// rounds a target-precision significand (53 bits for binary64, 24 for binary32)
+// and scales it by the discarded-bit count.
+// Signed inputs are made positive first and negated in FP after the magnitude
+// has been formed. The final narrowing is done only once when the requested
+// destination is float.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_i128_to_float(CodegenBuffer* buffer, u32 source_offset, u32 result_offset, u32 target_width,
+                                                            bool signed_value)
+{
+    bool result = false;
+    if (buffer && (target_width == 32 || target_width == 64) &&
+        codegen_canonical_a64_frame_memory_operation(buffer, 9, source_offset, 8, false, false) &&
+        codegen_canonical_a64_frame_memory_operation(buffer, 10, source_offset + 8, 8, false, false))
+    {
+        if (signed_value)
+        {
+            codegen_emit_u32(buffer, 0x937ffd4f); // asr x15, x10, #63
+            codegen_emit_u32(buffer, 0xca0f012d); // eor x13, x9, x15
+            codegen_emit_u32(buffer, 0xca0f014e); // eor x14, x10, x15
+            codegen_emit_u32(buffer, 0xeb0f01ad); // subs x13, x13, x15
+            codegen_emit_u32(buffer, 0xda0f01ce); // sbc x14, x14, x15
+        }
+        else
+        {
+            codegen_emit_u32(buffer, 0xaa0903ed); // mov x13, x9
+            codegen_emit_u32(buffer, 0xaa0a03ee); // mov x14, x10
+        }
+        // A zero high half is already a 64-bit conversion. Keeping it on a
+        // separate path also avoids asking the pair-significand code below to
+        // represent a shift outside the target format's range.
+        codegen_emit_u32(buffer, 0xf10001df); // cmp x14, #0
+        u32 direct_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000001); // b.ne general
+
+        // For a nonzero high half, E = floor(log2(value)) = 64 + h and the
+        // target conversion discards shift = E - (p - 1) bits. x0 is the
+        // high-half leading-zero count, x2 the discard count. The three paths
+        // below form the top p bits (x0) and the round/sticky pair (x1/x4);
+        // all then join at one nearest-even increment.
+        codegen_emit_u32(buffer, 0xaa0d03e0); // mov x0, x13
+        codegen_emit_u32(buffer, 0xaa1f03e2); // mov x2, xzr
+        u32 direct_to_convert = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x14000000); // b convert
+
+        u32 general_offset = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0xdac011c0); // clz x0, x14
+        // p includes the hidden leading bit: 53 for binary64 and 24 for
+        // binary32. Thus shift = (64 + h) - (p - 1) = bias - clz(high).
+        a64_emit_constant_compact(buffer, 2, target_width == 64 ? 75 : 104);
+        codegen_emit_u32(buffer, 0xcb000042); // sub x2, x2, x0
+        codegen_emit_u32(buffer, 0xf101005f); // cmp x2, #64
+        u32 low_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000003); // b.lo low_path
+        u32 shift64_branch = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x54000000); // b.eq shift64_path
+
+        // shift > 64: the significand is high >> (shift - 64), the round bit
+        // is immediately below it, and sticky includes the low half plus all
+        // lower high-half bits. x3 is shift - 64 and x4 is the round-bit
+        // position in the high half.
+        codegen_emit_u32(buffer, 0xd1010043); // sub x3, x2, #64
+        codegen_emit_u32(buffer, 0x9ac325c0); // lsr x0, x14, x3
+        codegen_emit_u32(buffer, 0xd1000464); // sub x4, x3, #1
+        codegen_emit_u32(buffer, 0x9ac425c1); // lsr x1, x14, x4
+        codegen_emit_u32(buffer, 0x92400021); // and x1, x1, #1
+        a64_emit_constant_compact(buffer, 5, 64);
+        codegen_emit_u32(buffer, 0xcb0400a5); // sub x5, x5, x4
+        codegen_emit_u32(buffer, 0x9ac521c5); // lsl x5, x14, x5
+        codegen_emit_u32(buffer, 0xf100009f); // cmp x4, #0
+        codegen_emit_u32(buffer, 0x9a8503e5); // csel x5, xzr, x5, eq
+        codegen_emit_u32(buffer, 0xf10000bf); // cmp x5, #0
+        codegen_emit_u32(buffer, 0x9a9f07e4); // cset x4, ne
+        codegen_emit_u32(buffer, 0xf10001bf); // cmp x13, #0
+        codegen_emit_u32(buffer, 0x9a9f07e5); // cset x5, ne
+        codegen_emit_u32(buffer, 0xaa050084); // orr x4, x4, x5
+        u32 high_to_round = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x14000000); // b round
+
+        u32 shift64_offset = (u32)buffer->count;
+        // shift == 64: high is the candidate significand, bit 63 of low is
+        // the round bit, and the remaining low bits are sticky.
+        codegen_emit_u32(buffer, 0xaa0e03e0); // mov x0, x14
+        codegen_emit_u32(buffer, 0xd37ffda1); // lsr x1, x13, #63
+        codegen_emit_u32(buffer, 0x92400021); // and x1, x1, #1
+        codegen_emit_u32(buffer, 0xd37ff9a4); // lsl x4, x13, #1
+        codegen_emit_u32(buffer, 0xf100009f); // cmp x4, #0
+        codegen_emit_u32(buffer, 0x9a9f07e4); // cset x4, ne
+        u32 shift64_to_round = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x14000000); // b round
+
+        u32 low_offset = (u32)buffer->count;
+        // shift < 64: combine the top of high with low >> shift. Sticky is
+        // all low bits below the round bit.
+        a64_emit_constant_compact(buffer, 3, 64);
+        codegen_emit_u32(buffer, 0xcb020063); // sub x3, x3, x2
+        codegen_emit_u32(buffer, 0x9ac321c0); // lsl x0, x14, x3
+        codegen_emit_u32(buffer, 0x9ac225a1); // lsr x1, x13, x2
+        codegen_emit_u32(buffer, 0xaa010000); // orr x0, x0, x1
+        codegen_emit_u32(buffer, 0xd1000443); // sub x3, x2, #1
+        codegen_emit_u32(buffer, 0x9ac325a1); // lsr x1, x13, x3
+        codegen_emit_u32(buffer, 0x92400021); // and x1, x1, #1
+        a64_emit_constant_compact(buffer, 4, 65);
+        codegen_emit_u32(buffer, 0xcb020084); // sub x4, x4, x2
+        codegen_emit_u32(buffer, 0x9ac421a4); // lsl x4, x13, x4
+        codegen_emit_u32(buffer, 0xf100009f); // cmp x4, #0
+        codegen_emit_u32(buffer, 0x9a9f07e4); // cset x4, ne
+        u32 low_to_round = (u32)buffer->count;
+        codegen_emit_u32(buffer, 0x14000000); // b round
+
+        u32 round_offset = (u32)buffer->count;
+        // Round to nearest, ties to even. x1 is the round bit, x4 the sticky
+        // flag, and x0's low bit supplies the tie parity.
+        codegen_emit_u32(buffer, 0x92400005); // and x5, x0, #1
+        codegen_emit_u32(buffer, 0xaa050084); // orr x4, x4, x5
+        codegen_emit_u32(buffer, 0x8a010084); // and x4, x4, x1
+        codegen_emit_u32(buffer, 0x91000405); // add x5, x0, #1
+        codegen_emit_u32(buffer, 0xf100009f); // cmp x4, #0
+        codegen_emit_u32(buffer, 0x9a8010a0); // csel x0, x5, x0, ne
+
+        u32 convert_offset = (u32)buffer->count;
+        if (target_width == 32)
+        {
+            // x0 has at most 24 significant bits here, so this conversion is
+            // exact. Scale in binary32 directly; narrowing a rounded binary64
+            // value would introduce a second rounding step.
+            codegen_emit_u32(buffer, 0x9e230000); // ucvtf s0, x0
+            a64_emit_constant(buffer, 16, UINT64_C(0x3f800000)); // float 1.0
+            codegen_emit_u32(buffer, 0x8b025e10); // add x16, x16, x2, lsl #23
+            codegen_emit_u32(buffer, 0x1e270201); // fmov s1, w16
+            codegen_emit_u32(buffer, 0x1e210800); // fmul s0, s0, s1
+        }
+        else
+        {
+            codegen_emit_u32(buffer, 0x9e630000); // ucvtf d0, x0
+            a64_emit_constant(buffer, 16, UINT64_C(0x3ff0000000000000)); // 1.0
+            codegen_emit_u32(buffer, 0x8b02d210); // add x16, x16, x2, lsl #52
+            codegen_emit_u32(buffer, 0x9e670201); // fmov d1, x16
+            codegen_emit_u32(buffer, 0x1e610800); // fmul d0, d0, d1
+        }
+
+        codegen_canonical_a64_patch_local_branch(buffer, direct_branch, general_offset, true);
+        codegen_canonical_a64_patch_local_branch(buffer, direct_to_convert, convert_offset, false);
+        codegen_canonical_a64_patch_local_branch(buffer, low_branch, low_offset, true);
+        codegen_canonical_a64_patch_local_branch(buffer, shift64_branch, shift64_offset, true);
+        codegen_canonical_a64_patch_local_branch(buffer, high_to_round, round_offset, false);
+        codegen_canonical_a64_patch_local_branch(buffer, shift64_to_round, round_offset, false);
+        codegen_canonical_a64_patch_local_branch(buffer, low_to_round, round_offset, false);
+        if (target_width == 32)
+        {
+            if (signed_value)
+            {
+                codegen_emit_u32(buffer, 0xf10001ff); // cmp x15, #0
+                u32 skip_negate = (u32)buffer->count;
+                codegen_emit_u32(buffer, 0x54000000); // b.eq skip_negate
+                codegen_emit_u32(buffer, 0x1e214000); // fneg s0, s0
+                u32 after_negate = (u32)buffer->count;
+                codegen_canonical_a64_patch_local_branch(buffer, skip_negate, after_negate, true);
+            }
+            result = codegen_canonical_a64_frame_float_memory_operation(buffer, 0, result_offset, 4, true);
+        }
+        else
+        {
+            if (signed_value)
+            {
+                codegen_emit_u32(buffer, 0xf10001ff); // cmp x15, #0
+                u32 skip_negate = (u32)buffer->count;
+                codegen_emit_u32(buffer, 0x54000000); // b.eq skip_negate
+                codegen_emit_u32(buffer, 0x1e614000); // fneg d0, d0
+                u32 after_negate = (u32)buffer->count;
+                codegen_canonical_a64_patch_local_branch(buffer, skip_negate, after_negate, true);
+            }
+            result = codegen_canonical_a64_frame_float_memory_operation(buffer, 0, result_offset, 8, true);
+        }
+    }
+    else if (buffer && buffer->error == CODEGEN_ERROR_NONE)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+    }
+    return result && buffer && buffer->error == CODEGEN_ERROR_NONE;
+}
+
+// Converts a scalar float/double in a frame slot to an i128 pair. Values are
+// split at 2^64 so each FCVTZU consumes a representable unsigned 64-bit
+// range; signed inputs use the absolute magnitude and restore the sign in the
+// integer pair. Float inputs are widened to double before the split.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_to_i128(CodegenBuffer* buffer, u32 source_offset, u32 result_offset, u32 source_width,
+                                                            bool signed_value)
+{
+    bool result = false;
+    if (buffer && (source_width == 32 || source_width == 64) &&
+        codegen_canonical_a64_frame_float_memory_operation(buffer, 0, source_offset, source_width / 8, false))
+    {
+        if (source_width == 32)
+        {
+            codegen_emit_u32(buffer, 0x1e22c000); // fcvt d0, s0
+        }
+        if (signed_value)
+        {
+            codegen_emit_u32(buffer, 0x9e66000f); // fmov x15, d0
+            codegen_emit_u32(buffer, 0x937ffdef); // asr x15, x15, #63
+            codegen_emit_u32(buffer, 0x1e60c000); // fabs d0, d0
+        }
+        a64_emit_constant(buffer, 16, UINT64_C(0x3bf0000000000000)); // 2^-64
+        codegen_emit_u32(buffer, 0x9e670201); // fmov d1, x16
+        codegen_emit_u32(buffer, 0x1e610801); // fmul d1, d0, d1
+        codegen_emit_u32(buffer, 0x9e79002a); // fcvtzu x10, d1
+        a64_emit_constant(buffer, 16, UINT64_C(0x43f0000000000000)); // 2^64
+        codegen_emit_u32(buffer, 0x9e630141); // ucvtf d1, x10
+        codegen_emit_u32(buffer, 0x9e670202); // fmov d2, x16
+        codegen_emit_u32(buffer, 0x1e620821); // fmul d1, d1, d2
+        codegen_emit_u32(buffer, 0x1e613800); // fsub d0, d0, d1
+        codegen_emit_u32(buffer, 0x9e790009); // fcvtzu x9, d0
+        if (signed_value)
+        {
+            codegen_emit_u32(buffer, 0xca0f0129); // eor x9, x9, x15
+            codegen_emit_u32(buffer, 0xca0f014a); // eor x10, x10, x15
+            codegen_emit_u32(buffer, 0xeb0f0129); // subs x9, x9, x15
+            codegen_emit_u32(buffer, 0xda0f014a); // sbc x10, x10, x15
+        }
+        result = codegen_canonical_a64_frame_memory_operation(buffer, 9, result_offset, 8, true, false) &&
+                 codegen_canonical_a64_frame_memory_operation(buffer, 10, result_offset + 8, 8, true, false);
+    }
+    else if (buffer && buffer->error == CODEGEN_ERROR_NONE)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+    }
+    return result && buffer && buffer->error == CODEGEN_ERROR_NONE;
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -14901,6 +15272,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
                         bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
+                        if (target_integer128 && source_type->kind == IR_TYPE_FLOAT &&
+                            (conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER || conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER))
+                        {
+                            bool converted = codegen_canonical_a64_float_to_i128(&buffer, value_offsets[instruction->operands[0].value], result_offset,
+                                                                                  source_type->bit_width,
+                                                                                  conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER);
+                            if (!converted)
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (target_integer128)
                         {
                             if (source_type->kind != IR_TYPE_INTEGER)
@@ -14946,7 +15331,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
-                        if (source_integer128 && target_type->kind != IR_TYPE_INTEGER)
+                        if (source_integer128 && target_type->kind != IR_TYPE_INTEGER &&
+                            !(target_type->kind == IR_TYPE_FLOAT &&
+                              (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT || conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
@@ -14978,6 +15365,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 codegen_emit_u32(&buffer, zero_extend);
                             }
+                        }
+                        if (source_integer128 && target_type->kind == IR_TYPE_FLOAT &&
+                            (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT || conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT))
+                        {
+                            bool converted = codegen_canonical_a64_i128_to_float(&buffer, value_offsets[instruction->operands[0].value], result_offset,
+                                                                                 target_type->bit_width,
+                                                                                 conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT);
+                            if (!converted)
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         if (target_type && source_type && target_type->kind == IR_TYPE_FLOAT && source_type->kind == IR_TYPE_INTEGER &&
                             (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
@@ -16013,8 +16414,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
                         {
                             // Pair forms over x9:x10; the 64-bit rows below
-                            // would drop the high half. Count-leading/trailing
-                            // zeros stay diagnosed rather than truncated.
+                            // would drop the high half. CLZ/CTZ select the
+                            // non-zero half and add the crossed-word offset.
                             c_a64_load_high(&emitter, 10, instruction->operands[0]);
                             if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
                             {
@@ -16025,6 +16426,34 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 codegen_emit_u32(&buffer, 0xaa2903e9); // mvn x9, x9
                                 codegen_emit_u32(&buffer, 0xaa2a03ea); // mvn x10, x10
+                            }
+                            else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                            {
+                                codegen_emit_u32(&buffer, 0xdac0114d); // clz x13, x10
+                                codegen_emit_u32(&buffer, 0xdac0112e); // clz x14, x9
+                                codegen_emit_u32(&buffer, 0x910101ce); // add x14, x14, #64
+                                codegen_emit_u32(&buffer, 0xf100015f); // cmp x10, #0
+                                codegen_emit_u32(&buffer, 0x9a8e11a9); // csel x9, x13, x14, ne
+                                codegen_emit_u32(&buffer, 0xaa1f03ea); // mov x10, xzr
+                                c_a64_store(&emitter, 9, result_offset);
+                                c_a64_store_high(&emitter, 10, result_offset);
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+                            {
+                                codegen_emit_u32(&buffer, 0xdac0012d); // rbit x13, x9
+                                codegen_emit_u32(&buffer, 0xdac011ad); // clz x13, x13
+                                codegen_emit_u32(&buffer, 0xdac0014e); // rbit x14, x10
+                                codegen_emit_u32(&buffer, 0xdac011ce); // clz x14, x14
+                                codegen_emit_u32(&buffer, 0x910101ce); // add x14, x14, #64
+                                codegen_emit_u32(&buffer, 0xf100013f); // cmp x9, #0
+                                codegen_emit_u32(&buffer, 0x9a8e11a9); // csel x9, x13, x14, ne
+                                codegen_emit_u32(&buffer, 0xaa1f03ea); // mov x10, xzr
+                                c_a64_store(&emitter, 9, result_offset);
+                                c_a64_store_high(&emitter, 10, result_offset);
+                                instruction_id = instruction->next;
+                                continue;
                             }
                             else
                             {
@@ -16137,10 +16566,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             // eightbyte, because the frontend may keep a
                             // shift's right operand at its promoted width and
                             // a narrow value's slot has no second eightbyte.
-                            // 128-bit division and remainder stay diagnosed:
-                            // the 64-bit rows below would truncate them
-                            // silently, and nothing in the tree divides
-                            // 128-bit integers at runtime.
+                            // Division and remainder use the same pair
+                            // convention and a bounded long-division loop;
+                            // the helper leaves its selected pair in x9:x10.
                             IrBinaryOperation operation128 = instruction->binary_operation;
                             bool shift128 = operation128 == IR_BINARY_SHIFT_LEFT || operation128 == IR_BINARY_SIGNED_SHIFT_RIGHT ||
                                             operation128 == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
@@ -16181,6 +16609,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             case IR_BINARY_INTEGER_BITWISE_XOR:
                                 codegen_emit_u32(&buffer, 0xca0b0129); // eor x9, x9, x11
                                 codegen_emit_u32(&buffer, 0xca0c014a); // eor x10, x10, x12
+                                break;
+                            case IR_BINARY_SIGNED_DIVIDE:
+                            case IR_BINARY_SIGNED_REMAINDER:
+                            case IR_BINARY_UNSIGNED_DIVIDE:
+                            case IR_BINARY_UNSIGNED_REMAINDER:
+                                if (!codegen_canonical_a64_i128_divide(&buffer,
+                                                                       operation128 == IR_BINARY_SIGNED_DIVIDE || operation128 == IR_BINARY_SIGNED_REMAINDER,
+                                                                       operation128 == IR_BINARY_SIGNED_REMAINDER || operation128 == IR_BINARY_UNSIGNED_REMAINDER))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 break;
                             case IR_BINARY_SHIFT_LEFT:
                                 codegen_emit_u32(&buffer, 0x2a2b03ed); // mvn w13, w11

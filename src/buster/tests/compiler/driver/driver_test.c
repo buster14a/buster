@@ -1935,6 +1935,82 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         file_map_unmap(wide_vector_map);
         scratch_end(cross_temp);
     }
+    // The AArch64 i128 fixture keeps results in caller-provided storage so
+    // both halves are observable without depending on the still-evolving
+    // direct i128 return ABI. Compile it through every allocator mode: the
+    // canonical emitter owns these operations while machine modes may elect
+    // their documented per-function fallback.
+    {
+        String8 i128_allocator_flags[] = {
+            S8("-fregister-allocator=none"),
+            S8("-fregister-allocator=mir-stack"),
+            S8("-fregister-allocator=fast"),
+            S8("-fregister-allocator=quality"),
+        };
+        String8 zig_executable = executable_resolve_in_path(arguments->arena, S8("zig"));
+        String8 qemu_aarch64_executable = executable_resolve_in_path(arguments->arena, S8("qemu-aarch64"));
+        bool can_run_aarch64_i128 = zig_executable.length != 0 && qemu_aarch64_executable.length != 0;
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(i128_allocator_flags); allocator_index += 1)
+        {
+            TemporalArena i128_temporary = arena_begin_temporal(c_object_arena);
+            String8 i128_object_path = buster_test_temporary_path(
+                i128_temporary.arena, S8("buster-c-aarch64-i128"), string_format(i128_temporary.arena, S8("-{u32}.o"), allocator_index));
+            String8 i128_command_line[] = {
+                S8("-c"),
+                S8("-O0"),
+                S8("-target"),
+                S8("aarch64-unknown-linux-gnu"),
+                i128_allocator_flags[allocator_index],
+                S8("-o"),
+                i128_object_path,
+                S8("tests/basic_c_aarch64_i128.c"),
+            };
+            CompilerDriverResult i128_result = compiler_driver_execute_invocation(
+                i128_temporary.arena, compiler_driver_parse_arguments(i128_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(i128_command_line)));
+            BUSTER_TEST(arguments, i128_result.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, i128_result.has_object);
+            FileMapRead i128_map = file_map_read(i128_temporary.arena, i128_object_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, i128_map.bytes.length != 0);
+            file_map_unmap(i128_map);
+            if (can_run_aarch64_i128 && i128_result.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 i128_executable_path = buster_test_temporary_path(
+                    i128_temporary.arena, S8("buster-c-aarch64-i128-run"), string_format(i128_temporary.arena, S8("-{u32}"), allocator_index));
+                String8 i128_link_arguments[] = {
+                    zig_executable,
+                    S8("cc"),
+                    S8("-target"),
+                    S8("aarch64-linux-musl"),
+                    S8("-static"),
+                    i128_object_path,
+                    S8("-o"),
+                    i128_executable_path,
+                };
+                ProcessSpawnResult i128_link_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(i128_link_arguments), (SliceString8){0},
+                                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, i128_link_spawn.handle != 0);
+                bool i128_linked = false;
+                if (i128_link_spawn.handle)
+                {
+                    i128_linked = os_process_wait_sync(i128_temporary.arena, i128_link_spawn).result == PROCESS_RESULT_SUCCESS;
+                }
+                BUSTER_TEST(arguments, i128_linked);
+                if (i128_linked)
+                {
+                    String8 i128_run_arguments[] = {qemu_aarch64_executable, i128_executable_path};
+                    ProcessSpawnResult i128_run_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(i128_run_arguments), (SliceString8){0},
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, i128_run_spawn.handle != 0);
+                    if (i128_run_spawn.handle)
+                    {
+                        ProcessWaitResult i128_run_wait = os_process_wait_sync(i128_temporary.arena, i128_run_spawn);
+                        BUSTER_TEST(arguments, i128_run_wait.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+            scratch_end(i128_temporary);
+        }
+    }
     {
         TemporalArena large_frame_temporary = arena_begin_temporal(c_object_arena);
         String8 large_frame_object_path = buster_test_temporary_path(large_frame_temporary.arena, S8("buster-c-large-frame"), S8(".o"));
