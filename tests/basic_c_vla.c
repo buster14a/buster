@@ -46,6 +46,47 @@ static int check_parameter(int rows, int columns, int values[static rows][column
     return 0;
 }
 
+// A constant array bound is not a variable-length array, and the C lowering
+// skips the VLA layout for this shape rather than folding it: the parameter
+// decays to a pointer, and every answer below has to come from that pointer
+// type instead of from a runtime layout the skip no longer builds.
+static int check_constant_bound_parameter(unsigned char slots[2], unsigned char matrix[2][3])
+{
+    if (sizeof(slots) != sizeof(unsigned char*))
+    {
+        return 1;
+    }
+    if (sizeof(slots[0]) != 1)
+    {
+        return 2;
+    }
+    if (sizeof(slots[1]) != 1)
+    {
+        return 3;
+    }
+    if (slots[1] - slots[0] != 1)
+    {
+        return 4;
+    }
+    if (slots + 2 - slots != 2)
+    {
+        return 5;
+    }
+    if (sizeof(matrix) != sizeof(unsigned char*))
+    {
+        return 6;
+    }
+    if (sizeof(matrix[0]) != 3)
+    {
+        return 7;
+    }
+    if (matrix[1][2] != 6)
+    {
+        return 8;
+    }
+    return 0;
+}
+
 static int check_nested(int rows, int columns)
 {
     int values[rows][columns];
@@ -113,6 +154,15 @@ int main(void)
         if (nested != 0)
         {
             return 40 + nested;
+        }
+    }
+    {
+        unsigned char slots[2] = {4, 5};
+        unsigned char grid[2][3] = {{1, 2, 3}, {4, 5, 6}};
+        int constant_bound = check_constant_bound_parameter(slots, grid);
+        if (constant_bound != 0)
+        {
+            return 50 + constant_bound;
         }
     }
     return 0;

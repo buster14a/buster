@@ -32930,13 +32930,29 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             CType* parameter_type = c_type_from_id(&builder.parse, parameter.type);
             if (parameter_type && parameter_type->kind == C_TYPE_ARRAY)
             {
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
                 IrType* adjusted_parameter_type = ir_type_from_id(&program->types, signature.parameter_types[parameter_index]);
                 bool fixed_inner_array = adjusted_parameter_type && adjusted_parameter_type->kind == IR_TYPE_POINTER &&
                                          adjusted_parameter_type->element_type.value < program->types.count &&
                                          ir_type_from_id(&program->types, adjusted_parameter_type->element_type)->kind == IR_TYPE_ARRAY;
-                if (!fixed_inner_array)
+                // An array C type reaches c_type_ir_map only when every one of
+                // its bounds is a constant expression, so a mapped type here is
+                // not a variable-length array at all: it is `u8 slots[2]`, and
+                // its layout would be a CONSTANT count, a CONSTANT element size
+                // and a MULTIPLY of the two emitted into the entry block. The
+                // parameter is a pointer either way, nothing reads a constant
+                // parameter's runtime_size — c_ir_lower_expression_core_step's
+                // sizeof arm refuses suffix 0 for is_vla_parameter, because
+                // `sizeof slots` is the pointer's — and every other consumer
+                // reaches the same answer through that pointer type, which is
+                // what local->type already holds. So skip the layout and leave the
+                // local unflagged. Every mapped array of two or more dimensions
+                // is already a pointer to a mapped array, hence fixed_inner_array
+                // above; this test therefore only ever adds the one-dimensional
+                // constant bound.
+                bool constant_bound = parameter.type.value < parse.type_count && c_type_ir_map[parameter.type.value].value != IR_ID_UNDERLYING_INVALID;
+                if (!fixed_inner_array && !constant_bound)
                 {
+                    CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
                     CIrVlaLayout layout = {0};
                     CToken parameter_token = c_ir_space_name_token(&builder, parameter.name);
                     if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, &layout))
