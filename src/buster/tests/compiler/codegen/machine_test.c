@@ -1844,7 +1844,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int variadic_named(int first, ...) { return first; }\n"
                                   "int variadic_named_caller(int first) { return variadic_named(first, 22, 3.5); }\n"
                                   "long stack_tail(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j) { return a * 2 + b + c + d + e + f + g + h + i * 3 + j * 5; }\n"
-                                  "long call_stack_tail(long x) { return stack_tail(x, 2, 3, 4, 5, 6, 7, 8, x + 9, 10); }\n");
+                                  "long call_stack_tail(long x) { return stack_tail(x, 2, 3, 4, 5, 6, 7, 8, x + 9, 10); }\n"
+                                  // A parameter written with array syntax carries a bound whose
+                                  // arithmetic is emitted between the parameter homes, so the entry
+                                  // block is not a contiguous run of them. Both shapes take a fourth
+                                  // integer argument, which System V passes in RCX -- the register
+                                  // that bound multiply uses. `vla_param` is the same shape with a
+                                  // genuine runtime bound, where the arithmetic cannot be folded away.
+                                  "long arr_param(unsigned char slots[2], long a, long b, long c) {\n"
+                                  "    return slots[0] * 1000 + a * 100 + b * 10 + c; }\n"
+                                  "long vla_param(long n, unsigned char slots[n], long b, long c) {\n"
+                                  "    return slots[n - 1] * 1000 + n * 100 + b * 10 + c; }\n");
     String8 machine_c_source_i128 = S8(
                                   "MachineWideSigned i8_to_i128(signed char v) { return (MachineWideSigned)v; }\n"
                                   "MachineWideUnsigned u8_to_u128(unsigned char v) { return (MachineWideUnsigned)v; }\n"
@@ -3248,6 +3258,52 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 s32 fast_result = (s32)fast_call6(1, 20, 300, 4000, 50000, 600000);
                 BUSTER_TEST_RAW(arguments, none_result == fast_result,
                                 string_format(arguments->arena, S8("fast six none={u64} fast={u64}"), (u64)(u32)none_result, (u64)(u32)fast_result));
+            }
+        }
+        // The canonical emitter's own entry captures. An array-syntax
+        // parameter puts its bound arithmetic between the parameter homes,
+        // and that multiply takes RAX and RCX, so a NONE-emitted body that
+        // homes RCX afterwards reads the multiplier instead of its fourth
+        // argument. Both shapes are checked against the value the C says, not
+        // only against each other: NONE is the differential oracle everywhere
+        // else here, so a wrong oracle has to be caught absolutely.
+        if (none_module_executable.address && fast_module_executable.address)
+        {
+            typedef s64 MachineTestArrayParamCall(unsigned char const*, s64, s64, s64);
+            typedef s64 MachineTestVlaParamCall(s64, unsigned char const*, s64, s64);
+            unsigned char entry_capture_slots[2] = {7, 8};
+            u32 none_array_offset = machine_test_module_offset(&none_module, machine_module, S8("arr_param"));
+            u32 fast_array_offset = machine_test_module_offset(&fast_module, machine_module, S8("arr_param"));
+            u32 none_vla_offset = machine_test_module_offset(&none_module, machine_module, S8("vla_param"));
+            u32 fast_vla_offset = machine_test_module_offset(&fast_module, machine_module, S8("vla_param"));
+            BUSTER_TEST(arguments, none_array_offset != UINT32_MAX && fast_array_offset != UINT32_MAX && none_vla_offset != UINT32_MAX &&
+                                       fast_vla_offset != UINT32_MAX);
+            if (none_array_offset != UINT32_MAX && fast_array_offset != UINT32_MAX)
+            {
+                void* none_address = (u8*)none_module_executable.address + none_array_offset;
+                void* fast_address = (u8*)fast_module_executable.address + fast_array_offset;
+                MachineTestArrayParamCall* none_array_call = 0;
+                MachineTestArrayParamCall* fast_array_call = 0;
+                memcpy(&none_array_call, &none_address, sizeof(none_array_call));
+                memcpy(&fast_array_call, &fast_address, sizeof(fast_array_call));
+                s64 none_array_result = none_array_call(entry_capture_slots, 2, 3, 4);
+                s64 fast_array_result = fast_array_call(entry_capture_slots, 2, 3, 4);
+                BUSTER_TEST_RAW(arguments, none_array_result == 7234 && fast_array_result == 7234,
+                                string_format(arguments->arena, S8("arr_param none={s64} fast={s64} want 7234"), none_array_result,
+                                              fast_array_result));
+            }
+            if (none_vla_offset != UINT32_MAX && fast_vla_offset != UINT32_MAX)
+            {
+                void* none_address = (u8*)none_module_executable.address + none_vla_offset;
+                void* fast_address = (u8*)fast_module_executable.address + fast_vla_offset;
+                MachineTestVlaParamCall* none_vla_call = 0;
+                MachineTestVlaParamCall* fast_vla_call = 0;
+                memcpy(&none_vla_call, &none_address, sizeof(none_vla_call));
+                memcpy(&fast_vla_call, &fast_address, sizeof(fast_vla_call));
+                s64 none_vla_result = none_vla_call(2, entry_capture_slots, 3, 4);
+                s64 fast_vla_result = fast_vla_call(2, entry_capture_slots, 3, 4);
+                BUSTER_TEST_RAW(arguments, none_vla_result == 8234 && fast_vla_result == 8234,
+                                string_format(arguments->arena, S8("vla_param none={s64} fast={s64} want 8234"), none_vla_result, fast_vla_result));
             }
         }
         codegen_release_executable(fast_module_executable);

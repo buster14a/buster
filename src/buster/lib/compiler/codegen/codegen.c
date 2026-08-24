@@ -7897,12 +7897,49 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // counter that used to stand in for that proof re-walked the whole
             // function before it could notice a cycle, and the emitter already
             // trusts validation for everything it indexes below.
+            // An argument register holds its parameter only until the first
+            // body instruction reuses it, and the entry block is not a
+            // contiguous run of parameter homes: an array parameter's bound
+            // arithmetic is emitted between them, and its multiply takes RAX
+            // and RCX -- RCX being the fourth System V argument. So walk the
+            // entry block twice, ARGUMENT first, and capture every parameter
+            // before anything else can be emitted. An ARGUMENT reads a
+            // physical register and writes only its own frame slot, so no
+            // other instruction in the block orders against it. This is the
+            // canonical counterpart of "capture every incoming argument
+            // register at entry" in the machine selectors, which the machine
+            // path has always done and this emitter had not.
+            bool entry_block = block_index == 0 && canonical_function_type &&
+                               canonical_function_type->kind == IR_TYPE_FUNCTION && canonical_function_type->parameter_count != 0;
+            bool argument_pass = entry_block;
             IrInstructionId instruction_id = emitted_block->first_instruction;
-            while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
+            while (true)
             {
+                if (instruction_id.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    if (!argument_pass)
+                    {
+                        break;
+                    }
+                    argument_pass = false;
+                    instruction_id = emitted_block->first_instruction;
+                    continue;
+                }
                 IrInstruction* instruction = function->instructions + instruction_id.value;
                 result.failed_instruction = instruction_id;
                 result.failed_opcode = instruction->opcode;
+                if (entry_block && (instruction->opcode == IR_OPCODE_ARGUMENT) != argument_pass)
+                {
+                    instruction_id = instruction->next;
+                    continue;
+                }
+                if (!entry_block && instruction->opcode == IR_OPCODE_ARGUMENT)
+                {
+                    // Reaching an ARGUMENT anywhere but the entry block means
+                    // its register is long dead; refuse rather than read it.
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
                 if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment <= 16)
                 {
                     instruction_id = instruction->next;
