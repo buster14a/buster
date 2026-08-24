@@ -239,6 +239,17 @@ a serialized CI runner for hours while Ninja buffers the edge's output and the
 log says nothing. On expiry the child is killed and the run fails naming the
 stage and its command line. Every other run waits indefinitely, because their
 cost scales with what they are given.
+The fixed-point pair continues to use the default FAST allocator, and the
+existing non-Windows machine stage continues to compile and run its benchmark
+with `-fregister-allocator=mir-stack`. That stage is followed by a canonical
+compile-only gate: the stage-2 compiler builds `ide-stage2-none` with
+`-fregister-allocator=none`. It does not run that output because the regression
+this gate protects against is a canonical argument-capture crash while
+compiling `ide.c`; launching a second benchmark would add CI work without
+covering that path. NONE is the only allocator stage here that reaches the
+canonical emission path; QUALITY exercises the same machine path already
+covered by FAST/MIR_STACK and is covered by focused/all-mode tests, so another
+full unity compile would add CI cost without distinct self-host coverage.
 CI Release builds use `-O2`; local Release builds retain the toolchain default.
 Local builds make the optimized tree profilable, which CMake's defaults do not:
 `BUSTER_DEBUG_INFO` emits debug information in the configurations that carry no

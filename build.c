@@ -3191,6 +3191,24 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
             },
     };
 }
+
+// The canonical emitter must also compile the complete self-host unit. The
+// ordinary fixed-point pair runs FAST, and the machine stage above runs
+// MIR_STACK, so neither reaches the canonical path for functions the machine
+// subset accepts. The argument-capture regression was exactly a canonical
+// compile-time crash; producing this stage is therefore the gate, and running
+// its benchmark would add work without exercising the failing path any
+// further. Keep this beside the machine stage so it inherits the same
+// ten-minute compile timeout from self_host_compile_add.
+BUSTER_GLOBAL_LOCAL void self_host_canonical_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
+                                                         String8 output_directory)
+{
+    String8 canonical_stage = path_join(arena, output_directory, S8("ide-stage2-none"));
+    remove_path_recursive(arena, canonical_stage);
+    remove_path_recursive(arena, self_host_metrics_path(arena, canonical_stage));
+    self_host_compile_add(arena, compiler, build_directory, sysroot, canonical_stage, S8("Self-host canonical stage"),
+                          S8("-fregister-allocator=none"));
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, BuildArtifactFanout* fanout)
@@ -3262,6 +3280,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
+    self_host_canonical_compile_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -3429,6 +3448,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, build_directory, sysroot, output_directory);
+    self_host_canonical_compile_add(arena, stage2, build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
