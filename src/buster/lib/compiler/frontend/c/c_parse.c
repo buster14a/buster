@@ -11022,6 +11022,22 @@ BUSTER_C_INTERNAL void c_parser_parse_declaration_expression(CPreprocessResult p
     }
 }
 
+// Answered at the closing parenthesis of a declarator's top-level group, which
+// `delimiter_count` still counts: `...` is the last parameter a parameter list
+// may have, so the token before that ')' is the only place an ellipsis makes
+// the declarator variadic. The declarator's own parameter list is that one
+// top-level group -- `f(int, ...)`, and `(*f)(int, ...)` once the
+// parenthesized declarator has closed. Any other ellipsis spells someone
+// else's parameter list: a parameter's own (`f(int (*cb)(int, ...))`) or a
+// function type named inside an array bound (`g[sizeof(int(int, ...))]`).
+// Both scans below used to take any ellipsis in the declarator's token range,
+// which gave a fixed-arity function a variadic type -- calls through it then
+// skipped the arity check and the definition paid a variadic prologue.
+BUSTER_C_INTERNAL bool c_parser_parameter_list_is_variadic(CPreprocessResult preprocess, u32 close_index, u32 delimiter_count, bool top_level_parenthesis)
+{
+    return delimiter_count == 1 && top_level_parenthesis && c_token_is_punctuator(&preprocess.tokens[close_index - 1], C_PUNCTUATOR_ELLIPSIS);
+}
+
 // One declarator of a file-scope comma-separated list. `start`/`count` cover
 // the segment between two top-level separators; for the first declarator that
 // range still carries the declaration specifiers, which is why the name scan
@@ -11042,6 +11058,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
         .function_name_token = C_ID_UNDERLYING_INVALID,
     };
     u32 delimiter_count = 0;
+    bool top_level_parenthesis = false;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -11057,7 +11074,6 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                 declarator.name_token = index;
             }
         }
-        declarator.is_variadic |= c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
         if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
         {
             declarator.seen_equal = true;
@@ -11081,12 +11097,17 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                     declarator.name_token = declarator.function_name_token;
                 }
             }
+            if (!delimiter_count)
+            {
+                top_level_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+            }
             delimiter_count += 1;
             continue;
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
         {
+            declarator.is_variadic |= c_parser_parameter_list_is_variadic(preprocess, index, delimiter_count, top_level_parenthesis);
             delimiter_count -= delimiter_count != 0;
         }
     }
@@ -11142,6 +11163,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             bool seen_equal = false;
             bool seen_declarator_comma = false;
             bool is_variadic = false;
+            bool top_level_parenthesis = false;
             bool ended = false;
             while (index < token_count)
             {
@@ -11163,7 +11185,6 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         name_token = index;
                     }
                 }
-                is_variadic |= c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
                 seen_declarator_comma |= !delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
                 if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
                 {
@@ -11218,6 +11239,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         }
                         break;
                     }
+                    if (!delimiter_count)
+                    {
+                        top_level_parenthesis = token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS;
+                    }
                     delimiter_stack[delimiter_count++] = index;
                     index += 1;
                     continue;
@@ -11233,6 +11258,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                     }
                     else
                     {
+                        is_variadic |= c_parser_parameter_list_is_variadic(preprocess, index, delimiter_count, top_level_parenthesis);
                         delimiter_count -= 1;
                     }
                     index += 1;

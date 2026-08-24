@@ -5737,11 +5737,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
 // and sizeof over it fell back to the prediction's int guess, folding 4 where
 // GNU folds 1 (tests/basic_c_sizeof_function_designator.c is the runtime
 // fixture). The array bounds below are where a misfolded size shows in the IR.
-// The variadic spelling `int(int, ...)` is covered in the runtime fixture's
-// expression position instead: an ellipsis anywhere inside a declarator marks
-// it variadic (c_parser_scan_declarator), so a file-scope bound holding one
-// loses the object it declares -- a gap that predates the function type name
-// and takes the pointer spelling `int (*)(int, ...)` down with it.
+// The variadic spelling `int(int, ...)` is one of them: the ellipsis is a
+// parameter of the type name, not of the declarator the bound belongs to, so
+// spelled_variadic below must measure like every other function type.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5751,6 +5749,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
                                             S8("typedef int NamedFunction(void);\n"
                                                "static unsigned char spelled_function[sizeof(int(void))];\n"
                                                "static unsigned char spelled_unprototyped[sizeof(int()) + 1];\n"
+                                               "static unsigned char spelled_variadic[sizeof(int(int, ...)) + 2];\n"
                                                "static unsigned char spelled_typedef[sizeof(NamedFunction) + 3];\n"
                                                "static unsigned char spelled_pointer[sizeof(int (*)(void))];\n"
                                                "static unsigned char spelled_parameter[sizeof(int (*)(int(void)))];\n"
@@ -5776,6 +5775,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
         } expected[] = {
             {S8("spelled_function"), 1},
             {S8("spelled_unprototyped"), 2},
+            {S8("spelled_variadic"), 3},
             {S8("spelled_typedef"), 4},
             {S8("spelled_pointer"), ir.program->data_layout.pointer.size},
             {S8("spelled_parameter"), ir.program->data_layout.pointer.size},
@@ -5798,6 +5798,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
             BUSTER_TEST(arguments, global_type && global_type->layout.resolved && global_type->layout.size == expected[expected_index].element_count);
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// An ellipsis makes a declarator variadic only where it is a parameter of that
+// declarator's own parameter list -- the one top-level parenthesis group. A
+// deeper one belongs to a nested type name: a parameter's own parameter list,
+// or a function type named inside an array bound. Both scans that answer this
+// from tokens alone -- the whole-declaration one in c_parse_ast and
+// c_parser_scan_declarator, which rescans each declarator of a comma-separated
+// list -- used to take any ellipsis in range, so fixed_arity and list_fixed
+// below came out variadic and their calls skipped the arity check.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_ellipsis_depth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("int fixed_arity(int (*callback)(int, ...));\n"
+                                               "int truly_variadic(int first, ...);\n"
+                                               "int (*pointer_variadic)(int, ...);\n"
+                                               "typedef int FixedTypedef(int (*)(int, ...));\n"
+                                               "static unsigned char bound_over_variadic[sizeof(int(int, ...)) + 2];\n"
+                                               "int list_fixed(int (*)(int, ...)), list_variadic(int, ...);\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    struct
+    {
+        String8 name;
+        CDeclarationKind kind;
+        CTypeKind type_kind;
+        bool is_variadic;
+    } expected[] = {
+        {S8("fixed_arity"), C_DECLARATION_FUNCTION, C_TYPE_FUNCTION, false},
+        {S8("truly_variadic"), C_DECLARATION_FUNCTION, C_TYPE_FUNCTION, true},
+        // The pointed-at function's parameter list is this declarator's own, so
+        // the flag is true here and the object type is a pointer either way.
+        {S8("pointer_variadic"), C_DECLARATION_OBJECT, C_TYPE_POINTER, true},
+        {S8("FixedTypedef"), C_DECLARATION_TYPEDEF, C_TYPE_FUNCTION, false},
+        {S8("bound_over_variadic"), C_DECLARATION_OBJECT, C_TYPE_ARRAY, false},
+        {S8("list_fixed"), C_DECLARATION_FUNCTION, C_TYPE_FUNCTION, false},
+        {S8("list_variadic"), C_DECLARATION_FUNCTION, C_TYPE_FUNCTION, true},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        CDeclaration* declaration = 0;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            if (string_equal(parse.declarations[declaration_index].name, expected[expected_index].name))
+            {
+                declaration = parse.declarations + declaration_index;
+            }
+        }
+        BUSTER_TEST(arguments, declaration != 0);
+        if (!declaration)
+        {
+            continue;
+        }
+        BUSTER_TEST(arguments, declaration->kind == expected[expected_index].kind);
+        BUSTER_TEST(arguments, declaration->is_variadic == expected[expected_index].is_variadic);
+        CType* type = declaration->type.value < parse.type_count ? parse.types + declaration->type.value : 0;
+        BUSTER_TEST(arguments, type != 0 && type->kind == expected[expected_index].type_kind);
+        // The declaration flag is what seeds the function type, so the type is
+        // where a stray ellipsis actually reaches the ABI and the arity check.
+        BUSTER_TEST(arguments, !type || type->kind != C_TYPE_FUNCTION || type->is_variadic == expected[expected_index].is_variadic);
+        // A pointer to a variadic function still points at one: the pointee is
+        // built by the type machine's own parameter walk, not by these scans.
+        if (type && type->kind == C_TYPE_POINTER)
+        {
+            CType* pointee = type->element_type.value < parse.type_count ? parse.types + type->element_type.value : 0;
+            BUSTER_TEST(arguments, pointee != 0 && pointee->kind == C_TYPE_FUNCTION && pointee->is_variadic);
+        }
     }
     scratch_end(temporary);
     return result;
@@ -9329,6 +9404,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
     c_test_result_add(&result, c_test_sizeof_function_type_name(arguments));
+    c_test_result_add(&result, c_test_declarator_ellipsis_depth(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));

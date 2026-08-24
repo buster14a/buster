@@ -13,6 +13,12 @@
 // _Alignof over a function has no cross-compiler answer (gcc folds 1, clang
 // 4), so the checks below encode gcc's 1, which is what goes with the size
 // fold. This fixture is compiled by `ide cc` only; it is not clang-comparable.
+//
+// The variadic spelling `int(int, ...)` is here because the ellipsis used to
+// escape the type name it belongs to: any `...` in a declarator marked that
+// declarator variadic, so a fixed-arity function holding a variadic function
+// pointer became variadic itself, and a file-scope array bound naming a
+// variadic function type was scanned as a function declarator.
 static int bare(void)
 {
     return 3;
@@ -27,6 +33,20 @@ static int folded_static = (int)sizeof(bare);
 static int folded_type_name = (int)sizeof(int(void)) * 10;
 
 static char spelled_bound[sizeof(int(void)) + 1];
+
+static char spelled_variadic_bound[sizeof(int(int, ...)) + 1];
+
+static int variadic_callback(int first, ...)
+{
+    return first + 1;
+}
+
+// A parameter's own ellipsis belongs to the parameter, not to this declarator:
+// call_through takes exactly one argument.
+static int call_through(int (*call)(int, ...))
+{
+    return call(6);
+}
 
 static int apply(int (*call)(void))
 {
@@ -131,6 +151,16 @@ int main(void)
     if (apply(bare) != 3 || ((int (*)(void))bare)() != 3)
     {
         return 20;
+    }
+    // The variadic spelling folds in a file-scope bound too, and a fixed-arity
+    // declarator that names one keeps its own arity.
+    if (sizeof(spelled_variadic_bound) != 2)
+    {
+        return 21;
+    }
+    if (call_through(variadic_callback) != 7 || variadic_callback(1, 2, 3) != 2)
+    {
+        return 22;
     }
     return 0;
 }
