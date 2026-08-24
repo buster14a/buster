@@ -87,7 +87,8 @@ MachineTargetDescription const* machine_target_aarch64(void)
 // V-register part for a short vector, or indirect — a large result through
 // the X8 pointer, or a large argument (any aggregate or vector past
 // sixteen bytes) through a pointer in the integer file, which the machine
-// caller points at a defensive copy. Aggregate/HFA stack arguments stay
+// caller points at a defensive copy. A supported aligned integer pair follows
+// the same register/stack simulation; other aggregate/HFA stack arguments stay
 // outside the subset.
 typedef struct MachineA64ValueShape MachineA64ValueShape;
 struct MachineA64ValueShape
@@ -108,14 +109,18 @@ struct MachineA64ValueShape
     bool indirect;
     // One whole-value V-register part; the value itself stays slot-backed.
     bool vector;
-    u8 reserved[1];
+    // AAPCS64 starts a sixteen-byte integer pair at an even X argument
+    // register.  The bare integer-128 shape deliberately remains outside the
+    // machine body subset, but wrapped integer pairs use this bit at the ABI
+    // edge and therefore must share the canonical placement rule.
+    bool even_integer_pair;
 };
 
 // One argument's placement: its shape's parts in consecutive per-class
 // registers, integer parts from X0 and float parts from V0 — or, for a
-// scalar past its register file, one eight-byte stack part at the
-// canonical caller's sequential offsets. Aggregate and HFA stack
-// arguments stay outside the subset; placement fails instead.
+// scalar past its register file or a supported aligned integer pair, stack
+// eightbytes at the canonical caller's sequential offsets. Other aggregate
+// and HFA stack arguments stay outside the subset; placement fails instead.
 typedef struct MachineA64ArgumentPlacement MachineA64ArgumentPlacement;
 struct MachineA64ArgumentPlacement
 {
@@ -321,6 +326,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
         .part_count = abi.part_count,
         .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
         .aggregate = true,
+        .even_integer_pair = ir_abi_value_is_aarch64_even_integer_pair(program, type_id, ir_abi_convention_for_target(target), use),
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
@@ -365,8 +371,9 @@ BUSTER_GLOBAL_LOCAL MachineInstruction machine_a64_vector_transfer_row(MachineA6
 // Consecutive-register assignment per class: integer parts take the next
 // X argument register, float parts the next V register. Whatever no
 // longer fits takes sequential eight-byte stack parts — a scalar or an
-// indirect argument's pointer as one part, a register aggregate, HFA, or
-// vector as its eightbyte images. The exact simulation the canonical
+// indirect argument's pointer as one part, a supported aligned integer pair,
+// or a register aggregate, HFA, or vector as its eightbyte images. The exact
+// simulation the canonical
 // caller and parameter capture both run, including both its quirks:
 // integer overflow leaves the X file open for a later narrower argument,
 // while an HFA or vector that overflows closes the V file behind it.
@@ -385,6 +392,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         .first_integer = (u16)*integer_count,
         .first_float = (u16)*float_count,
     };
+    if (shape->even_integer_pair && *integer_count < 8)
+    {
+        *integer_count = (*integer_count + 1u) & ~1u;
+        placement->first_integer = (u16)*integer_count;
+    }
     if (*integer_count + integer_parts <= 8 && *float_count + float_parts <= 8)
     {
         *integer_count += integer_parts;
@@ -420,6 +432,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape,
         *integer_count = 8;
         placement->on_stack = 1;
         placement->first_stack_part = (u16)*stack_part_count;
+        if (shape->even_integer_pair)
+        {
+            *stack_part_count = (*stack_part_count + 1u) & ~1u;
+            placement->first_stack_part = (u16)*stack_part_count;
+        }
         *stack_part_count += shape->byte_size / 8;
     }
     else
@@ -1543,12 +1560,23 @@ BUSTER_GLOBAL_LOCAL void machine_a64_va_named_cursors(MachineA64Selector* select
         {
             part_count = 1;
         }
+        bool even_integer_pair =
+            ir_abi_value_is_aarch64_even_integer_pair(selector->program, parameter_type_id, ir_abi_convention_for_target(selector->target),
+                                                      IR_ABI_USE_ARGUMENT);
+        if (even_integer_pair && *gp_count < 8)
+        {
+            *gp_count = (*gp_count + 1u) & ~1u;
+        }
         if (*gp_count + part_count <= 8)
         {
             *gp_count += part_count;
         }
         else
         {
+            if (even_integer_pair)
+            {
+                *stack_parts = (*stack_parts + 1u) & ~1u;
+            }
             *stack_parts += part_count;
         }
     }

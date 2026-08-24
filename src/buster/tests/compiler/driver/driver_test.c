@@ -3860,6 +3860,186 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_abi_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // AAPCS64's sixteen-byte INTEGER pair needs both halves of the boundary:
+    // C.8 rounds an odd X cursor to the next even register, while a pair that
+    // reaches the stack rounds NSAA to an even eightbyte.  Build the same
+    // freestanding fixture through every allocator; when qemu-aarch64 is
+    // installed, execute each static image so the result also checks the
+    // machine/canonical fallback boundary against the actual AArch64 ABI.
+    String8 aarch64_i128_allocators[] = {
+        S8("none"),
+        S8("mir-stack"),
+        S8("fast"),
+        S8("quality"),
+    };
+    bool aarch64_i128_qemu_available = false;
+#if !BUSTER_WINDOWS
+    {
+        String8 qemu_probe_arguments[] = {S8("qemu-aarch64"), S8("--version")};
+        ProcessSpawnResult qemu_probe = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(qemu_probe_arguments), (SliceString8){0}, (SliceString8){0},
+                                                         (ProcessSpawnOptions){
+                                                             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                             .use_process_environment = true,
+                                                         });
+        if (qemu_probe.handle)
+        {
+            aarch64_i128_qemu_available = os_process_wait_sync(arguments->arena, qemu_probe).result == PROCESS_RESULT_SUCCESS;
+        }
+    }
+#endif
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(aarch64_i128_allocators); allocator_index += 1)
+    {
+        String8 aarch64_i128_path =
+            buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128"),
+                                       string_format(arguments->arena, S8("-{S8}.elf"), aarch64_i128_allocators[allocator_index]));
+        String8 aarch64_i128_command_line[] = {
+            S8("-target"),
+            S8("aarch64-unknown-linux-gnu"),
+            string_format(arguments->arena, S8("-fregister-allocator={S8}"), aarch64_i128_allocators[allocator_index]),
+            S8("-o"),
+            aarch64_i128_path,
+            S8("tests/basic_c_aarch64_i128_abi.c"),
+        };
+        Arena* aarch64_i128_arena = arena_create((ArenaCreation){0});
+        CompilerDriverResult aarch64_i128 = compiler_driver_execute_invocation(
+            aarch64_i128_arena, compiler_driver_parse_arguments(aarch64_i128_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_i128_command_line)));
+        BUSTER_TEST(arguments, aarch64_i128.error == COMPILER_DRIVER_ERROR_NONE);
+        CompilerDriverError aarch64_i128_error = aarch64_i128.error;
+        BUSTER_TEST(arguments, arena_destroy(aarch64_i128_arena, 1));
+        if (aarch64_i128_error == COMPILER_DRIVER_ERROR_NONE && aarch64_i128_qemu_available)
+        {
+            String8 qemu_arguments[] = {S8("qemu-aarch64"), aarch64_i128_path};
+            ProcessSpawnResult qemu_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(qemu_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){
+                                                                .use_process_environment = true,
+                                                            });
+            BUSTER_TEST(arguments, qemu_run.handle != 0);
+            if (qemu_run.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, qemu_run).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+#if !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    // Pair the boundary translation units with clang in both directions.  A
+    // Buster caller linked to a clang callee checks incoming placement and a
+    // clang caller linked to a Buster callee checks outgoing placement and
+    // bare pair results.  The tiny AArch64 _start object keeps this a static,
+    // libc-free image that qemu can execute.
+    bool aarch64_i128_clang_available = false;
+    {
+        String8 clang_probe_arguments[] = {S8("clang"), S8("--version")};
+        ProcessSpawnResult clang_probe = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_probe_arguments), (SliceString8){0}, (SliceString8){0},
+                                                          (ProcessSpawnOptions){
+                                                              .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                              .use_process_environment = true,
+                                                          });
+        if (clang_probe.handle)
+        {
+            aarch64_i128_clang_available = os_process_wait_sync(arguments->arena, clang_probe).result == PROCESS_RESULT_SUCCESS;
+        }
+    }
+    if (aarch64_i128_clang_available)
+    {
+        String8 clang_callee_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-clang-callee"), S8(".o"));
+        String8 clang_caller_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-clang-caller"), S8(".o"));
+        String8 clang_start_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-clang-start"), S8(".o"));
+        String8 clang_compile_callee[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-fno-stack-protector"),
+            S8("-g0"), S8("-c"), S8("-o"), clang_callee_path, S8("tests/basic_c_aarch64_i128_callee.c"),
+        };
+        String8 clang_compile_caller[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-fno-stack-protector"),
+            S8("-g0"), S8("-c"), S8("-o"), clang_caller_path, S8("tests/basic_c_aarch64_i128_caller.c"),
+        };
+        String8 clang_compile_start[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-g0"), S8("-c"), S8("-o"), clang_start_path,
+            S8("tests/basic_c_aarch64_i128_start.S"),
+        };
+        ProcessSpawnOptions clang_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult clang_callee_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_compile_callee), (SliceString8){0}, (SliceString8){0}, clang_options);
+        ProcessSpawnResult clang_caller_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_compile_caller), (SliceString8){0}, (SliceString8){0}, clang_options);
+        ProcessSpawnResult clang_start_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_compile_start), (SliceString8){0}, (SliceString8){0}, clang_options);
+        bool clang_callee_compiled = clang_callee_spawn.handle && os_process_wait_sync(arguments->arena, clang_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool clang_caller_compiled = clang_caller_spawn.handle && os_process_wait_sync(arguments->arena, clang_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool clang_start_compiled = clang_start_spawn.handle && os_process_wait_sync(arguments->arena, clang_start_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, clang_callee_compiled && clang_caller_compiled && clang_start_compiled);
+        if (clang_callee_compiled && clang_caller_compiled && clang_start_compiled)
+        {
+            String8 buster_callee_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-buster-callee"), S8(".o"));
+            String8 buster_caller_path = buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-buster-caller"), S8(".o"));
+            String8 buster_callee_command[] = {
+                S8("-c"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fregister-allocator=none"), S8("-o"), buster_callee_path,
+                S8("tests/basic_c_aarch64_i128_callee.c"),
+            };
+            String8 buster_caller_command[] = {
+                S8("-c"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-fregister-allocator=none"), S8("-o"), buster_caller_path,
+                S8("tests/basic_c_aarch64_i128_caller.c"),
+            };
+            Arena* aarch64_i128_pair_arena = arena_create((ArenaCreation){0});
+            CompilerDriverResult buster_callee = compiler_driver_execute_invocation(
+                aarch64_i128_pair_arena, compiler_driver_parse_arguments(aarch64_i128_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_callee_command)));
+            CompilerDriverResult buster_caller = compiler_driver_execute_invocation(
+                aarch64_i128_pair_arena, compiler_driver_parse_arguments(aarch64_i128_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_caller_command)));
+            BUSTER_TEST(arguments, buster_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            CompilerDriverError buster_callee_error = buster_callee.error;
+            CompilerDriverError buster_caller_error = buster_caller.error;
+            BUSTER_TEST(arguments, arena_destroy(aarch64_i128_pair_arena, 1));
+            if (buster_callee_error == COMPILER_DRIVER_ERROR_NONE && buster_caller_error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 buster_caller_clang_callee_path =
+                    buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-pair-bc"), S8(".elf"));
+                String8 clang_caller_buster_callee_path =
+                    buster_test_temporary_path(arguments->arena, S8("buster-c-aarch64-i128-pair-cb"), S8(".elf"));
+                String8 buster_caller_clang_callee_command[] = {
+                    S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), buster_caller_clang_callee_path, buster_caller_path, clang_callee_path,
+                    clang_start_path,
+                };
+                String8 clang_caller_buster_callee_command[] = {
+                    S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), clang_caller_buster_callee_path, clang_caller_path, buster_callee_path,
+                    clang_start_path,
+                };
+                Arena* aarch64_i128_link_arena = arena_create((ArenaCreation){0});
+                CompilerDriverResult buster_caller_clang_callee = compiler_driver_execute_invocation(
+                    aarch64_i128_link_arena,
+                    compiler_driver_parse_arguments(aarch64_i128_link_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_caller_clang_callee_command)));
+                CompilerDriverResult clang_caller_buster_callee = compiler_driver_execute_invocation(
+                    aarch64_i128_link_arena,
+                    compiler_driver_parse_arguments(aarch64_i128_link_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_caller_buster_callee_command)));
+                BUSTER_TEST(arguments, buster_caller_clang_callee.error == COMPILER_DRIVER_ERROR_NONE &&
+                                           clang_caller_buster_callee.error == COMPILER_DRIVER_ERROR_NONE);
+                CompilerDriverError buster_caller_clang_callee_error = buster_caller_clang_callee.error;
+                CompilerDriverError clang_caller_buster_callee_error = clang_caller_buster_callee.error;
+                BUSTER_TEST(arguments, arena_destroy(aarch64_i128_link_arena, 1));
+                if (aarch64_i128_qemu_available && buster_caller_clang_callee_error == COMPILER_DRIVER_ERROR_NONE &&
+                    clang_caller_buster_callee_error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 buster_caller_clang_callee_arguments[] = {S8("qemu-aarch64"), buster_caller_clang_callee_path};
+                    String8 clang_caller_buster_callee_arguments[] = {S8("qemu-aarch64"), clang_caller_buster_callee_path};
+                    ProcessSpawnResult buster_caller_clang_callee_spawn =
+                        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(buster_caller_clang_callee_arguments), (SliceString8){0}, (SliceString8){0},
+                                         (ProcessSpawnOptions){.use_process_environment = true});
+                    ProcessSpawnResult clang_caller_buster_callee_spawn =
+                        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_caller_buster_callee_arguments), (SliceString8){0}, (SliceString8){0},
+                                         (ProcessSpawnOptions){.use_process_environment = true});
+                    bool buster_caller_clang_callee_ran =
+                        buster_caller_clang_callee_spawn.handle &&
+                        os_process_wait_sync(arguments->arena, buster_caller_clang_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+                    bool clang_caller_buster_callee_ran =
+                        clang_caller_buster_callee_spawn.handle &&
+                        os_process_wait_sync(arguments->arena, clang_caller_buster_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, buster_caller_clang_callee_ran && clang_caller_buster_callee_ran);
+                }
+            }
+        }
+    }
+#endif
     String8 c_vector_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));

@@ -3365,6 +3365,18 @@ IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConventi
     return result;
 }
 
+bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    bool aarch64 = convention == IR_ABI_CONVENTION_AAPCS64 || convention == IR_ABI_CONVENTION_DARWIN_AARCH64 ||
+                   convention == IR_ABI_CONVENTION_WINDOWS_AARCH64;
+    IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    bool result = aarch64 && use != IR_ABI_USE_RESULT && type && type->layout.resolved && type->layout.alignment >= 16 && abi.part_count == 2 &&
+                  !abi.indirect && !abi.memory && abi.parts[0].abi_class == IR_ABI_CLASS_INTEGER && abi.parts[1].abi_class == IR_ABI_CLASS_INTEGER &&
+                  abi.parts[0].size == 8 && abi.parts[1].size == 8;
+    return result;
+}
+
 IrTypeId ir_program_add_type(IrProgram* program, IrType type)
 {
     IrTypeId result;

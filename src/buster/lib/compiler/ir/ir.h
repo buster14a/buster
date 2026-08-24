@@ -683,6 +683,11 @@ BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
 BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
 BUSTER_F_DECL IrAbiConvention ir_abi_convention_for_target(Target target);
 BUSTER_F_DECL IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
+// AAPCS64 starts a 16-byte, two-integer-part value at an even X-register
+// number.  Keep this fact beside the ABI classifier so canonical and machine
+// placement cannot silently diverge; results use the fixed X0:X1 pair and do
+// not need the argument-file alignment rule.
+BUSTER_F_DECL bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
 BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol);
 BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);

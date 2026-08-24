@@ -3350,6 +3350,23 @@ BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrP
     return ir_type_abi_value(program, type_id, convention, use);
 }
 
+// AAPCS64's C.8 rule rounds the next general-purpose argument register up to
+// an even number for a 16-byte integer pair.  The same type is sixteen-byte
+// aligned when it spills to the incoming or outgoing stack area.  The IR ABI
+// classifier owns the shape test; this helper only converts the convention's
+// alignment requirement into the eightbyte cursors used by the canonical
+// emitter.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_even_integer_pair(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool result)
+{
+    IrAbiConvention convention = codegen_canonical_ir_abi_convention(abi);
+    return !result && ir_abi_value_is_aarch64_even_integer_pair(program, type_id, convention, IR_ABI_USE_ARGUMENT);
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_a64_align_stack_pair(u32 stack_parts, bool even_integer_pair)
+{
+    return even_integer_pair ? (stack_parts + 1u) & ~1u : stack_parts;
+}
+
 // The ABI classifier is the authority for aggregate x87 shapes.  It admits
 // nested one-field wrappers, one-element arrays, and unions whose alternatives
 // all occupy the same x87 payload, while mixed/offset aggregates classify as
@@ -14347,6 +14364,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 prior_parts = 1;
                             }
+                            bool prior_even_integer_pair =
+                                codegen_canonical_a64_even_integer_pair(program, function_type->parameter_types[prior_index], result.abi, false);
+                            if (prior_even_integer_pair && register_index < 8)
+                            {
+                                // AAPCS64 C.8: a 16-byte INTEGER value starts
+                                // at an even-numbered X register.
+                                register_index = (register_index + 1u) & ~1u;
+                            }
                             if (register_index + prior_parts <= 8)
                             {
                                 register_index += prior_parts;
@@ -14360,6 +14385,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     register_index = 8;
                                 }
+                                prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, prior_even_integer_pair);
                                 prior_stack_parts += prior_parts;
                             }
                         }
@@ -14374,6 +14400,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool indirect = aggregate && argument_type && argument_type->layout.size > 16;
                         u32 abi_part_count = indirect ? 1 : part_count;
+                        bool even_integer_pair =
+                            codegen_canonical_a64_even_integer_pair(program, instruction->canonical_type, result.abi, false);
+                        if (even_integer_pair && register_index < 8)
+                        {
+                            register_index = (register_index + 1u) & ~1u;
+                        }
                         if (!argument_type || ((argument_type->kind == IR_TYPE_STRUCT || argument_type->kind == IR_TYPE_UNION) && !aggregate))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
@@ -14464,6 +14496,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 instruction_id = instruction->next;
                                 continue;
                             }
+                            prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, even_integer_pair);
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
                                 if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, 16 + (prior_stack_parts + part_index) * 8, 8, false, false, 29) ||
@@ -15305,6 +15338,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 part_count = 1;
                             }
+                            bool parameter_even_integer_pair =
+                                codegen_canonical_a64_even_integer_pair(program, parameter_type, result.abi, false);
+                            if (parameter_even_integer_pair && gp_count < 8)
+                            {
+                                gp_count = (gp_count + 1u) & ~1u;
+                            }
                             if (gp_count + part_count <= 8)
                             {
                                 gp_count += part_count;
@@ -15318,6 +15357,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     gp_count = 8;
                                 }
+                                stack_parts = codegen_canonical_a64_align_stack_pair(stack_parts, parameter_even_integer_pair);
                                 stack_parts += part_count;
                             }
                         }
@@ -15406,9 +15446,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             return result;
                         }
                         c_a64_load(&emitter, 10, instruction->operands[0]);
+                        bool even_integer_pair =
+                            ir_abi_value_is_aarch64_even_integer_pair(program, instruction->canonical_type,
+                                                                      codegen_canonical_ir_abi_convention(result.abi),
+                                                                      IR_ABI_USE_VARIADIC_ARGUMENT);
                         if (aarch64_darwin)
                         {
                             codegen_emit_u32(&buffer, 0xf940014b);
+                            if (even_integer_pair)
+                            {
+                                // AAPCS64 rounds an overflow-area cursor to
+                                // the value's sixteen-byte alignment before
+                                // consuming a variadic INTEGER pair.
+                                codegen_emit_u32(&buffer, 0x91003d6b);
+                                a64_emit_constant(&buffer, 9, ~UINT64_C(15));
+                                codegen_emit_u32(&buffer, 0x8a09016b);
+                            }
                             for (u32 part_index = 0; part_index < part_count; part_index += 1)
                             {
                                 if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * 8, 8, false, false, 11) ||
@@ -15425,6 +15478,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             continue;
                         }
                         codegen_emit_u32(&buffer, 0xf940014b);
+                        if (even_integer_pair)
+                        {
+                            // The register-save cursor is measured in bytes;
+                            // unlike a scalar, a pair may not begin at the
+                            // odd eightbyte immediately before the boundary.
+                            codegen_emit_u32(&buffer, 0x91003d6b);
+                            a64_emit_constant(&buffer, 9, ~UINT64_C(15));
+                            codegen_emit_u32(&buffer, 0x8a09016b);
+                        }
                         u32 increment = part_count * 8;
                         u32 limit = 64 - increment;
                         codegen_emit_u32(&buffer, 0xf100017f | (limit << 10));
@@ -15447,6 +15509,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         codegen_emit_u32(&buffer, 0x14000000);
                         u32 overflow_offset = (u32)buffer.count;
                         codegen_emit_u32(&buffer, 0xf940054c);
+                        if (even_integer_pair)
+                        {
+                            codegen_emit_u32(&buffer, 0x91003d8c);
+                            a64_emit_constant(&buffer, 9, ~UINT64_C(15));
+                            codegen_emit_u32(&buffer, 0x8a09018c);
+                        }
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
                         {
                             codegen_emit_u32(&buffer, 0xf9400189 | (part_index << 10));
@@ -15541,6 +15609,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 part_count = 1;
                                 argument_indirect[argument_array_index] = true;
                             }
+                            bool even_integer_pair = codegen_canonical_a64_even_integer_pair(program, type_id, result.abi, false);
+                            if (even_integer_pair && !unnamed_variadic && simulated_registers < 8)
+                            {
+                                simulated_registers = (simulated_registers + 1u) & ~1u;
+                            }
                             if (!unnamed_variadic && simulated_registers + part_count <= 8)
                             {
                                 simulated_registers += part_count;
@@ -15558,6 +15631,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     simulated_registers = 8;
                                 }
                                 argument_on_stack[argument_array_index] = true;
+                                stack_part_count = codegen_canonical_a64_align_stack_pair(stack_part_count, even_integer_pair);
                                 argument_stack_offset[argument_array_index] = stack_part_count;
                                 stack_part_count += part_count;
                             }
@@ -15618,9 +15692,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 part_count = 1;
                             }
+                            bool even_integer_pair = codegen_canonical_a64_even_integer_pair(program, argument_type_id, result.abi, false);
                             if (argument_on_stack[argument_index - 1])
                             {
+                                if (aggregate && !indirect && !argument_hfa && argument_type && argument_type->kind != IR_TYPE_FLOAT)
+                                {
+                                    // A stack composite consumes the remaining
+                                    // X file even though no register move is
+                                    // emitted in this pass.
+                                    register_index = 8;
+                                }
                                 continue;
+                            }
+                            if (even_integer_pair && register_index < 8)
+                            {
+                                register_index = (register_index + 1u) & ~1u;
                             }
                             // The integer-file bound only guards integer parts:
                             // a float or HFA argument rides the V file, whose
