@@ -18989,6 +18989,24 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     c_ir_expression_core_range(builder, &start, &end);
+    // Unary integer operators keep the promoted operand type. In particular,
+    // a cast under `~` must not fall through to the s32 literal fallback.
+    if (start < end && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_TILDE) ||
+                        c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
+                        c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
+    {
+        IrTypeId operand_type = IR_TYPE_ID_INVALID;
+        if (!c_ir_query_prediction(builder, start + 1, end, &operand_type) && builder->queries->has_request)
+        {
+            return IR_TYPE_ID_INVALID;
+        }
+        IrTypeId predicted = c_ir_usual_arithmetic_type(builder, operand_type, operand_type);
+        IrType* predicted_value = ir_type_from_id(&builder->program->types, predicted);
+        if (predicted_value && predicted_value->kind == IR_TYPE_INTEGER)
+        {
+            return predicted;
+        }
+    }
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
         builder->preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
     {

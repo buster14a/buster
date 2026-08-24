@@ -11478,17 +11478,6 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, kind) == 10);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, punctuator) == 11);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, symbol) == 4);
 
-// The lanes below `lane`, which mask64_prefix would also spell. It is open
-// coded because `lane` always comes from mask64_first_set of a non-zero mask
-// and so is below 64, which makes mask64_prefix's `count >= 64` arm dead --
-// and because that arm is what `ide cc` miscompiles: for
-// `count >= 64 ? ~(u64)0 : ((u64)1 << count) - 1` it predicts the
-// conditional's type as s32, allocates an i32 result slot and truncates both
-// 64-bit arms into it, so every count in [32, 64) comes back sign-extended to
-// ~0. Only the self-hosted stages are affected; see the audit of
-// 2026-08-22T220912Z.
-#define c_parse_census_lanes_below(lane) ((Mask64)(((Mask64)1 << (lane)) - 1))
-
 #define C_PARSE_CENSUS_GROUP_TOKENS 16
 // Tokens projected before the counting pass reads them back. Three tiles of
 // this size stay in L1 beside the rows being gathered, and the padding keeps
@@ -11648,7 +11637,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                         if (!brace_depth)
                         {
                             census->declarator_list_comma_count +=
-                                (u32)(window_comma_base + mask64_count(mask64_and(commas, c_parse_census_lanes_below(lane))) - depth_zero_comma_base);
+                                (u32)(window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane))) - depth_zero_comma_base);
                         }
                         brace_depth += 1;
                     }
@@ -11660,7 +11649,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                         brace_depth -= 1;
                         if (!brace_depth)
                         {
-                            depth_zero_comma_base = window_comma_base + mask64_count(mask64_and(commas, c_parse_census_lanes_below(lane)));
+                            depth_zero_comma_base = window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane)));
                         }
                     }
                     delimiter_depth -= delimiter_depth != 0;

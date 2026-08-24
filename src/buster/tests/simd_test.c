@@ -28,6 +28,15 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, mask64_prefix(0) == 0);
     BUSTER_TEST(arguments, mask64_prefix(1) == 1);
     BUSTER_TEST(arguments, mask64_prefix(64) == ~(Mask64)0);
+    for (u32 count = 0; count <= 64; count += 1)
+    {
+        Mask64 expected = ~(Mask64)0;
+        if (count < 64)
+        {
+            expected = ((Mask64)1 << count) - 1;
+        }
+        BUSTER_TEST(arguments, mask64_prefix(count) == expected);
+    }
     BUSTER_TEST(arguments, mask64_shift_left(1, 63) == ((Mask64)1 << 63));
     BUSTER_TEST(arguments, mask64_shift_right((Mask64)1 << 63, 63) == 1);
     BUSTER_TEST(arguments, mask64_and(0xF0, 0x3C) == 0x30);

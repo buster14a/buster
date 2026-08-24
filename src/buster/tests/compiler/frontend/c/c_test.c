@@ -6723,6 +6723,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_then_nested_conditionals(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("const char* choose_feature(unsigned target_register, unsigned source_register)\n"
+                                               "{\n"
+                                               "    char apx_features[1] = {0};\n"
+                                               "    return (target_register >= 16 || source_register >= 16) ? apx_features : 0;\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("conditional-type-prediction.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9409,6 +9435,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
+    c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));

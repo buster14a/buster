@@ -138,6 +138,18 @@ int main(void)
     {
         return 3;
     }
+    for (u32 count = 0; count <= 64; count += 1)
+    {
+        Mask64 expected = ~(Mask64)0;
+        if (count < 64)
+        {
+            expected = ((Mask64)1 << count) - 1;
+        }
+        if (mask64_prefix(count) != expected)
+        {
+            return 100 + count;
+        }
+    }
     if (mask64_shift_left(1, 63) != ((Mask64)1 << 63))
     {
         return 4;
