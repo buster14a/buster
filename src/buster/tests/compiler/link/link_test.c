@@ -3228,6 +3228,37 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     }
 #endif
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // R_X86_64_32S is a signed field, unlike the unsigned ABS32 form.  A
+    // symbol just beyond INT32_MAX must therefore fail the native image link
+    // instead of silently truncating its address.
+    u8 absolute32s_text[] = {0xc3, 0, 0, 0, 0};
+    ObjectSymbol absolute32s_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = 1,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("far_target"),
+            .value = INT32_MAX,
+            .size = 1,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_DATA,
+        },
+    };
+    ObjectRelocation absolute32s_relocation = {
+        .offset = 1,
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S,
+    };
+    ObjectFile absolute32s_object = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(absolute32s_text),
+                                                           absolute32s_symbols, BUSTER_ARRAY_LENGTH(absolute32s_symbols), &absolute32s_relocation, 1);
+    NativeExecutableLinkResult absolute32s_overflow = link_native_executable(
+        arguments->arena, &absolute32s_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, absolute32s_overflow.error == LINK_ERROR_RELOCATION);
     String8 native_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-link-test"), S8(""));
     NativeExecutableLinkResult native_executable = link_native_executable(arguments->arena, &cfi_linked.object,
                                                                           (NativeExecutableLinkOptions){

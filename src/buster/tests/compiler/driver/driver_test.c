@@ -1966,6 +1966,81 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         file_map_unmap(ucontext_map);
         scratch_end(ucontext_temporary);
     }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    {
+        // Keep one real external-compiler fixture in the driver suite.  The
+        // non-PIC form exercises clang's R_X86_64_32S, while -fPIC emits the
+        // GOTPCRELX family that this linker deliberately rejects without a
+        // GOT model.  Keep debug sections out of this fixture: clang's newer
+        // .debug_addr/.debug_str_offsets sections are outside this object's
+        // intentionally narrow debug-section model.
+        TemporalArena pic_temporary = arena_begin_temporal(c_object_arena);
+        Arena* pic_arena = pic_temporary.arena;
+        String8 no_pic_object_path = buster_test_temporary_path(pic_arena, S8("buster-c-clang-no-pic"), S8(".o"));
+        String8 pic_object_path = buster_test_temporary_path(pic_arena, S8("buster-c-clang-pic"), S8(".o"));
+        String8 no_pic_compile_arguments[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-fno-pic"), S8("-g0"),
+            S8("-c"), S8("-o"), no_pic_object_path, S8("tests/basic_c_pic.c"),
+        };
+        String8 pic_compile_arguments[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-fPIC"), S8("-g0"),
+            S8("-c"), S8("-o"), pic_object_path, S8("tests/basic_c_pic.c"),
+        };
+        ProcessSpawnResult no_pic_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(no_pic_compile_arguments), (SliceString8){0},
+                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, no_pic_spawn.handle != 0);
+        bool no_pic_compiled = false;
+        if (no_pic_spawn.handle)
+        {
+            no_pic_compiled = os_process_wait_sync(pic_arena, no_pic_spawn).result == PROCESS_RESULT_SUCCESS;
+        }
+        BUSTER_TEST(arguments, no_pic_compiled);
+        ProcessSpawnResult pic_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(pic_compile_arguments), (SliceString8){0},
+                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, pic_spawn.handle != 0);
+        bool pic_compiled = false;
+        if (pic_spawn.handle)
+        {
+            pic_compiled = os_process_wait_sync(pic_arena, pic_spawn).result == PROCESS_RESULT_SUCCESS;
+        }
+        BUSTER_TEST(arguments, pic_compiled);
+        if (no_pic_compiled && pic_compiled)
+        {
+            Target elf_target = {
+                .cpu_arch = CPU_ARCH_X86_64,
+                .os = OPERATING_SYSTEM_LINUX,
+            };
+            FileMapRead no_pic_map = file_map_read(pic_arena, no_pic_object_path, (FileReadOptions){0});
+            ObjectFile no_pic = object_read(pic_arena, no_pic_map.bytes, elf_target);
+            bool signed_absolute_found = false;
+            for (u32 relocation_index = 0; relocation_index < no_pic.relocation_count; relocation_index += 1)
+            {
+                signed_absolute_found = signed_absolute_found || no_pic.relocations[relocation_index].kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S;
+            }
+            BUSTER_TEST(arguments, no_pic.error == OBJECT_ERROR_NONE && signed_absolute_found);
+            file_map_unmap(no_pic_map);
+            FileMapRead pic_map = file_map_read(pic_arena, pic_object_path, (FileReadOptions){0});
+            ObjectFile pic = object_read(pic_arena, pic_map.bytes, elf_target);
+            BUSTER_TEST(arguments, pic.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                                   string_first_sequence(pic.diagnostic, S8("R_X86_64_REX_GOTPCRELX")) != UINT64_MAX &&
+                                   string_first_sequence(pic.diagnostic, S8("GOT model")) != UINT64_MAX);
+            file_map_unmap(pic_map);
+            String8 no_pic_link_output = buster_test_temporary_path(pic_arena, S8("buster-c-clang-no-pic"), S8(""));
+            String8 no_pic_link_arguments[] = {S8("-o"), no_pic_link_output, no_pic_object_path};
+            CompilerDriverResult no_pic_link = compiler_driver_execute_invocation(
+                pic_arena, compiler_driver_parse_arguments(pic_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_pic_link_arguments)));
+            BUSTER_TEST(arguments, no_pic_link.error == COMPILER_DRIVER_ERROR_NONE);
+            String8 pic_link_output = buster_test_temporary_path(pic_arena, S8("buster-c-clang-pic"), S8(""));
+            String8 pic_link_arguments[] = {S8("-o"), pic_link_output, pic_object_path};
+            CompilerDriverResult pic_link = compiler_driver_execute_invocation(
+                pic_arena, compiler_driver_parse_arguments(pic_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_link_arguments)));
+            BUSTER_TEST(arguments, pic_link.error == COMPILER_DRIVER_ERROR_OBJECT &&
+                                   string_first_sequence(pic_link.diagnostic, S8("R_X86_64_REX_GOTPCRELX")) != UINT64_MAX &&
+                                   string_first_sequence(pic_link.diagnostic, S8("GOT model")) != UINT64_MAX);
+        }
+        scratch_end(pic_temporary);
+    }
+#endif
     scratch_end(c_object_temporary);
 #endif
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE

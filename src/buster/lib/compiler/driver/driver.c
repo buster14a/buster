@@ -2826,7 +2826,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             {
                 result.error = COMPILER_DRIVER_ERROR_OBJECT;
                 result.object_error = object.error;
-                result.diagnostic = string_format(arena, S8("could not read object {S8}: error {u32}"), input_path, (u32)object.error);
+                result.diagnostic = object.diagnostic.length
+                                        ? string_format(arena, S8("could not read object {S8}: {S8}"), input_path, object.diagnostic)
+                                        : string_format(arena, S8("could not read object {S8}: error {u32}"), input_path, (u32)object.error);
                 goto finish;
             }
             objects[object_count++] = object;

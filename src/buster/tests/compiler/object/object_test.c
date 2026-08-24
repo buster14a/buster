@@ -658,6 +658,52 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, elf_roundtrip.relocations[0].addend == -4);
         BUSTER_STRING_TEST(arguments, elf_roundtrip.symbols[elf_roundtrip.relocations[0].symbol].name, S8("object_callee"));
     }
+    // Clang's non-PIC x86-64 output uses the signed absolute relocation for
+    // addresses that must sign-extend from a 32-bit field.  Preserve its kind
+    // and signed REL addend instead of collapsing it into unsigned ABS32.
+    ObjectRelocation absolute32s_relocation = relocation;
+    absolute32s_relocation.kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S;
+    ObjectFile absolute32s_object = object;
+    absolute32s_object.relocations = &absolute32s_relocation;
+    ObjectArtifact absolute32s_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
+    ObjectFile absolute32s_roundtrip = object_read(arguments->arena, absolute32s_elf.bytes, absolute32s_object.target);
+    BUSTER_TEST(arguments, absolute32s_elf.error == OBJECT_ERROR_NONE && absolute32s_roundtrip.error == OBJECT_ERROR_NONE &&
+                               absolute32s_roundtrip.relocation_count == 1 &&
+                               absolute32s_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S &&
+                               absolute32s_roundtrip.relocations[0].addend == -4);
+    u64 absolute32s_relocation_section = 0;
+    u64 absolute32s_target_data = 0;
+    bool absolute32s_offsets_valid = object_test_elf_relocation_offsets(absolute32s_elf.bytes, &absolute32s_relocation_section, &absolute32s_target_data);
+    u64 absolute32s_relocation_data = 0;
+    if (absolute32s_offsets_valid)
+    {
+        memcpy(&absolute32s_relocation_data, absolute32s_elf.bytes.pointer + absolute32s_relocation_section + 24, sizeof(absolute32s_relocation_data));
+        // Convert this synthetic RELA object to REL and put the signed
+        // addend in the relocated word, as clang can do for SHT_REL inputs.
+        object_test_write_u32(absolute32s_elf.bytes, absolute32s_relocation_section + 4, 9);
+        object_test_write_u64(absolute32s_elf.bytes, absolute32s_relocation_section + 32, 16);
+        object_test_write_u64(absolute32s_elf.bytes, absolute32s_relocation_section + 56, 16);
+        object_test_write_u32(absolute32s_elf.bytes, absolute32s_target_data + absolute32s_relocation.offset, UINT32_C(0xfffffffc));
+    }
+    ObjectFile absolute32s_rel_roundtrip = object_read(arguments->arena, absolute32s_elf.bytes, absolute32s_object.target);
+    BUSTER_TEST(arguments, absolute32s_offsets_valid && absolute32s_rel_roundtrip.error == OBJECT_ERROR_NONE &&
+                               absolute32s_rel_roundtrip.relocation_count == 1 &&
+                               absolute32s_rel_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S &&
+                               absolute32s_rel_roundtrip.relocations[0].addend == -4);
+    ObjectArtifact gotpc_rel_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
+    u64 gotpc_rel_section = 0;
+    u64 gotpc_rel_target_data = 0;
+    bool gotpc_rel_offsets_valid = object_test_elf_relocation_offsets(gotpc_rel_elf.bytes, &gotpc_rel_section, &gotpc_rel_target_data);
+    u64 gotpc_rel_data = 0;
+    if (gotpc_rel_offsets_valid)
+    {
+        memcpy(&gotpc_rel_data, gotpc_rel_elf.bytes.pointer + gotpc_rel_section + 24, sizeof(gotpc_rel_data));
+        object_test_write_u32(gotpc_rel_elf.bytes, gotpc_rel_data + 8, 9);
+    }
+    ObjectFile gotpc_rel_roundtrip = object_read(arguments->arena, gotpc_rel_elf.bytes, absolute32s_object.target);
+    BUSTER_TEST(arguments, gotpc_rel_offsets_valid && gotpc_rel_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(gotpc_rel_roundtrip.diagnostic), S8("R_X86_64_GOTPCREL")) &&
+                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(gotpc_rel_roundtrip.diagnostic), S8("GOT model")));
     ObjectArtifact coff = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     ObjectFile coff_roundtrip = object_read(arguments->arena, coff.bytes,
                                             (Target){

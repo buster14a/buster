@@ -278,7 +278,7 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
-           (kind == OBJECT_RELOCATION_X86_64_PC32 && arch == CPU_ARCH_X86_64) ||
+           ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S) && arch == CPU_ARCH_X86_64) ||
            ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
              kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
              kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
@@ -544,6 +544,32 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 return false;
             }
             s32 value = (s32)displacement;
+            memcpy(patch, &value, sizeof(value));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
+        {
+            if (target > (u64)INT64_MAX)
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            s64 absolute = (s64)target;
+            if ((relocation->addend > 0 && absolute > INT64_MAX - relocation->addend) ||
+                (relocation->addend < 0 && absolute < INT64_MIN - relocation->addend))
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            absolute += relocation->addend;
+            if (absolute < INT32_MIN || absolute > INT32_MAX)
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            s32 value = (s32)absolute;
             memcpy(patch, &value, sizeof(value));
         }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)

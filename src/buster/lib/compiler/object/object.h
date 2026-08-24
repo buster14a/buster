@@ -72,6 +72,9 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_PREL32,
     OBJECT_RELOCATION_ABSOLUTE64,
     OBJECT_RELOCATION_ABSOLUTE32,
+    // x86-64 R_X86_64_32S: absolute S + A, required to sign-extend from
+    // 32 bits.  Keep this distinct from the unsigned ABSOLUTE32 forms.
+    OBJECT_RELOCATION_X86_64_ABSOLUTE32S,
     OBJECT_RELOCATION_COFF_SECREL32,
     OBJECT_RELOCATION_COFF_SECTION16,
     OBJECT_RELOCATION_COFF_ADDR32NB,
@@ -156,6 +159,10 @@ struct ObjectFile
     ObjectRelocation* relocations;
     Target target;
     ObjectError error;
+    // When error is OBJECT_ERROR_UNSUPPORTED_TARGET, this may name the
+    // unsupported input feature (for example an ELF relocation) for a
+    // user-facing diagnostic.  Empty means no more-specific text exists.
+    String8 diagnostic;
     u32 section_count;
     u32 symbol_count;
     u32 relocation_count;

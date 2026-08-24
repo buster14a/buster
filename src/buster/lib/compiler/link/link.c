@@ -913,6 +913,26 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool link_absolute32s_value(u64 address, s64 addend, s32* result)
+{
+    bool valid = result && address <= (u64)INT64_MAX;
+    s64 value = valid ? (s64)address : 0;
+    if (valid && ((addend > 0 && value > INT64_MAX - addend) || (addend < 0 && value < INT64_MIN - addend)))
+    {
+        valid = false;
+    }
+    if (valid)
+    {
+        value += addend;
+        valid = value >= INT32_MIN && value <= INT32_MAX;
+    }
+    if (valid)
+    {
+        *result = (s32)value;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
 {
     bool valid = result && right <= UINT64_MAX - left;
@@ -1722,6 +1742,16 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 }
                 link_write_u32(bytes, slot, (u32)value);
             }
+            else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
+            {
+                s32 value = 0;
+                if (!link_absolute32s_value(symbol->value, relocation->addend, &value))
+                {
+                    result->error = LINK_ERROR_RELOCATION;
+                    return;
+                }
+                link_write_u32(bytes, slot, (u32)value);
+            }
             else
             {
                 result->error = LINK_ERROR_RELOCATION;
@@ -1928,6 +1958,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 return result;
             }
             link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
+        {
+            s32 value = 0;
+            if (!link_absolute32s_value(symbol_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
@@ -2322,6 +2362,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 return result;
             }
             link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
+        {
+            s32 value = 0;
+            if (!link_absolute32s_value(symbol_address, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
