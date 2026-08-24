@@ -1971,6 +1971,8 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
     if (result && dispatched.token_count)
     {
         result = memcmp(dispatched.tokens, reference.tokens, dispatched.token_count * sizeof(CToken)) == 0;
+        result = result && dispatched.token_shapes && reference.token_shapes &&
+                 memcmp(dispatched.token_shapes, reference.token_shapes, dispatched.token_count * sizeof(CTokenShape)) == 0;
     }
     for (u64 index = 0; result && index < dispatched.diagnostic_count; index += 1)
     {
@@ -2607,7 +2609,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     BUSTER_TEST(arguments, empty.metrics.lines == 0);
     BUSTER_TEST(arguments, empty.metrics.translated_lines == 0);
     BUSTER_TEST(arguments, empty.metrics.tokens == 0);
+    BUSTER_TEST(arguments, empty.token_count == 1);
+    BUSTER_TEST(arguments, empty.token_shapes && empty.token_shapes[0] == C_TOKEN_END_OF_FILE);
     c_test_source_metrics_partitions(arguments, &result, empty.metrics);
+
+    CLexResult malformed = c_lex(arguments->arena, S8("/* unterminated"));
+    BUSTER_TEST(arguments, malformed.token_count != 0 && malformed.token_shapes != 0);
+    for (u32 token_index = 0; token_index < malformed.token_count; token_index += 1)
+    {
+        BUSTER_TEST(arguments, malformed.token_shapes[token_index] == c_token_shape_from_token(malformed.tokens[token_index]));
+    }
 
     // Without includes the two aggregates are the same one file, and the
     // preprocessor's totals are the root lex's.
@@ -2631,6 +2642,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     // ONE expanded once, and `int v = 1 ;` is what the parser receives. The
     // end marker is in token_count but not in the measured token total.
     BUSTER_TEST(arguments, preprocess.token_count == 6);
+    BUSTER_TEST(arguments, c_preprocess_token_shapes(&preprocess) != 0);
+    for (u32 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        BUSTER_TEST(arguments, c_preprocess_token_shape(&preprocess, token_index) == c_token_shape_from_token(preprocess.tokens[token_index]));
+    }
     BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.tokens == 5);
     BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.bytes == 7);
     BUSTER_TEST(arguments, c_preprocess_detail(preprocess)->preprocessed.definitions == 1);

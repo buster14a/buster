@@ -348,6 +348,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_benchmarks(void)
         {
             arena_destroy(preprocess.recovery->token_arena, 1);
         }
+        if (preprocess.recovery && preprocess.recovery->token_shape_arena)
+        {
+            arena_destroy(preprocess.recovery->token_shape_arena, 1);
+        }
         arena_set_position(work_arena, position);
         if (!succeeded)
         {
@@ -410,6 +414,10 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
             if (preprocess.recovery && preprocess.recovery->token_arena)
             {
                 arena_destroy(preprocess.recovery->token_arena, 1);
+            }
+            if (preprocess.recovery && preprocess.recovery->token_shape_arena)
+            {
+                arena_destroy(preprocess.recovery->token_shape_arena, 1);
             }
             arena_destroy(arena, 1);
         }

@@ -61,13 +61,12 @@
 //                                                 entities, indexes scopes
 //   c_parse_token_census_reference,               the token-shape census that
 //   c_parse_token_census                          sizes c_analyze_semantics'
-//                                                 tables: a vpermt2b
-//                                                 projection of kind,
-//                                                 punctuator and symbol byte
-//                                                 out of the 12-byte rows,
-//                                                 then masked compares, with
-//                                                 the scalar reference kept
-//                                                 as the differential gate
+//                                                 tables: contiguous sidecar
+//                                                 shape compares plus a
+//                                                 symbol-byte projection for
+//                                                 the rare `for` spelling,
+//                                                 with the scalar reference
+//                                                 kept as the differential gate
 //   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
 
 #include "c_internal.h"
@@ -266,6 +265,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
 BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
 {
     CTokenPositionIndex* index = result->position_index;
+    CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     index->matching_delimiters = arena_allocate(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
     memset(index->matching_delimiters, 0xff, sizeof(*index->matching_delimiters) * preprocess.token_count);
     TemporalArena temporary = scratch_begin(&result->arena, 1);
@@ -288,9 +288,10 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     // no predictor can learn because it is the token kinds of the program.
     for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
     {
-        CToken token = preprocess.tokens[token_index];
-        if (token.kind == C_TOKEN_IDENTIFIER)
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, (u32)token_index);
+        if (shape == C_TOKEN_IDENTIFIER)
         {
+            CToken token = preprocess.tokens[token_index];
             u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
             if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
             {
@@ -304,7 +305,8 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
             // The next token is one line of this cache at most, and reading
             // its punctuator here spares the body-lowering loops a re-scan of
             // every token for the same identifier-then-colon shape.
-            if (token_index + 1 < preprocess.token_count && preprocess.tokens[token_index + 1].punctuator == C_PUNCTUATOR_COLON)
+            if (token_index + 1 < preprocess.token_count &&
+                c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, (u32)token_index + 1)) == C_PUNCTUATOR_COLON)
             {
                 c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
                                               &label_candidate_capacity, (u32)token_index);
@@ -316,23 +318,23 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
             }
             continue;
         }
-        if (token.kind != C_TOKEN_PUNCTUATOR)
+        if (!c_token_shape_is_punctuator(shape))
         {
             continue;
         }
-        if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
-            token.punctuator == C_PUNCTUATOR_LEFT_BRACE)
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {
             stack[stack_count++] = (CDelimiterStackEntry){
                 .position = (u32)token_index,
-                .opening = token.punctuator,
+                .opening = punctuator,
             };
             continue;
         }
-        CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                               : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
-                               : token.punctuator == C_PUNCTUATOR_RIGHT_BRACE     ? C_PUNCTUATOR_LEFT_BRACE
-                                                                                  : C_PUNCTUATOR_NONE;
+        CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                               : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                               : punctuator == C_PUNCTUATOR_RIGHT_BRACE     ? C_PUNCTUATOR_LEFT_BRACE
+                                                                             : C_PUNCTUATOR_NONE;
         if (expected == C_PUNCTUATOR_NONE)
         {
             continue;
@@ -10254,6 +10256,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
     {
         return;
     }
+    CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     Arena* conflicts[] = {
         result_arena,
     };
@@ -10288,19 +10291,21 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             scope_count -= 1;
         }
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER &&
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        if (shape == C_TOKEN_IDENTIFIER &&
             (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))))
         {
             c_parse_asm_goto_label_range(preprocess, index, body_end, &asm_goto_label_start, &asm_goto_label_end);
             u32 asm_open = index + 1;
-            while (asm_open < body_end && preprocess.tokens[asm_open].kind == C_TOKEN_IDENTIFIER &&
+            while (asm_open < body_end && c_preprocess_token_shape_at(token_shapes, &preprocess, asm_open) == C_TOKEN_IDENTIFIER &&
                    (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[asm_open]), S8("volatile")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[asm_open]), S8("__volatile__")) ||
                     string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[asm_open]), S8("inline")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[asm_open]), S8("__inline__")) ||
                     string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[asm_open]), S8("goto"))))
             {
                 asm_open += 1;
             }
-            if (asm_open < body_end && c_token_is_punctuator(&preprocess.tokens[asm_open], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            if (asm_open < body_end && c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, asm_open)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
             {
                 u32 asm_close = c_parse_matching_delimiter(preprocess, asm_open, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 if (asm_close < body_end)
@@ -10310,18 +10315,18 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
                 }
             }
         }
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) && index + 1 < body_end &&
-            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (shape == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) && index + 1 < body_end &&
+            c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
             u32 builtin_index = index + 1;
             u32 builtin_depth = 0;
             while (builtin_index < body_end)
             {
-                if (c_token_is_punctuator(&preprocess.tokens[builtin_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                if (c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, builtin_index)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
                 {
                     builtin_depth += 1;
                 }
-                else if (c_token_is_punctuator(&preprocess.tokens[builtin_index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                else if (c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, builtin_index)) == C_PUNCTUATOR_RIGHT_PARENTHESIS)
                 {
                     if (!builtin_depth)
                     {
@@ -10340,7 +10345,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             statement_start = false;
             continue;
         }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {
             CScopeId parent = scope_stack[scope_count - 1];
             CScopeId child = {
@@ -10360,7 +10365,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             index += 1;
             continue;
         }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        if (punctuator == C_PUNCTUATOR_RIGHT_BRACE)
         {
             if (scope_count > 1)
             {
@@ -10375,8 +10380,8 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         // it appears; `statement_start` is deliberately not required. It is only set after `;`, `{`
         // and `}`, which misses every `for` that is itself the unbraced body of an enclosing
         // control statement — `for (...) for (int j = ...) ...` and `if (c) for (int j = ...) ...`.
-        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("for")) && index + 1 < body_end &&
-            c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (shape == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("for")) && index + 1 < body_end &&
+            c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
             u32 header_close = UINT32_MAX;
             u32 depth = 0;
@@ -10457,7 +10462,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             }
         }
         u32 declaration_type_start = c_parse_skip_attributes(preprocess, index, body_end);
-        if (statement_start && declaration_type_start < body_end && preprocess.tokens[declaration_type_start].kind == C_TOKEN_IDENTIFIER &&
+        if (statement_start && declaration_type_start < body_end && c_preprocess_token_shape_at(token_shapes, &preprocess, declaration_type_start) == C_TOKEN_IDENTIFIER &&
             c_parse_type_start_token(result, preprocess, scope_stack[scope_count - 1], preprocess.tokens[declaration_type_start]))
         {
             if (!c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[declaration_type_start]) &&
@@ -10506,16 +10511,16 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             }
         }
         bool label = false;
-        if (token.kind == C_TOKEN_IDENTIFIER)
+        if (shape == C_TOKEN_IDENTIFIER)
         {
             label = c_ir_named_label_at(&preprocess, declaration->body_start, index, body_end);
             bool member = index > declaration->body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                                               c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-            bool tag_name = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+            bool tag_name = index > declaration->body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                             (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("struct")) ||
                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("union")) ||
                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("enum")));
-            bool goto_target = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+            bool goto_target = index > declaration->body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("goto"));
             bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
             if (!member && !tag_name && !label && !goto_target && !asm_goto_label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
@@ -10533,7 +10538,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             index += 2;
             continue;
         }
-        statement_start = c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON);
+        statement_start = punctuator == C_PUNCTUATOR_SEMICOLON;
         index += 1;
     }
     c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
@@ -11142,6 +11147,7 @@ BUSTER_C_INTERNAL u32 c_parser_declarator_list_segment_end(CPreprocessResult pre
 CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 {
     CParserResult result = {0};
+    CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     if (arena && preprocess.tokens && preprocess.token_count && preprocess.token_count <= (UINT32_MAX - 1) / 2)
     {
         u32 token_count = (u32)preprocess.token_count;
@@ -11150,7 +11156,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         u32 index = 0;
-        while (index < token_count && preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
+        while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
         {
             u32 start = index;
             u32 delimiter_count = 0;
@@ -11168,11 +11174,13 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             while (index < token_count)
             {
                 CToken token = preprocess.tokens[index];
-                if (token.kind == C_TOKEN_END_OF_FILE)
+                CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
+                CPunctuator punctuator = c_token_shape_punctuator(shape);
+                if (shape == C_TOKEN_END_OF_FILE)
                 {
                     break;
                 }
-                if (token.kind == C_TOKEN_IDENTIFIER)
+                if (shape == C_TOKEN_IDENTIFIER)
                 {
                     is_typedef |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("typedef"));
                     is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("constexpr"));
@@ -11185,15 +11193,15 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         name_token = index;
                     }
                 }
-                seen_declarator_comma |= !delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
-                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+                seen_declarator_comma |= !delimiter_count && punctuator == C_PUNCTUATOR_COMMA;
+                if (!delimiter_count && punctuator == C_PUNCTUATOR_ASSIGN)
                 {
                     seen_equal = true;
                 }
-                if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
                 {
-                    if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
-                        preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                    if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
+                        c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                         !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) && !seen_equal &&
                         function_name_token == C_ID_UNDERLYING_INVALID)
                     {
@@ -11208,19 +11216,19 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                             name_token = function_name_token;
                         }
                     }
-                    if (!delimiter_count && token.punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
+                    if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)
                     {
                         body_start = index + 1;
                         u32 brace_depth = 1;
                         index += 1;
                         while (index < token_count)
                         {
-                            CToken body_token = preprocess.tokens[index];
-                            if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_LEFT_BRACE))
+                            CPunctuator body_punctuator = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index));
+                            if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
                             {
                                 brace_depth += 1;
                             }
-                            else if (c_token_is_punctuator(&body_token, C_PUNCTUATOR_RIGHT_BRACE))
+                            else if (body_punctuator == C_PUNCTUATOR_RIGHT_BRACE)
                             {
                                 brace_depth -= 1;
                                 if (!brace_depth)
@@ -11241,18 +11249,18 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                     }
                     if (!delimiter_count)
                     {
-                        top_level_parenthesis = token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS;
+                        top_level_parenthesis = punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS;
                     }
                     delimiter_stack[delimiter_count++] = index;
                     index += 1;
                     continue;
                 }
-                if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+                if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
                 {
-                    CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                                           : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
-                                                                                              : C_PUNCTUATOR_LEFT_BRACE;
-                    if (!delimiter_count || !c_token_is_punctuator(&preprocess.tokens[delimiter_stack[delimiter_count - 1]], expected))
+                    CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                                           : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                                                                                          : C_PUNCTUATOR_LEFT_BRACE;
+                    if (!delimiter_count || c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, delimiter_stack[delimiter_count - 1])) != expected)
                     {
                         c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
                     }
@@ -11264,7 +11272,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                     index += 1;
                     continue;
                 }
-                if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+                if (!delimiter_count && punctuator == C_PUNCTUATOR_SEMICOLON)
                 {
                     index += 1;
                     ended = true;
@@ -11280,10 +11288,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             }
             CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
                                           : function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
-                                          : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                                          : (c_preprocess_token_shape_at(token_shapes, &preprocess, start) == C_TOKEN_IDENTIFIER &&
                                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Static_assert")))
                                                 ? C_PARSER_DECLARATION_STATIC_ASSERT
-                                          : (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                                          : (c_preprocess_token_shape_at(token_shapes, &preprocess, start) == C_TOKEN_IDENTIFIER &&
                                              (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("asm")) ||
                                               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm")) ||
                                               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__asm__"))))
@@ -11299,7 +11307,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             // declaration specifiers stay shared through token_start/token_count,
             // which is what the storage-class and attribute scans read.
             u32 declarator_list_end = index;
-            if (declarator_list_end > start && c_token_is_punctuator(&preprocess.tokens[declarator_list_end - 1], C_PUNCTUATOR_SEMICOLON))
+            if (declarator_list_end > start && c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, declarator_list_end - 1)) == C_PUNCTUATOR_SEMICOLON)
             {
                 declarator_list_end -= 1;
             }
@@ -11462,44 +11470,30 @@ BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPrepro
 
 #if BUSTER_SIMD_512
 
-// The census reads two of CToken's twelve bytes -- kind and punctuator, at
-// offsets 10 and 11 -- so a compare over a chunk of raw rows spends 64 lanes
-// to classify the 5,33 tokens that fit in it. lcm(12, 64) = 192 bytes = 16
-// tokens, so one fixed pair of vpermt2b index vectors gathers a chosen field
-// of sixteen tokens out of three chunks: byte offsets below 128 come from the
-// (chunk 0, chunk 1) pair addressed directly, the rest from the
-// (chunk 1, chunk 2) pair addressed 64 lower. Projected into tiles, each pure
-// count is one compare, one popcount and one add over 64 tokens.
-//
-// A change to CToken's field order would silently mis-gather rather than fail
-// to build, so the offsets the tables encode are stated as checks.
+// The census reads its kind|punctuator sidecar as one contiguous byte stream,
+// so every pure shape count is one compare, one popcount and one add over 64
+// tokens. The rare `for` spelling filter still projects the symbol low byte
+// from the 12-byte rows with the fixed indices below; keeping that projection
+// separate avoids revisiting every identifier's spelling.
 BUSTER_CT_CHECK(sizeof(CToken) == 12);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, kind) == 10);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, punctuator) == 11);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, symbol) == 4);
 
 #define C_PARSE_CENSUS_GROUP_TOKENS 16
-// Tokens projected before the counting pass reads them back. Three tiles of
-// this size stay in L1 beside the rows being gathered, and the padding keeps
-// the counting pass reading whole 64-lane windows.
+// Symbol bytes are projected only for the rare `for` spelling filter; the
+// kind|punctuator stream is already contiguous in the preprocessor sidecar.
+// The tile keeps the projected symbols in L1 beside the rows being gathered,
+// and the padding keeps that auxiliary stream readable in whole windows.
 #define C_PARSE_CENSUS_TILE_TOKENS 2048
 #define C_PARSE_CENSUS_TILE_BYTES (C_PARSE_CENSUS_TILE_TOKENS + 64)
 
-// Lanes each permute fills: kind and punctuator split after token 9, whose
-// field bytes are the last below 128; the symbol byte of token 10 is still at
-// 124, so its stream splits one token later.
-#define C_PARSE_CENSUS_LOW_LANES UINT64_C(0x03ff)
-#define C_PARSE_CENSUS_HIGH_LANES UINT64_C(0xfc00)
+// The symbol byte of token 10 is still at 124, so its stream splits one token
+// later than the first ten rows in a 128-byte pair.
 #define C_PARSE_CENSUS_SYMBOL_LOW_LANES UINT64_C(0x07ff)
 #define C_PARSE_CENSUS_SYMBOL_HIGH_LANES UINT64_C(0xf800)
 #define C_PARSE_CENSUS_GROUP_LANES UINT64_C(0xffff)
 
-// Source byte of each projected field, per output lane: 12 * token + offset
+// Source byte of the projected symbol field, per output lane: 12 * token + 4
 // for the low pair, less 64 for the high pair, which starts at chunk 1.
-BUSTER_C_INTERNAL const u8 c_parse_census_kind_low[64] = {10, 22, 34, 46, 58, 70, 82, 94, 106, 118};
-BUSTER_C_INTERNAL const u8 c_parse_census_kind_high[64] = {[10] = 66, 78, 90, 102, 114, 126};
-BUSTER_C_INTERNAL const u8 c_parse_census_punctuator_low[64] = {11, 23, 35, 47, 59, 71, 83, 95, 107, 119};
-BUSTER_C_INTERNAL const u8 c_parse_census_punctuator_high[64] = {[10] = 67, 79, 91, 103, 115, 127};
 BUSTER_C_INTERNAL const u8 c_parse_census_symbol_low[64] = {4, 16, 28, 40, 52, 64, 76, 88, 100, 112, 124};
 BUSTER_C_INTERNAL const u8 c_parse_census_symbol_high[64] = {[11] = 72, 84, 96, 108, 120};
 
@@ -11521,149 +11515,139 @@ BUSTER_C_INTERNAL const u8 c_parse_census_symbol_high[64] = {[11] = 72, 84, 96, 
 BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
 {
 #if BUSTER_SIMD_512
-    u8 kinds[C_PARSE_CENSUS_TILE_BYTES];
-    u8 punctuators[C_PARSE_CENSUS_TILE_BYTES];
     u8 symbol_bytes[C_PARSE_CENSUS_TILE_BYTES];
-    Simd512 kind_low_indices = simd512_load(c_parse_census_kind_low);
-    Simd512 kind_high_indices = simd512_load(c_parse_census_kind_high);
-    Simd512 punctuator_low_indices = simd512_load(c_parse_census_punctuator_low);
-    Simd512 punctuator_high_indices = simd512_load(c_parse_census_punctuator_high);
     Simd512 symbol_low_indices = simd512_load(c_parse_census_symbol_low);
     Simd512 symbol_high_indices = simd512_load(c_parse_census_symbol_high);
-    Simd512 identifier_kind = simd512_splat((u8)C_TOKEN_IDENTIFIER);
-    Simd512 semicolon = simd512_splat((u8)C_PUNCTUATOR_SEMICOLON);
-    Simd512 comma = simd512_splat((u8)C_PUNCTUATOR_COMMA);
-    Simd512 open_parenthesis = simd512_splat((u8)C_PUNCTUATOR_LEFT_PARENTHESIS);
-    Simd512 open_bracket = simd512_splat((u8)C_PUNCTUATOR_LEFT_BRACKET);
-    Simd512 open_brace = simd512_splat((u8)C_PUNCTUATOR_LEFT_BRACE);
-    Simd512 close_parenthesis = simd512_splat((u8)C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    Simd512 close_bracket = simd512_splat((u8)C_PUNCTUATOR_RIGHT_BRACKET);
-    Simd512 close_brace = simd512_splat((u8)C_PUNCTUATOR_RIGHT_BRACE);
-    Simd512 for_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_FOR);
-    Simd512 uninterned_symbol = simd512_splat(0);
-    u32 brace_depth = 0;
-    u32 delimiter_depth = 0;
-    u32 maximum_depth = 0;
-    // Commas in stream order, and the count standing when the open
-    // brace-depth-0 span began; their difference is that span's contribution.
-    u64 comma_total = 0;
-    u64 depth_zero_comma_base = 0;
-    for (u32 tile_base = 0; tile_base < token_count; tile_base += C_PARSE_CENSUS_TILE_TOKENS)
+    CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
+    if (token_shapes)
     {
-        u32 tile_tokens = BUSTER_MIN(C_PARSE_CENSUS_TILE_TOKENS, token_count - tile_base);
-        u32 projected = 0;
-        while (projected + C_PARSE_CENSUS_GROUP_TOKENS <= tile_tokens)
+        Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+        Simd512 semicolon = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_SEMICOLON));
+        Simd512 comma = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_COMMA));
+        Simd512 open_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS));
+        Simd512 open_bracket = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACKET));
+        Simd512 open_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACE));
+        Simd512 close_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_PARENTHESIS));
+        Simd512 close_bracket = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACKET));
+        Simd512 close_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACE));
+        Simd512 for_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_FOR);
+        Simd512 uninterned_symbol = simd512_splat(0);
+        u32 brace_depth = 0;
+        u32 delimiter_depth = 0;
+        u32 maximum_depth = 0;
+        // Commas in stream order, and the count standing when the open
+        // brace-depth-0 span began; their difference is that span's contribution.
+        u64 comma_total = 0;
+        u64 depth_zero_comma_base = 0;
+        for (u32 tile_base = 0; tile_base < token_count; tile_base += C_PARSE_CENSUS_TILE_TOKENS)
         {
-            const u8* rows = (const u8*)(preprocess.tokens + tile_base + projected);
-            Simd512 chunk0 = simd512_load(rows);
-            Simd512 chunk1 = simd512_load(rows + 64);
-            Simd512 chunk2 = simd512_load(rows + 128);
-            Simd512 kind_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_LOW_LANES, chunk0, kind_low_indices, chunk1),
-                                            simd512_permute2_byte(C_PARSE_CENSUS_HIGH_LANES, chunk1, kind_high_indices, chunk2));
-            Simd512 punctuator_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_LOW_LANES, chunk0, punctuator_low_indices, chunk1),
-                                                  simd512_permute2_byte(C_PARSE_CENSUS_HIGH_LANES, chunk1, punctuator_high_indices, chunk2));
-            Simd512 symbol_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
-                                              simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
-            simd512_store_masked(kinds + projected, C_PARSE_CENSUS_GROUP_LANES, kind_group);
-            simd512_store_masked(punctuators + projected, C_PARSE_CENSUS_GROUP_LANES, punctuator_group);
-            simd512_store_masked(symbol_bytes + projected, C_PARSE_CENSUS_GROUP_LANES, symbol_group);
-            projected += C_PARSE_CENSUS_GROUP_TOKENS;
-        }
-        while (projected < tile_tokens)
-        {
-            CToken token = preprocess.tokens[tile_base + projected];
-            kinds[projected] = token.kind;
-            punctuators[projected] = token.punctuator;
-            symbol_bytes[projected] = (u8)token.symbol;
-            projected += 1;
-        }
-        // Pad to a whole window. Kind 0 is C_TOKEN_INVALID and punctuator 0 is
-        // C_PUNCTUATOR_NONE, so a padding lane matches no class and no tail
-        // mask is needed anywhere below.
-        u32 padded = (tile_tokens + 63) & ~UINT32_C(63);
-        while (projected < padded)
-        {
-            kinds[projected] = 0;
-            punctuators[projected] = 0;
-            symbol_bytes[projected] = 0;
-            projected += 1;
-        }
-        for (u32 window = 0; window < padded; window += 64)
-        {
-            Simd512 kind_lanes = simd512_load(kinds + window);
-            Simd512 punctuator_lanes = simd512_load(punctuators + window);
-            Mask64 identifiers = simd512_equal_byte(kind_lanes, identifier_kind);
-            Mask64 semicolons = simd512_equal_byte(punctuator_lanes, semicolon);
-            Mask64 commas = simd512_equal_byte(punctuator_lanes, comma);
-            Mask64 open_parentheses = simd512_equal_byte(punctuator_lanes, open_parenthesis);
-            Mask64 open_brackets = simd512_equal_byte(punctuator_lanes, open_bracket);
-            Mask64 open_braces = simd512_equal_byte(punctuator_lanes, open_brace);
-            Mask64 close_braces = simd512_equal_byte(punctuator_lanes, close_brace);
-            Mask64 opens = mask64_or(mask64_or(open_parentheses, open_brackets), open_braces);
-            Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(punctuator_lanes, close_parenthesis),
-                                                simd512_equal_byte(punctuator_lanes, close_bracket)),
-                                      close_braces);
-            census->identifier_count += mask64_count(identifiers);
-            census->semicolon_count += mask64_count(semicolons);
-            census->comma_count += mask64_count(commas);
-            census->open_parenthesis_count += mask64_count(open_parentheses);
-            census->open_bracket_count += mask64_count(open_brackets);
-            census->open_brace_count += mask64_count(open_braces);
-            // `for` is one interned id, so its low symbol byte is the filter,
-            // and the zero byte admits the uninterned tokens whose answer is
-            // the spelling fallback. The two together leave a few thousand
-            // candidates in a million identifiers, each then answered by the
-            // predicate the reference calls.
-            Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
-            Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol),
-                                                                      simd512_equal_byte(symbol_lanes, uninterned_symbol)));
-            for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
+            u32 tile_tokens = BUSTER_MIN(C_PARSE_CENSUS_TILE_TOKENS, token_count - tile_base);
+            u32 projected = 0;
+            while (projected + C_PARSE_CENSUS_GROUP_TOKENS <= tile_tokens)
             {
-                u32 lane = mask64_first_set(remaining);
-                census->for_count +=
-                    c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tile_base + window + lane], C_SYMBOL_WELL_KNOWN_FOR);
+                const u8* rows = (const u8*)(preprocess.tokens + tile_base + projected);
+                Simd512 chunk0 = simd512_load(rows);
+                Simd512 chunk1 = simd512_load(rows + 64);
+                Simd512 chunk2 = simd512_load(rows + 128);
+                Simd512 symbol_group = simd512_or(simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_LOW_LANES, chunk0, symbol_low_indices, chunk1),
+                                                  simd512_permute2_byte(C_PARSE_CENSUS_SYMBOL_HIGH_LANES, chunk1, symbol_high_indices, chunk2));
+                simd512_store_masked(symbol_bytes + projected, C_PARSE_CENSUS_GROUP_LANES, symbol_group);
+                projected += C_PARSE_CENSUS_GROUP_TOKENS;
             }
-            u64 window_comma_base = comma_total;
-            comma_total += mask64_count(commas);
-            for (Mask64 remaining = mask64_or(opens, closes); remaining; remaining &= remaining - 1)
+            while (projected < tile_tokens)
             {
-                u32 lane = mask64_first_set(remaining);
-                if ((opens >> lane) & 1)
+                CToken token = preprocess.tokens[tile_base + projected];
+                symbol_bytes[projected] = (u8)token.symbol;
+                projected += 1;
+            }
+            // Pad the projected symbol bytes to a whole window. The sidecar is
+            // loaded with a tail mask, so its padding never needs to be written.
+            u32 padded = (tile_tokens + 63) & ~UINT32_C(63);
+            while (projected < padded)
+            {
+                symbol_bytes[projected] = 0;
+                projected += 1;
+            }
+            for (u32 window = 0; window < padded; window += 64)
+            {
+                u32 window_tokens = BUSTER_MIN(64, tile_tokens - window);
+                Mask64 window_mask = mask64_prefix(window_tokens);
+                Simd512 shape_lanes = simd512_load_masked(token_shapes + tile_base + window, window_mask);
+                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
+                Mask64 semicolons = simd512_equal_byte(shape_lanes, semicolon);
+                Mask64 commas = simd512_equal_byte(shape_lanes, comma);
+                Mask64 open_parentheses = simd512_equal_byte(shape_lanes, open_parenthesis);
+                Mask64 open_brackets = simd512_equal_byte(shape_lanes, open_bracket);
+                Mask64 open_braces = simd512_equal_byte(shape_lanes, open_brace);
+                Mask64 close_braces = simd512_equal_byte(shape_lanes, close_brace);
+                Mask64 opens = mask64_or(mask64_or(open_parentheses, open_brackets), open_braces);
+                Mask64 closes =
+                    mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)), close_braces);
+                census->identifier_count += mask64_count(identifiers);
+                census->semicolon_count += mask64_count(semicolons);
+                census->comma_count += mask64_count(commas);
+                census->open_parenthesis_count += mask64_count(open_parentheses);
+                census->open_bracket_count += mask64_count(open_brackets);
+                census->open_brace_count += mask64_count(open_braces);
+                // `for` is one interned id, so its low symbol byte is the filter,
+                // and the zero byte admits the uninterned tokens whose answer is
+                // the spelling fallback. The two together leave a few thousand
+                // candidates in a million identifiers, each then answered by the
+                // predicate the reference calls.
+                Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
+                Mask64 for_candidates =
+                    mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), simd512_equal_byte(symbol_lanes, uninterned_symbol)));
+                for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
-                    delimiter_depth += 1;
-                    maximum_depth = BUSTER_MAX(maximum_depth, delimiter_depth);
-                    if ((open_braces >> lane) & 1)
-                    {
-                        if (!brace_depth)
-                        {
-                            census->declarator_list_comma_count +=
-                                (u32)(window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane))) - depth_zero_comma_base);
-                        }
-                        brace_depth += 1;
-                    }
+                    u32 lane = mask64_first_set(remaining);
+                    census->for_count += c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[tile_base + window + lane], C_SYMBOL_WELL_KNOWN_FOR);
                 }
-                else
+                u64 window_comma_base = comma_total;
+                comma_total += mask64_count(commas);
+                for (Mask64 remaining = mask64_or(opens, closes); remaining; remaining &= remaining - 1)
                 {
-                    if (brace_depth && ((close_braces >> lane) & 1))
+                    u32 lane = mask64_first_set(remaining);
+                    if ((opens >> lane) & 1)
                     {
-                        brace_depth -= 1;
-                        if (!brace_depth)
+                        delimiter_depth += 1;
+                        maximum_depth = BUSTER_MAX(maximum_depth, delimiter_depth);
+                        if ((open_braces >> lane) & 1)
                         {
-                            depth_zero_comma_base = window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane)));
+                            if (!brace_depth)
+                            {
+                                census->declarator_list_comma_count +=
+                                    (u32)(window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane))) - depth_zero_comma_base);
+                            }
+                            brace_depth += 1;
                         }
                     }
-                    delimiter_depth -= delimiter_depth != 0;
+                    else
+                    {
+                        if (brace_depth && ((close_braces >> lane) & 1))
+                        {
+                            brace_depth -= 1;
+                            if (!brace_depth)
+                            {
+                                depth_zero_comma_base = window_comma_base + mask64_count(mask64_and(commas, mask64_prefix(lane)));
+                            }
+                        }
+                        delimiter_depth -= delimiter_depth != 0;
+                    }
                 }
             }
         }
+        // The span still open at end of stream. When a brace is unclosed there is
+        // none, and the reference counted nothing more either.
+        if (!brace_depth)
+        {
+            census->declarator_list_comma_count += (u32)(comma_total - depth_zero_comma_base);
+        }
+        census->maximum_delimiter_depth = maximum_depth;
     }
-    // The span still open at end of stream. When a brace is unclosed there is
-    // none, and the reference counted nothing more either.
-    if (!brace_depth)
+    else
     {
-        census->declarator_list_comma_count += (u32)(comma_total - depth_zero_comma_base);
+        c_parse_token_census_reference(preprocess, token_count, census);
     }
-    census->maximum_delimiter_depth = maximum_depth;
 #if !BUSTER_OPTIMIZE
     // The differential gate. Unoptimized builds recompute the census the
     // reference way and require all nine counters to agree, which puts the

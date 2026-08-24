@@ -25,6 +25,10 @@
 //                                              method, AGENTS.md); c_lex
 //                                              dispatches, c_lex_reference is
 //                                              the differential baseline
+//   CTokenStream, c_token_stream_reserve       final token rows plus the
+//                                              one-byte kind|punctuator
+//                                              sidecar consumed by parser
+//                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
 //   c_macro_invocation_arguments ..            macro expansion: arguments,
 //   c_preprocess_expand                        stringify, paste, rescan
@@ -865,12 +869,19 @@ BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource transl
 {
     u64 length = end - start;
     u16 stored = length < C_TOKEN_LENGTH_OVERSIZED ? (u16)length : c_token_push_long_length(translated, start, end, kind);
-    result->tokens[result->token_count++] = (CToken){
+    u64 token_index = result->token_count;
+    CToken token = {
         .offset = translated.translated_offset + (u32)start,
         .length = stored,
         .kind = (u8)kind,
         .punctuator = (u8)punctuator,
     };
+    result->tokens[token_index] = token;
+    if (result->token_shapes)
+    {
+        result->token_shapes[token_index] = c_token_shape_from_token(token);
+    }
+    result->token_count = token_index + 1;
 }
 
 BUSTER_C_INTERNAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic_arena, u64* diagnostic_capacity, u64 maximum_diagnostic_count,
@@ -1559,8 +1570,9 @@ BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
 // zeroing masks rather than from sacrificial zero lanes, which is what
 // lets one pass cover sixteen rows where the earlier eight-row form spent
 // the offset vector's masked-off upper lanes as its zero source.
-BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, __m512i starts, __m512i lengths, __m512i kinds, __m512i punctuators, __m512i base,
-                                                        __m512i index_0, __m512i index_1, __m512i index_2)
+BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, CTokenShape* shapes_out, u64 shape_mask, __m512i starts, __m512i lengths,
+                                                        __m512i kinds, __m512i punctuators, __m512i shapes, __m512i base, __m512i index_0,
+                                                        __m512i index_1, __m512i index_2)
 {
     __m512i start_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(starts));
     __m512i length_wide = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
@@ -1572,6 +1584,7 @@ BUSTER_C_INLINE BUSTER_INLINE void c_lex_store_rows(CToken* out, __m512i starts,
     _mm512_storeu_si512((__m512i*)dwords, _mm512_maskz_permutex2var_epi32(0xDB6D, offsets, index_0, metadata));
     _mm512_storeu_si512((__m512i*)(dwords + 16), _mm512_maskz_permutex2var_epi32(0x6DB6, offsets, index_1, metadata));
     _mm512_storeu_si512((__m512i*)(dwords + 32), _mm512_maskz_permutex2var_epi32(0xB6DB, offsets, index_2, metadata));
+    _mm512_mask_storeu_epi8(shapes_out, (__mmask64)shape_mask, shapes);
 }
 
 BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
@@ -2044,8 +2057,12 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             // `.` opening a number, say — so the field is cleared first.
             __m512i punctuator_ids =
                 _mm512_maskz_compress_epi8((__mmask64)start_mask, _mm512_maskz_mov_epi8((__mmask64)operator_starts, punctuator_vector));
+            __m512i punctuator_shapes = _mm512_or_si512(punctuator_vector, _mm512_set1_epi8((char)C_TOKEN_SHAPE_PUNCTUATOR));
+            __m512i shape_vector = _mm512_mask_mov_epi8(kind_vector, (__mmask64)operator_starts, punctuator_shapes);
+            __m512i shapes = _mm512_maskz_compress_epi8((__mmask64)start_mask, shape_vector);
 
             CToken* out = result->tokens + result->token_count;
+            CTokenShape* shapes_out = result->token_shapes + result->token_count;
             __m512i base = _mm512_set1_epi32((s32)(u32)((u64)translated_offset + offset));
             // Sixteen rows per pass, tail rows included: the token array
             // carries sixteen slots of slack and the next window overwrites
@@ -2059,7 +2076,9 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             // here.
             for (u32 written = 0;;)
             {
-                c_lex_store_rows(out + written, start_positions, lengths, kinds, punctuator_ids, base, row_index_0, row_index_1, row_index_2);
+                u32 shape_count = BUSTER_MIN(count - written, UINT32_C(16));
+                c_lex_store_rows(out + written, shapes_out + written, c_lex_mask_below(shape_count), start_positions, lengths, kinds, punctuator_ids,
+                                 shapes, base, row_index_0, row_index_1, row_index_2);
                 written += 16;
                 if (written >= count)
                 {
@@ -2069,6 +2088,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
                 lengths = _mm512_alignr_epi32(lengths, lengths, 4);
                 kinds = _mm512_alignr_epi32(kinds, kinds, 4);
                 punctuator_ids = _mm512_alignr_epi32(punctuator_ids, punctuator_ids, 4);
+                shapes = _mm512_alignr_epi32(shapes, shapes, 4);
             }
             result->token_count += count;
             offset += bound;
@@ -2197,7 +2217,9 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
         // One token per byte bounds the stream including the end marker exactly as
         // the scalar loop needs; sixteen more absorb the tail rows of the emitter's
         // full-width interleaved stores, which the next window overwrites.
-        result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 16);
+        u64 token_capacity = translated.source.length + 1 + 16;
+        result.tokens = arena_allocate(arena, CToken, token_capacity);
+        result.token_shapes = arena_allocate(arena, CTokenShape, token_capacity);
         if (translated.source.length <= UINT64_MAX / sizeof(CDiagnostic) - 1)
         {
             u64 diagnostic_bytes = (translated.source.length + 1) * sizeof(CDiagnostic);
@@ -2843,17 +2865,22 @@ typedef struct CTokenStream CTokenStream;
 struct CTokenStream
 {
     Arena* arena;
+    Arena* shape_arena;
     CToken* base;
+    CTokenShape* shape_base;
 };
 
-BUSTER_C_INTERNAL CToken* c_token_stream_reserve(CTokenStream* stream, u64 token_count)
+BUSTER_C_INTERNAL CToken* c_token_stream_reserve(CTokenStream* stream, u64 token_count, CTokenShape** shapes_out)
 {
-    return arena_allocate(stream->arena, CToken, token_count);
+    CToken* result = arena_allocate(stream->arena, CToken, token_count);
+    *shapes_out = arena_allocate(stream->shape_arena, CTokenShape, token_count);
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_token_stream_shrink(CTokenStream* stream, u64 surplus_token_count)
 {
     arena_set_position(stream->arena, stream->arena->position - surplus_token_count * sizeof(CToken));
+    arena_set_position(stream->shape_arena, stream->shape_arena->position - surplus_token_count * sizeof(CTokenShape));
 }
 
 typedef enum CMacroExpansionTaskKind
@@ -4890,7 +4917,8 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
                                                             CPreprocessTokenNode* first_line, u64 line_output_count,
                                                             CTokenStream* token_stream, u64* output_count)
 {
-    CToken* tokens = c_token_stream_reserve(token_stream, line_output_count);
+    CTokenShape* shapes = 0;
+    CToken* tokens = c_token_stream_reserve(token_stream, line_output_count, &shapes);
     u64 count = 0;
     u64 foreign_length = 0;
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
@@ -4935,6 +4963,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
             run_open = false;
         }
         tokens[count] = item.token;
+        shapes[count] = c_token_shape_from_token(item.token);
         count += 1;
     }
     c_token_stream_shrink(token_stream, line_output_count - count);
@@ -5794,8 +5823,17 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                               .flags = {.pool_reuse = 1},
                                           })
                                         : 0;
-    if (!token_arena)
+    Arena* token_shape_arena = token_arena ? arena_create((ArenaCreation){
+                                                               .reserved_size = BUSTER_GB(1),
+                                                               .flags = {.pool_reuse = 1},
+                                                           })
+                                          : 0;
+    if (!token_shape_arena)
     {
+        if (token_arena)
+        {
+            arena_destroy(token_arena, 1);
+        }
         if (spelling_arena)
         {
             arena_destroy(spelling_arena, 1);
@@ -5811,6 +5849,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     *recovery = (CSourceMapRecovery){
         .spelling_arena = spelling_arena,
         .token_arena = token_arena,
+        .token_shape_arena = token_shape_arena,
     };
     result.recovery = recovery;
     result.spelling_base = space->base;
@@ -6141,7 +6180,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
     CTokenStream token_stream = {
         .arena = token_arena,
+        .shape_arena = token_shape_arena,
         .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+        .shape_base = (CTokenShape*)((char8*)token_shape_arena + arena_minimum_position),
     };
     u64 output_count = 0;
     CPragmaPackStack* pack_stack = 0;
@@ -6729,14 +6770,36 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             // directive lines and _Pragma markers change pack state), so
             // one sample covers the whole batch.
             c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
-            CToken* line_output = c_token_stream_reserve(&token_stream, logical_end - token_index);
+            CTokenShape* line_shapes = 0;
+            CToken* line_output = c_token_stream_reserve(&token_stream, logical_end - token_index, &line_shapes);
             u64 written = 0;
-            for (u64 scan = token_index; scan < logical_end; scan += 1)
+            for (u64 scan = token_index; scan < logical_end;)
             {
-                if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                u64 segment_start = scan;
+                while (scan < logical_end && lex.tokens[scan].kind != C_TOKEN_NEWLINE)
                 {
-                    line_output[written] = lex.tokens[scan];
-                    written += 1;
+                    scan += 1;
+                }
+                u64 segment_count = scan - segment_start;
+                if (segment_count)
+                {
+                    memcpy(line_output + written, lex.tokens + segment_start, segment_count * sizeof(*line_output));
+                    if (lex.token_shapes)
+                    {
+                        memcpy(line_shapes + written, lex.token_shapes + segment_start, segment_count * sizeof(*line_shapes));
+                    }
+                    else
+                    {
+                        for (u64 segment_index = 0; segment_index < segment_count; segment_index += 1)
+                        {
+                            line_shapes[written + segment_index] = c_token_shape_from_token(line_output[written + segment_index]);
+                        }
+                    }
+                    written += segment_count;
+                }
+                if (scan < logical_end)
+                {
+                    scan += 1;
                 }
             }
             c_token_stream_shrink(&token_stream, (logical_end - token_index) - written);
@@ -6776,12 +6839,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             break;
         }
     }
-    CToken* end_of_file = c_token_stream_reserve(&token_stream, 1);
+    CTokenShape* end_of_file_shape = 0;
+    CToken* end_of_file = c_token_stream_reserve(&token_stream, 1, &end_of_file_shape);
     *end_of_file = (CToken){
         .offset = root_lex.tokens[root_lex.token_count - 1].offset,
         .kind = C_TOKEN_END_OF_FILE,
     };
+    end_of_file_shape[0] = c_token_shape_from_token(*end_of_file);
     result.tokens = token_stream.base;
+    recovery->token_shapes = token_stream.shape_base;
     result.token_count = output_count + 1;
     result.pack_changes = pack_changes.changes;
     result.pack_change_count = pack_changes.count;

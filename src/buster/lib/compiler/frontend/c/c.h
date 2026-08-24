@@ -148,6 +148,48 @@ BUSTER_CT_CHECK(sizeof(CToken) == 12);
 BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(C_TOKEN_KIND_COUNT <= UINT8_MAX);
 
+// The parser asks about a token's shape far more often than it reads its
+// spelling, offset, or symbol.  Keep that projection in one byte beside the
+// final token stream: non-punctuators use their CTokenKind directly, while a
+// punctuator carries a high-bit tag and its CPunctuator id in the low bits.
+// The tag deliberately leaves the CToken ABI untouched; rows remain the
+// 12-byte public record consumed by preprocessing and lowering callers.
+typedef u8 CTokenShape;
+enum
+{
+    C_TOKEN_SHAPE_PUNCTUATOR = UINT8_C(0x80),
+    C_TOKEN_SHAPE_PUNCTUATOR_MASK = UINT8_C(0x7f),
+};
+
+BUSTER_CT_CHECK((u32)C_PUNCTUATOR_COUNT <= (u32)C_TOKEN_SHAPE_PUNCTUATOR_MASK);
+BUSTER_CT_CHECK((u32)C_TOKEN_KIND_COUNT < (u32)C_TOKEN_SHAPE_PUNCTUATOR);
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_token_shape_from_fields(CTokenKind kind, CPunctuator punctuator)
+{
+    CTokenShape result = kind == C_TOKEN_PUNCTUATOR ? (CTokenShape)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)punctuator) : (CTokenShape)kind;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_token_shape_from_token(CToken token)
+{
+    return c_token_shape_from_fields((CTokenKind)token.kind, (CPunctuator)token.punctuator);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_shape_is_punctuator(CTokenShape shape)
+{
+    return (shape & C_TOKEN_SHAPE_PUNCTUATOR) != 0;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenKind c_token_shape_kind(CTokenShape shape)
+{
+    return c_token_shape_is_punctuator(shape) ? C_TOKEN_PUNCTUATOR : (CTokenKind)shape;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CPunctuator c_token_shape_punctuator(CTokenShape shape)
+{
+    return c_token_shape_is_punctuator(shape) ? (CPunctuator)(shape & C_TOKEN_SHAPE_PUNCTUATOR_MASK) : C_PUNCTUATOR_NONE;
+}
+
 // A set of punctuators as a 64-bit mask: bit `p` is a member test for
 // CPunctuator `p`.  Every id is a valid bit position because the whole enum
 // fits in 64 values, which the check below holds it to; adding a 65th
@@ -348,6 +390,10 @@ struct CLexResult
     // the lex ran inside c_preprocess.
     char8 const* spelling_base;
     CToken* tokens;
+    // One byte per token, in the same order as `tokens`: raw CTokenKind for
+    // non-punctuators and a tagged CPunctuator for punctuators.  The
+    // preprocessor copies this projection into its final private stream.
+    CTokenShape* token_shapes;
     CDiagnostic* diagnostics;
     // Location checkpoints of the translated source, retained so a token's
     // line/column recover on demand from its offset: the original-source
@@ -463,6 +509,11 @@ struct CSourceMapRecovery
     // tokens into a private arena so each lands in its final slot once.
     // Same lifetime contract as the spelling arena — destroy both together.
     Arena* token_arena;
+    // Owns the one-byte kind|punctuator projection beside the token rows.
+    // Keeping it in a separate private arena preserves the row stream's
+    // contiguous layout while giving parser shape walks a linear byte scan.
+    Arena* token_shape_arena;
+    CTokenShape* token_shapes;
     IrSourceMap map;
     // Region-array capacity, kept across the respell pass that may append.
     u32 capacity;
@@ -1080,6 +1131,27 @@ BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preproces
 // of the final stream.
 BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
 BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape const* c_preprocess_token_shapes(CPreprocessResult const* preprocess)
+{
+    CTokenShape const* result = preprocess && preprocess->recovery ? preprocess->recovery->token_shapes : 0;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_preprocess_token_shape(CPreprocessResult const* preprocess, u32 token_index)
+{
+    CTokenShape const* shapes = c_preprocess_token_shapes(preprocess);
+    CTokenShape result = C_TOKEN_INVALID;
+    if (preprocess)
+    {
+        result = shapes ? shapes[token_index] : preprocess->tokens ? c_token_shape_from_token(preprocess->tokens[token_index]) : C_TOKEN_INVALID;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_preprocess_token_shape_at(CTokenShape const* shapes,
+                                                                                             CPreprocessResult const* preprocess,
+                                                                                             u32 token_index)
+{
+    return shapes ? shapes[token_index] : preprocess && preprocess->tokens ? c_token_shape_from_token(preprocess->tokens[token_index]) : C_TOKEN_INVALID;
+}
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
