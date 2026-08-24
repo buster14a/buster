@@ -84,6 +84,9 @@ struct NativeExecutableLinkResult
 };
 
 BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
+// Synthetic compiler-runtime input for hosted Windows executable links only;
+// object and relocatable output paths, UEFI, and non-Windows targets do not use it.
+BUSTER_F_DECL ObjectFile link_windows_runtime_object(Arena* arena, Target target);
 BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options);
 BUSTER_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,

@@ -843,6 +843,59 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     return result;
 }
 
+ObjectFile link_windows_runtime_object(Arena* arena, Target target)
+{
+    ObjectFile result = {
+        .target = target,
+    };
+    if (!arena)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
+    if (target.os != OPERATING_SYSTEM_WINDOWS || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        return result;
+    }
+
+    // MSVC-compatible COFF objects emit a reference to this data symbol when
+    // a translation unit uses floating point.  UCRT exposes the runtime
+    // functions but not the compiler marker itself, so it belongs to the
+    // compiler's Windows runtime policy rather than to a user fixture.  Keep
+    // the definition weak: a CRT or application object with the real marker
+    // wins, while mixed Clang/Buster links get the same four-byte contract as
+    // an MSVC startup object.
+    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+    result.section_count = OBJECT_SECTION_COUNT;
+    for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+    {
+        ObjectSectionKind kind = (ObjectSectionKind)section_index;
+        result.sections[section_index] = (ObjectSection){
+            .name = object_section_name_for_kind(kind),
+            .kind = kind,
+            .alignment = object_section_default_alignment(kind),
+        };
+    }
+    u8* marker = arena_allocate(arena, u8, sizeof(u32));
+    u32 marker_value = 1;
+    memcpy(marker, &marker_value, sizeof(marker_value));
+    result.sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = marker, .length = sizeof(marker_value)};
+    result.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(marker_value);
+    result.sections[OBJECT_SECTION_DATA].alignment = sizeof(marker_value);
+    result.symbols = arena_allocate(arena, ObjectSymbol, 1);
+    result.symbol_count = 1;
+    result.symbols[0] = (ObjectSymbol){
+        .name = S8("_fltused"),
+        .size = sizeof(marker_value),
+        .section = OBJECT_SECTION_DATA,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+        .weak = true,
+    };
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void link_write_u16(u8* bytes, u64 offset, u16 value)
 {
     memcpy(bytes + offset, &value, sizeof(value));

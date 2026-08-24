@@ -4436,6 +4436,192 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
             scratch_end(wine_temporary);
         }
+        // The generated corpus is intentionally a single FAST lane in CI.
+        // The full MIR_STACK/NONE/QUALITY matrix was run manually while
+        // isolating the ABI defect; existing allocator-focused tests cover
+        // those modes without multiplying this expensive generated compile.
+        String8 wine_c_abi_allocator = S8("fast");
+        String8 wine_c_abi_sources[] = {
+            S8("tests/c_abi_main.c"),
+            S8("tests/c_abi_main_generated.c"),
+            S8("tests/c_abi_cfuncs.c"),
+        };
+        // Keep the objects on disk after their compile arena is released.  The
+        // differential block below reuses these exact objects for both mixed
+        // directions, so each Buster translation unit is built once.
+        String8 wine_c_abi_buster_objects[3] = {0};
+        bool wine_c_abi_buster_ready = false;
+        if (wine_available)
+        {
+            Arena* wine_c_abi_arena = arena_create((ArenaCreation){
+                .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+            });
+            BUSTER_TEST(arguments, wine_c_abi_arena != 0);
+            if (!wine_c_abi_arena)
+            {
+                wine_available = false;
+            }
+            String8 wine_c_abi_path = buster_test_temporary_path(
+                arguments->arena, S8("buster-c-abi-windows"), S8("-fast.exe"));
+            bool buster_objects_ready = wine_c_abi_arena != 0;
+            for (u32 source_index = 0; wine_c_abi_arena && source_index < BUSTER_ARRAY_LENGTH(wine_c_abi_sources); source_index += 1)
+            {
+                wine_c_abi_buster_objects[source_index] = buster_test_temporary_path(
+                    arguments->arena, S8("buster-c-abi-buster"),
+                    string_format(arguments->arena, S8("-fast-{u32}.obj"), source_index));
+                String8 wine_c_abi_compile_command_line[] = {
+                    S8("-c"),
+                    S8("-g0"),
+                    S8("-target"),
+                    S8("x86_64-pc-windows-msvc"),
+                    S8("-march=native"),
+                    S8("-fregister-allocator=fast"),
+                    S8("-o"),
+                    wine_c_abi_buster_objects[source_index],
+                    wine_c_abi_sources[source_index],
+                };
+                // Keep the allocator value attached to its option; the
+                // argument parser accepts this single spelling.
+                wine_c_abi_compile_command_line[5] = string_format(
+                    wine_c_abi_arena, S8("-fregister-allocator={S8}"), wine_c_abi_allocator);
+                CompilerDriverResult wine_c_abi_compile = compiler_driver_execute_invocation(
+                    wine_c_abi_arena,
+                    compiler_driver_parse_arguments(wine_c_abi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_c_abi_compile_command_line)));
+                BUSTER_TEST(arguments, wine_c_abi_compile.error == COMPILER_DRIVER_ERROR_NONE && wine_c_abi_compile.has_object);
+                buster_objects_ready &= wine_c_abi_compile.error == COMPILER_DRIVER_ERROR_NONE && wine_c_abi_compile.has_object;
+            }
+            wine_c_abi_buster_ready = buster_objects_ready;
+            BUSTER_TEST(arguments, wine_c_abi_buster_ready);
+            if (buster_objects_ready)
+            {
+                String8 wine_c_abi_link_command_line[] = {
+                    S8("-target"),
+                    S8("x86_64-pc-windows-msvc"),
+                    S8("-march=native"),
+                    S8("-o"),
+                    wine_c_abi_path,
+                    wine_c_abi_buster_objects[0],
+                    wine_c_abi_buster_objects[1],
+                    wine_c_abi_buster_objects[2],
+                };
+                CompilerDriverResult wine_c_abi_link = compiler_driver_execute_invocation(
+                    wine_c_abi_arena,
+                    compiler_driver_parse_arguments(wine_c_abi_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_c_abi_link_command_line)));
+                BUSTER_TEST(arguments, wine_c_abi_link.error == COMPILER_DRIVER_ERROR_NONE);
+                if (wine_c_abi_link.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 wine_c_abi_run_arguments[] = {S8("wine"), wine_c_abi_path};
+                    ProcessSpawnResult wine_c_abi_run =
+                        os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_c_abi_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+                    BUSTER_TEST(arguments, wine_c_abi_run.handle != 0);
+                    if (wine_c_abi_run.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(wine_c_abi_arena, wine_c_abi_run).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+            if (wine_c_abi_arena)
+            {
+                BUSTER_TEST(arguments, arena_destroy(wine_c_abi_arena, 1));
+            }
+        }
+#if defined(BUSTER_HOST_C_COMPILER)
+        // Differential rows keep one side in the host Clang object writer and
+        // the other in buster's Win64 codegen.  The generated cfuncs fixture
+        // carries freestanding memcpy/memset helpers, so this lane has no CRT
+        // dependency and tests the ABI plus the `_fltused` runtime policy.
+        // A standalone lld-link reproduction must pass /stack:0x800000:
+        // lld's 1 MiB default overflows the wide-vector fixture, while the
+        // Buster PE linker reserves 8 MiB.  The driver links below use the
+        // latter policy directly, so this is not an ABI mismatch.
+        bool wine_clang_available = wine_available;
+        String8 wine_clang_probe_arguments[] = {S8(BUSTER_HOST_C_COMPILER), S8("--version")};
+        if (wine_clang_available)
+        {
+            ProcessSpawnResult wine_clang_probe = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_clang_probe_arguments), (SliceString8){0},
+                                                                    (SliceString8){0}, wine_options);
+            wine_clang_available = wine_clang_probe.handle && os_process_wait_sync(arguments->arena, wine_clang_probe).result == PROCESS_RESULT_SUCCESS;
+        }
+        if (wine_clang_available)
+        {
+            TemporalArena wine_mixed_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* wine_mixed_arena = wine_mixed_temporary.arena;
+            String8 wine_clang_sources[] = {
+                S8("tests/c_abi_main.c"),
+                S8("tests/c_abi_main_generated.c"),
+                S8("tests/c_abi_cfuncs.c"),
+            };
+            String8 wine_clang_objects[3] = {0};
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(wine_clang_sources); source_index += 1)
+            {
+                wine_clang_objects[source_index] =
+                    buster_test_temporary_path(wine_mixed_arena, S8("buster-c-abi-clang"), string_format(wine_mixed_arena, S8("-{u32}.obj"), source_index));
+                String8 wine_clang_compile_arguments[] = {
+                    S8(BUSTER_HOST_C_COMPILER),
+                    S8("-target"),
+                    S8("x86_64-pc-windows-msvc"),
+                    S8("-march=native"),
+                    S8("-O0"),
+                    S8("-g0"),
+                    S8("-c"),
+                    S8("-o"),
+                    wine_clang_objects[source_index],
+                    wine_clang_sources[source_index],
+                };
+                ProcessSpawnResult wine_clang_compile =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_clang_compile_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
+                BUSTER_TEST(arguments, wine_clang_compile.handle != 0);
+                if (!wine_clang_compile.handle || os_process_wait_sync(wine_mixed_arena, wine_clang_compile).result != PROCESS_RESULT_SUCCESS)
+                {
+                    wine_clang_available = false;
+                    break;
+                }
+            }
+            if (wine_c_abi_buster_ready && wine_clang_available)
+            {
+                Arena* mode_arena = arena_create((ArenaCreation){
+                    .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+                });
+                BUSTER_TEST(arguments, mode_arena != 0);
+                if (mode_arena)
+                {
+                    String8 mixed_executables[] = {
+                        buster_test_temporary_path(mode_arena, S8("buster-c-abi-mixed-clang-main"), S8(".exe")),
+                        buster_test_temporary_path(mode_arena, S8("buster-c-abi-mixed-buster-main"), S8(".exe")),
+                    };
+                    String8 mixed_link_commands[][8] = {
+                        {
+                            S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=native"), S8("-o"), mixed_executables[0],
+                            wine_clang_objects[0], wine_clang_objects[1], wine_c_abi_buster_objects[2],
+                        },
+                        {
+                            S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=native"), S8("-o"), mixed_executables[1],
+                            wine_c_abi_buster_objects[0], wine_c_abi_buster_objects[1], wine_clang_objects[2],
+                        },
+                    };
+                    for (u32 direction = 0; direction < BUSTER_ARRAY_LENGTH(mixed_executables); direction += 1)
+                    {
+                        CompilerDriverResult mixed_link = compiler_driver_execute_invocation(
+                            mode_arena, compiler_driver_parse_arguments(mode_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_link_commands[direction])));
+                        BUSTER_TEST(arguments, mixed_link.error == COMPILER_DRIVER_ERROR_NONE);
+                        if (mixed_link.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 mixed_run_arguments[] = {S8("wine"), mixed_executables[direction]};
+                            ProcessSpawnResult mixed_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_run_arguments), (SliceString8){0},
+                                                                             (SliceString8){0}, wine_options);
+                            BUSTER_TEST(arguments, mixed_run.handle != 0);
+                            if (mixed_run.handle)
+                            {
+                                BUSTER_TEST(arguments, os_process_wait_sync(mode_arena, mixed_run).result == PROCESS_RESULT_SUCCESS);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, arena_destroy(mode_arena, 1));
+                }
+            }
+            scratch_end(wine_mixed_temporary);
+        }
+#endif
         // The wide fixture again at pinned sub-AVX-512 models, run under
         // wine: the eight- and four-piece argument straddles and the
         // hidden-pointer wide result only exist below the host's likely

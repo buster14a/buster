@@ -42,6 +42,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
     };
 }
 
+#if BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL u32 link_test_symbol_find(ObjectFile* object, String8 name)
+{
+    for (u32 symbol_index = 0; object && symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        if (string_equal(object->symbols[symbol_index].name, name))
+        {
+            return symbol_index;
+        }
+    }
+    return UINT32_MAX;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL String8 link_test_symbol_name_write(char8* destination, u32 value)
 {
     static char8 const hexadecimal[] = "0123456789abcdef";
@@ -2052,6 +2066,94 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                               });
     BUSTER_TEST(arguments, permitted.error == LINK_ERROR_NONE);
 #if BUSTER_CPU_ARCH_X86_64
+    // The hosted Windows runtime supplies compiler marker data that UCRT does
+    // not export.  Keep it in the executable-link input policy: a weak
+    // definition resolves Clang objects, yields to an application/CRT strong
+    // definition, and does not hide any unrelated unresolved symbol.
+    Target windows_runtime_target = linked.object.target;
+    windows_runtime_target.os = OPERATING_SYSTEM_WINDOWS;
+    windows_runtime_target.cpu_arch = CPU_ARCH_X86_64;
+    ObjectFile windows_runtime = link_windows_runtime_object(arguments->arena, windows_runtime_target);
+    BUSTER_TEST(arguments, windows_runtime.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_runtime.symbol_count == 1 && windows_runtime.symbols && windows_runtime.symbols[0].weak &&
+                               string_equal(windows_runtime.symbols[0].name, S8("_fltused")) &&
+                               windows_runtime.symbols[0].section == OBJECT_SECTION_DATA && windows_runtime.sections[OBJECT_SECTION_DATA].data.length == sizeof(u32));
+    Target windows_runtime_linux_target = windows_runtime_target;
+    windows_runtime_linux_target.os = OPERATING_SYSTEM_LINUX;
+    ObjectFile windows_runtime_linux = link_windows_runtime_object(arguments->arena, windows_runtime_linux_target);
+    BUSTER_TEST(arguments, windows_runtime_linux.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    Target windows_runtime_uefi_target = windows_runtime_target;
+    windows_runtime_uefi_target.os = OPERATING_SYSTEM_UEFI;
+    ObjectFile windows_runtime_uefi = link_windows_runtime_object(arguments->arena, windows_runtime_uefi_target);
+    BUSTER_TEST(arguments, windows_runtime_uefi.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    u8 windows_runtime_text_bytes[] = {0xc3};
+    ObjectSymbol windows_runtime_undefined_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(windows_runtime_text_bytes),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("_fltused"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectFile windows_runtime_undefined =
+        link_test_object_make(arguments->arena, windows_runtime_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_runtime_text_bytes),
+                              windows_runtime_undefined_symbols, BUSTER_ARRAY_LENGTH(windows_runtime_undefined_symbols), 0, 0);
+    ObjectFile windows_runtime_inputs[] = {windows_runtime_undefined, windows_runtime};
+    LinkObjectResult windows_runtime_link = link_objects(arguments->arena, windows_runtime_inputs, BUSTER_ARRAY_LENGTH(windows_runtime_inputs), (LinkOptions){0});
+    BUSTER_TEST(arguments, windows_runtime_link.error == LINK_ERROR_NONE);
+    u32 windows_runtime_symbol_index = link_test_symbol_find(&windows_runtime_link.object, S8("_fltused"));
+    BUSTER_TEST(arguments, windows_runtime_symbol_index != UINT32_MAX && windows_runtime_link.object.symbols[windows_runtime_symbol_index].section == OBJECT_SECTION_DATA &&
+                               windows_runtime_link.object.symbols[windows_runtime_symbol_index].weak);
+    u8 windows_runtime_strong_data[] = {7, 0, 0, 0};
+    ObjectSection* windows_runtime_strong_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(windows_runtime_strong_sections, windows_runtime_undefined.sections, (u64)OBJECT_SECTION_COUNT * sizeof(*windows_runtime_strong_sections));
+    windows_runtime_strong_sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_runtime_strong_data);
+    windows_runtime_strong_sections[OBJECT_SECTION_DATA].virtual_size = sizeof(windows_runtime_strong_data);
+    ObjectSymbol windows_runtime_strong_symbols[] = {
+        windows_runtime_undefined_symbols[0],
+        {
+            .name = S8("_fltused"),
+            .size = sizeof(windows_runtime_strong_data),
+            .section = OBJECT_SECTION_DATA,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectFile windows_runtime_strong = windows_runtime_undefined;
+    windows_runtime_strong.sections = windows_runtime_strong_sections;
+    windows_runtime_strong.symbols = windows_runtime_strong_symbols;
+    windows_runtime_strong.symbol_count = BUSTER_ARRAY_LENGTH(windows_runtime_strong_symbols);
+    ObjectFile windows_runtime_strong_inputs[] = {windows_runtime_strong, windows_runtime};
+    LinkObjectResult windows_runtime_strong_link =
+        link_objects(arguments->arena, windows_runtime_strong_inputs, BUSTER_ARRAY_LENGTH(windows_runtime_strong_inputs), (LinkOptions){0});
+    BUSTER_TEST(arguments, windows_runtime_strong_link.error == LINK_ERROR_NONE);
+    u32 windows_runtime_strong_index = link_test_symbol_find(&windows_runtime_strong_link.object, S8("_fltused"));
+    BUSTER_TEST(arguments, windows_runtime_strong_index != UINT32_MAX && windows_runtime_strong_link.object.symbols[windows_runtime_strong_index].section == OBJECT_SECTION_DATA &&
+                               !windows_runtime_strong_link.object.symbols[windows_runtime_strong_index].weak &&
+                               windows_runtime_strong_link.object.symbols[windows_runtime_strong_index].value == 0);
+    ObjectSymbol windows_runtime_missing_symbols[] = {
+        windows_runtime_undefined_symbols[0],
+        {
+            .name = S8("missing_runtime_symbol"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectFile windows_runtime_missing = windows_runtime_undefined;
+    windows_runtime_missing.symbols = windows_runtime_missing_symbols;
+    ObjectFile windows_runtime_missing_inputs[] = {windows_runtime_missing, windows_runtime};
+    LinkObjectResult windows_runtime_missing_link =
+        link_objects(arguments->arena, windows_runtime_missing_inputs, BUSTER_ARRAY_LENGTH(windows_runtime_missing_inputs), (LinkOptions){0});
+    BUSTER_TEST(arguments, windows_runtime_missing_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+    BUSTER_STRING_TEST(arguments, windows_runtime_missing_link.symbol, S8("missing_runtime_symbol"));
     ObjectFile windows_object = linked.object;
     windows_object.target.os = OPERATING_SYSTEM_WINDOWS;
     windows_object.sections = arena_allocate(arguments->arena, ObjectSection, linked.object.section_count);

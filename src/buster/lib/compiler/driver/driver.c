@@ -29,6 +29,11 @@ void compiler_prewarm(void)
     codegen_prewarm();
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_windows_runtime_object_target(Target target)
+{
+    return target.os == OPERATING_SYSTEM_WINDOWS && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, String8 prefix)
 {
     if (!string_starts_with_sequence(argument, prefix))
@@ -2444,7 +2449,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    LinkObjectResult linked = link_objects(arena, &object, 1,
+    ObjectFile link_inputs[2] = {object};
+    u32 link_input_count = 1;
+    if (compiler_driver_windows_runtime_object_target(invocation.target))
+    {
+        link_inputs[link_input_count++] = link_windows_runtime_object(arena, invocation.target);
+    }
+    LinkObjectResult linked = link_objects(arena, link_inputs, link_input_count,
                                            (LinkOptions){
                                                .allow_undefined_symbols = true,
                                            });
@@ -2782,6 +2793,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += archive.object_count;
     }
+    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
+    {
+        if (object_capacity == UINT32_MAX)
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = S8("too many link inputs");
+            goto finish;
+        }
+        object_capacity += 1;
+    }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, object_capacity);
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
     u32 object_count = 0;
@@ -3021,6 +3042,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 added = true;
             }
         } while (added);
+    }
+    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
+    {
+        objects[object_count++] = link_windows_runtime_object(arena, invocation.target);
     }
     if (invocation.emit_llvm_bitcode)
     {

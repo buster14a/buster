@@ -5,6 +5,27 @@
 // gate contract.
 #include "c_abi.h"
 
+// The Clang half of the differential build has no hosted CRT object
+// to provide aggregate-copy builtins. Keep these freestanding helpers
+// in the generated fixture so mixed Clang/Buster links exercise only
+// the ABI under test (the executable-link driver supplies _fltused).
+void *memcpy(void *destination, void const *source, unsigned long long length) {
+    unsigned char *out = (unsigned char *)destination;
+    unsigned char const *in = (unsigned char const *)source;
+    for (unsigned long long index = 0; index < length; index += 1) {
+        out[index] = in[index];
+    }
+    return destination;
+}
+
+void *memset(void *destination, int value, unsigned long long length) {
+    unsigned char *out = (unsigned char *)destination;
+    for (unsigned long long index = 0; index < length; index += 1) {
+        out[index] = (unsigned char)value;
+    }
+    return destination;
+}
+
 void zig_panic(void);
 
 static void assert_or_panic(bool ok) {
