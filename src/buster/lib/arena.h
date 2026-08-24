@@ -24,7 +24,12 @@ struct Arena
     u64 os_position;
     u64 granularity;
     ArenaFlags flags;
-    u8 reserved[24];
+    // High-water mark retained across logical rewinds. Fresh mappings start
+    // at the header; the live position supplies the current high water without
+    // a store on every allocation, and pooled reuse carries the saved mark
+    // across header reinitialization.
+    u64 dirty_position;
+    u8 reserved[16];
 };
 
 // The arenas need to be aligned in order for SIMD data (AVX buffers, vertex data) to work as expected
@@ -59,6 +64,7 @@ BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
 BUSTER_F_DECL u64 arena_pool_release_thread(void);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position, u64 alignment);
+BUSTER_F_DECL u64 arena_dirty_position(Arena* arena);
 BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
 // Resets the logical position and releases only complete native pages beyond
 // it. This remains safe for legal arenas whose granularity is sub-page.

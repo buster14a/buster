@@ -16930,10 +16930,25 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         u64 cache_size = sizeof(CodegenX64MetadataCache) + (u64)template_capacity * sizeof(CodegenX64TemplateCacheEntry);
         if (module->function_count && cache_size <= arena->reserved_size - BUSTER_MIN(arena->position, arena->reserved_size))
         {
+            u64 template_dirty_position = arena_dirty_position(arena);
             x64_metadata_cache = arena_allocate(arena, CodegenX64MetadataCache, 1);
             memset(x64_metadata_cache, 0, sizeof(*x64_metadata_cache));
             x64_metadata_cache->templates = arena_allocate(arena, CodegenX64TemplateCacheEntry, template_capacity);
-            memset(x64_metadata_cache->templates, 0, sizeof(*x64_metadata_cache->templates) * template_capacity);
+            // `dirty_position` is the allocation high-water mark, not the
+            // logical position: a temporal rewind and a pooled arena can put
+            // old bytes ahead of the current cursor.  Only that overlap can
+            // carry a prior template; the suffix was never allocated in this
+            // arena generation and is therefore already zero from the OS.
+            // Clearing through the watermark also handles a boundary that
+            // falls inside an entry, leaving every field after it zero.
+            u64 template_bytes = (u64)template_capacity * sizeof(*x64_metadata_cache->templates);
+            u64 template_end = arena->position;
+            u64 template_start = template_end - template_bytes;
+            u64 clear_end = BUSTER_MIN(template_dirty_position, template_end);
+            if (clear_end > template_start)
+            {
+                memset(x64_metadata_cache->templates, 0, clear_end - template_start);
+            }
             x64_metadata_cache->template_mask = template_capacity - 1u;
         }
     }

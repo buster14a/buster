@@ -1139,6 +1139,58 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, canonical_windows_first.statistics.function_count == canonical_windows_second.statistics.function_count);
             BUSTER_TEST(arguments, canonical_windows_first.statistics.code_bytes == canonical_windows_second.statistics.code_bytes);
         }
+        // The canonical x86 template cache is allocated in the caller's
+        // arena.  A fresh mapping has a dirty watermark at its header, while
+        // a pooled mapping carries the previous high-water mark and therefore
+        // must clear the old cache prefix before probing it.  Compile through
+        // both lifetimes and compare the bytes to catch a stale template hit.
+        {
+            ArenaCreation pooled_codegen_creation = {
+                .reserved_size = BUSTER_MB(64),
+                .initial_size = BUSTER_MB(1),
+                .flags = {.pool_reuse = 1},
+            };
+            arena_pool_release_thread();
+            Arena* pooled_first_arena = arena_create(pooled_codegen_creation);
+            BUSTER_TEST(arguments, pooled_first_arena != 0);
+            if (pooled_first_arena)
+            {
+                CodegenModule pooled_first = codegen_generate_canonical_module(
+                    pooled_first_arena, canonical_program, canonical_module, canonical_windows_target,
+                    (CodegenModuleOptions){
+                        .assume_validated = true,
+                    });
+                BUSTER_TEST(arguments, pooled_first.error == CODEGEN_ERROR_NONE);
+                ByteSlice pooled_expected_code = {0};
+                if (pooled_first.error == CODEGEN_ERROR_NONE)
+                {
+                    pooled_expected_code.length = pooled_first.code.length;
+                    pooled_expected_code.pointer = arena_allocate(arguments->arena, u8, pooled_expected_code.length);
+                    memcpy(pooled_expected_code.pointer, pooled_first.code.pointer, pooled_expected_code.length);
+                }
+                BUSTER_TEST(arguments, arena_dirty_position(pooled_first_arena) > arena_minimum_position);
+                BUSTER_TEST(arguments, arena_destroy(pooled_first_arena, 1));
+
+                Arena* pooled_second_arena = arena_create(pooled_codegen_creation);
+                BUSTER_TEST(arguments, pooled_second_arena != 0);
+                if (pooled_second_arena)
+                {
+                    CodegenModule pooled_second = codegen_generate_canonical_module(
+                        pooled_second_arena, canonical_program, canonical_module, canonical_windows_target,
+                        (CodegenModuleOptions){
+                            .assume_validated = true,
+                        });
+                    BUSTER_TEST(arguments, pooled_second.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, pooled_second.code.length == pooled_expected_code.length);
+                    if (pooled_second.error == CODEGEN_ERROR_NONE && pooled_second.code.length == pooled_expected_code.length)
+                    {
+                        BUSTER_TEST(arguments, !memcmp(pooled_second.code.pointer, pooled_expected_code.pointer, pooled_expected_code.length));
+                    }
+                    BUSTER_TEST(arguments, arena_destroy(pooled_second_arena, 1));
+                }
+                arena_pool_release_thread();
+            }
+        }
         IrFunction* layout_mix_function = codegen_test_c_function_find(canonical_module, S8("layout_mix"));
         IrFunction* leaf_layout_function = codegen_test_c_function_find(canonical_module, S8("leaf_layout"));
         IrFunction* large_layout_function = codegen_test_c_function_find(canonical_module, S8("large_layout"));

@@ -81,6 +81,14 @@ u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position,
     return result;
 }
 
+u64 arena_dirty_position(Arena* arena)
+{
+    // The live cursor is necessarily dirty without paying a high-water store
+    // on every allocation. Rewinds fold that cursor into `dirty_position`.
+    u64 result = arena ? BUSTER_MAX(arena->dirty_position, arena->position) : 0;
+    return result;
+}
+
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
@@ -95,6 +103,7 @@ void arena_reset_to_start(Arena* arena)
 
 void arena_set_position(Arena* arena, u64 position)
 {
+    arena->dirty_position = BUSTER_MAX(arena->dirty_position, BUSTER_MAX(arena->position, position));
     arena->position = position;
 }
 
@@ -124,6 +133,10 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     }
     if (result)
     {
+        // Bytes beyond the native decommit boundary are freshly zeroed if
+        // they are committed again; retain the prefix that can still carry
+        // old contents, including a partial page below that boundary.
+        arena->dirty_position = BUSTER_MIN(BUSTER_MAX(arena->dirty_position, arena->position), decommit_start);
         arena->position = position;
     }
     return result;
@@ -166,14 +179,15 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 // the mapping and its already-faulted pages survive, so the next
 // arena_create skips the unmap/remap pair and the kernel's first-touch page
 // zeroing. A reused arena hands out dirty bytes — the same contract
-// arena_reset_to_start already imposes on every allocation site. The parked
-// arena's first buffer bytes hold the pool link and its header keeps the
-// reservation size the reuse match reads. Non-default reservation sizes
-// join only through the opt-in pool_reuse flag, because a consumer of a
-// custom-size arena may still assume freshly zeroed pages; reuse always
-// requires an exact reservation-size match, so differently shaped arenas
-// never satisfy each other's requests. Multi-arena reservations, execute or
-// locked pages, and entries past the cap unmap exactly as before.
+// arena_reset_to_start already imposes on every allocation site — and its
+// dirty high-water mark survives the header rewrite below. The parked arena's
+// first buffer bytes hold the pool link, so parking raises that watermark
+// before writing the link. Non-default reservation sizes join only through
+// the opt-in pool_reuse flag, because a consumer of a custom-size arena may
+// still assume freshly zeroed pages; reuse always requires an exact
+// reservation-size match, so differently shaped arenas never satisfy each
+// other's requests. Multi-arena reservations, execute or locked pages, and
+// entries past the cap unmap exactly as before.
 #define ARENA_POOL_LIMIT 16
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;
@@ -209,6 +223,7 @@ bool arena_destroy(Arena* arena, u64 count)
     bool result;
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
+        arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
         *(Arena**)((u8*)arena + arena_minimum_position) = arena_pool_head;
         arena_pool_head = arena;
         arena_pool_count += 1;
@@ -261,6 +276,7 @@ Arena* arena_create(ArenaCreation original_creation)
             }
             arena_pool_count -= 1;
             u64 committed = pooled->os_position;
+            u64 dirty_position = BUSTER_MAX(pooled->dirty_position, arena_minimum_position + sizeof(Arena*));
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {
@@ -275,6 +291,7 @@ Arena* arena_create(ArenaCreation original_creation)
                     .os_position = committed,
                     .granularity = creation.granularity,
                     .flags = creation.flags,
+                    .dirty_position = dirty_position,
                 };
                 reused = pooled;
                 break;
@@ -306,6 +323,7 @@ Arena* arena_create(ArenaCreation original_creation)
                         .os_position = arena_os_position_after_commit(creation.initial_size, individual_reserved_size),
                         .granularity = creation.granularity,
                         .flags = creation.flags,
+                        .dirty_position = arena_minimum_position,
                     };
                 }
                 else
@@ -340,5 +358,5 @@ TemporalArena scratch_begin(Arena** conflicts, u64 count)
 void scratch_end(TemporalArena temporal)
 {
     Arena* arena = temporal.arena;
-    arena->position = temporal.position;
+    arena_set_position(arena, temporal.position);
 }
