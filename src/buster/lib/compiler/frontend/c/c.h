@@ -1153,6 +1153,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_preprocess_to
     return shapes ? shapes[token_index] : preprocess && preprocess->tokens ? c_token_shape_from_token(preprocess->tokens[token_index]) : C_TOKEN_INVALID;
 }
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
 // Compatibility entry point for tests and callers that already own an analyzed model.

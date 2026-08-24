@@ -262,6 +262,82 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
 // c_token_length's oversized guard.
 #define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
 
+// The position index and token census classify the same contiguous sidecar in
+// the same tiles. Keeping the tile width here makes a later tile consumer
+// share the census' 2,048-token working set instead of inventing another pass
+// shape.
+#define C_PARSE_TOKEN_TILE_TOKENS 2048
+
+typedef struct CParseDelimiterStackEntry CParseDelimiterStackEntry;
+struct CParseDelimiterStackEntry
+{
+    u32 position;
+    CPunctuator opening;
+};
+
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* result, CPreprocessResult preprocess,
+                                                                   CTokenPositionIndex* index, CTokenShape const* token_shapes,
+                                                                   CParseDelimiterStackEntry* stack, u32* stack_count,
+                                                                   u32* vector_size_capacity, u32* alignas_capacity,
+                                                                   u32* label_candidate_capacity, u32* attribute_capacity,
+                                                                   u32 token_index, CTokenShape shape)
+{
+    if (shape == C_TOKEN_IDENTIFIER)
+    {
+        CToken token = preprocess.tokens[token_index];
+        u8 token_class = c_parse_token_class(result, preprocess, token_index);
+        if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
+        {
+            c_parse_position_index_append(result->arena, &index->vector_size_positions, &index->vector_size_count, vector_size_capacity, token_index);
+        }
+        if (token_class & C_TOKEN_CLASS_ALIGNAS)
+        {
+            c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, alignas_capacity, token_index);
+        }
+        // The next token is one line of this cache at most, and reading
+        // its punctuator here spares the body-lowering loops a re-scan of
+        // every token for the same identifier-then-colon shape.
+        if ((u64)token_index + 1 < preprocess.token_count &&
+            c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, token_index + 1)) == C_PUNCTUATOR_COLON)
+        {
+            c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count, label_candidate_capacity,
+                                          token_index);
+        }
+        if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
+        {
+            c_parse_position_index_append(result->arena, &index->attribute_positions, &index->attribute_count, attribute_capacity, token_index);
+        }
+        return;
+    }
+    if (!c_token_shape_is_punctuator(shape))
+    {
+        return;
+    }
+    CPunctuator punctuator = c_token_shape_punctuator(shape);
+    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE)
+    {
+        stack[(*stack_count)++] = (CParseDelimiterStackEntry){
+            .position = token_index,
+            .opening = punctuator,
+        };
+        return;
+    }
+    CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                           : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                                                                         : punctuator == C_PUNCTUATOR_RIGHT_BRACE ? C_PUNCTUATOR_LEFT_BRACE : C_PUNCTUATOR_NONE;
+    if (expected == C_PUNCTUATOR_NONE)
+    {
+        return;
+    }
+    if (!*stack_count || stack[*stack_count - 1].opening != expected)
+    {
+        index->delimiter_mismatch_count += 1;
+        *stack_count = 0;
+        return;
+    }
+    index->matching_delimiters[stack[--*stack_count].position] = token_index;
+}
+
 BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
 {
     CTokenPositionIndex* index = result->position_index;
@@ -269,83 +345,55 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     index->matching_delimiters = arena_allocate(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
     memset(index->matching_delimiters, 0xff, sizeof(*index->matching_delimiters) * preprocess.token_count);
     TemporalArena temporary = scratch_begin(&result->arena, 1);
-    typedef struct CDelimiterStackEntry CDelimiterStackEntry;
-    struct CDelimiterStackEntry
-    {
-        u32 position;
-        CPunctuator opening;
-    };
-    CDelimiterStackEntry* stack = arena_allocate(temporary.arena, CDelimiterStackEntry, preprocess.token_count ? preprocess.token_count : 1);
+    CParseDelimiterStackEntry* stack = arena_allocate(temporary.arena, CParseDelimiterStackEntry, preprocess.token_count ? preprocess.token_count : 1);
     u32 stack_count = 0;
     u32 vector_size_capacity = 0;
     u32 alignas_capacity = 0;
     u32 label_candidate_capacity = 0;
     u32 attribute_capacity = 0;
-    // One pass over the token stream for all three products.  The identifier
-    // classification used to run twice, once to count and once to fill, and
-    // the delimiter match was a third walk: together 3,55% of the stage-1
-    // branch mispredictions in the survey of 2026-08-22T082003Z, on a filter
-    // no predictor can learn because it is the token kinds of the program.
-    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+#if BUSTER_SIMD_512
+    if (token_shapes)
     {
-        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, (u32)token_index);
-        if (shape == C_TOKEN_IDENTIFIER)
+        Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+        Simd512 open_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS));
+        Simd512 open_bracket = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACKET));
+        Simd512 open_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACE));
+        Simd512 close_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_PARENTHESIS));
+        Simd512 close_bracket = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACKET));
+        Simd512 close_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACE));
+        for (u64 tile_base = 0; tile_base < preprocess.token_count; tile_base += C_PARSE_TOKEN_TILE_TOKENS)
         {
-            CToken token = preprocess.tokens[token_index];
-            u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
-            if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
+            u64 tile_tokens = BUSTER_MIN((u64)C_PARSE_TOKEN_TILE_TOKENS, preprocess.token_count - tile_base);
+            for (u32 window = 0; window < tile_tokens; window += 64)
             {
-                c_parse_position_index_append(result->arena, &index->vector_size_positions, &index->vector_size_count, &vector_size_capacity,
-                                              (u32)token_index);
+                u32 window_tokens = (u32)BUSTER_MIN(UINT64_C(64), tile_tokens - window);
+                Mask64 window_mask = window_tokens == 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << window_tokens) - 1);
+                Simd512 shape_lanes = simd512_load_masked(token_shapes + tile_base + window, window_mask);
+                Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
+                Mask64 opens = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, open_parenthesis), simd512_equal_byte(shape_lanes, open_bracket)),
+                                         simd512_equal_byte(shape_lanes, open_brace));
+                Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)),
+                                          simd512_equal_byte(shape_lanes, close_brace));
+                for (Mask64 remaining = mask64_or(identifiers, mask64_or(opens, closes)); remaining; remaining &= remaining - 1)
+                {
+                    u32 lane = mask64_first_set(remaining);
+                    u32 token_index = (u32)(tile_base + window + lane);
+                    c_parse_position_index_visit(result, preprocess, index, token_shapes, stack, &stack_count, &vector_size_capacity, &alignas_capacity,
+                                                 &label_candidate_capacity, &attribute_capacity, token_index, token_shapes[token_index]);
+                }
             }
-            if (token_class & C_TOKEN_CLASS_ALIGNAS)
-            {
-                c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, &alignas_capacity, (u32)token_index);
-            }
-            // The next token is one line of this cache at most, and reading
-            // its punctuator here spares the body-lowering loops a re-scan of
-            // every token for the same identifier-then-colon shape.
-            if (token_index + 1 < preprocess.token_count &&
-                c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, (u32)token_index + 1)) == C_PUNCTUATOR_COLON)
-            {
-                c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
-                                              &label_candidate_capacity, (u32)token_index);
-            }
-            if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
-            {
-                c_parse_position_index_append(result->arena, &index->attribute_positions, &index->attribute_count, &attribute_capacity,
-                                              (u32)token_index);
-            }
-            continue;
         }
-        if (!c_token_shape_is_punctuator(shape))
+    }
+    else
+#endif
+    {
+        for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
         {
-            continue;
+            u32 index_value = (u32)token_index;
+            c_parse_position_index_visit(result, preprocess, index, token_shapes, stack, &stack_count, &vector_size_capacity, &alignas_capacity,
+                                         &label_candidate_capacity, &attribute_capacity, index_value,
+                                         c_preprocess_token_shape_at(token_shapes, &preprocess, index_value));
         }
-        CPunctuator punctuator = c_token_shape_punctuator(shape);
-        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE)
-        {
-            stack[stack_count++] = (CDelimiterStackEntry){
-                .position = (u32)token_index,
-                .opening = punctuator,
-            };
-            continue;
-        }
-        CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                               : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
-                               : punctuator == C_PUNCTUATOR_RIGHT_BRACE     ? C_PUNCTUATOR_LEFT_BRACE
-                                                                             : C_PUNCTUATOR_NONE;
-        if (expected == C_PUNCTUATOR_NONE)
-        {
-            continue;
-        }
-        if (!stack_count || stack[stack_count - 1].opening != expected)
-        {
-            index->delimiter_mismatch_count += 1;
-            stack_count = 0;
-            continue;
-        }
-        index->matching_delimiters[stack[--stack_count].position] = (u32)token_index;
     }
     index->delimiter_mismatch_count += stack_count;
     scratch_end(temporary);
@@ -11483,7 +11531,7 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CToken, symbol) == 4);
 // kind|punctuator stream is already contiguous in the preprocessor sidecar.
 // The tile keeps the projected symbols in L1 beside the rows being gathered,
 // and the padding keeps that auxiliary stream readable in whole windows.
-#define C_PARSE_CENSUS_TILE_TOKENS 2048
+#define C_PARSE_CENSUS_TILE_TOKENS C_PARSE_TOKEN_TILE_TOKENS
 #define C_PARSE_CENSUS_TILE_BYTES (C_PARSE_CENSUS_TILE_TOKENS + 64)
 
 // The symbol byte of token 10 is still at 124, so its stream splits one token

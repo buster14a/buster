@@ -3474,6 +3474,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 source_capacity = BUSTER_MB(1);
+    char8* source_bytes = arena_allocate(arguments->arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 item = 0; item < 400; item += 1)
+    {
+        if (item % 5 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("typedef int vec_{u32} __attribute__((vector_size(16)));\n"), item));
+        }
+        if (item % 7 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("_Alignas(16) int aligned_{u32};\n"), item));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             string_format(arguments->arena, S8("int function_{u32}(int x) {{ label_{u32}: return x; }}\n"), item, item));
+    }
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}, (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, preprocess.token_count > UINT64_C(4096));
+    CParseResult parse = c_parse(arguments->arena, preprocess);
+    c_parse_position_index_ensure(&parse, preprocess);
+    CTokenPositionIndex* indexed = parse.position_index;
+    BUSTER_TEST(arguments, indexed && indexed->built);
+    if (!indexed || !indexed->built || preprocess.token_count > UINT32_MAX)
+    {
+        return result;
+    }
+    u32 token_count = (u32)preprocess.token_count;
+    u32* expected_matching = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_vector_size = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_alignas = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_labels = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_attributes = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    u32* expected_stack_positions = arena_allocate(arguments->arena, u32, token_count ? token_count : 1);
+    CPunctuator* expected_stack_openings = arena_allocate(arguments->arena, CPunctuator, token_count ? token_count : 1);
+    memset(expected_matching, 0xff, sizeof(*expected_matching) * token_count);
+    u32 vector_size_count = 0;
+    u32 alignas_count = 0;
+    u32 label_count = 0;
+    u32 attribute_count = 0;
+    u32 stack_count = 0;
+    u32 mismatch_count = 0;
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        CTokenShape shape = c_preprocess_token_shape(&preprocess, token_index);
+        if (shape == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
+            if (string_equal(spelling, S8("vector_size")))
+            {
+                expected_vector_size[vector_size_count++] = token_index;
+            }
+            if (string_equal(spelling, S8("_Alignas")))
+            {
+                expected_alignas[alignas_count++] = token_index;
+            }
+            if (string_equal(spelling, S8("__attribute__")) || string_equal(spelling, S8("__attribute")))
+            {
+                expected_attributes[attribute_count++] = token_index;
+            }
+            if (token_index + 1 < token_count &&
+                c_token_shape_punctuator(c_preprocess_token_shape(&preprocess, token_index + 1)) == C_PUNCTUATOR_COLON)
+            {
+                expected_labels[label_count++] = token_index;
+            }
+            continue;
+        }
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE)
+        {
+            expected_stack_positions[stack_count] = token_index;
+            expected_stack_openings[stack_count] = punctuator;
+            stack_count += 1;
+            continue;
+        }
+        CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                               : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                                                                             : punctuator == C_PUNCTUATOR_RIGHT_BRACE ? C_PUNCTUATOR_LEFT_BRACE : C_PUNCTUATOR_NONE;
+        if (expected == C_PUNCTUATOR_NONE)
+        {
+            continue;
+        }
+        if (!stack_count || expected_stack_openings[stack_count - 1] != expected)
+        {
+            mismatch_count += 1;
+            stack_count = 0;
+        }
+        else
+        {
+            expected_matching[expected_stack_positions[--stack_count]] = token_index;
+        }
+    }
+    mismatch_count += stack_count;
+    BUSTER_TEST(arguments, indexed->vector_size_count == vector_size_count);
+    BUSTER_TEST(arguments, indexed->alignas_count == alignas_count);
+    BUSTER_TEST(arguments, indexed->label_candidate_count == label_count);
+    BUSTER_TEST(arguments, indexed->attribute_count == attribute_count);
+    BUSTER_TEST(arguments, indexed->delimiter_mismatch_count == mismatch_count);
+    if (indexed->vector_size_count == vector_size_count)
+    {
+        BUSTER_TEST(arguments, memcmp(indexed->vector_size_positions, expected_vector_size, sizeof(*expected_vector_size) * vector_size_count) == 0);
+    }
+    if (indexed->alignas_count == alignas_count)
+    {
+        BUSTER_TEST(arguments, memcmp(indexed->alignas_positions, expected_alignas, sizeof(*expected_alignas) * alignas_count) == 0);
+    }
+    if (indexed->label_candidate_count == label_count)
+    {
+        BUSTER_TEST(arguments, memcmp(indexed->label_candidate_positions, expected_labels, sizeof(*expected_labels) * label_count) == 0);
+    }
+    if (indexed->attribute_count == attribute_count)
+    {
+        BUSTER_TEST(arguments, memcmp(indexed->attribute_positions, expected_attributes, sizeof(*expected_attributes) * attribute_count) == 0);
+    }
+    BUSTER_TEST(arguments, memcmp(indexed->matching_delimiters, expected_matching, sizeof(*expected_matching) * token_count) == 0);
+
+    // Run the same index through the scalar/reference shape fallback. The
+    // production sidecar is present above; clearing only this private pointer
+    // makes c_parse_position_index_build derive shapes from CToken without
+    // changing the token stream or the expected populations.
+    CTokenPositionIndex scalar_index = {0};
+    CTokenPositionIndex* saved_index = parse.position_index;
+    CTokenShape* saved_shapes = preprocess.recovery ? preprocess.recovery->token_shapes : 0;
+    parse.position_index = &scalar_index;
+    if (preprocess.recovery)
+    {
+        preprocess.recovery->token_shapes = 0;
+    }
+    c_parse_position_index_ensure(&parse, preprocess);
+    if (preprocess.recovery)
+    {
+        preprocess.recovery->token_shapes = saved_shapes;
+    }
+    parse.position_index = saved_index;
+    BUSTER_TEST(arguments, scalar_index.built);
+    BUSTER_TEST(arguments, scalar_index.vector_size_count == vector_size_count);
+    BUSTER_TEST(arguments, scalar_index.alignas_count == alignas_count);
+    BUSTER_TEST(arguments, scalar_index.label_candidate_count == label_count);
+    BUSTER_TEST(arguments, scalar_index.attribute_count == attribute_count);
+    BUSTER_TEST(arguments, scalar_index.delimiter_mismatch_count == mismatch_count);
+    if (scalar_index.vector_size_count == vector_size_count)
+    {
+        BUSTER_TEST(arguments, memcmp(scalar_index.vector_size_positions, expected_vector_size, sizeof(*expected_vector_size) * vector_size_count) == 0);
+    }
+    if (scalar_index.alignas_count == alignas_count)
+    {
+        BUSTER_TEST(arguments, memcmp(scalar_index.alignas_positions, expected_alignas, sizeof(*expected_alignas) * alignas_count) == 0);
+    }
+    if (scalar_index.label_candidate_count == label_count)
+    {
+        BUSTER_TEST(arguments, memcmp(scalar_index.label_candidate_positions, expected_labels, sizeof(*expected_labels) * label_count) == 0);
+    }
+    if (scalar_index.attribute_count == attribute_count)
+    {
+        BUSTER_TEST(arguments, memcmp(scalar_index.attribute_positions, expected_attributes, sizeof(*expected_attributes) * attribute_count) == 0);
+    }
+    BUSTER_TEST(arguments, memcmp(scalar_index.matching_delimiters, expected_matching, sizeof(*expected_matching) * token_count) == 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9438,6 +9603,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
+    c_test_result_add(&result, c_test_position_index_tiles(arguments));
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));

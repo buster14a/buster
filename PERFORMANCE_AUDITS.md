@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-24T174159Z`](docs/performance-audits/2026-08-24T174159Z.md) — #539 position-index tile classification A/B and fixed-point audit
 - [`2026-08-24T171245Z`](docs/performance-audits/2026-08-24T171245Z.md) — #538 token-shape sidecar A/B and fixed-point audit
 - [`2026-08-24T131758Z`](docs/performance-audits/2026-08-24T131758Z.md) — same-arena single-chunk machine streams alias their live payload instead of flattening
 - [`2026-08-24T131821Z`](docs/performance-audits/2026-08-24T131821Z.md) — the x86 template cache clears only its arena dirty prefix and skips the fresh suffix
