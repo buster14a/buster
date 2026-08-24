@@ -654,6 +654,51 @@ always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
 
+## Forge, issues, and pull requests
+
+The forge is Forgejo at `https://code.buster14a.com/buster/buster`, not GitHub;
+CI lives under `.forgejo/`. Talk to it with **`fj`**, the Forgejo CLI. It reads
+the repository from the git remote, so run it from inside a checkout (or pass
+`-C <path>` / `-r buster/buster`).
+
+`fj` needs a token once per machine. The password half of the
+`code.buster14a.com` line in `~/.git-credentials` is a valid API token, so
+authentication is a pipe, not a browser round trip:
+
+```sh
+grep code.buster14a.com ~/.git-credentials \
+  | sed 's|https://[^:]*:||; s|@code.buster14a.com.*||' \
+  | fj auth add-token -H code.buster14a.com
+fj whoami          # verify: davidgmbb@code.buster14a.com
+```
+
+`fj issue create "<title>" --body-file <path> --no-template`,
+`fj issue search [-s open|closed|all]`, `fj issue view <n>`,
+`fj issue comment <n>`, and `fj pr create --base main --head <branch>
+--body-file <path>` are the whole working set; `fj pr search`, `fj pr status`
+and `fj pr view` read the other side. Two things to know before scripting it:
+the subcommand for listing issues is `search`, not `list`, and **omitting both
+`--body` and `--body-file` opens `$EDITOR`**, which hangs a non-interactive
+session — always pass a body file. Write the body as a file rather than a
+shell string: backticks inside `$(cat <<EOF)` get command-substituted by zsh,
+which has mangled a commit message before.
+
+`fj` supersedes the older workarounds. `tea`'s login for this host has no
+token, and the raw-`curl` recipe that went with it needed a browser
+`User-Agent` to get past Cloudflare's `403 error code: 1010`; `fj` is not
+subject to either problem.
+
+**Issues are the task queue.** Work that is real but not being done right now
+becomes an issue, not a paragraph in an audit that nobody will find — a chip
+filed against a memory is invisible to the next agent, while an issue is
+something a fresh session can pick up cold. Write the body as a **prompt**: what
+is wrong and how it was diagnosed, the file and symbol names to start from,
+the constraints and do-not-retries that earlier work already paid for, how to
+validate the fix (which oracle, which harness, which counters), and a
+definition of done. State what was measured and when, so a stale claim is
+recognisable as stale; the tree moves fast enough that a count quoted without
+a date is a trap. Issues #537-#549 are the current examples of the form.
+
 ## Core rules
 
 - **Code must stay human-maintainable.** Every major file opens with an
