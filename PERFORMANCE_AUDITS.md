@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-24T092849Z`](docs/performance-audits/2026-08-24T092849Z.md) — a parameter's outermost suffix size is dead in every case: the VLA parameter layout stops emitting the whole-object multiply
 - [`2026-08-24T085746Z`](docs/performance-audits/2026-08-24T085746Z.md) — a constant array bound is not a variable-length array: the array-parameter layout stops emitting a multiply of two constants into every entry block
 - [`2026-08-22T195419Z`](docs/performance-audits/2026-08-22T195419Z.md) — re-rank both miss surveys on post-510/512 main; the module-symbol pass of the C lowering still compares specifier spellings
 - [`2026-08-22T195224Z`](docs/performance-audits/2026-08-22T195224Z.md) — the frame machine's statement machines become self-loops and places run off the loop

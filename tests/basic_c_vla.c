@@ -1,3 +1,31 @@
+// A parameter's outermost suffix size — the whole object's — is never read, so
+// the C lowering stops building it: an array parameter is a pointer, and
+// `sizeof values` below is that pointer's rather than the runtime layout's.
+// One dimension is where that walk now ends, which makes `sizeof(values[0])`
+// the innermost suffix it still has to build; the subscripts either side of it
+// say that dropping the outer product left the element size alone.
+static int check_one_dimensional_parameter(int count, int values[count])
+{
+    if (sizeof(values) != sizeof(int*))
+    {
+        return 3;
+    }
+    if (sizeof(values[0]) != sizeof(int))
+    {
+        return 4;
+    }
+    if (values[0] != 7 || values[count - 1] != 11)
+    {
+        return 5;
+    }
+    values[count - 1] = 23;
+    if (values[count - 1] != 23 || values + count - values != count)
+    {
+        return 6;
+    }
+    return 0;
+}
+
 static int check(int count)
 {
     int values[count];
@@ -7,6 +35,14 @@ static int check(int count)
     {
         return 1;
     }
+    {
+        int parameter = check_one_dimensional_parameter(count, values);
+        if (parameter != 0)
+        {
+            return parameter;
+        }
+    }
+    values[count - 1] = 11;
     return values[0] + values[count - 1] == 18 ? 0 : 2;
 }
 

@@ -18030,7 +18030,22 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
     IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
     result->suffix_sizes[result->dimension_count] =
         c_ir_emit_integer_value_typed(builder, element->layout.size, false, state->token, builder->size_type);
-    for (u32 dimension = result->dimension_count; dimension != 0; dimension -= 1)
+    // suffix_sizes[0] is the whole object's size, and a parameter never has
+    // one: an array parameter is a pointer, so the only reader of
+    // CIrVlaLayout::runtime_size that wants suffix 0 is the ALLOCATE in
+    // c_ir_lower_automatic_declaration_step, which is the declaration path and
+    // not this one, and c_ir_lower_expression_core_step's sizeof arm refuses
+    // suffix 0 for an is_vla_parameter local on purpose, because `sizeof a` is
+    // the pointer's. Stopping the walk one dimension short therefore drops the
+    // outermost MULTIPLY — for a one-dimensional `u8 a[n]` that is the whole
+    // product, and unlike the constant bound `u8 slots[2]` the operands are not
+    // both known, so it cost emitted code rather than compile time. Every inner
+    // suffix is still built: `sizeof a[0]` on `u8 a[n][m]` reads
+    // suffix_sizes[1]. suffix_sizes[0] stays INVALID from the 0xff fill above,
+    // which is what an absent bound already left there and what the
+    // c_ir_lower_frame_finish below already accepts for a parameter.
+    u32 outermost_dimension = state->parameter ? 1 : 0;
+    for (u32 dimension = result->dimension_count; dimension != outermost_dimension; dimension -= 1)
     {
         u32 index = dimension - 1;
         IrValueId count = result->dimension_counts[index];
