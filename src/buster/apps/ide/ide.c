@@ -250,7 +250,9 @@ ProcessResult process_arguments(void)
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
 {
 #if BUSTER_INCLUDE_TESTS
-    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+    // The same bound the parallel lanes reserve in test.c, for the same
+    // reason: a module that runs on this arena never rewinds between cases.
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
     if (!arena)
     {
         return PROCESS_RESULT_FAILED;

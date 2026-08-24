@@ -181,6 +181,33 @@ UnitTestResult simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(UINT32_C(0x80000000)), simd512_splat_word(1)) == 0);
     BUSTER_TEST(arguments, simd512_less_word(simd512_splat_word(1), simd512_splat_word(UINT32_C(0x80000000))) == 0xFFFF);
 
+    // vpcompressd packs the selected dword lanes down and zeroes the rest;
+    // only the low sixteen mask bits participate.
+    SimdTestLanes compacted;
+    compacted.vector = simd512_compress_word(0xAAAA, ascending.vector);
+    lanes_match = true;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match = lanes_match && compacted.words[word] == (word < 8 ? word * 2 + 1 : 0);
+    }
+    BUSTER_TEST(arguments, lanes_match);
+    compacted.vector = simd512_compress_word(0, ascending.vector);
+    lanes_match = true;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match = lanes_match && compacted.words[word] == 0;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+    compacted.vector = simd512_compress_word(0xFFFF, ascending.vector);
+    lanes_match = true;
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        lanes_match = lanes_match && compacted.words[word] == word;
+    }
+    BUSTER_TEST(arguments, lanes_match);
+    compacted.vector = simd512_compress_word(UINT64_C(0x10001), ascending.vector);
+    BUSTER_TEST(arguments, compacted.words[0] == 0 && compacted.words[1] == 0);
+
     // vpermt2b indexes a 128-byte table split across two vectors; the indices
     // count down from 127, so lane 0 selects the last byte of the high half.
     lanes_match = true;

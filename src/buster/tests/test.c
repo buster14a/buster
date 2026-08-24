@@ -404,8 +404,15 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         TestDescriptor descriptor = state->descriptors[descriptor_index];
         // Match the test harness's bounded working reservation. It is a
         // lazy/no-reserve mapping; only the initial 64 KiB is committed per
-        // active lane.
-        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .initial_size = BUSTER_KB(64)});
+        // active lane, so the bound costs address space and not memory.
+        // 512 MiB because a module arena is never rewound between the cases
+        // inside it: compiler_driver_tests hands this same arena to every
+        // fixture invocation, so each one's IR, machine IR, and object bytes
+        // stay resident for the whole module. It reached 265,250,192 of the
+        // previous 268,435,456-byte reservation before its last fixture —
+        // 98,8% — which made the next fixture case to be added anywhere in
+        // the module the one that aborted in arena_allocate_bytes.
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512), .initial_size = BUSTER_KB(64)});
         Arena* output_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64)});
         BUSTER_CHECK(arena != 0 && output_arena != 0);
         TestParallelArguments arguments = {.base = {.arena = arena, .show = &test_parallel_show}, .output_arena = output_arena};

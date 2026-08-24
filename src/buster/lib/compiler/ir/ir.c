@@ -433,6 +433,7 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
     case IR_SIMD_PERMUTE2_BYTE:
         return (IrSimdShape){.operand_count = 4, .has_result = true};
     case IR_SIMD_COMPRESS_BYTE:
+    case IR_SIMD_COMPRESS_WORD:
         return (IrSimdShape){.operand_count = 2, .has_result = true};
     case IR_SIMD_COMPRESS_STORE_BYTE:
         return (IrSimdShape){.operand_count = 3};
@@ -487,6 +488,8 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.splat_word");
     case IR_SIMD_COMPARE_LESS_WORD:
         return S8("simd.compare_less_word");
+    case IR_SIMD_COMPRESS_WORD:
+        return S8("simd.compress_word");
     case IR_SIMD_COUNT:
         break;
     }
@@ -622,6 +625,7 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
             return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
         case IR_SIMD_COMPRESS_BYTE:
+        case IR_SIMD_COMPRESS_WORD:
             return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
         case IR_SIMD_WIDEN_BYTE_TO_WORD:
             return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;

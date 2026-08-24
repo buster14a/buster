@@ -288,6 +288,7 @@ typedef enum IrSimdOperation
     IR_SIMD_COMPARE_EQUAL_WORD, // (vector, vector) -> mask of the 16 u32 lanes in the low bits
     IR_SIMD_SPLAT_WORD,         // (u32) -> vector holding that value in all 16 u32 lanes
     IR_SIMD_COMPARE_LESS_WORD,  // (vector, vector) -> mask of the 16 u32 lanes, unsigned
+    IR_SIMD_COMPRESS_WORD,      // (mask, vector) -> vector, selected u32 lanes packed down
     IR_SIMD_COUNT,
 } IrSimdOperation;
 

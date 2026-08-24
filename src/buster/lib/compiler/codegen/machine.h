@@ -443,7 +443,9 @@ typedef enum MachineOpcode
     // selector copies the low table into the destination first and the row
     // ties destination to itself; zeroing under the mask.
     MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
-    MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing
+    MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing. The
+                              // payload selects the lane width: 0 =
+                              // vpcompressb, 1 = vpcompressd (16 mask bits).
     // vpmovzxbd from the source's chosen 16-byte quarter (payload); quarters
     // past zero extract through the destination register first.
     MACHINE_X64_VPMOVZXBD,    // def vec, use vec; payload = quarter

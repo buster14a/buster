@@ -213,6 +213,19 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  the rest zero -- a compare
 //                                                  over sixteen dword lanes
 //                                                  needs no byte-mask collapse
+//   simd512_compress_word(mask, value)          -> Simd512
+//                                                  vpcompressd: the u32 lanes
+//                                                  selected by the low sixteen
+//                                                  mask bits packed down, rest
+//                                                  zero. Register form only,
+//                                                  deliberately: pair it with
+//                                                  simd512_store and advance
+//                                                  the cursor by
+//                                                  mask64_count(mask) -- the
+//                                                  memory-destination
+//                                                  vpcompress* forms are
+//                                                  microcoded on Zen 4 (see
+//                                                  simd512_compress_store_byte)
 // ---------------------------------------------------------------------------
 
 // Lanewise arithmetic and bitwise operations. On the vector path these are the
@@ -259,6 +272,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
 #define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
 #define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
+#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
 
 #elif BUSTER_SIMD_512
 
@@ -282,6 +296,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
 #define simd512_splat_word(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
 #define simd512_less_word(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_compress_word(mask, value) ((Simd512)_mm512_maskz_compress_epi32((__mmask16)(mask), (__m512i)(value)))
 
 #else
 
@@ -303,6 +318,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
 #define simd512_splat_word(value) simd512_splat_word_fallback(value)
 #define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
+#define simd512_compress_word(mask, value) simd512_compress_word_fallback((mask), (value))
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 {
@@ -570,6 +586,24 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_word_fallback(Simd512
     for (u32 lane = 0; lane < 16; lane += 1)
     {
         result |= simd512_word_lane_fallback(left, lane) < simd512_word_lane_fallback(right, lane) ? (Mask64)1 << lane : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_word_fallback(Mask64 mask, Simd512 value)
+{
+    Simd512 result = simd512_splat_fallback(0);
+    u32 next = 0;
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        if ((mask >> lane) & 1)
+        {
+            result.bytes[next * 4] = value.bytes[lane * 4];
+            result.bytes[next * 4 + 1] = value.bytes[lane * 4 + 1];
+            result.bytes[next * 4 + 2] = value.bytes[lane * 4 + 2];
+            result.bytes[next * 4 + 3] = value.bytes[lane * 4 + 3];
+            next += 1;
+        }
     }
     return result;
 }

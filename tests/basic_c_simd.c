@@ -50,6 +50,7 @@ typedef u64 Mask64;
 #define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
 #define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
 #define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
+#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
 #define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
 
 #define mask64_prefix(count) ((count) >= 64 ? ~(Mask64)0 : (((Mask64)1 << (count)) - 1))
@@ -621,6 +622,41 @@ int main(void)
     if (simd512_less_word(simd512_splat_word(1), high_bit.vector) != 0xFFFF)
     {
         return 68;
+    }
+    // vpcompressd packs the selected dword lanes down and zeroes the rest;
+    // pairing it with a full store and a popcount cursor advance is the
+    // compaction idiom the register-form-only rule prescribes.
+    Lanes compacted;
+    compacted.vector = simd512_compress_word(0xAAAAu, ascending.vector);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        u32 expected_word = word < 8 ? word * 2 + 1 : 0;
+        if (compacted.words[word] != expected_word)
+        {
+            return 69;
+        }
+    }
+    compacted.vector = simd512_compress_word(0, ascending.vector);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        if (compacted.words[word] != 0)
+        {
+            return 70;
+        }
+    }
+    compacted.vector = simd512_compress_word(0xFFFFu, ascending.vector);
+    for (u32 word = 0; word < 16; word += 1)
+    {
+        if (compacted.words[word] != word)
+        {
+            return 71;
+        }
+    }
+    // Only the low sixteen mask bits participate: bit 16 selects nothing.
+    compacted.vector = simd512_compress_word(0x10001u, ascending.vector);
+    if (compacted.words[0] != 0 || compacted.words[1] != 0)
+    {
+        return 72;
     }
     return 0;
 }

@@ -4195,6 +4195,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_evex_register(CodegenBuffer* buff
         operands[0] = codegen_canonical_x64_metadata_vector(rm, 512);
         operands[1] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
         break;
+    case (2u << 16) | (1u << 8) | 0x8b: // VPCOMPRESSD zmm/mask
+        mnemonic = S8("VPCOMPRESSD");
+        operands[0] = codegen_canonical_x64_metadata_vector(rm, 512);
+        operands[1] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
+        break;
     case (2u << 16) | (1u << 8) | 0x7a: // VPBROADCASTB zmm, r32
         mnemonic = S8("VPBROADCASTB");
         operands[0] = codegen_canonical_x64_metadata_vector(evex.reg, 512);
@@ -5151,6 +5156,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
             return codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
         }
         case IR_SIMD_COMPRESS_BYTE:
+        case IR_SIMD_COMPRESS_WORD:
         {
             if (!codegen_canonical_x64_simd_emit_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]))
             {
@@ -5164,11 +5170,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
             }
             // Register form: rm is the destination and reg is the source, so the
             // source is the one that gets loaded and the result lands in the
-            // first register like every other operation's does.
+            // first register like every other operation's does. The dword form
+            // reads its 16 mask bits from the same 64-bit spill the byte form
+            // fills, so the two share every step but the opcode.
             X64Evex compress = {
                 .map = 2,
                 .prefix = 1,
-                .opcode = 0x63,
+                .opcode = operation == IR_SIMD_COMPRESS_BYTE ? 0x63 : 0x8b,
                 .reg = X64_SIMD_VECTOR_SECOND,
                 .mask = X64_SIMD_MASK,
                 .zeroing = true,
