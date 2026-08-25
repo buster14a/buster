@@ -3882,6 +3882,48 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_relative_encoded.exact_attempts ==
                                    exact_relative_encoded.exact_successes + exact_relative_encoded.exact_failures);
 
+    // A vector load that the target cannot select must reject the function at
+    // that load and let module generation use the canonical path. Keeping the
+    // signature scalar makes the unsupported instruction internal to the
+    // function instead of letting the vector ABI reject it first.
+    Target machine_vector_fallback_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    String8 machine_vector_fallback_source =
+        S8("typedef unsigned char V64 __attribute__((vector_size(64)));\n"
+           "unsigned char load_first(const V64* value) {\n"
+           "    V64 loaded = *value;\n"
+           "    return ((const unsigned char*)&loaded)[0];\n"
+           "}\n");
+    IrProgram* machine_vector_fallback_program =
+        machine_test_compile_c(arguments->arena, S8("machine-vector-load-fallback.c"), machine_vector_fallback_source,
+                               machine_vector_fallback_target);
+    BUSTER_TEST(arguments, machine_vector_fallback_program != 0);
+    if (machine_vector_fallback_program && machine_vector_fallback_program->module_count)
+    {
+        IrModule* machine_vector_fallback_ir_module = machine_vector_fallback_program->modules;
+        IrFunction* machine_vector_fallback_function =
+            machine_test_ir_function_find(machine_vector_fallback_ir_module, S8("load_first"));
+        BUSTER_TEST(arguments, machine_vector_fallback_function != 0);
+        if (machine_vector_fallback_function)
+        {
+            MachineSelectResult machine_vector_fallback_selected = machine_select_canonical_function(
+                arguments->arena, machine_vector_fallback_program, machine_vector_fallback_function, machine_vector_fallback_target);
+            BUSTER_TEST(arguments, !machine_vector_fallback_selected.supported);
+            BUSTER_TEST(arguments, machine_vector_fallback_selected.failed_opcode == IR_OPCODE_LOAD);
+        }
+        CodegenModule machine_vector_fallback_module = codegen_generate_canonical_module(
+            arguments->arena, machine_vector_fallback_program, machine_vector_fallback_ir_module, machine_vector_fallback_target,
+            (CodegenModuleOptions){
+                .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+            });
+        BUSTER_TEST(arguments, machine_vector_fallback_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_function_count == 1);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 1);
+    }
+
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
     // target, which carries every feature the vocabulary needs, so
     // selection, verification, placement, and encoding run on every host;
