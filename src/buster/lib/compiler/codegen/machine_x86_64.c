@@ -2579,68 +2579,77 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_promoted_local_register(MachineX64Selector* 
 // aggregate and vector paths.
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
     bool selected = false;
+
     if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
         IrValue* place = function->values + instruction->operands[0].value;
         if (place->definition.value < function->instruction_count)
         {
+            IrProgram* program = selector->program;
+
             IrInstruction* definition = function->instructions + place->definition.value;
             u32 slot = selector->value_stack_slots[instruction->operands[0].value];
             u32 result_slot = selector->value_stack_slots[instruction->result.value];
             IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
-            if (result_register != UINT32_MAX && machine_x64_type_is_vector_register(loaded_type))
+
+            bool is_vector_load = result_register != UINT32_MAX && machine_x64_type_is_vector_register(loaded_type);
+            bool is_scalar_load = !is_vector_load && result_register != UINT32_MAX;
+            bool is_aggregate_load = !is_vector_load && !is_scalar_load && result_slot != UINT32_MAX;
+            bool splat_supported = machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE);
+
+            if (is_vector_load)
             {
                 // Whole-vector load into a ZMM-class register: a promoted vector local aliases
                 // or copies, a slot-backed one loads from its frame home, and everything else
                 // goes through an address vreg.
-                u32 promoted = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
-                if (instruction->opcode != IR_OPCODE_ATOMIC_LOAD && machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
+                
+                if (instruction->opcode != IR_OPCODE_ATOMIC_LOAD && splat_supported)
                 {
-                    if (promoted != UINT32_MAX)
+                    u32 promoted = machine_x64_promoted_local_register(selector, instruction->operands[0], definition);
+                    bool promoted_valid = promoted != UINT32_MAX;
+                    bool local_slot_valid = !promoted_valid && (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX);
+                    bool place_is_addressed = !local_slot_valid && machine_x64_place_is_addressed(selector, instruction->operands[0], definition);
+
+                    BUSTER_CHECK(promoted_valid || local_slot_valid || place_is_addressed);
+                    uint32_t address_register;
+                    bool operand_register = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+
+                    bool select_promoted_valid = promoted_valid && result_register != promoted;
+                    bool select_local_slot_valid = local_slot_valid;
+                    bool select_place_is_addressed = place_is_addressed && operand_register;
+                    bool select_and_define = select_promoted_valid || select_local_slot_valid || select_place_is_addressed;
+
+                    selected = promoted_valid || local_slot_valid || select_place_is_addressed;
+
+                    if (select_and_define)
                     {
-                        // Aliased, the load is a name for the local and not code.
-                        if (result_register != promoted)
-                        {
-                            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, promoted)},
-                                                                           .opcode = MACHINE_X64_VMOV_RR,
-                                                                       });
-                            machine_x64_define(selector, result_register, row);
-                        }
-                        selected = true;
-                    }
-                    else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
-                    {
+                        u16 opcode = promoted_valid ? MACHINE_X64_VMOV_RR : (local_slot_valid ? MACHINE_X64_VLOAD_FRAME : MACHINE_X64_VLOAD_PTR);
+
+                        MachineRef destination = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register);
+
+                        MachineRef source_promoted = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, promoted);
+                        MachineRef source_local = machine_ref_make(MACHINE_REF_STACK_SLOT, slot);
+                        MachineRef source_address = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register);
+
+                        MachineRef source = promoted_valid ? source_promoted : (local_slot_valid ? source_local : source_address);
+
                         u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                                    machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
-                                                                       .opcode = MACHINE_X64_VLOAD_FRAME,
-                                                                   });
+                            .operands = {destination, source},
+                            .opcode = opcode,
+                        });
+
                         machine_x64_define(selector, result_register, row);
-                        selected = true;
-                    }
-                    else if (machine_x64_place_is_addressed(selector, instruction->operands[0], definition))
-                    {
-                        u32 address_register;
-                        selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
-                        if (selected)
-                        {
-                            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                                           .opcode = MACHINE_X64_VLOAD_PTR,
-                                                                       });
-                            machine_x64_define(selector, result_register, row);
-                        }
                     }
                 }
+                else
+                {
+                    BUSTER_TODO();
+                }
             }
-            else if (result_register != UINT32_MAX)
+            else if (is_scalar_load)
             {
                 // A promoted scalar local reads as a register, a direct local as a
                 // frame load, and anything address-shaped as a sized pointer load.
@@ -2690,8 +2699,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                         }
                     }
                 }
+                else
+                {
+                    BUSTER_TODO();
+                }
             }
-            else if (result_slot != UINT32_MAX)
+            else if (is_aggregate_load)
             {
                 // An aggregate load is an exact-size chunk copy into the result slot,
                 // from a direct local's slot or through an address vreg.
@@ -2723,8 +2736,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     }
                 }
             }
+            else
+            {
+                BUSTER_TODO();
+            }
         }
     }
+
     return selected;
 }
 
