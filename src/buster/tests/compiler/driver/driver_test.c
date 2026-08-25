@@ -4892,6 +4892,31 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_prefix_increment_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // zlib's public tests combine several C frontend edge shapes in one
+    // expression: indirect calls through (*fp)(...), nested subscript
+    // postfix updates, comma-heavy pointer updates, gzgetc's conditional and
+    // character-literal macro, and glibc's __extension__ statement expression.
+    String8 c_zlib_regressions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-zlib-regressions"), S8(""));
+    String8 c_zlib_regressions_command_line[] = {
+        S8("-o"),
+        c_zlib_regressions_path,
+        S8("tests/basic_c_zlib_regressions.c"),
+    };
+    CompilerDriverResult c_zlib_regressions = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_zlib_regressions_command_line)));
+    BUSTER_TEST(arguments, c_zlib_regressions.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_zlib_regressions.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_zlib_regressions_arguments[] = {c_zlib_regressions_path};
+        ProcessSpawnResult c_zlib_regressions_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_zlib_regressions_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, c_zlib_regressions_spawn.handle != 0);
+        if (c_zlib_regressions_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_zlib_regressions_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // Hosted math headers spell NAN and the classification helpers through
     // compiler builtins.  Keep the quiet-NaN value and finite isinf result
     // observable at runtime so these are not merely accepted identifiers.

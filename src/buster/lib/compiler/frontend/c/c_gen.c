@@ -9905,7 +9905,9 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                 }
             }
         }
-        if (parenthesized_callee && (callee_start + 1 >= index || c_token_is_punctuator(&builder->preprocess.tokens[callee_start + 1], C_PUNCTUATOR_STAR) ||
+        bool empty_pointer_declarator = parenthesized_callee && callee_start + 2 == index &&
+                                        c_token_is_punctuator(&builder->preprocess.tokens[callee_start + 1], C_PUNCTUATOR_STAR);
+        if (parenthesized_callee && (callee_start + 1 >= index || empty_pointer_declarator ||
                                      c_ir_type_name(builder, callee_start + 1, index).value != IR_ID_UNDERLYING_INVALID))
         {
             callee_start = index;
@@ -11587,6 +11589,18 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     u32 callee_end = selected->parenthesized_callee ? selected->open_index - 1 : selected->open_index;
                     if (selected->parenthesized_callee)
                     {
+                        // A function designator written as `(*fp)(args)` is
+                        // the same callable value as `fp` after the C
+                        // function-to-pointer conversion.  Lower the value
+                        // expression without the redundant dereference: the
+                        // place machine intentionally only accepts a simple
+                        // identifier/field chain and cannot form a place for
+                        // a parenthesized field designator.
+                        if (callee_start < callee_end &&
+                            c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
+                        {
+                            callee_start += 1;
+                        }
                         return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
                                                                      callee_end, false);
                     }
@@ -16284,6 +16298,17 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     u32 operation_count = 0;
     u32 index;
     bool expect_operand;
+    // GNU __extension__ is a diagnostic-only unary marker.  Strip a leading
+    // marker before the control and call preparation passes as well as in the
+    // evaluator below.  In particular, glibc's assert macro prefixes a
+    // statement expression this way; preparing the unstripped outer range can
+    // otherwise hoist the noreturn __assert_fail call out of its else branch.
+    u32 preparation_start = start;
+    while (preparation_start < end && builder->preprocess.tokens[preparation_start].kind == C_TOKEN_IDENTIFIER &&
+           string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[preparation_start]), S8("__extension__")))
+    {
+        preparation_start += 1;
+    }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE)
     {
         c_ir_lower_expression_core_root_update_resume(builder, state);
@@ -16369,7 +16394,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         // A suspension leaves the child's continuation on the machine stack
         // and resumes through the loop unchanged.
         u32 mark = machine->frame_count;
-        if (!c_ir_prepare_control_expressions_frame_push(builder, start, end))
+        if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -16393,7 +16418,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS;
         u32 mark = machine->frame_count;
-        if (!c_ir_prepare_calls_frame_push(builder, start, end))
+        if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -16881,6 +16906,15 @@ c_ir_expression_core_loop:
             values[value_count++] = value;
             expect_operand = false;
             index = operand_index;
+            continue;
+        }
+        // glibc's assert macro prefixes its GNU statement expression with
+        // `__extension__`.  This marker suppresses pedantic diagnostics but
+        // contributes no expression value, so leave operand state unchanged
+        // and let the following statement-expression wrapper lower normally.
+        if (expect_operand && token.kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__extension__")))
+        {
             continue;
         }
         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
@@ -18712,7 +18746,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
     if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-        if (close == UINT32_MAX || close == start + 2 || close + 2 >= end)
+        if (close == UINT32_MAX || close == start + 2 || close + 1 >= end)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return false;
@@ -18721,25 +18755,29 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
         CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
         bool simple = c_token_is_punctuator(&assignment, C_PUNCTUATOR_ASSIGN);
         bool compound = c_ir_compound_assignment_operator(assignment, &operation);
-        CEntityId entity = c_ir_identifier_entity(builder, start);
-        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-        IrValueId base = IR_VALUE_ID_INVALID;
-        if (local)
+        if (close + 2 < end && (simple || compound))
         {
-            IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
-            base = local_type && local_type->kind == IR_TYPE_ARRAY ? local->place : c_ir_emit_load(builder, local, first);
+            CEntityId entity = c_ir_identifier_entity(builder, start);
+            CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+            IrValueId base = IR_VALUE_ID_INVALID;
+            if (local)
+            {
+                IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
+                base = local_type && local_type->kind == IR_TYPE_ARRAY ? local->place : c_ir_emit_load(builder, local, first);
+            }
+            if (base.value != IR_ID_UNDERLYING_INVALID)
+            {
+                state->base = base;
+                state->assignment = close + 1;
+                state->close = close;
+                state->operation = operation;
+                state->simple = simple;
+                return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
+            }
         }
-        if ((!simple && !compound) || base.value == IR_ID_UNDERLYING_INVALID)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return false;
-        }
-        state->base = base;
-        state->assignment = close + 1;
-        state->close = close;
-        state->operation = operation;
-        state->simple = simple;
-        return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
+        // A postfix update or another full expression follows the subscript;
+        // leave it to the expression machine below rather than treating the
+        // update token as a malformed assignment operator.
     }
     if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end &&
         (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_DOT) ||
@@ -19294,6 +19332,27 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     c_ir_expression_core_range(builder, &start, &end);
+    // Parenthesized function designators are still calls: `(gzgetc)(g)` is
+    // common in zlib's gzgetc macro and must predict the declared return type
+    // rather than the function-pointer type of the designator.  The strict
+    // operand resolver already handles the parenthesized postfix call chain.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            IrTypeId call_type = IR_TYPE_ID_INVALID;
+            bool call_ready = c_ir_sizeof_operand_type_attempt(builder, start, end, &call_type);
+            if (builder->queries->has_request)
+            {
+                return IR_TYPE_ID_INVALID;
+            }
+            if (call_ready && call_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                return call_type;
+            }
+        }
+    }
     // An assignment expression has the unpromoted type of its left operand.
     // The broad identifier scan below is intentionally only a fallback for
     // incomplete expressions; for `(p)->field = value` it would otherwise
@@ -19330,6 +19389,19 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         if (predicted_value && predicted_value->kind == IR_TYPE_INTEGER)
         {
             return predicted;
+        }
+    }
+    // Unary dereference changes the operand's pointer/array type to its
+    // element type.  Keep this in the prediction path as well as the lowering
+    // path; otherwise a conditional such as `*p++ ? ... : int_call()` is
+    // predicted as a pointer and the later comparison rejects an ordinary
+    // promoted character result against a nonzero integer.
+    if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
+    {
+        IrTypeId dereferenced_type = IR_TYPE_ID_INVALID;
+        if (c_ir_sizeof_operand_type_attempt(builder, start, end, &dereferenced_type))
+        {
+            return dereferenced_type;
         }
     }
     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
@@ -20394,6 +20466,17 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         }
         u32 start = frame->as.expression.start;
         u32 end = frame->as.expression.end;
+        // Comma and assignment continuations reuse this expression frame
+        // without re-entering its BEGIN stage.  Strip GNU's diagnostic-only
+        // marker at every subexpression boundary so `a,
+        // __extension__ ({ ... })` takes the ordinary statement-expression
+        // path as if the marker were absent.
+        while (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+               string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__extension__")))
+        {
+            start += 1;
+        }
+        frame->as.expression.start = start;
         // A control expression the prepass already lowered has run its side
         // effects. An operand that is exactly that group -- under however
         // many redundant parentheses -- must reuse the prepared result:
@@ -25063,6 +25146,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             u32 parentheses = 0;
             u32 brackets = 0;
             u32 braces = 0;
+            u32 first_top_level_comma = UINT32_MAX;
             while (end < task.end)
             {
                 CToken token = builder->preprocess.tokens[end];
@@ -25106,6 +25190,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     break;
                 }
+                else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) && first_top_level_comma == UINT32_MAX)
+                {
+                    first_top_level_comma = end;
+                }
                 end += 1;
             }
             if (end >= task.end && task.allow_trailing_expression && index < task.end)
@@ -25118,41 +25206,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             if (task.allow_trailing_expression)
             {
-                u32 expression_parentheses = 0;
-                u32 expression_brackets = 0;
-                u32 expression_braces = 0;
-                for (u32 scan = index; scan < end; scan += 1)
+                if (first_top_level_comma != UINT32_MAX)
                 {
-                    CToken token = builder->preprocess.tokens[scan];
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                    {
-                        expression_parentheses += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && expression_parentheses)
-                    {
-                        expression_parentheses -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        expression_brackets += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && expression_brackets)
-                    {
-                        expression_brackets -= 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-                    {
-                        expression_braces += 1;
-                    }
-                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && expression_braces)
-                    {
-                        expression_braces -= 1;
-                    }
-                    else if (!expression_parentheses && !expression_brackets && !expression_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
-                    {
-                        end = scan;
-                        break;
-                    }
+                    end = first_top_level_comma;
                 }
             }
             if (statement_expression_mode && task.allow_trailing_expression && (end == task.end || end + 1 == task.end))
@@ -25838,6 +25894,26 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             else
             {
+                // A comma expression is one full expression statement, not
+                // an assignment whose right-hand range includes the comma.
+                // The assignment fast path would otherwise feed the value of
+                // the final comma operand back into the first assignment
+                // (for example `scan += 2, match++`).
+                if (first_top_level_comma != UINT32_MAX)
+                {
+                    c_ir_lower_body_yield(builder, state, task, end == task.end ? task.end : end + 1,
+                                          C_IR_LOWER_BODY_CONTINUE_STATEMENT,
+                                          (CIrLowerFrame){
+                                              .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                              .as.expression =
+                                                  {
+                                                      .start = index,
+                                                      .end = end,
+                                                  },
+                                          });
+                    state->task_count = task_count;
+                    return false;
+                }
                 CIrLowerAssignmentStatementState* statement_state = arena_allocate(builder->scratch_arena, CIrLowerAssignmentStatementState, 1);
                 *statement_state = (CIrLowerAssignmentStatementState){
                     .place = IR_VALUE_ID_INVALID,
@@ -25897,16 +25973,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 return false;
             }
         }
+        else if (statement_expression_mode)
+        {
+            // This is the end of the nested GNU statement expression, not
+            // the end of its enclosing function.  The enclosing function's
+            // return type is irrelevant here: glibc assert expands to a
+            // statement expression, and in a void function successful
+            // assertions must continue with the following statement.
+            return true;
+        }
         else if (builder->returns_void)
         {
             if (!c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, declaration_source))
             {
                 return false;
             }
-        }
-        else if (statement_expression_mode)
-        {
-            return true;
         }
         else if (builder->current_block.value != builder->function->entry.value && !c_ir_block_is_reachable(builder, builder->current_block))
         {

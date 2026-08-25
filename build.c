@@ -76,6 +76,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
     BUILD_COMMAND_X86_64_COMPLETION_CENSUS,
     BUILD_COMMAND_TEST_CJSON,
+    BUILD_COMMAND_TEST_ZLIB,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -569,6 +570,18 @@ struct TestCjsonOptions
 };
 
 #define CJSON_COMPATIBILITY_COMMIT "c859b25da02955fef659d658b8f324b5cde87be3"
+
+// zlib is always consumed from a caller-provided pristine checkout.  Keep the
+// exact upstream revision here so the compatibility result remains
+// reproducible without copying third-party sources into this repository.
+typedef struct TestZlibOptions TestZlibOptions;
+struct TestZlibOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define ZLIB_COMPATIBILITY_COMMIT "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -8681,6 +8694,649 @@ BUSTER_GLOBAL_LOCAL void test_cjson_action_add(Arena* arena, TestCjsonOptions op
     TestCjsonOptions* options_copy = arena_allocate(arena, TestCjsonOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_cjson_action, .callback_data = options_copy};
+}
+
+// --- zlib compatibility harness -----------------------------------------
+// The zlib workflow is intentionally explicit rather than driven by the
+// upstream Makefile: every translation unit, allocator mode, archive member,
+// and executable is named below.  The checkout remains outside this tree and
+// must be the pinned, pristine upstream revision.
+typedef struct ZlibCommandResult ZlibCommandResult;
+struct ZlibCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL ZlibCommandResult zlib_command_env(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture,
+                                                        SliceString8 environment_keys, SliceString8 environment_values)
+{
+    // Supplying an explicit environment replaces the inherited environment in
+    // the process-spawn layer.  Keep the caller's PATH so configure/make and
+    // their helper tools continue to resolve exactly as they do from the
+    // driver's shell.
+    SliceString8 effective_environment_keys = environment_keys;
+    SliceString8 effective_environment_values = environment_values;
+    bool has_path = false;
+    for (u64 index = 0; index < environment_keys.length; index += 1)
+    {
+        has_path = has_path || string_equal(environment_keys.pointer[index], S8("PATH"));
+    }
+    String8 inherited_path = os_get_environment_variable(S8("PATH"));
+    if (environment_keys.length && environment_keys.length == environment_values.length && !has_path && inherited_path.length)
+    {
+        String8* keys = arena_allocate(arena, String8, environment_keys.length + 1);
+        String8* values = arena_allocate(arena, String8, environment_values.length + 1);
+        for (u64 index = 0; index < environment_keys.length; index += 1)
+        {
+            keys[index] = environment_keys.pointer[index];
+            values[index] = environment_values.pointer[index];
+        }
+        keys[environment_keys.length] = S8("PATH");
+        values[environment_values.length] = inherited_path;
+        effective_environment_keys = (SliceString8){.pointer = keys, .length = environment_keys.length + 1};
+        effective_environment_values = (SliceString8){.pointer = values, .length = environment_values.length + 1};
+    }
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = effective_environment_keys.length == 0,
+            },
+        .environment_keys = effective_environment_keys,
+        .environment_values = effective_environment_values,
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: zlib harness could not start the command above\n"));
+        return (ZlibCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    ZlibCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ZlibCommandResult zlib_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    return zlib_command_env(arena, arguments, working_directory, capture, (SliceString8){0}, (SliceString8){0});
+}
+
+BUSTER_GLOBAL_LOCAL String8 zlib_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_zlib requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    ZlibCommandResult head = zlib_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = zlib_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(ZLIB_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_zlib requires pristine zlib commit {S8}; found {S8}\n"), S8(ZLIB_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    ZlibCommandResult status = zlib_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_zlib checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("ZLIB_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 zlib_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (configs[index].length)
+        {
+            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+            if (path_exists(arena, candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL String8 zlib_mode_flag(Arena* arena, String8 mode)
+{
+    return string_format(arena, S8("-fregister-allocator={S8}"), mode);
+}
+
+BUSTER_GLOBAL_LOCAL String8 zlib_basename(String8 path)
+{
+    u64 start = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    return string_slice(path, start, path.length);
+}
+
+BUSTER_GLOBAL_LOCAL String8 zlib_metric_flag(Arena* arena, String8 path)
+{
+    return string_format(arena, S8("-fsource-metrics={S8}"), path);
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: zlib compiler metrics missing allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+        return false;
+    }
+    string_print(S8("ZLIB_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"),
+                 mode, unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics,
+                                              String8 mode, u64* elapsed_us, bool verbose)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 mode_flag = zlib_mode_flag(arena, mode);
+    String8 metric_flag = zlib_metric_flag(arena, metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-D_LARGEFILE64_SOURCE=1"));
+    os_argument_builder_append(&builder, S8("-DHAVE_HIDDEN"));
+    os_argument_builder_append(&builder, mode_flag);
+    os_argument_builder_append(&builder, metric_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    ZlibCommandResult command = zlib_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-D_LARGEFILE64_SOURCE=1"));
+    os_argument_builder_append(&builder, S8("-DHAVE_HIDDEN"));
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    ZlibCommandResult command = zlib_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_archive(Arena* arena, String8 archive, String8 ar, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ar);
+    os_argument_builder_append(&builder, S8("rcs"));
+    os_argument_builder_append(&builder, archive);
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    ZlibCommandResult command = zlib_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_link(Arena* arena, String8 clang, String8 output, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    ZlibCommandResult command = zlib_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_run_args(Arena* arena, String8 binary, String8 working_directory, String8* extra, u64 extra_count, String8* output,
+                                       u64* elapsed_us)
+{
+    u64 argument_count = extra_count + 1;
+    String8* arguments = arena_allocate(arena, String8, argument_count);
+    arguments[0] = binary;
+    for (u64 index = 0; index < extra_count; index += 1)
+    {
+        arguments[index + 1] = extra[index];
+    }
+    u64 start = os_now_microseconds();
+    ZlibCommandResult command = zlib_command(arena, (SliceString8){.pointer = arguments, .length = argument_count}, working_directory, output != 0);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL u64 zlib_hash_file(Arena* arena, String8 path, u64* size_out)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    if (!bytes.pointer)
+    {
+        return 0;
+    }
+    if (size_out)
+    {
+        *size_out = bytes.length;
+    }
+    return buster_hash_64(bytes.pointer, bytes.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_write_corpus(Arena* arena, String8 path)
+{
+    enum { corpus_size = 131072 };
+    u8* bytes = arena_allocate(arena, u8, corpus_size);
+    for (u64 index = 0; index < corpus_size; index += 1)
+    {
+        bytes[index] = (u8)(((index * 17u) ^ (index >> 3) ^ (index >> 11)) & 0xffu);
+        if ((index % 257u) < 193u)
+        {
+            bytes[index] = (u8)('A' + ((index / 257u) % 23u));
+        }
+    }
+    return file_write(path, (ByteSlice){.pointer = bytes, .length = corpus_size});
+}
+
+BUSTER_GLOBAL_LOCAL bool zlib_configure_make(Arena* arena, String8 source_directory, String8 output_directory, String8 git, String8 ide)
+{
+    String8 archive = path_join(arena, output_directory, S8("upstream.tar"));
+    String8 configure_directory = path_join(arena, output_directory, S8("configure-source"));
+    make_directory_recursive(arena, configure_directory);
+    String8 archive_arguments[] = {git, S8("-C"), source_directory, S8("archive"), S8("--format=tar"), S8("HEAD"), S8("-o"), archive};
+    ZlibCommandResult archive_result = zlib_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(archive_arguments), S8("."), false);
+    if (archive_result.result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    String8 tar = executable_resolve_in_path(arena, S8("tar"));
+    if (!tar.length)
+    {
+        string_print(S8("error: test_zlib configure gate requires tar in PATH\n"));
+        return false;
+    }
+    String8 extract_arguments[] = {tar, S8("-xf"), archive, S8("-C"), configure_directory};
+    if (zlib_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(extract_arguments), S8("."), false).result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    if (!ar.length)
+    {
+        ar = executable_resolve_in_path(arena, S8("llvm-ar"));
+    }
+    String8 ranlib = executable_resolve_in_path(arena, S8("ranlib"));
+    if (!ar.length || !ranlib.length)
+    {
+        string_print(S8("error: test_zlib configure gate requires ar/llvm-ar and ranlib in PATH\n"));
+        return false;
+    }
+    String8 cc_value = string_format(arena, S8("{S8} cc"), ide);
+    String8 environment_keys[] = {S8("CC"), S8("AR"), S8("RANLIB")};
+    String8 environment_values[] = {cc_value, ar, ranlib};
+    SliceString8 environment = BUSTER_ARRAY_TO_SLICE(environment_keys);
+    SliceString8 values = BUSTER_ARRAY_TO_SLICE(environment_values);
+    // Invoke the pristine script as an in-tree configure.  zlib deliberately
+    // switches to `-include zconf.h` when $0 names an out-of-tree source
+    // directory; the ordinary upstream `./configure && make` gate should
+    // exercise the driver's native build path, not manufacture an
+    // out-of-tree-only forced-include requirement.
+    String8 configure_arguments[] = {S8("./configure"), S8("--static")};
+    if (zlib_command_env(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure_arguments), configure_directory, false, environment, values).result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    String8 make = executable_resolve_in_path(arena, S8("make"));
+    if (!make.length)
+    {
+        string_print(S8("error: test_zlib configure gate requires make in PATH\n"));
+        return false;
+    }
+    // The explicit allocator matrix above already links and runs all three
+    // upstream programs through the system linker.  This separate driver gate
+    // asks the pristine upstream build to compile and archive its canonical
+    // library target; default `make` additionally links example programs with
+    // Buster's native linker, which is a different (data-symbol import) scope.
+    String8 make_arguments[] = {make, S8("-j2"), S8("libz.a")};
+    if (zlib_command_env(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_arguments), configure_directory, false, environment, values).result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    string_print(S8("ZLIB_CONFIGURE target=libz.a status=pass source={S8}\n"), configure_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_zlib_action(Arena* arena, void* data)
+{
+    TestZlibOptions options = *(TestZlibOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_zlib requires an external pinned zlib checkout path\n"));
+        string_print(S8("usage: ./build/build test_zlib [--config Debug|Release] /path/to/zlib\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 library_sources[] = {
+        S8("adler32.c"), S8("crc32.c"), S8("deflate.c"), S8("infback.c"), S8("inffast.c"), S8("inflate.c"), S8("inftrees.c"), S8("trees.c"),
+        S8("zutil.c"), S8("compress.c"), S8("uncompr.c"), S8("gzclose.c"), S8("gzlib.c"), S8("gzread.c"), S8("gzwrite.c"),
+    };
+    String8 test_sources[] = {S8("test/example.c"), S8("test/minigzip.c"), S8("test/infcover.c")};
+    String8 required[] = {S8("zlib.h"), S8("zconf.h"), S8("tests/basic_zlib_compat.c")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, library_sources[index])))
+        {
+            string_print(S8("error: zlib manifest source is missing: {S8}\n"), library_sources[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_sources); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, test_sources[index])))
+        {
+            string_print(S8("error: zlib manifest test source is missing: {S8}\n"), test_sources[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(required); index += 1)
+    {
+        String8 path = index < 2 ? path_join(arena, source_directory, required[index]) : required[index];
+        if (!path_exists(arena, path))
+        {
+            string_print(S8("error: zlib compatibility fixture is missing: {S8}\n"), path);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    if (!zlib_git_verify(arena, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 ide = zlib_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!ar.length)
+    {
+        ar = executable_resolve_in_path(arena, S8("llvm-ar"));
+    }
+    if (!ide.length || !clang.length || !ar.length || !git.length)
+    {
+        string_print(S8("error: test_zlib requires a built ide, clang, git, and ar/llvm-ar in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 output_directory = string_format_z(arena, S8("build/zlib-v1.3.1-{u64}"), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    string_print(S8("ZLIB_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+    string_print(S8("ZLIB_MANIFEST library_sources={u64} test_sources={u64} allocators=4 fixture=tests/basic_zlib_compat.c\n"),
+                 BUSTER_ARRAY_LENGTH(library_sources), BUSTER_ARRAY_LENGTH(test_sources));
+
+    // Build the Clang reference archive once.  Buster objects are linked with
+    // this archive and the Clang archive in both directions below, keeping
+    // compiler/codegen failures separate from archive and linker failures.
+    String8 clang_objects[BUSTER_ARRAY_LENGTH(library_sources)];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        String8 name = zlib_basename(library_sources[index]);
+        clang_objects[index] = path_join(arena, output_directory, string_format(arena, S8("clang-{S8}.o"), name));
+        if (!zlib_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, library_sources[index]), clang_objects[index]))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 clang_archive = path_join(arena, output_directory, S8("libz-clang.a"));
+    if (!zlib_archive(arena, clang_archive, ar, clang_objects, BUSTER_ARRAY_LENGTH(clang_objects)))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 fixture = S8("tests/basic_zlib_compat.c");
+    String8 clang_fixture = path_join(arena, output_directory, S8("probe-clang.o"));
+    if (!zlib_compile_clang(arena, clang, source_directory, fixture, clang_fixture))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 reference_probe = path_join(arena, output_directory, S8("probe-reference"));
+    if (!zlib_link(arena, clang, reference_probe, (String8[]){clang_fixture, clang_archive}, 2))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 reference_output = {0};
+    u64 reference_elapsed = 0;
+    if (!zlib_run_args(arena, reference_probe, output_directory, 0, 0, &reference_output, &reference_elapsed))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("ZLIB_REFERENCE elapsed_us={u64} output={S8}"), reference_elapsed, zlib_trim_ascii_space(reference_output));
+    string_print(S8("\n"));
+
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 mode_directory = path_join(arena, output_directory, mode);
+        String8 mode_metrics_directory = path_join(arena, metrics_directory, mode);
+        make_directory_recursive(arena, mode_directory);
+        make_directory_recursive(arena, mode_metrics_directory);
+        String8 objects[BUSTER_ARRAY_LENGTH(library_sources)];
+        bool mode_ok = true;
+        u64 elapsed_us = 0;
+        for (u64 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(library_sources); source_index += 1)
+        {
+            String8 name = zlib_basename(library_sources[source_index]);
+            objects[source_index] = path_join(arena, mode_directory, string_format(arena, S8("{S8}.o"), name));
+            String8 metrics = path_join(arena, mode_metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+            mode_ok = zlib_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, library_sources[source_index]), objects[source_index], metrics,
+                                           mode, &elapsed_us, mode_index == 0) &&
+                      zlib_metrics_report(arena, mode, name, metrics, elapsed_us);
+            if (!mode_ok)
+            {
+                break;
+            }
+        }
+        if (!mode_ok)
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 archive = path_join(arena, mode_directory, S8("libz.a"));
+        if (!zlib_archive(arena, archive, ar, objects, BUSTER_ARRAY_LENGTH(objects)))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 buster_fixture = path_join(arena, mode_directory, S8("probe-buster.o"));
+        String8 fixture_metrics = path_join(arena, mode_metrics_directory, S8("basic_zlib_compat.metrics"));
+        if (!zlib_compile_buster(arena, ide, source_directory, fixture, buster_fixture, fixture_metrics, mode, &elapsed_us, false) ||
+            !zlib_metrics_report(arena, mode, S8("basic_zlib_compat.c"), fixture_metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 probe = path_join(arena, mode_directory, S8("probe"));
+        if (!zlib_link(arena, clang, probe, (String8[]){buster_fixture, archive}, 2))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 probe_cross = path_join(arena, mode_directory, S8("probe-cross-clang-archive"));
+        if (!zlib_link(arena, clang, probe_cross, (String8[]){clang_fixture, archive}, 2))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 output = {0};
+        u64 elapsed = 0;
+        if (!zlib_run_args(arena, probe, mode_directory, 0, 0, &output, &elapsed) || !string_equal(output, reference_output))
+        {
+            string_print(S8("error: zlib allocator={S8} probe differs from Clang reference\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        // The probe performs eight complete compression/decompression
+        // round-trips.  Count both input streams for each iteration so the
+        // reported rate describes the work the timed process actually did.
+        u64 workload_bytes = 131072ull * 2ull * 8ull;
+        u64 throughput_milli_mb_s = elapsed ? (workload_bytes * 1000ull) / elapsed : 0;
+        string_print(S8("ZLIB_PROBE allocator={S8} equal_reference=1 elapsed_us={u64} throughput_mb_s={u64}.{u64:width=[0,3]} corpus_bytes=131072 workload_bytes={u64} workload=compress+decompress\n"),
+                     mode, elapsed, throughput_milli_mb_s / 1000, throughput_milli_mb_s % 1000, workload_bytes);
+        String8 cross_output = {0};
+        if (!zlib_run_args(arena, probe_cross, mode_directory, 0, 0, &cross_output, 0) || !string_equal(cross_output, reference_output))
+        {
+            string_print(S8("error: zlib allocator={S8} cross-link probe differs from Clang reference\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("ZLIB_CROSS_LINK allocator={S8} fixture=clang archive=buster buster_objects=15 clang_objects=1 status=pass\n"), mode);
+        String8 probe_cross_buster = path_join(arena, mode_directory, S8("probe-cross-buster-archive"));
+        if (!zlib_link(arena, clang, probe_cross_buster, (String8[]){buster_fixture, clang_archive}, 2))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 cross_buster_output = {0};
+        if (!zlib_run_args(arena, probe_cross_buster, mode_directory, 0, 0, &cross_buster_output, 0) ||
+            !string_equal(cross_buster_output, reference_output))
+        {
+            string_print(S8("error: zlib allocator={S8} Buster fixture + Clang archive differs from reference\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("ZLIB_CROSS_LINK allocator={S8} fixture=buster archive=clang buster_objects=1 clang_objects=15 status=pass\n"), mode);
+
+        // Compile/link/run the upstream example, minigzip, and infcover tests
+        // for every allocator mode.  minigzip's file round-trip is also a
+        // deterministic corpus hash check, while the probe above records the
+        // compression workload throughput separately from compiler metrics.
+        String8 test_objects[BUSTER_ARRAY_LENGTH(test_sources)];
+        for (u64 test_index = 0; test_index < BUSTER_ARRAY_LENGTH(test_sources); test_index += 1)
+        {
+            String8 name = zlib_basename(test_sources[test_index]);
+            test_objects[test_index] = path_join(arena, mode_directory, string_format(arena, S8("{S8}.o"), name));
+            String8 test_metrics = path_join(arena, mode_metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+            if (!zlib_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, test_sources[test_index]), test_objects[test_index], test_metrics,
+                                     mode, &elapsed_us, false) ||
+                !zlib_metrics_report(arena, mode, name, test_metrics, elapsed_us))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        String8 example = path_join(arena, mode_directory, S8("example"));
+        String8 minigzip = path_join(arena, mode_directory, S8("minigzip"));
+        String8 infcover = path_join(arena, mode_directory, S8("infcover"));
+        if (!zlib_link(arena, clang, example, (String8[]){test_objects[0], archive}, 2) ||
+            !zlib_link(arena, clang, minigzip, (String8[]){test_objects[1], archive}, 2) ||
+            !zlib_link(arena, clang, infcover, (String8[]){test_objects[2], archive}, 2))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 example_output_file = path_join(arena, mode_directory, S8("example.gz"));
+        if (!zlib_run_args(arena, example, mode_directory, &example_output_file, 1, 0, 0))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("ZLIB_TEST allocator={S8} name=example status=pass\n"), mode);
+        String8 corpus = path_join(arena, mode_directory, S8("corpus.bin"));
+        String8 compressed = path_join(arena, mode_directory, S8("corpus.bin.gz"));
+        u64 corpus_size = 0;
+        u64 corpus_hash = 0;
+        if (!zlib_write_corpus(arena, corpus) || !(corpus_hash = zlib_hash_file(arena, corpus, &corpus_size)) ||
+            !zlib_run_args(arena, minigzip, mode_directory, &corpus, 1, 0, 0))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!zlib_run_args(arena, minigzip, mode_directory, (String8[]){S8("-d"), compressed}, 2, 0, 0))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        u64 roundtrip_size = 0;
+        u64 roundtrip_hash = zlib_hash_file(arena, corpus, &roundtrip_size);
+        if (corpus_hash != roundtrip_hash || corpus_size != roundtrip_size)
+        {
+            string_print(S8("error: zlib allocator={S8} minigzip corpus hash mismatch\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("ZLIB_TEST allocator={S8} name=minigzip corpus_hash={u64:x} status=pass\n"), mode, corpus_hash);
+        if (!zlib_run_args(arena, infcover, mode_directory, 0, 0, 0, 0))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("ZLIB_TEST allocator={S8} name=infcover status=pass\n"), mode);
+    }
+    if (!zlib_configure_make(arena, source_directory, output_directory, git, ide))
+    {
+        string_print(S8("error: zlib upstream configure+make gate failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("ZLIB_RESULT commit={S8} library_sources={u64} test_sources={u64} allocators={u64} status=pass\n"), S8(ZLIB_COMPATIBILITY_COMMIT),
+                 BUSTER_ARRAY_LENGTH(library_sources), BUSTER_ARRAY_LENGTH(test_sources), BUSTER_ARRAY_LENGTH(allocator_modes));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_zlib_action_add(Arena* arena, TestZlibOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestZlibOptions* options_copy = arena_allocate(arena, TestZlibOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_zlib_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -21822,6 +22478,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
         [BUILD_COMMAND_X86_64_COMPLETION_CENSUS] = S8_INITIALIZER("x86_64_completion_census"),
         [BUILD_COMMAND_TEST_CJSON] = S8_INITIALIZER("test_cjson"),
+        [BUILD_COMMAND_TEST_ZLIB] = S8_INITIALIZER("test_zlib"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -21892,6 +22549,7 @@ ProcessResult process_arguments(void)
     String8List build_targets = {0};
     String8List native_arguments = {0};
     TestCjsonOptions test_cjson_options = {0};
+    TestZlibOptions test_zlib_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -21991,6 +22649,12 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_cjson_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_ZLIB && !test_zlib_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_zlib_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -22240,6 +22904,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_CJSON)
                 {
                     test_cjson_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_ZLIB)
+                {
+                    test_zlib_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -22775,6 +23443,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_CJSON:
         {
             test_cjson_action_add(arena, test_cjson_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_ZLIB:
+        {
+            test_zlib_action_add(arena, test_zlib_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

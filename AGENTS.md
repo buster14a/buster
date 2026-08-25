@@ -194,7 +194,27 @@ the system linker, compares a deterministic parse/print round trip with
 Clang, and exercises FAST, NONE, MIR_STACK and QUALITY. Generated objects,
 metrics and logs remain under `build/cjson-v1.7.19-<pid>/`.
 
-`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`,
+The opt-in zlib compatibility harness takes an external, pristine zlib v1.3.1
+checkout; upstream sources are never copied into or patched in this repository:
+
+```sh
+./build.sh build --config Release -t ide
+./build/build test_zlib --config Release /path/to/zlib-v1.3.1
+```
+
+The checkout must be commit
+`51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf` with no tracked or untracked
+changes. The harness explicitly compiles all 15 zlib library translation units
+with Clang and Buster and the example, minigzip, and infcover test units with
+Buster, builds `libz.a`, exercises FAST, NONE, MIR_STACK and QUALITY, cross-links both
+archive directions, compares a deterministic compression/decompression probe
+and minigzip corpus hashes with Clang, and records source metrics plus actual
+compression-workload throughput. After the explicit manifest passes, it
+extracts a clean upstream archive and runs its unmodified configure script and
+`libz.a` make target with the selected Buster driver. Generated objects, metrics,
+archives, and logs remain under `build/zlib-v1.3.1-<pid>/`.
+
+`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,
