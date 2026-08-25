@@ -2373,7 +2373,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
             u32 import_index = import_indices[relocation->symbol];
-            if (import_index == UINT32_MAX || relocation->kind != OBJECT_RELOCATION_X86_64_PC32)
+            // Function-pointer initializers (for example cJSON's allocator
+            // hooks) use an absolute 64-bit relocation for the imported
+            // function.  Point those at the generated PLT entry just like a
+            // direct PC-relative call; the dynamic loader then resolves the
+            // entry on first use.  Reject every other undefined relocation so
+            // data imports cannot be mistaken for callable symbols.
+            if (import_index == UINT32_MAX ||
+                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;

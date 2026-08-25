@@ -2468,6 +2468,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isinf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isinff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -4063,6 +4070,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
+        "__builtin_nan",           "__builtin_nanf", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_isinf_sign",
+        "__builtin_isinf",         "__builtin_isinff",
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_types_compatible_p",
@@ -6028,6 +6038,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
+    // The hosted <float.h> supplied by Clang/GCC spells DBL_EPSILON in terms
+    // of this predefined macro.  Keep the value in the compiler's prelude so
+    // an otherwise ordinary system header does not depend on a host compiler
+    // having supplied it first (cJSON uses DBL_EPSILON directly).
+    C_DEFINE_TYPE_MACRO("__DBL_EPSILON__", S8("2.220446049250313080847263336181640625e-16"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
@@ -6036,6 +6051,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
     C_DEFINE_TYPE_MACRO("__clang__", S8("1"));
     C_DEFINE_TYPE_MACRO("__clang_major__", S8("18"));
+    C_DEFINE_TYPE_MACRO("__clang_minor__", S8("0"));
+    C_DEFINE_TYPE_MACRO("__clang_patchlevel__", S8("0"));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));

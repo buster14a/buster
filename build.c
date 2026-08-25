@@ -75,6 +75,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
     BUILD_COMMAND_X86_64_COMPLETION_CENSUS,
+    BUILD_COMMAND_TEST_CJSON,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -555,6 +556,19 @@ struct Generate
     u32 cmake_profile_summary : 1;
     u32 cross_configs : 1;
 };
+
+// The cJSON compatibility workflow deliberately keeps the third-party source
+// outside this repository.  The command accepts a clean checkout supplied by
+// the caller, verifies the released commit below, and only writes generated
+// objects, metrics and logs beneath build/.
+typedef struct TestCjsonOptions TestCjsonOptions;
+struct TestCjsonOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define CJSON_COMPATIBILITY_COMMIT "c859b25da02955fef659d658b8f324b5cde87be3"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -8198,6 +8212,476 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_clean_action(Arena* aren
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_release_success_action(Arena* arena, void* data);
 BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRun* run);
 BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run);
+
+typedef struct CjsonCommandResult CjsonCommandResult;
+struct CjsonCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+// Run one compatibility-harness command in the requested directory.  Keeping
+// this in build.c (rather than shell snippets) means every test sees the same
+// process/environment handling as the rest of the build driver.
+BUSTER_GLOBAL_LOCAL CjsonCommandResult cjson_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: cJSON harness could not start the command above\n"));
+        return (CjsonCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    CjsonCommandResult result = {
+        .result = wait.result,
+        .output = {
+            .pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+            .length = wait.streams[STANDARD_STREAM_OUTPUT].length,
+        },
+        .error = {
+            .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+            .length = wait.streams[STANDARD_STREAM_ERROR].length,
+        },
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 cjson_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_cjson requires git in PATH\n"));
+        return false;
+    }
+
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    CjsonCommandResult head = cjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = cjson_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(CJSON_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_cjson requires pristine cJSON commit {S8}; found {S8}\n"), S8(CJSON_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    CjsonCommandResult status = cjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_cjson checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("CJSON_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 cjson_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(configs); i += 1)
+    {
+        if (!configs[i].length)
+        {
+            continue;
+        }
+        String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[i]), S8("ide"));
+        if (path_exists(arena, candidate))
+        {
+            return candidate;
+        }
+    }
+
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL String8 cjson_mode_flag(Arena* arena, String8 mode)
+{
+    return string_format(arena, S8("-fregister-allocator={S8}"), mode);
+}
+
+BUSTER_GLOBAL_LOCAL String8 cjson_metric_flag(Arena* arena, String8 path)
+{
+    return string_format(arena, S8("-fsource-metrics={S8}"), path);
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    bool measured = self_host_source_metrics_read(arena, path, &metrics);
+    if (measured)
+    {
+        string_print(S8("CJSON_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"),
+                     mode, unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    }
+    else
+    {
+        string_print(S8("warning: cJSON compiler metrics missing for allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+    }
+    return measured;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics,
+                                               String8 mode, u64* elapsed_us, bool verbose)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 include_tests = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("tests")));
+    String8 include_unity = string_format(arena, S8("-I{S8}"), path_join(arena, path_join(arena, source_directory, S8("tests")), S8("unity/src")));
+    String8 include_examples = string_format(arena, S8("-I{S8}"), path_join(arena, path_join(arena, source_directory, S8("tests")), S8("unity/examples")));
+    String8 mode_flag = cjson_mode_flag(arena, mode);
+    String8 metric_flag = cjson_metric_flag(arena, metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, include_tests);
+    os_argument_builder_append(&builder, include_unity);
+    os_argument_builder_append(&builder, include_examples);
+    os_argument_builder_append(&builder, mode_flag);
+    os_argument_builder_append(&builder, metric_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    SliceString8 arguments = os_argument_builder_flush(&builder);
+    u64 start = os_now_microseconds();
+    CjsonCommandResult command = cjson_command(arena, arguments, S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 include_tests = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("tests")));
+    String8 include_unity = string_format(arena, S8("-I{S8}"), path_join(arena, path_join(arena, source_directory, S8("tests")), S8("unity/src")));
+    String8 include_examples = string_format(arena, S8("-I{S8}"), path_join(arena, path_join(arena, source_directory, S8("tests")), S8("unity/examples")));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, include_tests);
+    os_argument_builder_append(&builder, include_unity);
+    os_argument_builder_append(&builder, include_examples);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    CjsonCommandResult command = cjson_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_link_clang(Arena* arena, String8 clang, String8 output, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-no-pie"));
+    for (u64 i = 0; i < object_count; i += 1)
+    {
+        os_argument_builder_append(&builder, objects[i]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    CjsonCommandResult command = cjson_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_run_binary(Arena* arena, String8 binary, String8 working_directory, String8* output)
+{
+    String8 arguments[] = {binary};
+    CjsonCommandResult command = cjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true);
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool cjson_roundtrip(Arena* arena, String8 ide, String8 clang, String8 source_directory, String8 tests_directory,
+                                         String8 output_directory, String8 metrics_directory, String8 mode, String8 buster_cjson_object,
+                                         String8 clang_cjson_object, String8 clang_roundtrip_object)
+{
+    String8 roundtrip_source = S8("tests/basic_cjson_roundtrip.c");
+    String8 buster_roundtrip_object = path_join(arena, output_directory, string_format(arena, S8("roundtrip-{S8}.o"), mode));
+    String8 buster_binary = path_join(arena, output_directory, string_format(arena, S8("roundtrip-{S8}"), mode));
+    String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("roundtrip-{S8}.metrics"), mode));
+    u64 elapsed_us = 0;
+    if (!cjson_compile_buster(arena, ide, source_directory, roundtrip_source, buster_roundtrip_object, metrics, mode, &elapsed_us, false) ||
+        !cjson_metrics_report(arena, mode, S8("roundtrip"), metrics, elapsed_us))
+    {
+        return false;
+    }
+
+    String8 buster_objects[] = {buster_cjson_object, buster_roundtrip_object};
+    if (!cjson_link_clang(arena, clang, buster_binary, buster_objects, BUSTER_ARRAY_LENGTH(buster_objects)))
+    {
+        return false;
+    }
+    String8 buster_output = {0};
+    if (!cjson_run_binary(arena, buster_binary, S8("."), &buster_output))
+    {
+        return false;
+    }
+
+    String8 clang_binary = path_join(arena, output_directory, string_format(arena, S8("roundtrip-clang-{S8}"), mode));
+    String8 clang_objects[] = {clang_cjson_object, clang_roundtrip_object};
+    if (!cjson_link_clang(arena, clang, clang_binary, clang_objects, BUSTER_ARRAY_LENGTH(clang_objects)))
+    {
+        return false;
+    }
+    String8 clang_output = {0};
+    if (!cjson_run_binary(arena, clang_binary, S8("."), &clang_output))
+    {
+        return false;
+    }
+
+    bool equal = string_equal(buster_output, clang_output);
+    string_print(S8("CJSON_ROUNDTRIP allocator={S8} equal_clang={u32} output={S8}"), mode, equal, cjson_trim_ascii_space(buster_output));
+    string_print(S8("\n"));
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
+{
+    TestCjsonOptions options = *(TestCjsonOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_cjson requires an external cJSON v1.7.19 checkout path\n"));
+        string_print(S8("usage: ./build/build test_cjson [--config Debug|Release] /path/to/cjson\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 cjson_source = path_join(arena, source_directory, S8("cJSON.c"));
+    String8 cjson_utils_source = path_join(arena, source_directory, S8("cJSON_Utils.c"));
+    String8 tests_directory = path_join(arena, source_directory, S8("tests"));
+    String8 unity_source = path_join(arena, path_join(arena, tests_directory, S8("unity/src")), S8("unity.c"));
+    if (!path_exists(arena, cjson_source) || !path_exists(arena, cjson_utils_source) || !path_exists(arena, unity_source) ||
+        !path_exists(arena, path_join(arena, S8("tests"), S8("basic_cjson_roundtrip.c"))) || !cjson_git_verify(arena, source_directory))
+    {
+        string_print(S8("error: test_cjson checkout is missing cJSON.c/cJSON_Utils.c/tests or is not pristine\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = cjson_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_cjson requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 output_directory = string_format_z(arena, S8("build/cjson-v1.7.19-{u64}"), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    string_print(S8("CJSON_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+
+    String8 fast = S8("fast");
+    String8 cjson_object = path_join(arena, output_directory, S8("cJSON-fast.o"));
+    String8 cjson_metrics = path_join(arena, metrics_directory, S8("cJSON-fast.metrics"));
+    u64 elapsed_us = 0;
+    if (!cjson_compile_buster(arena, ide, source_directory, cjson_source, cjson_object, cjson_metrics, fast, &elapsed_us, true) ||
+        !cjson_metrics_report(arena, fast, S8("cJSON.c"), cjson_metrics, elapsed_us))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 utils_object = path_join(arena, output_directory, S8("cJSON_Utils-fast.o"));
+    String8 utils_metrics = path_join(arena, metrics_directory, S8("cJSON_Utils-fast.metrics"));
+    if (!cjson_compile_buster(arena, ide, source_directory, cjson_utils_source, utils_object, utils_metrics, fast, &elapsed_us, true) ||
+        !cjson_metrics_report(arena, fast, S8("cJSON_Utils.c"), utils_metrics, elapsed_us))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // Build the Clang reference objects once.  Every allocator mode links its
+    // own Buster objects against this same reference binary, so output changes
+    // are attributable to the compiler rather than a second source variant.
+    String8 clang_cjson_object = path_join(arena, output_directory, S8("cJSON-clang.o"));
+    String8 clang_roundtrip_object = path_join(arena, output_directory, S8("roundtrip-clang.o"));
+    if (!cjson_compile_clang(arena, clang, source_directory, cjson_source, clang_cjson_object) ||
+        !cjson_compile_clang(arena, clang, source_directory, S8("tests/basic_cjson_roundtrip.c"), clang_roundtrip_object))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // The first (default FAST) mode runs every upstream test.  Tests include
+    // cJSON.c through tests/common.h, therefore cJSON_object is intentionally
+    // not linked into these binaries; cJSON_Utils.c is added only to the three
+    // utility tests below.
+    String8 core_tests[] = {
+        S8("parse_examples"), S8("parse_number"), S8("parse_hex4"), S8("parse_string"), S8("parse_array"), S8("parse_object"),
+        S8("parse_value"), S8("print_string"), S8("print_number"), S8("print_array"), S8("print_object"), S8("print_value"),
+        S8("misc_tests"), S8("parse_with_opts"), S8("compare_tests"), S8("cjson_add"), S8("readme_examples"), S8("minify_tests"),
+    };
+    String8 unity_object = path_join(arena, output_directory, S8("unity-fast.o"));
+    String8 unity_metrics = path_join(arena, metrics_directory, S8("unity-fast.metrics"));
+    if (!cjson_compile_buster(arena, ide, source_directory, unity_source, unity_object, unity_metrics, fast, &elapsed_us, false) ||
+        !cjson_metrics_report(arena, fast, S8("unity.c"), unity_metrics, elapsed_us))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    for (u64 test_index = 0; test_index < BUSTER_ARRAY_LENGTH(core_tests); test_index += 1)
+    {
+        String8 name = core_tests[test_index];
+        String8 source = path_join(arena, tests_directory, string_format(arena, S8("{S8}.c"), name));
+        String8 object = path_join(arena, output_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 binary = path_join(arena, output_directory, string_format(arena, S8("{S8}"), name));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+        if (!cjson_compile_buster(arena, ide, source_directory, source, object, metrics, fast, &elapsed_us, false) ||
+            !cjson_metrics_report(arena, fast, name, metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 objects[] = {object, unity_object};
+        if (!cjson_link_clang(arena, clang, binary, objects, BUSTER_ARRAY_LENGTH(objects)) || !cjson_run_binary(arena, binary, tests_directory, 0))
+        {
+            string_print(S8("error: cJSON upstream core test failed: {S8}\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("CJSON_TEST suite=core name={S8} status=pass\n"), name);
+    }
+
+    String8 utils_tests[] = {S8("json_patch_tests"), S8("old_utils_tests"), S8("misc_utils_tests")};
+    for (u64 test_index = 0; test_index < BUSTER_ARRAY_LENGTH(utils_tests); test_index += 1)
+    {
+        String8 name = utils_tests[test_index];
+        String8 source = path_join(arena, tests_directory, string_format(arena, S8("{S8}.c"), name));
+        String8 object = path_join(arena, output_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 binary = path_join(arena, output_directory, string_format(arena, S8("{S8}"), name));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+        if (!cjson_compile_buster(arena, ide, source_directory, source, object, metrics, fast, &elapsed_us, false) ||
+            !cjson_metrics_report(arena, fast, name, metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 objects[] = {object, utils_object, unity_object};
+        if (!cjson_link_clang(arena, clang, binary, objects, BUSTER_ARRAY_LENGTH(objects)) || !cjson_run_binary(arena, binary, tests_directory, 0))
+        {
+            string_print(S8("error: cJSON upstream utility test failed: {S8}\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("CJSON_TEST suite=utils name={S8} status=pass\n"), name);
+    }
+
+    // Exercise the requested allocator matrix without repeating the expensive
+    // 21-test suite.  Each mode compiles cJSON.c and runs the same deterministic
+    // parse/print program, comparing byte-for-byte with Clang.
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 mode_cjson_object = cjson_object;
+        if (!string_equal(mode, fast))
+        {
+            mode_cjson_object = path_join(arena, output_directory, string_format(arena, S8("cJSON-{S8}.o"), mode));
+            String8 mode_metrics = path_join(arena, metrics_directory, string_format(arena, S8("cJSON-{S8}.metrics"), mode));
+            if (!cjson_compile_buster(arena, ide, source_directory, cjson_source, mode_cjson_object, mode_metrics, mode, &elapsed_us, true) ||
+                !cjson_metrics_report(arena, mode, S8("cJSON.c"), mode_metrics, elapsed_us))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        if (!cjson_roundtrip(arena, ide, clang, source_directory, tests_directory, output_directory, metrics_directory, mode, mode_cjson_object,
+                             clang_cjson_object, clang_roundtrip_object))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    // Complete the end-to-end gate with one native ide compile+link command.
+    // The system-linker isolation above remains useful for running every
+    // upstream test, while this probe verifies that Buster's own linker can
+    // produce and execute a hosted cJSON program as well.
+    String8 ide_binary = path_join(arena, output_directory, S8("roundtrip-ide"));
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 ide_arguments_array[] = {
+        ide,
+        S8("cc"),
+        S8("-g0"),
+        include_root,
+        S8("-fregister-allocator=fast"),
+        cjson_source,
+        S8("tests/basic_cjson_roundtrip.c"),
+        S8("-l"),
+        S8("m"),
+        S8("-o"),
+        ide_binary,
+    };
+    CjsonCommandResult ide_link = cjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ide_arguments_array), S8("."), true);
+    bool ide_link_pass = false;
+    if (ide_link.result == PROCESS_RESULT_SUCCESS)
+    {
+        String8 ide_output = {0};
+        bool ran = cjson_run_binary(arena, ide_binary, S8("."), &ide_output);
+        bool expected = string_equal(ide_output, S8("{\"z\":3,\"a\":[true,null,1.25]}\n"));
+        ide_link_pass = ran && expected;
+        string_print(S8("CJSON_IDE_LINK status={S8} equal_reference={u32}\n"), ide_link_pass ? S8("pass") : S8("run-failed"), ide_link_pass);
+    }
+    else
+    {
+        string_print(S8("CJSON_IDE_LINK status=link-failed\n"));
+    }
+    if (!ide_link_pass)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    string_print(S8("CJSON_RESULT commit={S8} core_tests={u64} utils_tests={u64} allocators={u64} status=pass\n"), S8(CJSON_COMPATIBILITY_COMMIT),
+                 BUSTER_ARRAY_LENGTH(core_tests), BUSTER_ARRAY_LENGTH(utils_tests), BUSTER_ARRAY_LENGTH(allocator_modes));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_cjson_action_add(Arena* arena, TestCjsonOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestCjsonOptions* options_copy = arena_allocate(arena, TestCjsonOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_cjson_action, .callback_data = options_copy};
+}
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
 struct X86CompletionCensusPlan
@@ -21337,6 +21821,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
         [BUILD_COMMAND_X86_64_COMPLETION_CENSUS] = S8_INITIALIZER("x86_64_completion_census"),
+        [BUILD_COMMAND_TEST_CJSON] = S8_INITIALIZER("test_cjson"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -21406,6 +21891,7 @@ ProcessResult process_arguments(void)
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
     String8List native_arguments = {0};
+    TestCjsonOptions test_cjson_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -21499,6 +21985,12 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TEST_TIMING_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
             {
                 string8_list_push(arena, &test_timing_summary_paths, argument);
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_CJSON && !test_cjson_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_cjson_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -21744,6 +22236,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_CLANG_ANALYZE)
                 {
                     clang_analyze_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_CJSON)
+                {
+                    test_cjson_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -22274,6 +22770,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_X86_64_COMPLETION_CENSUS:
         {
             x86_completion_census_add(arena, build_directory, false);
+        }
+        break;
+        case BUILD_COMMAND_TEST_CJSON:
+        {
+            test_cjson_action_add(arena, test_cjson_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

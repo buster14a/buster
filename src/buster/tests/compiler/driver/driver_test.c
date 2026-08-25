@@ -3124,6 +3124,28 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A hosted dynamic link must also resolve an imported function used as a
+    // data initializer.  This is the relocation shape cJSON uses for its
+    // global allocator hooks (R_X86_64_64 -> the generated PLT entry).
+    String8 c_function_pointer_path = buster_test_temporary_path(arguments->arena, S8("buster-c-function-pointer"), S8(""));
+    String8 c_function_pointer_command_line[] = {
+        S8("-o"), c_function_pointer_path, S8("tests/basic_c_function_pointer.c"),
+    };
+    CompilerDriverResult c_function_pointer = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_command_line)));
+    BUSTER_TEST(arguments, c_function_pointer.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_function_pointer.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_function_pointer_run_arguments[] = {c_function_pointer_path};
+        ProcessSpawnResult c_function_pointer_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, c_function_pointer_spawn.handle != 0);
+        if (c_function_pointer_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_function_pointer_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
 #endif
     String8 c_atomic_path = buster_test_temporary_path(arguments->arena, S8("buster-c-atomic"),
 #if BUSTER_WINDOWS
@@ -4720,6 +4742,240 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ProcessWaitResult c_conditional_operand_wait = os_process_wait_sync(arguments->arena, c_conditional_operand_spawn);
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // A conditional assignment yields the assigned member's type.  Keep the
+    // cJSON_SetBoolValue shape inline with its comparison so type prediction
+    // cannot retain the pointer type of the object operand.
+    String8 c_conditional_assignment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conditional-assignment"), S8(""));
+    String8 c_conditional_assignment_command_line[] = {
+        S8("-o"),
+        c_conditional_assignment_path,
+        S8("tests/basic_c_conditional_assignment.c"),
+    };
+    CompilerDriverResult c_conditional_assignment = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_assignment_command_line)));
+    BUSTER_TEST(arguments, c_conditional_assignment.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_conditional_assignment.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_conditional_assignment_arguments[] = {
+            c_conditional_assignment_path,
+        };
+        ProcessSpawnResult c_conditional_assignment_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_assignment_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_conditional_assignment_spawn.handle != 0);
+        if (c_conditional_assignment_spawn.handle)
+        {
+            ProcessWaitResult c_conditional_assignment_wait = os_process_wait_sync(arguments->arena, c_conditional_assignment_spawn);
+            BUSTER_TEST(arguments, c_conditional_assignment_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // A qualified typedef'd enum keeps the same declaration identity across
+    // a function prototype and definition.  Unity relies on this exact
+    // redeclaration shape for UnityPrintNumberByStyle.
+    String8 c_enum_prototype_path = buster_test_temporary_path(arguments->arena, S8("buster-c-enum-prototype"), S8(""));
+    String8 c_enum_prototype_command_line[] = {
+        S8("-o"),
+        c_enum_prototype_path,
+        S8("tests/basic_c_enum_prototype.c"),
+    };
+    CompilerDriverResult c_enum_prototype = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_enum_prototype_command_line)));
+    BUSTER_TEST(arguments, c_enum_prototype.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_enum_prototype.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_enum_prototype_arguments[] = {
+            c_enum_prototype_path,
+        };
+        ProcessSpawnResult c_enum_prototype_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_enum_prototype_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_enum_prototype_spawn.handle != 0);
+        if (c_enum_prototype_spawn.handle)
+        {
+            ProcessWaitResult c_enum_prototype_wait = os_process_wait_sync(arguments->arena, c_enum_prototype_spawn);
+            BUSTER_TEST(arguments, c_enum_prototype_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // An array of aggregates decays to a pointer for `->` access.  Keep both
+    // the field assignment and the value read as a call argument here: the
+    // original lowering loaded the whole array and then asked field access to
+    // treat that ARRAY value as a POINTER.
+    String8 c_array_arrow_path = buster_test_temporary_path(arguments->arena, S8("buster-c-array-arrow"), S8(""));
+    String8 c_array_arrow_command_line[] = {
+        S8("-o"),
+        c_array_arrow_path,
+        S8("tests/basic_c_array_arrow.c"),
+    };
+    CompilerDriverResult c_array_arrow = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_arrow_command_line)));
+    BUSTER_TEST(arguments, c_array_arrow.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_array_arrow.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_array_arrow_arguments[] = {
+            c_array_arrow_path,
+        };
+        ProcessSpawnResult c_array_arrow_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_arrow_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_array_arrow_spawn.handle != 0);
+        if (c_array_arrow_spawn.handle)
+        {
+            ProcessWaitResult c_array_arrow_wait = os_process_wait_sync(arguments->arena, c_array_arrow_spawn);
+            BUSTER_TEST(arguments, c_array_arrow_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // Explicit casts apply the same array-to-pointer decay as ordinary
+    // expressions.  Exercise both pointer and integer destinations so the
+    // cast lowering cannot retain the source ARRAY type.
+    String8 c_array_cast_path = buster_test_temporary_path(arguments->arena, S8("buster-c-array-cast"), S8(""));
+    String8 c_array_cast_command_line[] = {
+        S8("-o"),
+        c_array_cast_path,
+        S8("tests/basic_c_array_cast.c"),
+    };
+    CompilerDriverResult c_array_cast = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_cast_command_line)));
+    BUSTER_TEST(arguments, c_array_cast.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_array_cast.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_array_cast_arguments[] = {
+            c_array_cast_path,
+        };
+        ProcessSpawnResult c_array_cast_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_cast_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_array_cast_spawn.handle != 0);
+        if (c_array_cast_spawn.handle)
+        {
+            ProcessWaitResult c_array_cast_wait = os_process_wait_sync(arguments->arena, c_array_cast_spawn);
+            BUSTER_TEST(arguments, c_array_cast_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // Prefix updates over a dereferenced pointer are full expressions, not
+    // the identifier-only assignment fast path.  Exercise both directions
+    // at runtime so the produced place and its updated value are observable.
+    String8 c_prefix_increment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-prefix-increment"), S8(""));
+    String8 c_prefix_increment_command_line[] = {
+        S8("-o"),
+        c_prefix_increment_path,
+        S8("tests/basic_c_prefix_increment.c"),
+    };
+    CompilerDriverResult c_prefix_increment = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_increment_command_line)));
+    BUSTER_TEST(arguments, c_prefix_increment.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_prefix_increment.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_prefix_increment_arguments[] = {
+            c_prefix_increment_path,
+        };
+        ProcessSpawnResult c_prefix_increment_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_increment_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_prefix_increment_spawn.handle != 0);
+        if (c_prefix_increment_spawn.handle)
+        {
+            ProcessWaitResult c_prefix_increment_wait = os_process_wait_sync(arguments->arena, c_prefix_increment_spawn);
+            BUSTER_TEST(arguments, c_prefix_increment_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // Hosted math headers spell NAN and the classification helpers through
+    // compiler builtins.  Keep the quiet-NaN value and finite isinf result
+    // observable at runtime so these are not merely accepted identifiers.
+    String8 c_builtin_math_path = buster_test_temporary_path(arguments->arena, S8("buster-c-builtin-math"), S8(""));
+    String8 c_builtin_math_command_line[] = {
+        S8("-o"),
+        c_builtin_math_path,
+        S8("tests/basic_c_builtin_math.c"),
+    };
+    CompilerDriverResult c_builtin_math = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_builtin_math_command_line)));
+    BUSTER_TEST(arguments, c_builtin_math.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_builtin_math.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_builtin_math_arguments[] = {
+            c_builtin_math_path,
+        };
+        ProcessSpawnResult c_builtin_math_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_builtin_math_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_builtin_math_spawn.handle != 0);
+        if (c_builtin_math_spawn.handle)
+        {
+            ProcessWaitResult c_builtin_math_wait = os_process_wait_sync(arguments->arena, c_builtin_math_spawn);
+            BUSTER_TEST(arguments, c_builtin_math_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // Decimal literals with a large exponent still require correctly rounded
+    // binary conversion.  This exact bit pattern is the value Clang emits
+    // for 123e+127; an accumulated decimal f64 can drift by two ulps.
+    String8 c_float_literal_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-literal"), S8(""));
+    String8 c_float_literal_command_line[] = {
+        S8("-o"),
+        c_float_literal_path,
+        S8("tests/basic_c_float_literal.c"),
+    };
+    CompilerDriverResult c_float_literal = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_literal_command_line)));
+    BUSTER_TEST(arguments, c_float_literal.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_float_literal.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_float_literal_arguments[] = {
+            c_float_literal_path,
+        };
+        ProcessSpawnResult c_float_literal_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_literal_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_float_literal_spawn.handle != 0);
+        if (c_float_literal_spawn.handle)
+        {
+            ProcessWaitResult c_float_literal_wait = os_process_wait_sync(arguments->arena, c_float_literal_spawn);
+            BUSTER_TEST(arguments, c_float_literal_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // A void cast around an assignment must still execute its store.  This is
+    // the exact loop-update shape used by cJSON_Utils.c.
+    String8 c_void_assignment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-void-assignment"), S8(""));
+    String8 c_void_assignment_command_line[] = {
+        S8("-o"),
+        c_void_assignment_path,
+        S8("tests/basic_c_void_assignment.c"),
+    };
+    CompilerDriverResult c_void_assignment = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_void_assignment_command_line)));
+    BUSTER_TEST(arguments, c_void_assignment.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_void_assignment.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_void_assignment_arguments[] = {
+            c_void_assignment_path,
+        };
+        ProcessSpawnResult c_void_assignment_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_void_assignment_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_void_assignment_spawn.handle != 0);
+        if (c_void_assignment_spawn.handle)
+        {
+            ProcessWaitResult c_void_assignment_wait = os_process_wait_sync(arguments->arena, c_void_assignment_spawn);
+            BUSTER_TEST(arguments, c_void_assignment_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     // Every fixture here folds a sizeof or _Alignof whose wrong lowering still

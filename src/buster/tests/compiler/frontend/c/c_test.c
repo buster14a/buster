@@ -3100,6 +3100,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, builtins, 5, C_TOKEN_PREPROCESSING_NUMBER, S8("2"));
     c_test_preprocessed_token(arguments, &result, builtins, 6, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
 
+    CPreprocessResult floating_builtins = c_preprocess(arguments->arena,
+                                                       S8("__DBL_EPSILON__\n"),
+                                                       (CPreprocessOptions){
+                                                           .source_path = S8("floating-builtins.c"),
+                                                       });
+    BUSTER_TEST(arguments, floating_builtins.diagnostic_count == 0);
+    BUSTER_TEST(arguments, floating_builtins.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, floating_builtins, 0, C_TOKEN_PREPROCESSING_NUMBER,
+                               S8("2.220446049250313080847263336181640625e-16"));
+
     CPreprocessResult aarch64_android_builtins = c_preprocess(arguments->arena,
                                                               S8("#if defined(__ANDROID__) && "
                                                                  "defined(__linux__) && "

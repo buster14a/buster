@@ -8033,7 +8033,15 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
         case C_TYPE_UNION:
         case C_TYPE_ENUM:
         {
-            compatible = left_type.tag.length ? string_equal(left_type.tag, right_type.tag) : pair.left.value == pair.right.value;
+            // Qualified uses of an anonymous aggregate retain a distinct
+            // CTypeId, but their unqualified type points at the same
+            // declaration.  Compare that identity rather than the wrapper
+            // IDs so a typedef'd enum remains compatible across a prototype
+            // and its definition (Unity's display-style enum exercises this
+            // exact redeclaration path).
+            CTypeId left_unqualified = c_parse_unqualified_type(result, pair.left);
+            CTypeId right_unqualified = c_parse_unqualified_type(result, pair.right);
+            compatible = left_type.tag.length ? string_equal(left_type.tag, right_type.tag) : left_unqualified.value == right_unqualified.value;
             if (compatible && left_type.kind == C_TYPE_ENUM &&
                 (left_type.element_type.value != C_ID_UNDERLYING_INVALID || right_type.element_type.value != C_ID_UNDERLYING_INVALID))
             {
