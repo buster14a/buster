@@ -1,5 +1,3 @@
-#include <math.h>
-
 int main(void)
 {
     double nan = __builtin_nan("");
