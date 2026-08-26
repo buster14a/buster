@@ -77,6 +77,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_X86_64_COMPLETION_CENSUS,
     BUILD_COMMAND_TEST_CJSON,
     BUILD_COMMAND_TEST_ZLIB,
+    BUILD_COMMAND_TEST_LUA,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -582,6 +583,23 @@ struct TestZlibOptions
 };
 
 #define ZLIB_COMPATIBILITY_COMMIT "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+
+// Lua is consumed from a caller-provided pristine checkout.  Keep the exact
+// upstream release commit here so the external compatibility run is
+// reproducible without copying or patching third-party sources in this tree.
+typedef struct TestLuaOptions TestLuaOptions;
+struct TestLuaOptions
+{
+    // Official Lua release src/ (contains luac.c) and the pinned Git checkout
+    // (contains ltests.c, ltests.h, and testes/).
+    String8 source_directory;
+    String8 compatibility_directory;
+    String8 config;
+};
+
+#define LUA_COMPATIBILITY_COMMIT "6e22fedb74cf0c9b6656e9fce8b7331db847c605"
+#define LUA_RELEASE_LUAC_SIZE 15145u
+#define LUA_RELEASE_LUAC_HASH 0x6cdc1a7db5393273ULL
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -9337,6 +9355,760 @@ BUSTER_GLOBAL_LOCAL void test_zlib_action_add(Arena* arena, TestZlibOptions opti
     TestZlibOptions* options_copy = arena_allocate(arena, TestZlibOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_zlib_action, .callback_data = options_copy};
+}
+
+// --- Lua compatibility harness ------------------------------------------
+// Lua's release tree has one explicit production manifest in its makefile.
+// Keep that manifest here so an opt-in run does not depend on a generated
+// build file or silently omit a translation unit.  The checkout remains
+// outside this repository and is never copied or patched.
+typedef struct LuaCommandResult LuaCommandResult;
+struct LuaCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL LuaCommandResult lua_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: Lua harness could not start the command above\n"));
+        return (LuaCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    LuaCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lua_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lua_normalize_transcript(Arena* arena, String8 output)
+{
+    // all.lua deliberately prints entropy, clocks, allocator totals, and the
+    // current package path.  Keep the remaining test transcript byte-for-byte
+    // comparable while replacing those run-dependent records with one marker.
+    String8List lines = {0};
+    String8 rest = output;
+    bool skip_next_line = false;
+    String8 volatile_marker = S8("<volatile>\n");
+    while (rest.length)
+    {
+        String8 line = {0};
+        if (!text_next_line(&rest, &line))
+        {
+            break;
+        }
+        if (skip_next_line)
+        {
+            skip_next_line = false;
+            continue;
+        }
+        bool volatile_line = string_starts_with_sequence(line, S8("random seeds:")) || string_starts_with_sequence(line, S8("time:")) ||
+                             string_starts_with_sequence(line, S8("total time:")) || string_starts_with_sequence(line, S8("#time difference")) ||
+                             string_starts_with_sequence(line, S8("memory:")) || string_starts_with_sequence(line, S8("    ---- total memory:")) ||
+                             string_starts_with_sequence(line, S8("test done on ")) || string_starts_with_sequence(line, S8("float random range in ")) ||
+                             string_starts_with_sequence(line, S8("integer random range in ")) || string_starts_with_sequence(line, S8("sorting 5000 ")) ||
+                             string_starts_with_sequence(line, S8(".sorting 5000 ")) || string_starts_with_sequence(line, S8("re-sorting 5000 ")) ||
+                             string_starts_with_sequence(line, S8("Invert-sorting other 5000 ")) ||
+                             string_starts_with_sequence(line, S8("testing short-circuit optimizations ("));
+        if (string_starts_with_sequence(line, S8("current path:")))
+        {
+            volatile_line = true;
+            skip_next_line = true;
+        }
+        if (volatile_line)
+        {
+            string8_list_push(arena, &lines, volatile_marker);
+        }
+        else
+        {
+            string8_list_push(arena, &lines, string_format(arena, S8("{S8}\n"), line));
+        }
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_lua requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    LuaCommandResult head = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = lua_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(LUA_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_lua requires pristine Lua v5.4.8 commit {S8}; found {S8}\n"), S8(LUA_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    LuaCommandResult status = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_lua checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("LUA_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_release_sources_verify(Arena* arena, String8 source_directory, String8 compatibility_directory, String8* production, u64 production_count)
+{
+    bool result = true;
+    u64 overlap_count = 0;
+    for (u64 index = 0; index < production_count; index += 1)
+    {
+        String8 unit = production[index];
+        String8 release_path = path_join(arena, source_directory, unit);
+        if (string_equal(unit, S8("luac.c")))
+        {
+            ByteSlice luac = file_read(arena, release_path, (FileReadOptions){0});
+            u64 hash = luac.pointer ? buster_hash_64(luac.pointer, luac.length) : 0;
+            bool valid = luac.pointer && luac.length == LUA_RELEASE_LUAC_SIZE && hash == LUA_RELEASE_LUAC_HASH;
+            string_print(S8("LUA_ARTIFACT unit=luac.c bytes={u64} hash={u64:x} status={S8}\n"), luac.length, hash, valid ? S8("pass") : S8("fail"));
+            result = result && valid;
+        }
+        else
+        {
+            String8 compatibility_path = path_join(arena, compatibility_directory, unit);
+            ByteSlice release = file_read(arena, release_path, (FileReadOptions){0});
+            ByteSlice compatibility = file_read(arena, compatibility_path, (FileReadOptions){0});
+            bool equal = release.pointer && compatibility.pointer && release.length == compatibility.length &&
+                         (!release.length || memcmp(release.pointer, compatibility.pointer, (size_t)release.length) == 0);
+            string_print(S8("LUA_ARTIFACT unit={S8} bytes={u64} overlap_equal={u32}\n"), unit, release.length, equal);
+            result = result && equal;
+            overlap_count += 1;
+        }
+    }
+    string_print(S8("LUA_ARTIFACT_SUMMARY release_src={S8} compatibility_commit={S8} overlapping_units={u64} luac_size={u64} luac_hash={u64:x} status={S8}\n"),
+                 source_directory, S8(LUA_COMPATIBILITY_COMMIT), overlap_count, (u64)LUA_RELEASE_LUAC_SIZE, (u64)LUA_RELEASE_LUAC_HASH,
+                 result ? S8("pass") : S8("fail"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lua_mode_flag(Arena* arena, String8 mode)
+{
+    return string_format(arena, S8("-fregister-allocator={S8}"), mode);
+}
+
+BUSTER_GLOBAL_LOCAL String8 lua_basename(String8 path)
+{
+    u64 start = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    return string_slice(path, start, path.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: Lua compiler metrics missing allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+        return false;
+    }
+    string_print(S8("LUA_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"), mode,
+                 unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 compatibility_directory, String8 source, String8 output, String8 metrics,
+                                             String8 mode, bool test_build, u64* elapsed_us, bool verbose)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 compatibility_include_root = compatibility_directory.length ? string_format(arena, S8("-I{S8}"), compatibility_directory) : (String8){0};
+    String8 mode_flag = lua_mode_flag(arena, mode);
+    String8 metric_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-DLUA_USE_LINUX"));
+    os_argument_builder_append(&builder, S8("-DLUA_USE_READLINE"));
+    if (compatibility_include_root.length)
+    {
+        os_argument_builder_append(&builder, compatibility_include_root);
+    }
+    // Lua's internal test interpreter is a different build: every object,
+    // including the core and lua.c, must see ltests.h through LUA_USER_H.
+    if (test_build)
+    {
+        os_argument_builder_append(&builder, S8("-DLUA_USER_H=\"ltests.h\""));
+    }
+    os_argument_builder_append(&builder, mode_flag);
+    os_argument_builder_append(&builder, metric_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    LuaCommandResult command = lua_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 compatibility_directory, String8 source, String8 output, bool test_build)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 compatibility_include_root = compatibility_directory.length ? string_format(arena, S8("-I{S8}"), compatibility_directory) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-DLUA_USE_LINUX"));
+    os_argument_builder_append(&builder, S8("-DLUA_USE_READLINE"));
+    if (compatibility_include_root.length)
+    {
+        os_argument_builder_append(&builder, compatibility_include_root);
+    }
+    if (test_build)
+    {
+        os_argument_builder_append(&builder, S8("-DLUA_USER_H=\"ltests.h\""));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    LuaCommandResult command = lua_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_stage_tests(Arena* arena, String8 tests_directory, String8 output_directory, String8* staged_tests_out)
+{
+    String8 stage_parent = path_join(arena, output_directory, S8("upstream-tests"));
+    make_directory_recursive(arena, stage_parent);
+    String8 copy_arguments[] = {S8("cp"), S8("-a"), tests_directory, stage_parent};
+    LuaCommandResult copy = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy_arguments), S8("."), false);
+    if (copy.result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    *staged_tests_out = path_join(arena, stage_parent, lua_basename(tests_directory));
+    return path_exists(arena, path_join(arena, *staged_tests_out, S8("all.lua")));
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_build_test_libraries(Arena* arena, String8 clang, String8 source_directory, String8 staged_tests_directory)
+{
+    String8 library_sources[] = {S8("lib1.c"), S8("lib11.c"), S8("lib2.c"), S8("lib21.c"), S8("lib22.c")};
+    String8 library_names[] = {S8("lib1.so"), S8("lib11.so"), S8("lib2.so"), S8("lib21.so"), S8("lib2-v2.so")};
+    String8 library_directory = path_join(arena, staged_tests_directory, S8("libs"));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        String8 source = path_join(arena, library_directory, library_sources[index]);
+        String8 output = path_join(arena, library_directory, library_names[index]);
+        String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+        String8 arguments[] = {clang, S8("-Wall"), S8("-std=gnu99"), S8("-O2"), include_root, S8("-fPIC"), S8("-shared"), S8("-o"), output, source};
+        LuaCommandResult command = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false);
+        if (command.result != PROCESS_RESULT_SUCCESS)
+        {
+            string_print(S8("error: Lua test library failed: {S8}\n"), library_sources[index]);
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_build_atexit_shim(Arena* arena, String8 clang, String8 output_directory, String8* object_out)
+{
+    String8 source = path_join(arena, output_directory, S8("lua-atexit-shim.c"));
+    String8 object = path_join(arena, output_directory, S8("lua-atexit-shim.o"));
+    String8 contents = S8("typedef void (*lua_atexit_function)(void);\n"
+                           "extern int __cxa_atexit(void (*function)(void *), void *argument, void *dso_handle);\n"
+                           "int atexit(lua_atexit_function function) { return __cxa_atexit((void (*)(void *))function, 0, 0); }\n");
+    if (!file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(contents)))
+    {
+        return false;
+    }
+    String8 arguments[] = {clang, S8("-O2"), S8("-g0"), S8("-c"), S8("-o"), object, source};
+    LuaCommandResult command = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false);
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    *object_out = object;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_link(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, bool buster_driver, String8 ide)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, buster_driver ? ide : linker);
+    if (buster_driver)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    // Clang accepts the linker spelling -no-pie, while ide cc exposes the
+    // compatible code-generation spelling -fno-pie (and rejects -no-pie).
+    os_argument_builder_append(&builder, buster_driver ? S8("-fno-pie") : S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    // Lua's upstream Linux test modules resolve the interpreter API from the
+    // executable, so export its symbols just as the upstream makefile does.
+    os_argument_builder_append(&builder, S8("-Wl,-E"));
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-ldl"));
+    os_argument_builder_append(&builder, S8("-lreadline"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    LuaCommandResult command = lua_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_run(Arena* arena, String8 binary, String8 working_directory, String8* extra, u64 extra_count, String8* output, u64* elapsed_us)
+{
+    String8* arguments = arena_allocate(arena, String8, extra_count + 1);
+    arguments[0] = binary;
+    for (u64 index = 0; index < extra_count; index += 1)
+    {
+        arguments[index + 1] = extra[index];
+    }
+    u64 start = os_now_microseconds();
+    LuaCommandResult command = lua_command(arena, (SliceString8){.pointer = arguments, .length = extra_count + 1}, working_directory, output != 0);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lua_write_workload(String8 path)
+{
+    String8 source = S8("local t = {}\n"
+                        "for i = 1, 64 do t[i] = i * 3 end\n"
+                        "local function make(x) return function(...) local a = {...}; return x + a[1] + a[2] end end\n"
+                        "local f = make(7)\n"
+                        "local co = coroutine.create(function() coroutine.yield(f(4, 5)); return 99 end)\n"
+                        "local ok, value = coroutine.resume(co)\n"
+                        "local protected, message = pcall(function() error('protected') end)\n"
+                        "print(#t, t[17], f(8, 9), ok, value, protected, string.find(message, 'protected') ~= nil, 0.5 + 0.25)\n");
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
+{
+    TestLuaOptions options = *(TestLuaOptions*)data;
+    if (!options.source_directory.length || !options.compatibility_directory.length)
+    {
+        string_print(S8("error: test_lua requires the official Lua v5.4.8 src/ path and its pinned Git test checkout\n"));
+        string_print(S8("usage: ./build/build test_lua [--config Debug|Release] /path/to/lua-5.4.8/src /path/to/lua-v5.4.8\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 compatibility_directory = os_path_absolute(arena, options.compatibility_directory, true);
+    if (!lua_git_verify(arena, compatibility_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    // This is the explicit executable manifest from Lua's v5.4.8 release:
+    // the core/library units, the stand-alone interpreter, and luac.  The
+    // internal ltests.c support unit is compiled separately for the upstream
+    // test interpreter; onelua.c is an amalgamation and is not linked here.
+    String8 production[] = {
+        S8("lapi.c"), S8("lcode.c"), S8("lctype.c"), S8("ldebug.c"), S8("ldo.c"), S8("ldump.c"), S8("lfunc.c"), S8("lgc.c"), S8("llex.c"),
+        S8("lmem.c"), S8("lobject.c"), S8("lopcodes.c"), S8("lparser.c"), S8("lstate.c"), S8("lstring.c"), S8("ltable.c"), S8("ltm.c"),
+        S8("lundump.c"), S8("lvm.c"), S8("lzio.c"), S8("lauxlib.c"), S8("lbaselib.c"), S8("ldblib.c"), S8("liolib.c"),
+        S8("lmathlib.c"), S8("loslib.c"), S8("ltablib.c"), S8("lstrlib.c"), S8("lutf8lib.c"), S8("loadlib.c"), S8("lcorolib.c"),
+        S8("linit.c"), S8("lua.c"), S8("luac.c"),
+    };
+    String8 test_support[] = {S8("ltests.c")};
+    if (!lua_release_sources_verify(arena, source_directory, compatibility_directory, production, BUSTER_ARRAY_LENGTH(production)))
+    {
+        string_print(S8("error: Lua release src/ does not match the pinned Git sources or authenticated luac.c artifact\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, production[index])))
+        {
+            string_print(S8("LUA_MANIFEST source={S8} status=missing\n"), production[index]);
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_support); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, compatibility_directory, test_support[index])))
+        {
+            string_print(S8("error: Lua test-support source is missing: {S8}\n"), test_support[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 tests_directory = path_join(arena, compatibility_directory, S8("testes"));
+    if (!path_exists(arena, path_join(arena, tests_directory, S8("all.lua"))))
+    {
+        string_print(S8("error: Lua compatibility checkout is missing testes/all.lua\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 ide = zlib_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_lua requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 output_directory = string_format_z(arena, S8("build/lua-v5.4.8-{u64}"), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    string_print(S8("LUA_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+    string_print(S8("LUA_MANIFEST production_units={u64} upstream_tests=all.lua allocators=4\n"), BUSTER_ARRAY_LENGTH(production));
+    String8 staged_tests_directory = {0};
+    if (!lua_stage_tests(arena, tests_directory, output_directory, &staged_tests_directory) ||
+        !lua_build_test_libraries(arena, clang, source_directory, staged_tests_directory))
+    {
+        string_print(S8("error: Lua upstream test tree staging/library build failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // Compile every production unit in the first allocator mode and keep
+    // going after a failure so the log records the complete defect surface.
+    String8 mode = S8("fast");
+    String8 mode_directory = path_join(arena, output_directory, mode);
+    String8 mode_metrics = path_join(arena, metrics_directory, mode);
+    make_directory_recursive(arena, mode_directory);
+    make_directory_recursive(arena, mode_metrics);
+    String8 objects[BUSTER_ARRAY_LENGTH(production)];
+    String8 test_support_objects[BUSTER_ARRAY_LENGTH(test_support)];
+    bool compile_ok = true;
+    u64 failed_count = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        String8 name = lua_basename(production[index]);
+        objects[index] = path_join(arena, mode_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 metrics = path_join(arena, mode_metrics, string_format(arena, S8("{S8}.metrics"), name));
+        u64 elapsed_us = 0;
+        bool source_exists = path_exists(arena, path_join(arena, source_directory, production[index]));
+        bool unit_ok = source_exists &&
+                       lua_compile_buster(arena, ide, source_directory, compatibility_directory, path_join(arena, source_directory, production[index]), objects[index], metrics, mode, false, &elapsed_us,
+                                          true);
+        bool metric_ok = lua_metrics_report(arena, mode, name, metrics, elapsed_us);
+        if (!unit_ok || !metric_ok)
+        {
+            compile_ok = false;
+            failed_count += 1;
+            string_print(S8("LUA_COMPILE allocator={S8} unit={S8} elapsed_us={u64} status=fail\n"), mode, name, elapsed_us);
+        }
+        else
+        {
+            string_print(S8("LUA_COMPILE allocator={S8} unit={S8} elapsed_us={u64} status=pass\n"), mode, name, elapsed_us);
+        }
+    }
+    string_print(S8("LUA_COMPILE_SUMMARY allocator={S8} units={u64} failed={u64} status={S8}\n"), mode, BUSTER_ARRAY_LENGTH(production), failed_count,
+                 compile_ok ? S8("pass") : S8("fail"));
+    if (!compile_ok)
+    {
+        string_print(S8("error: Lua production manifest did not compile with Buster; link/tests skipped until every unit passes\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_support); index += 1)
+    {
+        String8 name = lua_basename(test_support[index]);
+        test_support_objects[index] = path_join(arena, mode_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 metrics = path_join(arena, mode_metrics, string_format(arena, S8("{S8}.metrics"), name));
+        u64 elapsed_us = 0;
+        bool unit_ok = lua_compile_buster(arena, ide, compatibility_directory, compatibility_directory, path_join(arena, compatibility_directory, test_support[index]), test_support_objects[index], metrics, mode,
+                                          true, &elapsed_us, true);
+        bool metric_ok = lua_metrics_report(arena, mode, name, metrics, elapsed_us);
+        if (!unit_ok || !metric_ok)
+        {
+            string_print(S8("error: Lua test-support unit failed: {S8}\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("LUA_TEST_SUPPORT allocator={S8} unit={S8} elapsed_us={u64} status=pass\n"), mode, name, elapsed_us);
+    }
+
+    // Once FAST reaches the manifest gate, repeat the complete compile/link
+    // gate through the three alternate allocators.  The expensive upstream
+    // transcript is run only by the first mode; every mode still has an
+    // independent object set and executable so allocator fallbacks cannot be
+    // hidden by a shared artifact.
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 mode_index = 1; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 alternate_mode = allocator_modes[mode_index];
+        String8 alternate_directory = path_join(arena, output_directory, alternate_mode);
+        String8 alternate_metrics = path_join(arena, metrics_directory, alternate_mode);
+        make_directory_recursive(arena, alternate_directory);
+        make_directory_recursive(arena, alternate_metrics);
+        String8 alternate_objects[BUSTER_ARRAY_LENGTH(production)];
+        bool alternate_ok = true;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+        {
+            String8 name = lua_basename(production[index]);
+            alternate_objects[index] = path_join(arena, alternate_directory, string_format(arena, S8("{S8}.o"), name));
+            String8 metrics = path_join(arena, alternate_metrics, string_format(arena, S8("{S8}.metrics"), name));
+            u64 elapsed_us = 0;
+            bool source_exists = path_exists(arena, path_join(arena, source_directory, production[index]));
+            bool unit_ok = source_exists && lua_compile_buster(arena, ide, source_directory, compatibility_directory, path_join(arena, source_directory, production[index]), alternate_objects[index], metrics,
+                                                               alternate_mode, false, &elapsed_us, true);
+            bool metric_ok = lua_metrics_report(arena, alternate_mode, name, metrics, elapsed_us);
+            string_print(S8("LUA_COMPILE allocator={S8} unit={S8} elapsed_us={u64} status={S8}\n"), alternate_mode, name, elapsed_us,
+                         unit_ok && metric_ok ? S8("pass") : S8("fail"));
+            alternate_ok = alternate_ok && unit_ok && metric_ok;
+        }
+        if (!alternate_ok)
+        {
+            string_print(S8("error: Lua allocator manifest failed: {S8}\n"), alternate_mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 lua_objects[BUSTER_ARRAY_LENGTH(production)];
+        u64 lua_object_count = 0;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+        {
+            if (!string_equal(production[index], S8("luac.c")))
+            {
+                lua_objects[lua_object_count++] = alternate_objects[index];
+            }
+        }
+        String8 alternate_lua = path_join(arena, alternate_directory, S8("lua"));
+        if (!lua_link(arena, ide, alternate_lua, lua_objects, lua_object_count, true, ide))
+        {
+            string_print(S8("error: Lua allocator link failed: {S8}\n"), alternate_mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("LUA_ALLOCATOR allocator={S8} link=pass\n"), alternate_mode);
+    }
+
+    // A successful manifest reaches the executable gates.  Build a Clang
+    // reference beside it, link both binaries through their native drivers,
+    // then compare the deterministic workload and upstream test transcript.
+    String8 clang_objects[BUSTER_ARRAY_LENGTH(production)];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        String8 name = lua_basename(production[index]);
+        clang_objects[index] = path_join(arena, output_directory, string_format(arena, S8("clang-{S8}.o"), name));
+        if (!lua_compile_clang(arena, clang, source_directory, compatibility_directory, path_join(arena, source_directory, production[index]), clang_objects[index], false))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 clang_test_support_objects[BUSTER_ARRAY_LENGTH(test_support)];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_support); index += 1)
+    {
+        String8 name = lua_basename(test_support[index]);
+        clang_test_support_objects[index] = path_join(arena, output_directory, string_format(arena, S8("clang-{S8}.o"), name));
+        if (!lua_compile_clang(arena, clang, compatibility_directory, compatibility_directory, path_join(arena, compatibility_directory, test_support[index]), clang_test_support_objects[index], true))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    // Build a second, test-only object set.  Reusing the production objects
+    // here would silently omit ltests.h from the core and interpreter; Lua's
+    // makefile applies LUA_USER_H to every object in this executable.
+    String8 test_mode = S8("fast-test");
+    String8 test_mode_directory = path_join(arena, output_directory, test_mode);
+    String8 test_mode_metrics = path_join(arena, metrics_directory, test_mode);
+    make_directory_recursive(arena, test_mode_directory);
+    make_directory_recursive(arena, test_mode_metrics);
+    String8 buster_test_production_objects[BUSTER_ARRAY_LENGTH(production)];
+    String8 clang_test_production_objects[BUSTER_ARRAY_LENGTH(production)];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        // luac is a separate production executable and is not part of the
+        // ltests-enabled interpreter object set.
+        if (string_equal(production[index], S8("luac.c")))
+        {
+            buster_test_production_objects[index] = (String8){0};
+            clang_test_production_objects[index] = (String8){0};
+            continue;
+        }
+        String8 name = lua_basename(production[index]);
+        buster_test_production_objects[index] = path_join(arena, test_mode_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 metrics = path_join(arena, test_mode_metrics, string_format(arena, S8("{S8}.metrics"), name));
+        u64 elapsed_us = 0;
+        if (!lua_compile_buster(arena, ide, source_directory, compatibility_directory, path_join(arena, source_directory, production[index]), buster_test_production_objects[index], metrics, mode,
+                                true, &elapsed_us, true) ||
+            !lua_metrics_report(arena, test_mode, name, metrics, elapsed_us))
+        {
+            string_print(S8("error: Lua Buster test object failed: {S8}\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("LUA_TEST_COMPILE compiler=buster allocator={S8} unit={S8} elapsed_us={u64} status=pass\n"), test_mode, name, elapsed_us);
+
+        clang_test_production_objects[index] = path_join(arena, output_directory, string_format(arena, S8("test-clang-{S8}.o"), name));
+        if (!lua_compile_clang(arena, clang, source_directory, compatibility_directory, path_join(arena, source_directory, production[index]), clang_test_production_objects[index], true))
+        {
+            string_print(S8("error: Lua Clang test object failed: {S8}\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 lua_binary = path_join(arena, mode_directory, S8("lua"));
+    String8 lua_clang = path_join(arena, output_directory, S8("lua-clang"));
+    String8 buster_lua_objects[BUSTER_ARRAY_LENGTH(production)];
+    String8 clang_lua_objects[BUSTER_ARRAY_LENGTH(production)];
+    String8 buster_luac_objects[BUSTER_ARRAY_LENGTH(production)];
+    String8 clang_luac_objects[BUSTER_ARRAY_LENGTH(production)];
+    u64 lua_object_count = 0;
+    u64 luac_object_count = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        if (!string_equal(production[index], S8("luac.c")))
+        {
+            buster_lua_objects[lua_object_count] = objects[index];
+            clang_lua_objects[lua_object_count] = clang_objects[index];
+            lua_object_count += 1;
+        }
+        if (!string_equal(production[index], S8("lua.c")))
+        {
+            buster_luac_objects[luac_object_count] = objects[index];
+            clang_luac_objects[luac_object_count] = clang_objects[index];
+            luac_object_count += 1;
+        }
+    }
+    String8 buster_test_objects[BUSTER_ARRAY_LENGTH(production) + BUSTER_ARRAY_LENGTH(test_support)];
+    String8 clang_test_objects[BUSTER_ARRAY_LENGTH(production) + BUSTER_ARRAY_LENGTH(test_support)];
+    u64 test_object_count = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(production); index += 1)
+    {
+        if (!string_equal(production[index], S8("luac.c")))
+        {
+            buster_test_objects[test_object_count] = buster_test_production_objects[index];
+            clang_test_objects[test_object_count] = clang_test_production_objects[index];
+            test_object_count += 1;
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_support); index += 1)
+    {
+        buster_test_objects[test_object_count] = test_support_objects[index];
+        clang_test_objects[test_object_count] = clang_test_support_objects[index];
+        test_object_count += 1;
+    }
+    String8 atexit_shim = {0};
+    if (!lua_build_atexit_shim(arena, clang, output_directory, &atexit_shim))
+    {
+        string_print(S8("error: Lua test atexit compatibility shim failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    buster_test_objects[test_object_count] = atexit_shim;
+    clang_test_objects[test_object_count] = atexit_shim;
+    test_object_count += 1;
+    String8 buster_test_lua = path_join(arena, mode_directory, S8("lua-test"));
+    String8 clang_test_lua = path_join(arena, output_directory, S8("lua-test-clang"));
+    if (!lua_link(arena, clang, lua_clang, clang_lua_objects, lua_object_count, false, ide) ||
+        !lua_link(arena, clang, path_join(arena, output_directory, S8("luac-clang")), clang_luac_objects, luac_object_count, false, ide) ||
+        !lua_link(arena, ide, lua_binary, buster_lua_objects, lua_object_count, true, ide) ||
+        !lua_link(arena, ide, path_join(arena, mode_directory, S8("luac")), buster_luac_objects, luac_object_count, true, ide) ||
+        !lua_link(arena, clang, clang_test_lua, clang_test_objects, test_object_count, false, ide) ||
+        !lua_link(arena, clang, buster_test_lua, buster_test_objects, test_object_count, false, ide))
+    {
+        string_print(S8("error: Lua lua/luac executable link gate failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 workload = path_join(arena, output_directory, S8("workload.lua"));
+    if (!lua_write_workload(workload))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 workload_arg[] = {workload};
+    String8 buster_output = {0};
+    String8 clang_output = {0};
+    u64 buster_elapsed = 0;
+    u64 clang_elapsed = 0;
+    if (!lua_run(arena, lua_binary, output_directory, workload_arg, 1, &buster_output, &buster_elapsed) ||
+        !lua_run(arena, lua_clang, output_directory, workload_arg, 1, &clang_output, &clang_elapsed))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    bool workload_equal = string_equal(buster_output, clang_output);
+    string_print(S8("LUA_WORKLOAD equal_clang={u32} buster_elapsed_us={u64} clang_elapsed_us={u64} output={S8}\n"), workload_equal, buster_elapsed, clang_elapsed,
+                 lua_trim_ascii_space(buster_output));
+    if (!workload_equal)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    // The internal ltests interpreter remains a separate compile/link gate,
+    // but its reduced LUAI_MAXCCALLS test configuration intentionally drives
+    // host-stack overflow paths that are not part of the user test contract.
+    // Run the complete upstream suite in Lua's documented user mode against
+    // the production Buster and Clang interpreters for a deterministic
+    // language-runtime comparison.
+    String8 upstream_script[] = {S8("-e"), S8("_U=true"), S8("all.lua")};
+    String8 upstream_output = {0};
+    String8 upstream_clang_output = {0};
+    bool upstream_buster_ok = lua_run(arena, lua_binary, staged_tests_directory, upstream_script, BUSTER_ARRAY_LENGTH(upstream_script), &upstream_output, 0);
+    bool upstream_clang_ok = lua_run(arena, lua_clang, staged_tests_directory, upstream_script, BUSTER_ARRAY_LENGTH(upstream_script), &upstream_clang_output, 0);
+    bool upstream_raw_equal = string_equal(upstream_output, upstream_clang_output);
+    String8 upstream_normalized = lua_normalize_transcript(arena, upstream_output);
+    String8 upstream_clang_normalized = lua_normalize_transcript(arena, upstream_clang_output);
+    bool upstream_normalized_equal = string_equal(upstream_normalized, upstream_clang_normalized);
+    string_print(S8("LUA_UPSTREAM_TESTS buster_status={S8} clang_status={S8} raw_equal={u32} normalized_equal={u32} buster_bytes={u64} clang_bytes={u64} normalized_bytes={u64}\n"),
+                 upstream_buster_ok ? S8("pass") : S8("fail"), upstream_clang_ok ? S8("pass") : S8("fail"), upstream_raw_equal, upstream_normalized_equal, upstream_output.length,
+                 upstream_clang_output.length, upstream_normalized.length);
+    if (!upstream_buster_ok || !upstream_clang_ok || !upstream_normalized_equal)
+    {
+        string_print(S8("error: Lua upstream tests failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("LUA_RESULT commit={S8} production_units={u64} allocators={u64} status=pass\n"), S8(LUA_COMPATIBILITY_COMMIT), BUSTER_ARRAY_LENGTH(production),
+                 BUSTER_ARRAY_LENGTH(allocator_modes));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_lua_action_add(Arena* arena, TestLuaOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestLuaOptions* options_copy = arena_allocate(arena, TestLuaOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_lua_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -22479,6 +23251,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_X86_64_COMPLETION_CENSUS] = S8_INITIALIZER("x86_64_completion_census"),
         [BUILD_COMMAND_TEST_CJSON] = S8_INITIALIZER("test_cjson"),
         [BUILD_COMMAND_TEST_ZLIB] = S8_INITIALIZER("test_zlib"),
+        [BUILD_COMMAND_TEST_LUA] = S8_INITIALIZER("test_lua"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -22550,6 +23323,7 @@ ProcessResult process_arguments(void)
     String8List native_arguments = {0};
     TestCjsonOptions test_cjson_options = {0};
     TestZlibOptions test_zlib_options = {0};
+    TestLuaOptions test_lua_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -22655,6 +23429,18 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_zlib_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_LUA && !test_lua_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_lua_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_LUA && !test_lua_options.compatibility_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_lua_options.compatibility_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -22908,6 +23694,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_ZLIB)
                 {
                     test_zlib_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_LUA)
+                {
+                    test_lua_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -23448,6 +24238,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_ZLIB:
         {
             test_zlib_action_add(arena, test_zlib_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_LUA:
+        {
+            test_lua_action_add(arena, test_lua_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

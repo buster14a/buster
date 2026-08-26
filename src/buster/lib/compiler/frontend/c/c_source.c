@@ -2470,6 +2470,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
@@ -4070,7 +4071,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_nan",           "__builtin_nanf", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_nan",           "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff",
         "__builtin_sqrt",          "__builtin_sqrtf",
@@ -6043,6 +6044,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // an otherwise ordinary system header does not depend on a host compiler
     // having supplied it first (cJSON uses DBL_EPSILON directly).
     C_DEFINE_TYPE_MACRO("__DBL_EPSILON__", S8("2.220446049250313080847263336181640625e-16"));
+    // Lua's number formatting and conversion code queries the corresponding
+    // mantissa width through <float.h>'s __DBL_MANT_DIG__ spelling.  Keep the
+    // IEEE-754 double contract explicit in the builtin prelude, just as the
+    // epsilon above, so an external resource header cannot leave it undefined.
+    C_DEFINE_TYPE_MACRO("__DBL_MANT_DIG__", S8("53"));
+    // Lua's string formatter also uses the decimal exponent bound from
+    // <float.h>; this is the IEEE-754 binary64 value required by
+    // DBL_MAX_10_EXP on every hosted target currently supported here.
+    C_DEFINE_TYPE_MACRO("__DBL_MAX_10_EXP__", S8("308"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));

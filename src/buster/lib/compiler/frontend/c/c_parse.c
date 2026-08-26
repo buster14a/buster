@@ -6144,7 +6144,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         }
         frame->pointer_start = frame->declarator_start + 1;
         if (frame->close_index >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->close_index], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-            frame->pointer_start >= frame->name_index || !c_token_is_punctuator(&preprocess.tokens[frame->pointer_start], C_PUNCTUATOR_STAR))
+            (frame->pointer_start < frame->name_index && !c_token_is_punctuator(&preprocess.tokens[frame->pointer_start], C_PUNCTUATOR_STAR)))
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
@@ -7325,10 +7325,8 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         return false;
     }
     u32 index = declarator_start + 1;
-    bool saw_pointer = false;
     while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
     {
-        saw_pointer = true;
         index += 1;
         CType ignored = {0};
         while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
@@ -7343,11 +7341,53 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
             break;
         }
     }
-    if (!saw_pointer || index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+    // Parenthesized declarators may redundantly wrap a plain function name
+    // (`extern int (f)(void)`) as well as a function pointer (`int (*f)`).
+    // Requiring a `*` here drops the API declarations used by Lua and system
+    // headers, leaving every call looking undeclared.
+    if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
     {
         return false;
     }
     *name_index = index;
+    return true;
+}
+
+// Return the name of a parenthesized function declarator (`(f)(...)` or
+// `(*f)(...)`).  The parser's declaration scan normally recognizes a function
+// from the identifier immediately before its parameter list; a redundant
+// pair of parentheses moves that identifier inside the first group, so keep
+// this small shape test shared by the AST and semantic declaration passes.
+BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+{
+    if (start >= end || !c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return false;
+    }
+    u32 candidate = 0;
+    if (!c_parse_parenthesized_declarator_name(preprocess, start, end, &candidate))
+    {
+        return false;
+    }
+    u32 depth = 1;
+    u32 close = start + 1;
+    while (close < end && depth)
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth -= 1;
+        }
+        close += 1;
+    }
+    if (depth || close >= end || !c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return false;
+    }
+    *name_index = candidate;
     return true;
 }
 
@@ -7597,6 +7637,29 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
             }
         }
     }
+    // A function declaration may parenthesize its name before the parameter
+    // list (`extern int (f)(void)` or `extern int (*f)(void)`).  In that shape
+    // the identifier is followed by `)` rather than `(`, so the ordinary name
+    // scan above intentionally skips it.  Recover the candidate from the
+    // parenthesized declarator helper and let the same type machine build the
+    // function (or function-pointer) type.
+    if (name_index == declarator_end && declaration->kind == C_DECLARATION_FUNCTION)
+    {
+        for (u32 index = name_search_start; index < declarator_end; index += 1)
+        {
+            if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                continue;
+            }
+            u32 candidate = C_ID_UNDERLYING_INVALID;
+            if (c_parse_parenthesized_function_name(preprocess, index, declarator_end, &candidate) && candidate < declarator_end &&
+                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[candidate]), declaration->name))
+            {
+                name_index = candidate;
+                break;
+            }
+        }
+    }
     if (name_index != declarator_end)
     {
         if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, name_index, &declaration->alignment_start,
@@ -7637,11 +7700,28 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
             }
             declarator_start = c_parse_skip_attributes(preprocess, declarator_start, name_index);
             bool parenthesized = declarator_start < name_index && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            if (parenthesized && declaration->kind != C_DECLARATION_FUNCTION)
+            if (parenthesized)
             {
                 u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
+                // The parenthesized declarator parser owns the parameter
+                // records it creates, but the declaration still needs to
+                // point at that range for function signatures and body
+                // parameter entities.  The ordinary `name(...)` path fills
+                // these fields alongside the function CType; mirror that
+                // handoff for `(<name>)(...)` while leaving function-pointer
+                // object declarators untouched.
+                if (declaration->kind == C_DECLARATION_FUNCTION && declaration->type.value < result->type_count)
+                {
+                    CType* function_type = result->types + declaration->type.value;
+                    if (function_type->kind == C_TYPE_FUNCTION)
+                    {
+                        declaration->parameter_start = function_type->parameter_start;
+                        declaration->parameter_count = function_type->parameter_count;
+                        declaration->is_variadic = function_type->is_variadic;
+                    }
+                }
                 return;
             }
             if (declarator_start == name_index)
@@ -11142,20 +11222,33 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index > start &&
-                preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) &&
-                !declarator.seen_equal && declarator.function_name_token == C_ID_UNDERLYING_INVALID)
+            if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && !declarator.seen_equal &&
+                declarator.function_name_token == C_ID_UNDERLYING_INVALID)
             {
                 u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
-                if (c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
+                bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, end, &parenthesized_name_token);
+                bool ordinary_function = index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                                         !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                if (parenthesized_function)
                 {
                     declarator.name_token = parenthesized_name_token;
+                    // `(*f)(...)` declares an object holding a function
+                    // pointer; only the redundant plain `(f)(...)` form is
+                    // a function declaration in the AST.
+                    if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
+                    {
+                        declarator.function_name_token = parenthesized_name_token;
+                    }
                 }
-                else
+                else if (ordinary_function)
                 {
                     declarator.function_name_token = index - 1;
                     declarator.name_token = declarator.function_name_token;
+                }
+                else if (declarator.name_token == C_ID_UNDERLYING_INVALID &&
+                         c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
+                {
+                    declarator.name_token = parenthesized_name_token;
                 }
             }
             if (!delimiter_count)
@@ -11256,20 +11349,30 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 }
                 if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
                 {
-                    if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && index > start &&
-                        c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
-                        !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]) && !seen_equal &&
+                    if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && !seen_equal &&
                         function_name_token == C_ID_UNDERLYING_INVALID)
                     {
                         u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
-                        if (c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
+                        bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, token_count, &parenthesized_name_token);
+                        bool ordinary_function = index > start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+                                                  !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                        if (parenthesized_function)
                         {
                             name_token = parenthesized_name_token;
+                            if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
+                            {
+                                function_name_token = parenthesized_name_token;
+                            }
                         }
-                        else
+                        else if (ordinary_function)
                         {
                             function_name_token = index - 1;
                             name_token = function_name_token;
+                        }
+                        else if (name_token == C_ID_UNDERLYING_INVALID &&
+                                 c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
+                        {
+                            name_token = parenthesized_name_token;
                         }
                     }
                     if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_BRACE && function_name_token != C_ID_UNDERLYING_INVALID && !seen_equal)

@@ -1253,6 +1253,7 @@ BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
         {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_huge_val"), S8("huge_val")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
@@ -7650,6 +7651,8 @@ typedef enum CIrPlaceContinuation
     C_IR_PLACE_CONTINUATION_NONE,
     C_IR_PLACE_CONTINUATION_VLA,
     C_IR_PLACE_CONTINUATION_SUBSCRIPT,
+    C_IR_PLACE_CONTINUATION_GROUP,
+    C_IR_PLACE_CONTINUATION_EXPRESSION,
 } CIrPlaceContinuation;
 
 typedef enum CIrCompoundContinuation
@@ -7762,6 +7765,11 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
     c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.index);
 }
 
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
+BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value);
+
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -7802,13 +7810,20 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             end -= 1;
         }
         u32 dereference_count = 0;
+        // A unary `*` before the base identifier applies to the complete
+        // postfix expression (`*p->field` means `*(p->field)`).  Keep that
+        // provenance separate from stars inside a parenthesized group such
+        // as `(*p).field`, whose dereference must happen before the suffix.
+        bool leading_dereference = false;
         while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
         {
             dereference_count += 1;
+            leading_dereference = true;
             start += 1;
         }
         u32 index = start;
         u32 base_index = index;
+        IrTypeId cast_type = IR_TYPE_ID_INVALID;
         if (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 depth = 1;
@@ -7827,6 +7842,153 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             }
             u32 nested_start = index + 1;
             u32 nested_end = depth ? nested_start : close - 1;
+            IrTypeId grouped_cast_type = c_ir_type_name(builder, nested_start, nested_end);
+            if (grouped_cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                // `*(int*)ud` is a place whose pointer operand is a cast,
+                // rather than a parenthesized single identifier.  Preserve
+                // the cast type so the base value can be converted before
+                // the outer dereference is formed below.
+                if (close >= end || builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                cast_type = grouped_cast_type;
+                base_index = close;
+                index = base_index + 1;
+                goto c_ir_place_base_resolved;
+            }
+            // A cast expression is sometimes wrapped in an additional pair
+            // of parentheses, as in `*((int *)ud)`.  The outer group is not a
+            // type name itself; inspect its single inner `(type) identifier`
+            // expression before falling back to the ordinary parenthesized
+            // place form below.
+            if (!depth && nested_start < nested_end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 inner_open = nested_start;
+                u32 inner_depth = 1;
+                u32 inner_close = inner_open + 1;
+                while (inner_close < nested_end && inner_depth)
+                {
+                    if (c_token_is_punctuator(&builder->preprocess.tokens[inner_close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        inner_depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&builder->preprocess.tokens[inner_close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                    {
+                        inner_depth -= 1;
+                    }
+                    inner_close += 1;
+                }
+                if (!inner_depth && inner_close < nested_end)
+                {
+                    IrTypeId inner_cast_type = c_ir_type_name(builder, inner_open + 1, inner_close - 1);
+                    if (inner_cast_type.value != IR_ID_UNDERLYING_INVALID && builder->preprocess.tokens[inner_close].kind == C_TOKEN_IDENTIFIER &&
+                        inner_close + 1 == nested_end)
+                    {
+                        cast_type = inner_cast_type;
+                        base_index = inner_close;
+                        index = close;
+                        goto c_ir_place_base_resolved;
+                    }
+                    // The cast operand may itself be a call, as in
+                    // `*((Extra *)get_extra())->plock`.  The outer group
+                    // remains part of the base expression; retain `close`
+                    // as the suffix start while the prepared-call branch
+                    // below supplies and casts the call value.
+                    if (inner_cast_type.value != IR_ID_UNDERLYING_INVALID && inner_close + 1 < nested_end &&
+                        builder->preprocess.tokens[inner_close].kind == C_TOKEN_IDENTIFIER &&
+                        c_token_is_punctuator(&builder->preprocess.tokens[inner_close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        u32 call_close = c_ir_matching_delimiter_cached(builder, inner_close + 1, nested_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                          C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                        if (call_close < nested_end && call_close + 1 == nested_end)
+                        {
+                            cast_type = inner_cast_type;
+                            base_index = inner_close;
+                            index = close;
+                            goto c_ir_place_base_resolved;
+                        }
+                    }
+                }
+            }
+            // A parenthesized member/subscript chain is itself a place, for
+            // example `(state->stream)->p++`.  Lower that inner place as a
+            // child, then resume this frame at the outer suffix; treating the
+            // group as a single identifier would otherwise reject valid
+            // postfix updates in Lua's buffered-reader macro.
+            if (!depth && nested_end > nested_start + 1 &&
+                builder->preprocess.tokens[nested_start].kind == C_TOKEN_IDENTIFIER)
+            {
+                IrSourceRange group_source = c_ir_token_source_range(builder, builder->preprocess.tokens[nested_start]);
+                frame->as.place.local = 0;
+                frame->as.place.place = IR_VALUE_ID_INVALID;
+                frame->as.place.source = group_source;
+                frame->as.place.start = start;
+                frame->as.place.end = end;
+                frame->as.place.index = close;
+                frame->as.place.close = close;
+                frame->as.place.dereference_count = dereference_count;
+                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_GROUP;
+                frame->stage = C_IR_LOWER_STAGE_CHILD;
+                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                        .kind = C_IR_LOWER_FRAME_PLACE,
+                                                        .as.place =
+                                                            {
+                                                                .start = nested_start,
+                                                                .end = nested_end,
+                                                            },
+                                                    }))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                }
+                return;
+            }
+            // An address-of expression may be parenthesized before its
+            // member suffix, as in `(&buffer)->count`.  Unlike a grouped
+            // place this inner expression produces a pointer value, so form
+            // that value directly and let the common suffix walk create the
+            // resulting field place.  This shape occurs in Lua's
+            // `luaL_addchar` macro (`(&B)->b[(&B)->n++]`).
+            if (!depth && nested_end == nested_start + 2 &&
+                c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_AMPERSAND) &&
+                builder->preprocess.tokens[nested_start + 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                CToken base_token = builder->preprocess.tokens[nested_start + 1];
+                CEntityId entity = c_ir_identifier_entity(builder, nested_start + 1);
+                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+                if (!local)
+                {
+                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
+                    {
+                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
+                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, base_token)))
+                        {
+                            local = candidate;
+                            break;
+                        }
+                    }
+                }
+                IrSourceRange source = c_ir_token_source_range(builder, base_token);
+                IrValueId place = local ? c_ir_emit_address_of_place(builder, local->place, local->type, source) : IR_VALUE_ID_INVALID;
+                if (place.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                frame->as.place.local = 0;
+                frame->as.place.place = place;
+                frame->as.place.source = source;
+                frame->as.place.start = start;
+                frame->as.place.end = end;
+                frame->as.place.index = close;
+                frame->as.place.dereference_count = 0;
+                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+                frame->stage = C_IR_LOWER_STAGE_FINISH;
+                goto c_ir_place_suffix_walk;
+            }
             while (nested_start < nested_end && c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                    c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
@@ -7840,6 +8002,36 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             }
             if (depth || nested_end != nested_start + 1)
             {
+                // If the unary star fronts a complex cast/arithmetic base,
+                // lower the complete postfix operand as a value and recover
+                // its final load into a place.  Lua's `getlock` macro expands
+                // to exactly this shape (`*(((T*)(((void*)((char*)p -
+                // sizeof(T)))))->field)`).
+                if (dereference_count && start < end)
+                {
+                    frame->as.place.local = 0;
+                    frame->as.place.place = IR_VALUE_ID_INVALID;
+                    frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
+                    frame->as.place.start = start;
+                    frame->as.place.end = end;
+                    frame->as.place.index = end;
+                    frame->as.place.close = end;
+                    frame->as.place.dereference_count = dereference_count;
+                    frame->as.place.continuation = C_IR_PLACE_CONTINUATION_EXPRESSION;
+                    frame->stage = C_IR_LOWER_STAGE_CHILD;
+                    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                            .as.expression =
+                                                                {
+                                                                    .start = start,
+                                                                    .end = end,
+                                                                },
+                                                        }))
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    }
+                    return;
+                }
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
@@ -7850,10 +8042,61 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
         {
             index += 1;
         }
+c_ir_place_base_resolved:
         if (base_index >= end || builder->preprocess.tokens[base_index].kind != C_TOKEN_IDENTIFIER)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
+        }
+        // Calls are prepared and emitted before place lowering.  A call that
+        // returns a pointer can therefore be the base of an addressable
+        // arrow/subscript chain (`*getlock(l)->plock`), even though it is not
+        // itself a local/global place.  Keep the call value as the suffix
+        // operand and defer a leading dereference until that chain is walked.
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, base_index);
+        if (prepared_call && prepared_call->close_index < end)
+        {
+            IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
+            IrValueId place = c_ir_emit_call(builder, base_index);
+            if (place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            if (cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                place = c_ir_emit_cast(builder, place, cast_type, source);
+                if (place.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+            }
+            u32 suffix_index = prepared_call->close_index + 1;
+            if (index > suffix_index)
+            {
+                // A parenthesized cast-call (`((T)f())->field`) consumes an
+                // outer group beyond the call's own close delimiter.
+                suffix_index = index;
+            }
+            if (!leading_dereference || suffix_index >= end)
+            {
+                while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
+                {
+                    place = c_ir_emit_dereference_place(builder, place, source);
+                    dereference_count -= 1;
+                }
+            }
+            frame->as.place.local = 0;
+            frame->as.place.place = place;
+            frame->as.place.source = source;
+            frame->as.place.start = start;
+            frame->as.place.end = end;
+            frame->as.place.index = suffix_index;
+            frame->as.place.dereference_count = dereference_count;
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
+            frame->stage = C_IR_LOWER_STAGE_FINISH;
+            goto c_ir_place_suffix_walk;
         }
         CEntityId entity = c_ir_identifier_entity(builder, base_index);
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
@@ -7876,7 +8119,35 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
         {
             builder->failure_token_index = base_index;
         }
-        while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
+        if (place.value != IR_ID_UNDERLYING_INVALID && cast_type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrTypeId base_type = builder->function->values[place.value].canonical_type;
+            IrValueId base_value = c_ir_emit_load_place(builder, place, base_type, source);
+            base_value = base_value.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, base_value, cast_type, source);
+            if (base_value.value == IR_ID_UNDERLYING_INVALID)
+            {
+                place = IR_VALUE_ID_INVALID;
+            }
+            else if (dereference_count && !(leading_dereference && index < end))
+            {
+                place = c_ir_emit_dereference_place(builder, base_value, source);
+                dereference_count -= 1;
+            }
+            else
+            {
+                // A casted pointer can feed a subscript/member suffix without
+                // an outer `*`; retain the converted value for that suffix.
+                place = base_value;
+            }
+        }
+        if (leading_dereference && index < end)
+        {
+            // Delay prefix stars until after postfix member/subscript suffixes
+            // have produced their final place.  This is the C precedence of
+            // `*p->field`; stars introduced by a parenthesized group are not
+            // marked leading and retain the existing early-dereference path.
+        }
+        else while (place.value != IR_ID_UNDERLYING_INVALID && dereference_count)
         {
             IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
             IrValueId pointer = c_ir_emit_load_place(builder, place, pointer_type, source);
@@ -7918,6 +8189,27 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             frame->as.place.place = c_ir_emit_index_place(builder, base, machine->child_result.value, frame->as.place.source);
             frame->as.place.index = frame->as.place.close;
         }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GROUP)
+        {
+            frame->as.place.place = machine->child_result.value;
+            frame->as.place.index = frame->as.place.close;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_EXPRESSION)
+        {
+            IrValueId place = machine->child_result.value;
+            while (place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
+            {
+                IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
+                if (builder->function->values[place.value].category == IR_VALUE_PLACE)
+                {
+                    place = c_ir_emit_load_place(builder, place, pointer_type, frame->as.place.source);
+                }
+                place = c_ir_emit_dereference_place(builder, place, frame->as.place.source);
+                frame->as.place.dereference_count -= 1;
+            }
+            frame->as.place.place = place;
+            frame->as.place.index = frame->as.place.end;
+        }
         else
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -7926,6 +8218,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
         frame->as.place.continuation = C_IR_PLACE_CONTINUATION_NONE;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
+ c_ir_place_suffix_walk:
     if (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.local && frame->as.place.local->is_variable_length_array &&
         frame->as.place.index < frame->as.place.end && c_token_is_punctuator(&builder->preprocess.tokens[frame->as.place.index], C_PUNCTUATOR_LEFT_BRACKET))
     {
@@ -7998,7 +8291,13 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
         if (c_token_is_punctuator(&access, C_PUNCTUATOR_ARROW))
         {
             IrTypeId place_type = builder->function->values[frame->as.place.place.value].canonical_type;
-            operand = c_ir_emit_arrow_operand_from_place(builder, frame->as.place.place, place_type, frame->as.place.source);
+            // A parenthesized address expression such as `(&buffer)->field`
+            // already yields a pointer value rather than a place.  Load only
+            // ordinary pointer places; loading a value would reject the
+            // otherwise valid suffix with "not a modifiable place".
+            operand = builder->function->values[frame->as.place.place.value].category == IR_VALUE_PLACE
+                          ? c_ir_emit_arrow_operand_from_place(builder, frame->as.place.place, place_type, frame->as.place.source)
+                          : frame->as.place.place;
         }
         frame->as.place.place =
             c_ir_emit_field_place_from_value(builder, operand, access, builder->preprocess.tokens[index + 1]);
@@ -8007,6 +8306,15 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             builder->failure_token_index = index + 1;
         }
         frame->as.place.index += 2;
+    }
+    while (frame->as.place.place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
+    {
+        IrTypeId pointer_type = builder->function->values[frame->as.place.place.value].canonical_type;
+        IrValueId pointer = builder->function->values[frame->as.place.place.value].category == IR_VALUE_PLACE
+                                ? c_ir_emit_load_place(builder, frame->as.place.place, pointer_type, frame->as.place.source)
+                                : frame->as.place.place;
+        frame->as.place.place = c_ir_emit_dereference_place(builder, pointer, frame->as.place.source);
+        frame->as.place.dereference_count -= 1;
     }
     bool success = frame->as.place.index == frame->as.place.end && frame->as.place.place.value != IR_ID_UNDERLYING_INVALID;
     c_ir_lower_frame_finish(builder, success, success ? frame->as.place.place : IR_VALUE_ID_INVALID);
@@ -8498,6 +8806,19 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_builtin_float_bits(CIntegerIrBuilder* buil
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
+    // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
+    // it in the math-builtin path so hosted headers can use the spelling
+    // without declaring a runtime symbol, but emit the IEEE positive
+    // infinity directly in canonical IR.
+    if (string_equal(link_name, S8("huge_val")))
+    {
+        if (argument_count != 0)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        return c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("HUGE_VAL"));
+    }
     // The builtin NaN constructors are compile-time values.  Do not create
     // an imported `nan*` symbol: hosted headers use these names before a
     // runtime library declaration exists, and the quiet IEEE payload is
@@ -9136,6 +9457,65 @@ BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, 
     return false;
 }
 
+// A parenthesized comma expression may carry a nested assignment in its
+// right operand.  The control-expression prepass must own that whole group:
+// lowering the nested assignment group first would run the right operand
+// before an earlier call in the comma's left operand.  Keep this scan local to
+// balanced top-level commas; calls/assignments in ordinary argument groups do
+// not need the special ordering path.
+BUSTER_C_INTERNAL bool c_ir_has_top_level_comma(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+        {
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    for (u32 index = 0; index < builder->prepared_control_expression_count; index += 1)
+    {
+        CIrPreparedControlExpression* expression = builder->prepared_control_expressions + index;
+        if (expression->lowering && expression->open_index < start && expression->close_index >= end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -9192,18 +9572,27 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
             frame->as.prepare_control.index = recorded->close_index + 1;
             continue;
         }
+        u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end,
+                                                   parentheses ? C_PUNCTUATOR_LEFT_PARENTHESIS : C_PUNCTUATOR_LEFT_BRACKET,
+                                                   parentheses ? C_PUNCTUATOR_RIGHT_PARENTHESIS : C_PUNCTUATOR_RIGHT_BRACKET);
+        if ((parentheses || brackets) && close == UINT32_MAX)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        // A nested control group inside an enclosing comma/assignment group
+        // is evaluated by that parent's expression walk.  Preparing it here
+        // would emit its assignment before an earlier comma operand (for
+        // example Lua's `save(...), (state = next(...))`).
+        if ((parentheses || brackets) && c_ir_prepared_control_expression_contains_range(builder, index, close))
+        {
+            frame->as.prepare_control.index = close + 1;
+            continue;
+        }
         if ((!parentheses && !brackets) ||
             (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER))
         {
             continue;
-        }
-        u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end,
-                                                   parentheses ? C_PUNCTUATOR_LEFT_PARENTHESIS : C_PUNCTUATOR_LEFT_BRACKET,
-                                                   parentheses ? C_PUNCTUATOR_RIGHT_PARENTHESIS : C_PUNCTUATOR_RIGHT_BRACKET);
-        if (close == UINT32_MAX)
-        {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
         }
         if (brackets && (close == index + 1 || (!c_ir_has_root_control_operator(builder, index + 1, close) &&
                                                 !c_ir_has_root_assignment(builder, index + 1, close))))
@@ -9217,7 +9606,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // or logical group.  This is needed for conditions such as
         // `if ((p = get()) != 0)` and for assignment arms of `?:`.
         if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
-            !c_ir_has_root_assignment(builder, index + 1, close))
+            !c_ir_has_root_assignment(builder, index + 1, close) &&
+            !(c_ir_has_top_level_comma(builder, index + 1, close) && c_ir_has_assignment_anywhere(builder, index + 1, close)))
         {
             continue;
         }
@@ -9724,6 +10114,27 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
     return cursor < end ? cursor : end;
 }
 
+BUSTER_C_INTERNAL bool c_ir_statement_expression_has_control(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+    if (close >= end)
+    {
+        return false;
+    }
+    u32 control_set = C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |
+                      C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) |
+                      C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) | C_SYMBOL_WELL_KNOWN_BIT(GOTO);
+    for (u32 index = start + 2; index < close; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, token, control_set))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -9760,6 +10171,28 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             index = c_ir_unevaluated_operand_end(builder, index + 1, end) - 1;
             continue;
+        }
+        // GNU statement expressions own a complete nested body.  Calls in
+        // that body must be prepared when the body is lowered, after its
+        // enclosing branch has selected a block; discovering them here would
+        // emit (for example) an assert failure call in the parent block before
+        // the statement-expression condition is evaluated.  Treat the
+        // balanced `({ ... })` group as a lazy operand.  Unlike skipping it,
+        // this still records calls in the body as deferred children of an
+        // enclosing call, so the prepared-call emitter can temporarily clear
+        // preparation while lowering that body.
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 brace_close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            if (brace_close < end && brace_close + 1 < end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[brace_close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                if (lazy_scan_depth == UINT32_MAX)
+                {
+                    lazy_scan_depth = scan_depth + 1;
+                }
+            }
         }
         // One byte load answers this for the whole token stream: every token
         // the table does not name classifies as C_IR_LAZY_SCAN_OTHER and does
@@ -12618,6 +13051,13 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         else
         {
             IrType* pointer_type = ir_type_from_id(&builder->program->types, operand_type);
+            if (pointer_type && pointer_type->kind == IR_TYPE_ARRAY)
+            {
+                IrTypeId decay_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, pointer_type->element_type);
+                operand = c_ir_decay_array(builder, operand, decay_type, pointer_source);
+                operand_type = decay_type;
+                pointer_type = ir_type_from_id(&builder->program->types, operand_type);
+            }
             if (!pointer_type || pointer_type->kind != IR_TYPE_POINTER || pointer_type->is_nullptr)
             {
                 return false;
@@ -15625,6 +16065,24 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     }
     if (first.kind == C_TOKEN_IDENTIFIER)
     {
+        // `__builtin_offsetof(T, member)` (and the spelling supplied by
+        // <stddef.h>) is a size_t-valued expression, not a callable entity.
+        // Recognizing it here keeps pointer arithmetic such as Lua's
+        // `getudatamem` macro in the strict type walk; otherwise the generic
+        // identifier fallback sees the final `nuvalue` member and predicts
+        // an integer result for the whole `char * + offset` expression.
+        String8 name = c_token_spelling(builder->preprocess.spelling_base, first);
+        if ((string_equal(name, S8("__builtin_offsetof")) || string_equal(name, S8("offsetof"))) && start + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close >= end)
+            {
+                return false;
+            }
+            *type_out = builder->size_type;
+            return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end);
+        }
         return c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out);
     }
     return false;
@@ -17651,6 +18109,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     {
         return IR_VALUE_ID_INVALID;
     }
+    // Array expressions decay to pointers in every value context, including
+    // the truth conversion of an assertion's `condition && "message"`
+    // operand.  Keep the declared array type for sizeof/type-only queries,
+    // but materialize its address before forming the pointer comparison here.
+    if (type->kind == IR_TYPE_ARRAY)
+    {
+        IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type->element_type);
+        value = c_ir_decay_array(builder, value, pointer_type, source);
+        if (value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        type_id = pointer_type;
+        type = ir_type_from_id(&builder->program->types, type_id);
+        if (!type)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
     // The accepted f80 subset is a byte-preserving transport type.  Truth
     // conversion would require x87 comparison semantics, which the canonical
     // backend deliberately does not provide.
@@ -17790,6 +18267,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     u32 brackets = 0;
     u32 braces = 0;
     bool conditional_tail = false;
+    bool top_level_comma = false;
     CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
     for (u32 index = start; index < end; index += 1)
     {
@@ -17822,11 +18300,21 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         {
             conditional_tail = true;
         }
-        else if (!conditional_tail && !parentheses && !brackets && !braces &&
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            // An assignment in a comma expression is not the condition
+            // leaf's root assignment.  Let the full expression machine split
+            // the comma and preserve the assignment store before lowering
+            // the boolean tail (Lua's luaV_fastget uses this exact shape).
+            top_level_comma = true;
+            assignment = end;
+            operation = C_CONDITIONAL_OPERATOR_COUNT;
+        }
+        else if (!conditional_tail && !top_level_comma && !parentheses && !brackets && !braces &&
+                 assignment == end &&
                  (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &operation)))
         {
             assignment = index;
-            break;
         }
     }
     if (assignment >= end)
@@ -17877,6 +18365,31 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     frame->as.condition_leaf.source = c_ir_token_source_range(builder, assignment_token);
     frame->as.condition_leaf.operation = operation;
     frame->as.condition_leaf.simple = c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_ASSIGN);
+    // Parenthesized address/dereference left operands (for example
+    // `(*(&local) = value)`) need the expression machine's recovered-place
+    // path.  The direct condition-leaf place stage intentionally handles only
+    // ordinary identifier/member places, so let the full expression lowerer
+    // preserve the assignment side effect and resulting truth value here.
+    bool parenthesized_place = start < assignment &&
+                               (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                                (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
+                                 c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+    if (parenthesized_place)
+    {
+        frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_CORE;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                .as.expression =
+                                                    {
+                                                        .start = frame->as.condition_leaf.start,
+                                                        .end = frame->as.condition_leaf.end,
+                                                    },
+                                            }))
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
     frame->as.condition_leaf.start = assignment + 1;
     frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE;
     if (!c_ir_lower_place_frame_push(builder, start, assignment))
@@ -18439,6 +18952,69 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_place(CIntegerIrB
     return completed;
 }
 
+// Recover the addressable place behind a just-emitted load. Both ordinary
+// assignment statements and nested parenthesized assignment expressions use
+// this when their left operand was lowered as a value first (for example an
+// address-of/member chain in Lua's setnilvalue macro).
+BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrValue* value_definition = builder->function->values + value.value;
+    if (value_definition->category == IR_VALUE_PLACE)
+    {
+        return value;
+    }
+    IrInstructionId definition_id = value_definition->definition;
+    if (definition_id.value >= builder->function->instruction_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrInstruction* definition = builder->function->instructions + definition_id.value;
+    if ((definition->opcode != IR_OPCODE_LOAD && definition->opcode != IR_OPCODE_ATOMIC_LOAD) || definition->operand_count != 1 ||
+        definition_id.value + 1 != builder->function->instruction_count || value.value + 1 != builder->function->value_count ||
+        builder->function->blocks[builder->current_block.value].last_instruction.value != definition_id.value ||
+        builder->last_instruction.value != definition_id.value)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+    if (builder->previous_instruction_known)
+    {
+        previous = builder->previous_instruction;
+    }
+    else
+    {
+        IrInstructionId cursor = builder->function->blocks[builder->current_block.value].first_instruction;
+        while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+        {
+            previous = cursor;
+            cursor = builder->function->instructions[cursor.value].next;
+        }
+        if (cursor.value != definition_id.value)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
+    if (previous.value == IR_ID_UNDERLYING_INVALID)
+    {
+        builder->function->blocks[builder->current_block.value].first_instruction = IR_INSTRUCTION_ID_INVALID;
+    }
+    else
+    {
+        builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
+    }
+    builder->function->blocks[builder->current_block.value].last_instruction = previous;
+    builder->last_instruction = previous;
+    builder->previous_instruction_known = false;
+    IrValueId place = definition->operands[0];
+    builder->function->instruction_count -= 1;
+    builder->function->value_count -= 1;
+    return place;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -18466,60 +19042,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return false;
             }
-            IrValueId left = machine->child_result.value;
-            IrValue* left_value = left.value < builder->function->value_count ? builder->function->values + left.value : 0;
-            if (left_value && left_value->category == IR_VALUE_PLACE)
-            {
-                state->place = left;
-            }
-            else if (left_value && left_value->definition.value < builder->function->instruction_count)
-            {
-                IrInstruction* definition = builder->function->instructions + left_value->definition.value;
-                if ((definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD) && definition->operand_count == 1)
-                {
-                    IrInstructionId definition_id = left_value->definition;
-                    IrBlock* current_block = builder->function->blocks + builder->current_block.value;
-                    if (definition_id.value + 1 != builder->function->instruction_count || left.value + 1 != builder->function->value_count ||
-                        current_block->last_instruction.value != definition_id.value || builder->last_instruction.value != definition_id.value)
-                    {
-                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                        return false;
-                    }
-                    IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
-                    if (builder->previous_instruction_known)
-                    {
-                        previous = builder->previous_instruction;
-                    }
-                    else
-                    {
-                        IrInstructionId cursor = current_block->first_instruction;
-                        while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
-                        {
-                            previous = cursor;
-                            cursor = builder->function->instructions[cursor.value].next;
-                        }
-                        if (cursor.value != definition_id.value)
-                        {
-                            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                            return false;
-                        }
-                    }
-                    if (previous.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        current_block->first_instruction = IR_INSTRUCTION_ID_INVALID;
-                    }
-                    else
-                    {
-                        builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
-                    }
-                    current_block->last_instruction = previous;
-                    builder->last_instruction = previous;
-                    builder->previous_instruction_known = false;
-                    builder->function->instruction_count -= 1;
-                    builder->function->value_count -= 1;
-                    state->place = definition->operands[0];
-                }
-            }
+            state->place = c_ir_recover_place_from_value(builder, machine->child_result.value);
             if (state->place.value == IR_ID_UNDERLYING_INVALID)
             {
                 for (u32 value_index = builder->function->value_count; value_index > state->left_value_start; value_index -= 1)
@@ -18824,11 +19347,19 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
     {
         CToken update = builder->preprocess.tokens[start + 1];
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start));
+        if (!local)
+        {
+            // Global objects use the general expression-core update path,
+            // which resolves their identifier to a global place before
+            // applying the increment.  Keep this local fast path narrow so
+            // a direct statement such as `listing++` is not rejected merely
+            // because it has no CIntegerIrLocal entry.
+            return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+        }
         IrValueId one = c_ir_emit_integer_value(builder, 1, false, update);
-        bool success =
-            local && c_ir_emit_compound_assignment(builder, local->place, local->type,
-                                                   c_token_is_punctuator(&update, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
-                                                   c_ir_token_source_range(builder, update), 0, 0);
+        bool success = c_ir_emit_compound_assignment(builder, local->place, local->type,
+                                                      c_token_is_punctuator(&update, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+                                                      c_ir_token_source_range(builder, update), 0, 0);
         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
         return false;
     }
@@ -18844,11 +19375,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
             return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
         }
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start + 1));
+        if (!local)
+        {
+            // See the postfix case above: the expression core already knows
+            // how to form a place for a global identifier, so let it handle
+            // prefix updates instead of treating a missing local as an
+            // unsupported statement.
+            return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+        }
         IrValueId one = c_ir_emit_integer_value(builder, 1, false, first);
-        bool success =
-            local && c_ir_emit_compound_assignment(builder, local->place, local->type,
-                                                   c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
-                                                   c_ir_token_source_range(builder, first), 0, 0);
+        bool success = c_ir_emit_compound_assignment(builder, local->place, local->type,
+                                                      c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+                                                      c_ir_token_source_range(builder, first), 0, 0);
         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
         return false;
     }
@@ -19215,6 +19753,7 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
     }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
+    bool root_assignment = false;
     for (u32 index = start; index < end; index += 1)
     {
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
@@ -19233,6 +19772,15 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         }
         if (punctuator == C_PUNCTUATOR_QUESTION)
         {
+            // `lhs = condition ? true_value : false_value` has a
+            // conditional operator in the assignment's right operand, not
+            // at the root of the expression.  Treating it as a root
+            // conditional loses the assignment completion (the Lua
+            // luaV_fastgeti macro relies on this exact precedence).
+            if (root_assignment)
+            {
+                return false;
+            }
             if (found_question == UINT32_MAX)
             {
                 found_question = index;
@@ -19260,6 +19808,10 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
                 *expression_end = end;
                 return true;
             }
+        }
+        else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
+        {
+            root_assignment = true;
         }
     }
     return false;
@@ -19310,6 +19862,28 @@ BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u3
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
+    // GNU statement expressions with a trailing semicolon have type void.
+    // glibc's assert expansion (used by Lua's `LUA_USER_H="ltests.h"`
+    // build) wraps its noreturn assertion in `__extension__ ({ ...; })`;
+    // letting the generic identifier fallback see `__assert_fail` instead
+    // predicts an integer and makes a valid `(void)0 : assert(...)`
+    // conditional appear incompatible.  Keep this narrow shape check ahead
+    // of the strict operand query, which is intentionally type-only.
+    u32 statement_start = start;
+    if (statement_start < end && builder->preprocess.tokens[statement_start].kind == C_TOKEN_IDENTIFIER &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[statement_start]), S8("__extension__")))
+    {
+        statement_start += 1;
+    }
+    if (statement_start + 3 < end && c_token_is_punctuator(&builder->preprocess.tokens[statement_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[statement_start + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+        c_ir_matching_delimiter_cached(builder, statement_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1 &&
+        c_ir_matching_delimiter_cached(builder, statement_start + 1, end - 1, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 2 &&
+        c_token_is_punctuator(&builder->preprocess.tokens[end - 3], C_PUNCTUATOR_SEMICOLON))
+    {
+        return builder->void_type;
+    }
     if (start + 3 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -19332,6 +19906,38 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     c_ir_expression_core_range(builder, &start, &end);
+    // Resolve complete arithmetic/cast expressions before the legacy
+    // identifier scan below.  That scan is intentionally a cheap fallback,
+    // but for `((int)(pointer_difference)) + index` it retained the last
+    // member's pointer type and made a surrounding conditional appear to
+    // merge `int` with `pointer`.  The strict operand resolver already knows
+    // the usual arithmetic conversions and pointer arithmetic, so use its
+    // result whenever the full range is unambiguous.
+    IrTypeId strict_type = IR_TYPE_ID_INVALID;
+    if (c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type))
+    {
+        // The strict operand walk deliberately preserves an array's declared
+        // type so callers such as sizeof can distinguish an array from its
+        // element pointer.  An ordinary expression value, however, applies
+        // the C array-to-pointer conversion before a conditional compares
+        // the branch types (for example `array : 0`).
+        IrType* strict_value = ir_type_from_id(&builder->program->types, strict_type);
+        if (strict_value && strict_value->kind == IR_TYPE_FUNCTION)
+        {
+            // Function designators decay to pointers in value contexts.  The
+            // strict operand query intentionally retains the declared
+            // function type for sizeof/type-only callers, so perform the
+            // value-context conversion here (not in the query itself).  This
+            // matters for `lax ? iter_auxlax : iter_auxstrict` passed to
+            // lua_pushcfunction.
+            return c_ir_add_pointer_type(builder->program, builder->pointer_types, strict_type);
+        }
+        return c_ir_sizeof_operand_decay(builder, strict_type);
+    }
+    if (builder->queries->has_request)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
     // Parenthesized function designators are still calls: `(gzgetc)(g)` is
     // common in zlib's gzgetc macro and must predict the declared return type
     // rather than the function-pointer type of the designator.  The strict
@@ -20017,9 +20623,26 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
     {
         IrValueId value = machine->child_result.value;
         IrType* task_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
-        if (!machine->child_result.success || !task_type || value.value >= builder->function->value_count)
+        if (!machine->child_result.success || !task_type ||
+            (task_type->kind != IR_TYPE_VOID && value.value >= builder->function->value_count))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        // A conditional whose branches are void is itself a void expression.
+        // There is no result place to materialize or store: the branch effects
+        // only need to complete before jumping to the merge.  The final frame
+        // returns an integer zero placeholder so discarded void expressions
+        // can still travel through the value machinery.
+        if (task_type->kind == IR_TYPE_VOID)
+        {
+            if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
+                                 frame->as.conditional.source))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
             return;
         }
         if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.type.value)
@@ -20088,11 +20711,13 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         frame->as.conditional.source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[expression_start]);
         frame->as.conditional.type = result_type;
-        frame->as.conditional.place = c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
+        IrType* result_type_value = ir_type_from_id(&builder->program->types, result_type);
+        bool result_is_void = result_type_value && result_type_value->kind == IR_TYPE_VOID;
+        frame->as.conditional.place = result_is_void ? IR_VALUE_ID_INVALID : c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
         frame->as.conditional.final_block = c_ir_block_create(builder);
         frame->as.conditional.task_capacity = end - start + 1;
         frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
-        if (frame->as.conditional.place.value == IR_ID_UNDERLYING_INVALID ||
+        if ((!result_is_void && frame->as.conditional.place.value == IR_ID_UNDERLYING_INVALID) ||
             frame->as.conditional.final_block.value == IR_ID_UNDERLYING_INVALID)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -20156,7 +20781,13 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 leaf_start += 1;
                 leaf_end -= 1;
             }
-            bool assignment_leaf = c_ir_has_root_assignment(builder, leaf_start, leaf_end);
+            // A branch may carry an assignment in a comma expression rather
+            // than at the leaf's root (Lua's luaV_fastget macro uses exactly
+            // `(slot = lookup(...), !isempty(slot))`).  The logical-value
+            // core is intentionally assignment-free, so inspect the whole
+            // leaf before choosing it; otherwise the call is emitted but the
+            // assignment side effect is silently dropped.
+            bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end);
             if (!(assignment_leaf ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                     .as.expression =
@@ -20223,7 +20854,10 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         return;
     }
-    IrValueId value = c_ir_emit_load_place(builder, frame->as.conditional.place, frame->as.conditional.type, frame->as.conditional.source);
+    IrType* result_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+    IrValueId value = result_type && result_type->kind == IR_TYPE_VOID
+                          ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+                          : c_ir_emit_load_place(builder, frame->as.conditional.place, frame->as.conditional.type, frame->as.conditional.source);
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
@@ -20296,6 +20930,18 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         IrValueId place = machine->child_result.value;
         u32 assignment = frame->as.expression.pending_assignment;
         if (!machine->child_result.success || place.value >= builder->function->value_count)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        // A parenthesized place may contain an address-of/dereference chain,
+        // as in Lua's setnilvalue macro: `((&(p->val))->tt_ = value)`.
+        // The expression child materializes that field as a load, while the
+        // assignment still needs its underlying place.  Recover the final
+        // load's operand exactly as the general assignment statement path
+        // does, removing the now-redundant load from the current block.
+        place = c_ir_recover_place_from_value(builder, place);
+        if (place.value >= builder->function->value_count || builder->function->values[place.value].category != IR_VALUE_PLACE)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -20850,7 +21496,27 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             frame->as.expression.pending_assignment = assignment;
             frame->as.expression.pending_operation = assignment_operation;
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_PLACE;
-            if (!c_ir_lower_place_frame_push(builder, start, assignment))
+            // Most assignment operands can be lowered directly by the place
+            // machine.  A dereference whose pointer is itself parenthesized,
+            // such as `*(&local) = value`, is a value expression that the
+            // place machine intentionally does not parse.  Lower that small
+            // shape through the expression path and recover its final load's
+            // operand in EXPRESSION_PLACE (the same recovery used for
+            // parenthesized member assignments above).
+            bool parenthesized_place =
+                start < assignment &&
+                (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                 (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
+                  c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+            if (!(parenthesized_place ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                                         .as.expression =
+                                                                             {
+                                                                                 .start = start,
+                                                                                 .end = assignment,
+                                                                             },
+                                                                     })
+                                      : c_ir_lower_place_frame_push(builder, start, assignment)))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             }

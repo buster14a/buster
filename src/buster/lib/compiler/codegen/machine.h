@@ -862,7 +862,10 @@ struct MachineSwitchCase
 {
     u64 value;
     u32 target_block;
-    u32 reserved;
+    // Width of the controlling integer comparison. Zero is the legacy/default
+    // 64-bit form (also used by indirect-branch target rows).
+    u16 compare_width;
+    u16 reserved;
 };
 // SWITCH rows use value/target_block pairs.  INDIRECT_BRANCH rows reuse the
 // same compact side table as a target-set stream: value is ignored, payload

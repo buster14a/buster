@@ -13924,16 +13924,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        u16 compare_width = 64;
+                        if (instruction->operand_count && instruction->operands[0].value < function->value_count)
+                        {
+                            IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+                            if (switch_type && (switch_type->kind == IR_TYPE_BOOLEAN ||
+                                                (switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width <= 32)))
+                            {
+                                compare_width = 32;
+                            }
+                        }
                         c_x64_load(&emitter, 0x85, instruction->operands[0]);
                         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
                         {
                             BusterX86MetadataPhysicalOperand move_case_operands[2] = {
-                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
-                                codegen_canonical_x64_metadata_unsigned_immediate(instruction->immediates[case_index], 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, compare_width),
+                                codegen_canonical_x64_metadata_unsigned_immediate(instruction->immediates[case_index], compare_width),
                             };
                             BusterX86MetadataPhysicalOperand compare_case_operands[2] = {
-                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, compare_width),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, compare_width),
                             };
                             BusterX86MetadataPhysicalOperand case_branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
                             if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), move_case_operands,

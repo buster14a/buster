@@ -3110,6 +3110,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, floating_builtins, 0, C_TOKEN_PREPROCESSING_NUMBER,
                                S8("2.220446049250313080847263336181640625e-16"));
 
+    CPreprocessResult floating_mantissa_builtin = c_preprocess(arguments->arena,
+                                                                S8("__DBL_MANT_DIG__\n"),
+                                                                (CPreprocessOptions){
+                                                                    .source_path = S8("floating-mantissa-builtins.c"),
+                                                                });
+    BUSTER_TEST(arguments, floating_mantissa_builtin.diagnostic_count == 0);
+    BUSTER_TEST(arguments, floating_mantissa_builtin.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, floating_mantissa_builtin, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("53"));
+
+    CPreprocessResult floating_decimal_exponent_builtin = c_preprocess(arguments->arena,
+                                                                        S8("__DBL_MAX_10_EXP__\n"),
+                                                                        (CPreprocessOptions){
+                                                                            .source_path = S8("floating-decimal-exponent-builtins.c"),
+                                                                        });
+    BUSTER_TEST(arguments, floating_decimal_exponent_builtin.diagnostic_count == 0);
+    BUSTER_TEST(arguments, floating_decimal_exponent_builtin.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, floating_decimal_exponent_builtin, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("308"));
+
     CPreprocessResult aarch64_android_builtins = c_preprocess(arguments->arena,
                                                               S8("#if defined(__ANDROID__) && "
                                                                  "defined(__linux__) && "
@@ -4584,7 +4602,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
                                                             "double power(double left,"
                                                             " double right) {\n"
                                                             " return __builtin_pow(left, right);\n"
-                                                            "}\n"),
+                                                            "}\n"
+                                                            "double huge(void) { return __builtin_huge_val(); }\n"),
                                                          (CPreprocessOptions){0});
     CParseResult math_builtin_parse = c_parse(arguments->arena, math_builtin_tokens);
     CIRLowerResult math_builtin_ir = c_lower_to_ir(arguments->arena, S8("math-builtins.c"), math_builtin_tokens, math_builtin_parse, target_native);
@@ -4595,13 +4614,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
     {
         IrModule* math_module = &math_builtin_ir.program->modules[0];
         u32 call_count = 0;
+        bool found_huge_constant = false;
         for (u32 function_index = 0; function_index < math_module->function_count; function_index += 1)
         {
             IrFunction* function = &math_module->functions[function_index];
             BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
-                call_count += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+                IrInstruction* instruction = function->instructions + instruction_index;
+                call_count += instruction->opcode == IR_OPCODE_CALL;
+                found_huge_constant |= instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && instruction->immediate_count == 1 && instruction->immediates &&
+                                       instruction->immediates[0] == UINT64_C(0x7ff0000000000000);
             }
         }
         bool found_floorf = false;
@@ -4617,6 +4640,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
             found_pow |= string_equal(symbol->link_name, S8("pow"));
         }
         BUSTER_TEST(arguments, call_count == 2);
+        BUSTER_TEST(arguments, found_huge_constant);
         BUSTER_TEST(arguments, found_floorf);
         BUSTER_TEST(arguments, found_pow);
         BUSTER_TEST(arguments, ir_validate_canonical_module(math_builtin_ir.program, math_module).error == IR_VALIDATION_NONE);
@@ -6928,6 +6952,462 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
                                             (CPreprocessOptions){0});
     CParseResult parse = c_parse(temporary.arena, tokens);
     CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("conditional-type-prediction.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+
+    // This is the shape used by Lua's lua_absindex: a casted pointer
+    // difference plus an integer in the false arm of a conditional.  The
+    // predictor must retain the cast's integer type rather than the last
+    // member expression's pointer type.
+    CPreprocessResult lua_shape_tokens = c_preprocess(temporary.arena,
+                                                      S8("struct ConditionalState { int *top; int *func; };\n"
+                                                         "int conditional_lua_shape(struct ConditionalState *state, int index)\n"
+                                                         "{ return (index > 0 || index <= -2000) ? index : ((int)(state->top - state->func)) + index; }\n"),
+                                                      (CPreprocessOptions){0});
+    CParseResult lua_shape_parse = c_parse(temporary.arena, lua_shape_tokens);
+    CIRLowerResult lua_shape_ir = c_lower_to_ir(temporary.arena, S8("conditional-lua-shape.c"), lua_shape_tokens, lua_shape_parse, target_native);
+    BUSTER_TEST(arguments, lua_shape_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lua_shape_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lua_shape_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lua_shape_ir.program != 0);
+    if (lua_shape_ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lua_shape_ir.program, &lua_shape_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A conditional with void branches is common in Lua's GC-barrier macros:
+// `iscollectable(v) ? luaC_objbarrier(...) : ((void)(0))`.  It has side
+// effects but no result place; lowering must not cast/store a synthetic value
+// into a void temporary.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_void_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("void barrier_call(void);\n"
+                                               "void conditional_void_shape(int condition)\n"
+                                               "{ condition ? barrier_call() : ((void)(0)); }\n"
+                                               "void conditional_void_nested(int condition)\n"
+                                               "{ condition ? (condition ? barrier_call() : ((void)(0))) : ((void)(0)); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("conditional-void-expression.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lua's luaV_fastget macro assigns a lookup result in one arm of a
+// conditional comma expression.  The assignment is not the arm's root
+// operator, but it is still a required side effect before the following
+// `isempty(slot)` test and before either conditional result is used.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_assignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef struct FastValue { unsigned char tt; } FastValue;\n"
+                                               "typedef struct FastState { FastValue *table; unsigned char tt; unsigned int limit; FastValue *array; } FastState;\n"
+                                               "extern const FastValue *fast_lookup(FastValue *table, const char *key);\n"
+                                               "extern const FastValue *fast_lookup_index(FastValue *table, unsigned long key);\n"
+                                               "#define fast_ttistable(o) ((o)->tt == 5)\n"
+                                               "#define fast_hvalue(o) ((o)->table)\n"
+                                               "#define fast_isempty(o) ((o)->tt == 0)\n"
+                                               "#define fast_get(L,t,k,slot,f) (!fast_ttistable(t) ? (slot = (void *)0, 0) : (slot = f(fast_hvalue(t), k), !fast_isempty(slot)))\n"
+                                               "#define fast_geti(t,k,slot) (!fast_ttistable(t) ? (slot = (void *)0, 0) : (slot = ((unsigned long)(k) - 1u < (t)->limit) ? &(t)->array[(k) - 1] : fast_lookup_index(fast_hvalue(t), (k)), !fast_isempty(slot)))\n"
+                                               "typedef struct LexState { int current; } LexState;\n"
+                                               "extern int lex_save(LexState *state, int current);\n"
+                                               "extern int lex_getc(LexState *state);\n"
+                                               "#define lex_next(ls) ((ls)->current = lex_getc((ls)))\n"
+                                               "#define lex_save_and_next(ls) (lex_save((ls), (ls)->current), lex_next((ls)))\n"
+                                               "#define lex_cast(t,e) ((t)(e))\n"
+                                               "#define lex_cast_void(value) lex_cast(void, (value))\n"
+                                               "int fast_macro_shape(FastState *state, const char *key)\n"
+                                               "{ const FastValue *slot; return fast_get((void *)0, state, key, slot, fast_lookup) ? slot->tt : 0; }\n"
+                                               "int fast_macro_integer_shape(FastState *state, unsigned long key)\n"
+                                               "{ const FastValue *slot; return fast_geti(state, key, slot) ? slot->tt : 0; }\n"
+                                               "int lex_control_shape(LexState *state)\n"
+                                               "{ while (lex_cast_void(lex_save_and_next(state)), state->current >= 0) {} return state->current; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("conditional-comma-assignment.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        BUSTER_TEST(arguments, module->lowered_function_count >= 3);
+        IrFunction* function = c_test_find_ir_function(module, S8("fast_macro_shape"));
+        BUSTER_TEST(arguments, function != 0);
+        if (function)
+        {
+            u32 call_count = 0;
+            u32 store_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = function->instructions[instruction_index].opcode;
+                call_count += opcode == IR_OPCODE_CALL;
+                store_count += opcode == IR_OPCODE_STORE;
+            }
+            BUSTER_TEST(arguments, call_count == 1);
+            BUSTER_TEST(arguments, store_count >= 1);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        IrFunction* integer_function = c_test_find_ir_function(module, S8("fast_macro_integer_shape"));
+        BUSTER_TEST(arguments, integer_function != 0);
+        if (integer_function)
+        {
+            u32 call_count = 0;
+            u32 store_count = 0;
+            for (u32 instruction_index = 0; instruction_index < integer_function->instruction_count; instruction_index += 1)
+            {
+                IrOpcode opcode = integer_function->instructions[instruction_index].opcode;
+                call_count += opcode == IR_OPCODE_CALL;
+                store_count += opcode == IR_OPCODE_STORE;
+            }
+            BUSTER_TEST(arguments, call_count == 1);
+            BUSTER_TEST(arguments, store_count >= 2);
+        }
+        IrFunction *control_function = c_test_find_ir_function(module, S8("lex_control_shape"));
+        BUSTER_TEST(arguments, control_function != 0);
+        if (control_function)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A GNU statement expression can contain control flow and calls.  Its calls
+// must be emitted in the selected arm's block, rather than hoisted into the
+// enclosing expression's entry block by call preparation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("extern void abort(void);\n"
+                                               "typedef struct StatementValue { unsigned char tag; } StatementValue;\n"
+                                               "int statement_expression_control_call(StatementValue *value)\n"
+                                               "{ (void)({ if (value->tag & 64) ; else abort(); }); return 7; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("statement-expression-control-call.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        IrFunction* function = c_test_find_ir_function(module, S8("statement_expression_control_call"));
+        BUSTER_TEST(arguments, function != 0);
+        if (function)
+        {
+            u32 entry_branch_if_count = 0;
+            u32 abort_call_count = 0;
+            bool abort_call_in_entry = false;
+            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            {
+                IrBlock* block = &function->blocks[block_index];
+                if (block->first_instruction.value == IR_ID_UNDERLYING_INVALID || block->last_instruction.value >= function->instruction_count)
+                {
+                    continue;
+                }
+                for (u32 instruction_index = block->first_instruction.value; instruction_index <= block->last_instruction.value; instruction_index += 1)
+                {
+                    IrInstruction* instruction = &function->instructions[instruction_index];
+                    if (instruction->opcode == IR_OPCODE_BRANCH_IF && block_index == function->entry.value)
+                    {
+                        entry_branch_if_count += 1;
+                    }
+                    if (instruction->opcode == IR_OPCODE_CALL)
+                    {
+                        IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, instruction->symbol);
+                        if (symbol && string_equal(symbol->name, S8("abort")))
+                        {
+                            abort_call_count += 1;
+                            abort_call_in_entry |= block_index == function->entry.value;
+                        }
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, entry_branch_if_count == 1);
+            BUSTER_TEST(arguments, abort_call_count == 1);
+            BUSTER_TEST(arguments, !abort_call_in_entry);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A control-bearing statement expression can also occur inside a function
+// call argument (the shape used by glibc's assert/check_exp macros).  The
+// deferred call must still be lowered in the statement-expression body rather
+// than being lost while the outer call's arguments are prepared.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_nested_call(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("extern void abort(void);\n"
+                                               "typedef struct NestedObject { unsigned char tag; } NestedObject;\n"
+                                               "typedef struct NestedString { char contents[1]; } NestedString;\n"
+                                               "union NestedUnion { NestedObject object; NestedString string; };\n"
+                                               "#define nested_check(c,e) ((void)sizeof((c) ? 1 : 0), __extension__ ({ if (c) ; else abort(); }), (e))\n"
+                                               "static NestedString *nested_get(NestedString *value) { return value; }\n"
+                                               "NestedString *statement_expression_nested_call(NestedObject *value)\n"
+                                               "{ return nested_get(nested_check((value->tag & 64) != 0, (&(((union NestedUnion *)value)->string)))); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("statement-expression-nested-call.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule *module = &ir.program->modules[0];
+        IrFunction *function = c_test_find_ir_function(module, S8("statement_expression_nested_call"));
+        BUSTER_TEST(arguments, function != 0);
+        if (function)
+        {
+            u32 abort_call_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction *instruction = &function->instructions[instruction_index];
+                if (instruction->opcode == IR_OPCODE_CALL)
+                {
+                    IrSymbol *symbol = ir_symbol_from_id(&ir.program->symbols, instruction->symbol);
+                    abort_call_count += symbol && string_equal(symbol->name, S8("abort"));
+                }
+            }
+            BUSTER_TEST(arguments, abort_call_count == 1);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Direct identifier updates in a body normally take a local fast path.  A
+// file-scope object has no CIntegerIrLocal entry, but the expression core can
+// still resolve it to a global place; keep prefix and postfix forms covered
+// so that statement lowering does not reject `++global`/`global++`.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_identifier_updates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int global_counter;\n"
+                                               "int global_identifier_updates(int value)\n"
+                                               "{ global_counter = value; ++global_counter; global_counter++; return global_counter; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("global-identifier-updates.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Assignment expressions can hide a dereference behind a parenthesized
+// address expression.  The result of `*(&local) = value` must remain usable
+// in a comma/return expression after its addressable place is recovered.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_assignment_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("int parenthesized_address_assignment(int value)\n"
+                                               "{ int local = 0; return (*(&local) = value, local); }\n"
+                                               "int parenthesized_address_condition(int condition)\n"
+                                               "{ int local = 0; if ((condition ? (*(&local) = 1, 1) : 0) && 1) return local; return local; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("parenthesized-address-assignment-expression.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lua's userdata accessor combines nested pointer-cast macros, a
+// builtin-offsetof ternary, and a switch whose other arm returns void *.  The
+// strict expression-type walk must preserve the pointer result instead of
+// falling back to the final integer member (`nuvalue`).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_offsetof_pointer_prediction(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef unsigned long size_t;\n"
+                                               "typedef unsigned char Byte;\n"
+                                               "typedef struct GCObject { Byte tt; } GCObject;\n"
+                                               "typedef struct UValue { unsigned long value; } UValue;\n"
+                                               "typedef struct Udata0 { GCObject *next; Byte tt; Byte marked; unsigned short nuvalue; size_t len; void *meta; GCObject *list; union { long double align; } bindata; } Udata0;\n"
+                                               "typedef struct Udata { GCObject *next; Byte tt; Byte marked; unsigned short nuvalue; size_t len; void *meta; GCObject *list; UValue uv[1]; } Udata;\n"
+                                               "typedef union GCUnion { GCObject gc; Udata u; } GCUnion;\n"
+                                               "typedef union Value { void *p; GCObject *gc; } Value;\n"
+                                               "typedef struct TValue { Value value; Byte tag; } TValue;\n"
+                                               "#define check_exp(c,e) (e)\n"
+                                               "#define cast(t,e) ((t)(e))\n"
+                                               "#define cast_charp(e) cast(char *, (e))\n"
+                                               "#define cast_u(e) cast(union GCUnion *, (e))\n"
+                                               "#define gco2u(e) check_exp((e)->tt == 7, &((cast_u(e))->u))\n"
+                                               "#define val_(e) ((e)->value)\n"
+                                               "#define uvalue(e) check_exp(1, gco2u(val_(e).gc))\n"
+                                               "#define ttype(e) ((e)->tag & 0x0F)\n"
+                                               "#define udatamemoffset(n) ((n) == 0 ? __builtin_offsetof(Udata0, bindata) : __builtin_offsetof(Udata, uv) + (sizeof(UValue) * (n)))\n"
+                                               "#define getudatamem(e) (cast_charp(e) + udatamemoffset((e)->nuvalue))\n"
+                                               "void *nested_offsetof_pointer(TValue *object)\n"
+                                               "{ switch (ttype(object)) { case 7: return getudatamem(uvalue(object)); case 2: return val_(object).p; default: return ((void *)0); } }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("nested-offsetof-pointer-prediction.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A casted pointer dereference is still a modifiable place.  Lua's luac
+// reader uses the postfix form `(*(int *)ud)--`; keep it on the same update
+// machinery as an uncast dereference.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_casted_dereference_update(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                               S8("int casted_dereference_update(void *opaque)\n"
+                                               "{ return (*(int *)opaque)--; }\n"
+                                               "int casted_dereference_parenthesized(void *opaque)\n"
+                                               "{ return (*((int *)opaque))--; }\n"
+                                               "int casted_dereference_index(void *opaque)\n"
+                                               "{ return ((int *)opaque)[0]--; }\n"
+                                               "int casted_dereference_prefix(void *opaque)\n"
+                                               "{ return --*(int *)opaque; }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("casted-dereference-update.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lua and several hosted C headers parenthesize exported function names.  The
+// spelling is distinct from a function-pointer object, which must remain an
+// object declaration even though both forms contain `(name)(...)`.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_function_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("extern int (plain)(int value);\n"
+                                               "extern int (*pointer)(int value);\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.declaration_count == 2);
+    if (parse.declaration_count == 2)
+    {
+        CDeclaration* plain = &parse.declarations[0];
+        CDeclaration* pointer = &parse.declarations[1];
+        BUSTER_STRING_TEST(arguments, plain->name, S8("plain"));
+        BUSTER_STRING_TEST(arguments, pointer->name, S8("pointer"));
+        BUSTER_TEST(arguments, plain->kind == C_DECLARATION_FUNCTION);
+        BUSTER_TEST(arguments, pointer->kind == C_DECLARATION_OBJECT);
+        CType* plain_type = c_type_from_id(&parse, plain->type);
+        CType* pointer_type = c_type_from_id(&parse, pointer->type);
+        CType* pointed_function = pointer_type ? c_type_from_id(&parse, pointer_type->element_type) : 0;
+        BUSTER_TEST(arguments, plain_type && plain_type->kind == C_TYPE_FUNCTION);
+        BUSTER_TEST(arguments, plain_type && plain_type->parameter_count == 1);
+        BUSTER_TEST(arguments, pointer_type && pointer_type->kind == C_TYPE_POINTER);
+        BUSTER_TEST(arguments, pointed_function && pointed_function->kind == C_TYPE_FUNCTION);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Lua's setnilvalue macro wraps a member assignment in an extra pair of
+// parentheses and reaches the member through an address-of expression with a
+// post-incremented pointer: `((( &(p++->val))->tt_) = value)`.  The expression
+// lowering path must recover the field place from the materialized load before
+// emitting the store.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_place_assignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef struct LuaValue { int tt_; } LuaValue;\n"
+                                               "typedef struct LuaStackValue { LuaValue val; } LuaStackValue;\n"
+                                               "void setnilvalue_shape(LuaStackValue *p)\n"
+                                               "{ for (int i = 0; i < 2; i++) (((&(p++->val))->tt_) = ((0) | ((0) << 4))); }\n"
+                                               "typedef struct LuaBufferShape { unsigned long n; unsigned long size; char b[8]; } LuaBufferShape;\n"
+                                               "void addchar_shape(int value)\n"
+                                               "{ LuaBufferShape buffer; ((void)(((&buffer)->n < (&buffer)->size || (void *)0)), ((&buffer)->b[(&buffer)->n++] = value)); }\n"
+                                               "typedef struct LuaLockShape { int lock; int *plock; } LuaLockShape;\n"
+                                               "void unlock_shape(void *opaque)\n"
+                                               "{ --(*((LuaLockShape *)((void *)((char *)opaque - sizeof(LuaLockShape))))->plock); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("parenthesized-address-place.c"), tokens, parse, target_native);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, ir.diagnostic_count == 0);
@@ -9628,6 +10108,16 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
+    c_test_result_add(&result, c_test_conditional_void_expression(arguments));
+    c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
+    c_test_result_add(&result, c_test_statement_expression_control_call(arguments));
+    c_test_result_add(&result, c_test_statement_expression_nested_call(arguments));
+    c_test_result_add(&result, c_test_global_identifier_updates(arguments));
+    c_test_result_add(&result, c_test_parenthesized_address_assignment_expression(arguments));
+    c_test_result_add(&result, c_test_nested_offsetof_pointer_prediction(arguments));
+    c_test_result_add(&result, c_test_casted_dereference_update(arguments));
+    c_test_result_add(&result, c_test_parenthesized_function_declarations(arguments));
+    c_test_result_add(&result, c_test_parenthesized_address_place_assignment(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));

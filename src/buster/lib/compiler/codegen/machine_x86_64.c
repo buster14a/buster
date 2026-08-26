@@ -3856,6 +3856,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_switch(MachineX64Selector* selector,
     if (machine_x64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
+        u16 compare_width = 64;
+        if (instruction->operands[0].value < selector->function->value_count)
+        {
+            IrType* condition_type = ir_type_from_id(&selector->program->types,
+                                                      selector->function->values[instruction->operands[0].value].canonical_type);
+            if (condition_type && (condition_type->kind == IR_TYPE_BOOLEAN ||
+                                   (condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width <= 32)))
+            {
+                compare_width = 32;
+            }
+        }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
@@ -3863,6 +3874,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_switch(MachineX64Selector* selector,
             *case_row = (MachineSwitchCase){
                 .value = instruction->immediates[case_index],
                 .target_block = instruction->targets[case_index].value,
+                .compare_width = compare_width,
             };
         }
         machine_x64_select_row(selector, (MachineInstruction){
@@ -8100,11 +8112,16 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void
                                                         (BusterX86MetadataFeatureInput){0}, attributes);
         }
     }
-    BusterX86MetadataPhysicalOperand operands[2] = {
-        machine_x64_exact_gpr_operand(0, 64), machine_x64_exact_gpr_operand(1, 64),
-    };
-    (void)machine_x64_metadata_shape_cache_add(S8("CMP"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
-    (void)machine_x64_metadata_shape_cache_add(S8("TEST"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    u16 compare_widths[] = {32, 64};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(compare_widths); width_index += 1)
+    {
+        u16 width = compare_widths[width_index];
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            machine_x64_exact_gpr_operand(0, width), machine_x64_exact_gpr_operand(1, width),
+        };
+        (void)machine_x64_metadata_shape_cache_add(S8("CMP"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+        (void)machine_x64_metadata_shape_cache_add(S8("TEST"), operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_immediates(void)
@@ -10217,8 +10234,18 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
                         {
                             MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
-                            (void)machine_x64_emit_exact_movabs(&encoder, compare_register, case_row->value, 0);
-                            (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 64, 0);
+                            u16 compare_width = case_row->compare_width ? case_row->compare_width : 64;
+                            if (compare_width == 32)
+                            {
+                                (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("MOV"), compare_register,
+                                                                                   case_row->value, 32, 32, 0);
+                                (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 32, 0);
+                            }
+                            else
+                            {
+                                (void)machine_x64_emit_exact_movabs(&encoder, compare_register, case_row->value, 0);
+                                (void)machine_x64_emit_metadata_registers(&encoder, S8("CMP"), compare_register, condition, 64, 0);
+                            }
                             u32 branch_start = encoder.count;
                             (void)machine_x64_emit_metadata_relative(&encoder, S8("JZ"), 0, 32, 0);
                             MachineX64BranchFixup* case_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
