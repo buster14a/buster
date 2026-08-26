@@ -10114,27 +10114,6 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
     return cursor < end ? cursor : end;
 }
 
-BUSTER_C_INTERNAL bool c_ir_statement_expression_has_control(CIntegerIrBuilder* builder, u32 start, u32 end)
-{
-    u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-    if (close >= end)
-    {
-        return false;
-    }
-    u32 control_set = C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |
-                      C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) |
-                      C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) | C_SYMBOL_WELL_KNOWN_BIT(GOTO);
-    for (u32 index = start + 2; index < close; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(builder->preprocess.spelling_base, token, control_set))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
