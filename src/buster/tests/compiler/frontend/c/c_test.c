@@ -6980,6 +6980,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(lua_shape_ir.program, &lua_shape_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
+
+    // Type prediction is speculative and must yield to the ordinary lowering
+    // path before a deeply nested conditional/arithmetic expression exhausts
+    // the compiler's host stack.  Fuzz-instrumented sanitizer frames are large
+    // enough to expose this well before an unsanitized build does.
+    u64 deep_capacity = 4096;
+    char8* deep_source_pointer = arena_allocate(temporary.arena, char8, deep_capacity);
+    u64 deep_source_length = 0;
+    c_test_append_source(deep_source_pointer, deep_capacity, &deep_source_length, S8("int deep_prediction(int value) { return "));
+    for (u32 depth = 0; depth < 96; depth += 1)
+    {
+        c_test_append_source(deep_source_pointer, deep_capacity, &deep_source_length, S8("value ? 1 + ("));
+    }
+    c_test_append_source(deep_source_pointer, deep_capacity, &deep_source_length, S8("value"));
+    for (u32 depth = 0; depth < 96; depth += 1)
+    {
+        c_test_append_source(deep_source_pointer, deep_capacity, &deep_source_length, S8(") : 0"));
+    }
+    c_test_append_source(deep_source_pointer, deep_capacity, &deep_source_length, S8("; }\n"));
+    String8 deep_source = {deep_source_pointer, deep_source_length};
+    CPreprocessResult deep_tokens = c_preprocess(temporary.arena, deep_source, (CPreprocessOptions){0});
+    CParseResult deep_parse = c_parse(temporary.arena, deep_tokens);
+    CIRLowerResult deep_ir = c_lower_to_ir(temporary.arena, S8("deep-conditional-type-prediction.c"), deep_tokens, deep_parse, target_native);
+    BUSTER_TEST(arguments, deep_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, deep_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, deep_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, deep_ir.program != 0);
+    if (deep_ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(deep_ir.program, &deep_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
     scratch_end(temporary);
     return result;
 }

@@ -15358,6 +15358,7 @@ BUSTER_C_INTERNAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, IrTy
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
 BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth);
 
 BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
 {
@@ -15554,8 +15555,18 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
    guessed type must never come out of this function, because the guessed size folds
    silently into the program (the 2026-08-08 array-bound incident, and the same
    defect shape in function bodies). */
-BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth)
 {
+    // This resolver is a speculative type query: false lets the caller use
+    // the ordinary expression paths.  Bound its recursive precedence walk so
+    // adversarially deep, otherwise-valid expressions cannot exhaust the host
+    // stack in sanitizer/fuzz configurations, whose instrumented frames are
+    // substantially larger than Release frames.
+    if (!remaining_depth)
+    {
+        return false;
+    }
+    remaining_depth -= 1;
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
     {
@@ -15714,7 +15725,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     if (last_comma != UINT32_MAX)
     {
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, last_comma + 1, end, &right))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, last_comma + 1, end, &right, remaining_depth))
         {
             return false;
         }
@@ -15724,7 +15735,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     if (first_assign != UINT32_MAX)
     {
         // Assignment yields the unpromoted type of its left operand.
-        return c_ir_sizeof_operand_type_attempt(builder, start, first_assign, type_out);
+        return c_ir_sizeof_operand_type_attempt_depth(builder, start, first_assign, type_out, remaining_depth);
     }
     if (first_question != UINT32_MAX)
     {
@@ -15742,8 +15753,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
         }
         IrTypeId true_type = IR_TYPE_ID_INVALID;
         IrTypeId false_type = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, true_start, true_end, &true_type) ||
-            !c_ir_sizeof_operand_type_attempt(builder, first_colon + 1, end, &false_type))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &true_type, remaining_depth) ||
+            !c_ir_sizeof_operand_type_attempt_depth(builder, first_colon + 1, end, &false_type, remaining_depth))
         {
             return false;
         }
@@ -15773,8 +15784,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start, bitwise_index, &left) ||
-            !c_ir_sizeof_operand_type_attempt(builder, bitwise_index + 1, end, &right))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, bitwise_index, &left, remaining_depth) ||
+            !c_ir_sizeof_operand_type_attempt_depth(builder, bitwise_index + 1, end, &right, remaining_depth))
         {
             return false;
         }
@@ -15795,7 +15806,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     {
         // A shift yields the promoted left operand; the right operand never widens it.
         IrTypeId left = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start, shift_index, &left))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, shift_index, &left, remaining_depth))
         {
             return false;
         }
@@ -15812,8 +15823,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start, additive_index, &left) ||
-            !c_ir_sizeof_operand_type_attempt(builder, additive_index + 1, end, &right))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth) ||
+            !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth))
         {
             return false;
         }
@@ -15855,8 +15866,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     {
         IrTypeId left = IR_TYPE_ID_INVALID;
         IrTypeId right = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start, multiplicative_index, &left) ||
-            !c_ir_sizeof_operand_type_attempt(builder, multiplicative_index + 1, end, &right))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, multiplicative_index, &left, remaining_depth) ||
+            !c_ir_sizeof_operand_type_attempt_depth(builder, multiplicative_index + 1, end, &right, remaining_depth))
         {
             return false;
         }
@@ -15892,7 +15903,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth))
         {
             return false;
         }
@@ -15907,7 +15918,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth))
         {
             return false;
         }
@@ -15918,7 +15929,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
         c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE))
     {
         IrTypeId operand = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth))
         {
             return false;
         }
@@ -15933,7 +15944,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
     {
-        return c_ir_sizeof_operand_type_attempt(builder, start + 1, end, type_out);
+        return c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth);
     }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
@@ -15975,7 +15986,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
             return true;
         }
         IrTypeId inner = IR_TYPE_ID_INVALID;
-        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, close, &inner))
+        if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, close, &inner, remaining_depth))
         {
             return false;
         }
@@ -16065,6 +16076,11 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
         return c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out);
     }
     return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+{
+    return c_ir_sizeof_operand_type_attempt_depth(builder, start, end, type_out, 64);
 }
 
 // Walks the call, subscript, member and postfix-increment suffixes that may
