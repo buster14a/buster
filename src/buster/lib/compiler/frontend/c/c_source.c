@@ -2468,6 +2468,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
@@ -2476,6 +2477,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinff"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_isfinite"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -4071,9 +4073,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_nan",           "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inff",          "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
-        "__builtin_isinf",         "__builtin_isinff",
+        "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_types_compatible_p",
@@ -6053,6 +6055,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // <float.h>; this is the IEEE-754 binary64 value required by
     // DBL_MAX_10_EXP on every hosted target currently supported here.
     C_DEFINE_TYPE_MACRO("__DBL_MAX_10_EXP__", S8("308"));
+    // C99's decimal-roundtrip precision macros are exposed by <float.h> in
+    // terms of the compiler predefined spellings.  Keep the IEEE-754 values
+    // in the prelude so external headers (and yyjson's number tests) do not
+    // inherit a host compiler's macro set.
+    C_DEFINE_TYPE_MACRO("__FLT_DECIMAL_DIG__", S8("9"));
+    C_DEFINE_TYPE_MACRO("__DBL_DECIMAL_DIG__", S8("17"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));

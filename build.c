@@ -78,6 +78,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_CJSON,
     BUILD_COMMAND_TEST_ZLIB,
     BUILD_COMMAND_TEST_LUA,
+    BUILD_COMMAND_TEST_YYJSON,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -600,6 +601,19 @@ struct TestLuaOptions
 #define LUA_COMPATIBILITY_COMMIT "6e22fedb74cf0c9b6656e9fce8b7331db847c605"
 #define LUA_RELEASE_LUAC_SIZE 15145u
 #define LUA_RELEASE_LUAC_HASH 0x6cdc1a7db5393273ULL
+
+// yyjson is consumed from a caller-provided pristine checkout.  The
+// compatibility harness intentionally pins a release commit rather than
+// vendoring the amalgamation into this repository.
+typedef struct TestYyjsonOptions TestYyjsonOptions;
+struct TestYyjsonOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define YYJSON_COMPATIBILITY_TAG "0.12.0"
+#define YYJSON_COMPATIBILITY_COMMIT "8b4a38dc994a110abaec8a400615567bd996105f"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -10109,6 +10123,384 @@ BUSTER_GLOBAL_LOCAL void test_lua_action_add(Arena* arena, TestLuaOptions option
     TestLuaOptions* options_copy = arena_allocate(arena, TestLuaOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_lua_action, .callback_data = options_copy};
+}
+
+// --- yyjson compatibility harness --------------------------------------
+// yyjson deliberately stays outside the repository.  This gate authenticates
+// a pristine release checkout, compiles the unmodified amalgamation and its
+// upstream tests with Buster, then compares a deterministic JSON corpus with
+// Clang for every register allocator.  Optional yyjson SIMD remains disabled:
+// the portable scalar implementation is the compatibility contract.
+typedef struct YyjsonCommandResult YyjsonCommandResult;
+struct YyjsonCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL YyjsonCommandResult yyjson_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: yyjson harness could not start the command above\n"));
+        return (YyjsonCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    YyjsonCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 yyjson_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_yyjson requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    YyjsonCommandResult head = yyjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = yyjson_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(YYJSON_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_yyjson requires pristine yyjson tag {S8} commit {S8}; found {S8}\n"), S8(YYJSON_COMPATIBILITY_TAG),
+                     S8(YYJSON_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    YyjsonCommandResult status = yyjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_yyjson checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("YYJSON_SOURCE tag={S8} commit={S8} pristine=1 path={S8}\n"), S8(YYJSON_COMPATIBILITY_TAG), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 yyjson_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (!configs[index].length)
+        {
+            continue;
+        }
+        String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+        if (path_exists(arena, candidate))
+        {
+            return candidate;
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    bool measured = self_host_source_metrics_read(arena, path, &metrics);
+    if (measured)
+    {
+        string_print(S8("YYJSON_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"),
+                     mode, unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    }
+    else
+    {
+        string_print(S8("warning: yyjson compiler metrics missing for allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+    }
+    return measured;
+}
+
+BUSTER_GLOBAL_LOCAL String8 yyjson_data_define(Arena* arena, String8 source_directory)
+{
+    String8 test_directory = path_join(arena, source_directory, S8("test"));
+    return string_format(arena, S8("-DYYJSON_TEST_DATA_PATH=\"{S8}\""), test_directory);
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics,
+                                               String8 mode, bool verbose, u64* elapsed_us)
+{
+    String8 include_src = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("src")));
+    String8 include_util = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("test/util")));
+    String8 mode_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+    String8 metric_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    String8 data_flag = yyjson_data_define(arena, source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_src);
+    os_argument_builder_append(&builder, include_util);
+    os_argument_builder_append(&builder, data_flag);
+    os_argument_builder_append(&builder, mode_flag);
+    os_argument_builder_append(&builder, metric_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    YyjsonCommandResult command = yyjson_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output)
+{
+    String8 include_src = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("src")));
+    String8 include_util = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("test/util")));
+    String8 data_flag = yyjson_data_define(arena, source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-std=c99"));
+    os_argument_builder_append(&builder, include_src);
+    os_argument_builder_append(&builder, include_util);
+    os_argument_builder_append(&builder, data_flag);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    YyjsonCommandResult command = yyjson_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_link_clang(Arena* arena, String8 clang, String8 output, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    YyjsonCommandResult command = yyjson_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool yyjson_run_binary(Arena* arena, String8 binary, String8 working_directory, String8* output)
+{
+    String8 arguments[] = {binary};
+    YyjsonCommandResult command = yyjson_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true);
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_yyjson_action(Arena* arena, void* data)
+{
+    TestYyjsonOptions options = *(TestYyjsonOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_yyjson requires an external yyjson v{S8} checkout path\n"), S8(YYJSON_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build/build test_yyjson [--config Debug|Release] /path/to/yyjson-v{S8}\n"), S8(YYJSON_COMPATIBILITY_TAG));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 yyjson_source = path_join(arena, path_join(arena, source_directory, S8("src")), S8("yyjson.c"));
+    String8 yyjson_header = path_join(arena, path_join(arena, source_directory, S8("src")), S8("yyjson.h"));
+    String8 util_directory = path_join(arena, source_directory, S8("test/util"));
+    String8 data_directory = path_join(arena, path_join(arena, source_directory, S8("test")), S8("data"));
+    if (!path_exists(arena, yyjson_source) || !path_exists(arena, yyjson_header) || !path_exists(arena, path_join(arena, util_directory, S8("yy_test_utils.c"))) ||
+        !path_exists(arena, path_join(arena, util_directory, S8("goo_double_conv.c"))) || !path_exists(arena, data_directory) || !yyjson_git_verify(arena, source_directory))
+    {
+        string_print(S8("error: test_yyjson checkout is missing src/yyjson.c, test utilities/data, or is not pristine\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = yyjson_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_yyjson requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 output_directory = string_format_z(arena, S8("build/yyjson-v{S8}-{u64}"), S8(YYJSON_COMPATIBILITY_TAG), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    string_print(S8("YYJSON_HARNESS ide={S8} clang={S8} output={S8} simd=disabled\n"), ide, clang, output_directory);
+
+    String8 fast = S8("fast");
+    String8 fast_yyjson_object = path_join(arena, output_directory, S8("yyjson-fast.o"));
+    String8 fast_yyjson_metrics = path_join(arena, metrics_directory, S8("yyjson-fast.metrics"));
+    u64 elapsed_us = 0;
+    if (!yyjson_compile_buster(arena, ide, source_directory, yyjson_source, fast_yyjson_object, fast_yyjson_metrics, fast, true, &elapsed_us) ||
+        !yyjson_metrics_report(arena, fast, S8("src/yyjson.c"), fast_yyjson_metrics, elapsed_us))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 utility_names[] = {S8("yy_test_utils"), S8("goo_double_conv")};
+    String8 utility_objects[ BUSTER_ARRAY_LENGTH(utility_names) ];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(utility_names); index += 1)
+    {
+        String8 source = path_join(arena, util_directory, string_format(arena, S8("{S8}.c"), utility_names[index]));
+        utility_objects[index] = path_join(arena, output_directory, string_format(arena, S8("{S8}-fast.o"), utility_names[index]));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}-fast.metrics"), utility_names[index]));
+        if (!yyjson_compile_buster(arena, ide, source_directory, source, utility_objects[index], metrics, fast, false, &elapsed_us) ||
+            !yyjson_metrics_report(arena, fast, utility_names[index], metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    String8 clang_yyjson_object = path_join(arena, output_directory, S8("yyjson-clang.o"));
+    if (!yyjson_compile_clang(arena, clang, source_directory, yyjson_source, clang_yyjson_object))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 test_names[] = {
+        S8("test_allocator"), S8("test_err_code"), S8("test_json_merge_patch"), S8("test_json_mut_val"), S8("test_json_patch"), S8("test_json_pointer"),
+        S8("test_json_reader"), S8("test_json_val"), S8("test_json_writer"), S8("test_number"), S8("test_roundtrip"), S8("test_string"),
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_names); index += 1)
+    {
+        String8 source = path_join(arena, path_join(arena, source_directory, S8("test")), string_format(arena, S8("{S8}.c"), test_names[index]));
+        String8 object = path_join(arena, output_directory, string_format(arena, S8("{S8}-fast.o"), test_names[index]));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}-fast.metrics"), test_names[index]));
+        String8 binary = path_join(arena, output_directory, test_names[index]);
+        if (!yyjson_compile_buster(arena, ide, source_directory, source, object, metrics, fast, false, &elapsed_us) ||
+            !yyjson_metrics_report(arena, fast, test_names[index], metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 objects[] = {object, fast_yyjson_object, utility_objects[0], utility_objects[1]};
+        if (!yyjson_link_clang(arena, clang, binary, objects, BUSTER_ARRAY_LENGTH(objects)) || !yyjson_run_binary(arena, binary, source_directory, 0))
+        {
+            string_print(S8("error: yyjson upstream test failed: {S8}\n"), test_names[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("YYJSON_TEST name={S8} status=pass\n"), test_names[index]);
+    }
+
+    // Compile the deterministic corpus once with Clang; each Buster allocator
+    // links its own amalgamation and probe object against the same reference.
+    String8 corpus_source = S8("tests/basic_yyjson_roundtrip.c");
+    String8 clang_corpus_object = path_join(arena, output_directory, S8("roundtrip-clang.o"));
+    if (!yyjson_compile_clang(arena, clang, source_directory, corpus_source, clang_corpus_object))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 mode_yyjson_object = fast_yyjson_object;
+        if (!string_equal(mode, fast))
+        {
+            mode_yyjson_object = path_join(arena, output_directory, string_format(arena, S8("yyjson-{S8}.o"), mode));
+            String8 mode_metrics = path_join(arena, metrics_directory, string_format(arena, S8("yyjson-{S8}.metrics"), mode));
+            if (!yyjson_compile_buster(arena, ide, source_directory, yyjson_source, mode_yyjson_object, mode_metrics, mode, true, &elapsed_us) ||
+                !yyjson_metrics_report(arena, mode, S8("src/yyjson.c"), mode_metrics, elapsed_us))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        String8 corpus_object = path_join(arena, output_directory, string_format(arena, S8("roundtrip-{S8}.o"), mode));
+        String8 corpus_metrics = path_join(arena, metrics_directory, string_format(arena, S8("roundtrip-{S8}.metrics"), mode));
+        if (!yyjson_compile_buster(arena, ide, source_directory, corpus_source, corpus_object, corpus_metrics, mode, false, &elapsed_us) ||
+            !yyjson_metrics_report(arena, mode, S8("roundtrip"), corpus_metrics, elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 buster_binary = path_join(arena, output_directory, string_format(arena, S8("roundtrip-{S8}"), mode));
+        String8 buster_objects[] = {mode_yyjson_object, corpus_object};
+        if (!yyjson_link_clang(arena, clang, buster_binary, buster_objects, BUSTER_ARRAY_LENGTH(buster_objects)))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 buster_output = {0};
+        bool buster_ok = yyjson_run_binary(arena, buster_binary, S8("."), &buster_output);
+
+        String8 clang_binary = path_join(arena, output_directory, string_format(arena, S8("roundtrip-clang-{S8}"), mode));
+        String8 clang_objects[] = {clang_yyjson_object, clang_corpus_object};
+        if (!yyjson_link_clang(arena, clang, clang_binary, clang_objects, BUSTER_ARRAY_LENGTH(clang_objects)))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 clang_output = {0};
+        bool clang_ok = yyjson_run_binary(arena, clang_binary, S8("."), &clang_output);
+        bool equal = buster_ok && clang_ok && string_equal(buster_output, clang_output);
+        string_print(S8("YYJSON_ROUNDTRIP allocator={S8} buster_status={S8} clang_status={S8} equal_bytes={u32} output_bytes={u64}\n"), mode,
+                     buster_ok ? S8("pass") : S8("fail"), clang_ok ? S8("pass") : S8("fail"), equal, buster_output.length);
+        if (!equal)
+        {
+            if (buster_output.length)
+            {
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(buster_output));
+            }
+            if (clang_output.length)
+            {
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(clang_output));
+            }
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    string_print(S8("YYJSON_RESULT tag={S8} commit={S8} upstream_tests={u64} allocators={u64} simd=disabled status=pass\n"), S8(YYJSON_COMPATIBILITY_TAG),
+                 S8(YYJSON_COMPATIBILITY_COMMIT), BUSTER_ARRAY_LENGTH(test_names), BUSTER_ARRAY_LENGTH(allocator_modes));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_yyjson_action_add(Arena* arena, TestYyjsonOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestYyjsonOptions* options_copy = arena_allocate(arena, TestYyjsonOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_yyjson_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -23252,6 +23644,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_CJSON] = S8_INITIALIZER("test_cjson"),
         [BUILD_COMMAND_TEST_ZLIB] = S8_INITIALIZER("test_zlib"),
         [BUILD_COMMAND_TEST_LUA] = S8_INITIALIZER("test_lua"),
+        [BUILD_COMMAND_TEST_YYJSON] = S8_INITIALIZER("test_yyjson"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -23324,6 +23717,7 @@ ProcessResult process_arguments(void)
     TestCjsonOptions test_cjson_options = {0};
     TestZlibOptions test_zlib_options = {0};
     TestLuaOptions test_lua_options = {0};
+    TestYyjsonOptions test_yyjson_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -23441,6 +23835,12 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_lua_options.compatibility_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_YYJSON && !test_yyjson_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_yyjson_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -23698,6 +24098,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_LUA)
                 {
                     test_lua_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_YYJSON)
+                {
+                    test_yyjson_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -24243,6 +24647,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_LUA:
         {
             test_lua_action_add(arena, test_lua_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_YYJSON:
+        {
+            test_yyjson_action_add(arena, test_yyjson_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

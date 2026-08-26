@@ -246,7 +246,26 @@ are excluded), and records compile/runtime timings. Generated objects, metrics, 
 checkout and reports the first unsupported frontend construct without altering
 upstream sources.
 
-`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`,
+The opt-in yyjson compatibility harness takes an external, pristine yyjson
+0.12.0 checkout; upstream sources are never copied into or patched in this
+repository:
+
+```sh
+./build.sh build --config Release -t ide
+./build/build test_yyjson --config Release /path/to/yyjson-v0.12.0
+```
+
+The checkout must be tag `0.12.0` at commit
+`8b4a38dc994a110abaec8a400615567bd996105f` with no tracked or untracked
+changes. The harness compiles the unmodified yyjson amalgamation and its
+upstream utility/test units with Buster, links and runs all 12 upstream test
+executables, and compares a deterministic parse/serialize corpus with Clang.
+It exercises FAST, NONE, MIR_STACK, and QUALITY for the amalgamation and
+corpus; optional SIMD is explicitly disabled. Source metrics, compiler timing,
+allocator diagnostics, and generated objects/logs remain under
+`build/yyjson-v0.12.0-<pid>/`.
+
+`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,

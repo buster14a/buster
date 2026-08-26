@@ -4946,6 +4946,64 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_builtin_math_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // yyjson compatibility reduced four independent frontend failures to
+    // these focused runtime fixtures: brace-elided nested aggregates,
+    // __builtin_inff/isfinite, decimal precision macros, and narrow frame
+    // loads after pointer-written scalar values.
+    // Keep each source separate so a future regression identifies the exact
+    // language or builtin contract that broke.
+    String8 c_yyjson_regression_paths[] = {
+        S8("tests/basic_c_nested_aggregate_scalar.c"),
+        S8("tests/basic_c_builtin_inff.c"),
+        S8("tests/basic_c_decimal_digits.c"),
+        S8("tests/basic_c_narrow_frame_load.c"),
+    };
+    String8 c_yyjson_regression_names[] = {
+        S8("buster-c-nested-aggregate-scalar"),
+        S8("buster-c-builtin-inff"),
+        S8("buster-c-decimal-digits"),
+        S8("buster-c-narrow-frame-load"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_yyjson_regression_paths); fixture_index += 1)
+    {
+        String8 fixture_path = buster_test_temporary_path(arguments->arena, c_yyjson_regression_names[fixture_index], S8(""));
+        String8 fixture_command_line[] = {S8("-o"), fixture_path, c_yyjson_regression_paths[fixture_index]};
+        CompilerDriverResult fixture = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+        BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+        if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 fixture_arguments[] = {fixture_path};
+            ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+            if (fixture_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+    // The narrow-load fixture also guards the machine lowering itself.  A
+    // direct branch must normalize the byte written through the escaped
+    // pointer before testing the frame value; checking the x86 assembly keeps
+    // this regression deterministic even on a host where a fresh stack happens
+    // to contain zeroes above the byte.
+    String8 narrow_frame_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_narrow_frame_load.c"),
+    };
+    CompilerDriverResult narrow_frame_assembly = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(narrow_frame_assembly_command_line)));
+    BUSTER_TEST(arguments, narrow_frame_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    u64 narrow_call = string_first_sequence(narrow_frame_assembly.output, S8("call \"write_narrow_values\"\n"));
+    BUSTER_TEST(arguments, narrow_call != BUSTER_STRING_NO_MATCH);
+    if (narrow_call != BUSTER_STRING_NO_MATCH)
+    {
+        String8 after_call = string_slice(narrow_frame_assembly.output, narrow_call, narrow_frame_assembly.output.length);
+        u64 normalize = string_first_sequence(after_call, S8("movzx "));
+        u64 branch_test = string_first_sequence(after_call, S8("test "));
+        BUSTER_TEST(arguments, normalize != BUSTER_STRING_NO_MATCH && branch_test != BUSTER_STRING_NO_MATCH && normalize < branch_test);
+    }
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.

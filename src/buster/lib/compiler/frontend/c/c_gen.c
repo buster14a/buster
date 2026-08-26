@@ -1253,10 +1253,12 @@ BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
         {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_inff"), S8("inff")},
         {S8("__builtin_huge_val"), S8("huge_val")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
+        {S8("__builtin_isfinite"), S8("isfinite")},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mappings); index += 1)
     {
@@ -3658,6 +3660,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
 }
+
+// The initializer lowering below is intentionally defined much earlier than
+// the shape-inference helpers.  Keep this declaration beside the value-cast
+// API so brace-elision can ask whether a non-braced expression already has an
+// aggregate type before descending into its first member.
+BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type);
+BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
 {
@@ -8713,6 +8722,28 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
     return result;
 }
 
+// A call to abort-like entry points terminates an ordinary body, but GNU
+// statement expressions still need to hand their value/control back to the
+// enclosing expression walker.  Keep the context query local to lowering so
+// the call emitter can avoid inserting an early unreachable terminator in
+// those nested bodies (the body walker already knows how to close them).
+BUSTER_C_INTERNAL bool c_ir_lowering_in_statement_expression(CIntegerIrBuilder* builder)
+{
+    for (u32 index = 0; index < builder->lower_machine.frame_count; index += 1)
+    {
+        CIrLowerFrame* frame = &builder->lower_machine.frames[index];
+        if (frame->kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION)
+        {
+            return true;
+        }
+        if (frame->kind == C_IR_LOWER_FRAME_BODY && frame->as.body.state && frame->as.body.state->statement_expression_mode)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
                                                      IrValueId* arguments, u32 argument_count)
 {
@@ -8758,6 +8789,23 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.symbol = target->symbol;
     call.result = result;
     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+    // libc's abort (and the assertion helpers built on it) are noreturn.  A
+    // direct body therefore must not fall through after the call; GNU
+    // statement expressions are the exception because their nested body is
+    // resumed by the enclosing expression frame, which emits the proper
+    // continuation after this call.
+    bool noreturn = (string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+                     string_equal(target->name, S8("__assert_perror_fail"))) &&
+                    !c_ir_lowering_in_statement_expression(builder);
+    if (noreturn)
+    {
+        IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+        c_ir_append_instruction(builder, unreachable, call_source);
+        if (builder->current_block.value < builder->function->block_count)
+        {
+            builder->function->blocks[builder->current_block.value].terminated = true;
+        }
+    }
     if (!signature.returns_void)
     {
         builder->function->values[result.value].definition = call_id;
@@ -8819,6 +8867,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         IrSourceRange source = c_ir_token_source_range(builder, token);
         return c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("HUGE_VAL"));
     }
+    // `__builtin_inff()` is the single-precision counterpart used by the
+    // hosted <math.h> INFINITY macro.  It is a constant-valued intrinsic, so
+    // do not require a runtime `inff` declaration or linker symbol.
+    if (string_equal(link_name, S8("inff")))
+    {
+        if (argument_count != 0)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        return c_ir_emit_builtin_float_bits(builder, builder->f32_type, UINT64_C(0x7f800000), source, S8("INFF"));
+    }
     // The builtin NaN constructors are compile-time values.  Do not create
     // an imported `nan*` symbol: hosted headers use these names before a
     // runtime library declaration exists, and the quiet IEEE payload is
@@ -8843,11 +8903,39 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     bool isnan_builtin = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isnan"));
     bool isinf_builtin = string_equal(link_name, S8("isinf")) || string_equal(link_name, S8("isinff"));
     bool isinf_sign_builtin = string_equal(link_name, S8("isinf_sign"));
-    if (isnan_builtin || isinf_builtin || isinf_sign_builtin)
+    bool isfinite_builtin = string_equal(link_name, S8("isfinite"));
+    if (isnan_builtin || isinf_builtin || isinf_sign_builtin || isfinite_builtin)
     {
         if (argument_count != 1)
         {
             return IR_VALUE_ID_INVALID;
+        }
+        if (isfinite_builtin)
+        {
+            // `isfinite` accepts any real scalar and returns an int.  Compare
+            // in binary64 against both signed infinities; NaN is unordered,
+            // so it fails both comparisons as required.  This avoids a libc
+            // dependency and keeps the result identical for Buster/Clang.
+            IrSourceRange source = c_ir_token_source_range(builder, token);
+            IrValueId value = c_ir_emit_cast(builder, arguments[0], builder->f64_type, source);
+            if (value.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
+            IrValueId positive_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("INF"));
+            IrValueId negative_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0xfff0000000000000), source, S8("-INF"));
+            if (positive_infinity.value == IR_ID_UNDERLYING_INVALID || negative_infinity.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
+            IrValueId below_positive = c_ir_emit_binary_value(builder, value, positive_infinity, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+            IrValueId above_negative = c_ir_emit_binary_value(builder, negative_infinity, value, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+            if (below_positive.value == IR_ID_UNDERLYING_INVALID || above_negative.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
+            IrValueId finite = c_ir_emit_binary_value(builder, below_positive, above_negative, builder->bool_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            return finite.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, finite, builder->s32_type, source);
         }
         bool single = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isinff"));
         IrTypeId value_type = single ? builder->f32_type : builder->f64_type;
@@ -14711,6 +14799,65 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 child_type = builder->function->values[child_place.value].canonical_type;
             }
             IrType* child = ir_type_from_id(&builder->program->types, child_type);
+            // C's brace-elision permits a scalar initializer to reach the
+            // first scalar subobject of a nested aggregate (`.ptr = 3` when
+            // ptr is a struct whose first member is an integer).  The old
+            // lowering attempted an aggregate-to-scalar cast instead.  Only
+            // descend when the value expression itself is not aggregate-valued
+            // so assigning an existing struct/array still stores it whole.
+            CScopeId initializer_scope = C_SCOPE_ID_INVALID;
+            if (builder->declaration_index < builder->parse.declaration_count)
+            {
+                initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
+            }
+            bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
+            // Type prediction intentionally stays conservative for a
+            // parenthesized compound literal.  Recognize `(T){...}` here so
+            // it is stored as one aggregate rather than brace-elided into its
+            // first scalar member.
+            if (!value_is_aggregate && value_start + 2 < index &&
+                c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 type_close = c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                value_is_aggregate = type_close + 1 < index &&
+                                     c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
+            }
+            while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate &&
+                   !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                if ((child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) && child->element_count)
+                {
+                    IrValueId zero = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[value_start]);
+                    child_place = c_ir_emit_index_place(builder, child_place, zero, source);
+                    child_type = child->element_type;
+                }
+                else if ((child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && child->field_count)
+                {
+                    CToken access = {
+                        .offset = C_SPELLING_DOT,
+                        .length = 1,
+                        .kind = C_TOKEN_PUNCTUATOR,
+                        .punctuator = C_PUNCTUATOR_DOT,
+                    };
+                    CToken member = c_ir_space_name_token(builder, child->fields[0].name);
+                    child_place = c_ir_emit_field_place_from_value(builder, child_place, access, member);
+                    child_type = child->fields[0].type;
+                }
+                else
+                {
+                    child_place = IR_VALUE_ID_INVALID;
+                    break;
+                }
+                if (child_place.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    break;
+                }
+                child = ir_type_from_id(&builder->program->types, child_type);
+            }
+            if (child_place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                goto c_ir_nested_compound_failed;
+            }
             bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
                           c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
                           c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
@@ -15455,10 +15602,39 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
 {
     CToken token = builder->preprocess.tokens[start];
+    String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+    u32 chain_start = start + 1;
+
+    // Builtin math names are parser symbols rather than ordinary declarations,
+    // so they have no CEntity/signature for the strict type walk to query.
+    // Resolve their result type directly and consume the call suffix.  This
+    // matters for hosted headers where NAN/INFINITY expand to a conditional
+    // expression containing __builtin_nanf/__builtin_inff: treating the
+    // builtin as an unknown identifier poisons the conditional's type merge
+    // even though lowering already knows the intrinsic's scalar result.
+    String8 math_link_name = c_ir_math_builtin_link_name(name);
+    if (math_link_name.length)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            return false;
+        }
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end)
+        {
+            return false;
+        }
+        bool predicate = string_equal(math_link_name, S8("isnan")) || string_equal(math_link_name, S8("isnanf")) ||
+                         string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
+                         string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite"));
+        bool single = math_link_name.length && math_link_name.pointer[math_link_name.length - 1] == 'f';
+        *type_out = predicate ? builder->s32_type : single ? builder->f32_type : builder->f64_type;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end);
+    }
+
     CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
     IrTypeId type = IR_TYPE_ID_INVALID;
-    u32 chain_start = start + 1;
     if (local)
     {
         if (local->is_variable_length_array)

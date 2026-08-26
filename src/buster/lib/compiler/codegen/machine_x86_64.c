@@ -2652,6 +2652,42 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     MachineRef source = machine_ref_make(source_kind, source_payload);
                     u32 row = machine_x64_select_row(selector, (MachineInstruction){ .operands = {destination, source}, .opcode = opcode });
                     machine_x64_define(selector, result_register, row);
+
+                    // A frame load is deliberately a full eight-byte read so
+                    // that every direct local uses one compact slot shape.
+                    // Narrow objects (notably _Bool values written through a
+                    // pointer) occupy only their declared byte width, though;
+                    // reading the untouched upper bytes would let stale stack
+                    // data escape as part of the scalar value.  Normalize the
+                    // register after a direct frame load just as the pointer
+                    // load forms do, preserving C's integer/boolean width.
+                    if (local_slot_valid && loaded_type)
+                    {
+                        u16 narrow_opcode = 0;
+                        if (loaded_type->kind == IR_TYPE_BOOLEAN ||
+                            (loaded_type->kind == IR_TYPE_INTEGER && loaded_type->bit_width == 8))
+                        {
+                            narrow_opcode = loaded_type->kind == IR_TYPE_INTEGER && loaded_type->is_signed
+                                                ? MACHINE_X64_MOVSX8_RR
+                                                : MACHINE_X64_MOVZX8_RR;
+                        }
+                        else if (loaded_type->kind == IR_TYPE_INTEGER && loaded_type->bit_width == 16)
+                        {
+                            narrow_opcode = loaded_type->is_signed ? MACHINE_X64_MOVSX16_RR : MACHINE_X64_MOVZX16_RR;
+                        }
+                        else if (loaded_type->kind == IR_TYPE_INTEGER && loaded_type->bit_width == 32)
+                        {
+                            narrow_opcode = MACHINE_X64_MOV32_RR;
+                        }
+                        if (narrow_opcode)
+                        {
+                            machine_x64_select_row(selector, (MachineInstruction){
+                                                                 .operands = {destination, destination},
+                                                                 .opcode = narrow_opcode,
+                                                             });
+                        }
+                    }
+
                 }
             }
             else if (is_aggregate_load)
