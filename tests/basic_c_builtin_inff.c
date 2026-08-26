@@ -1,7 +1,5 @@
-#include <math.h>
-
 int main(void)
 {
     float infinity = __builtin_inff();
-    return !(isinf(infinity) && !isfinite(infinity));
+    return !(__builtin_isinf(infinity) && !__builtin_isfinite(infinity));
 }
