@@ -634,6 +634,13 @@ typedef enum CTypeKind
     C_TYPE_FLOAT,
     C_TYPE_DOUBLE,
     C_TYPE_LONG_DOUBLE,
+    // The three C99 complex types. Each is laid out as two contiguous
+    // elements of its underlying real type -- real part first -- which is
+    // both what the psABIs specify and what lets the IR model them as
+    // two-field aggregates (see c_ir_scalar_type).
+    C_TYPE_FLOAT_COMPLEX,
+    C_TYPE_DOUBLE_COMPLEX,
+    C_TYPE_LONG_DOUBLE_COMPLEX,
     C_TYPE_VA_LIST,
     C_TYPE_NULLPTR,
     C_TYPE_POINTER,
@@ -645,6 +652,31 @@ typedef enum CTypeKind
     C_TYPE_ENUM,
     C_TYPE_COUNT,
 } CTypeKind;
+
+// The complex kinds and their underlying real kind, in both directions. Every
+// complex question in the frontend goes through these three so the mapping
+// lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+// real kind that has no complex counterpart (C only defines the three).
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+{
+    return kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
+{
+    return kind == C_TYPE_FLOAT_COMPLEX         ? C_TYPE_FLOAT
+           : kind == C_TYPE_DOUBLE_COMPLEX      ? C_TYPE_DOUBLE
+           : kind == C_TYPE_LONG_DOUBLE_COMPLEX ? C_TYPE_LONG_DOUBLE
+                                                : C_TYPE_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_of(CTypeKind kind)
+{
+    return kind == C_TYPE_FLOAT         ? C_TYPE_FLOAT_COMPLEX
+           : kind == C_TYPE_DOUBLE      ? C_TYPE_DOUBLE_COMPLEX
+           : kind == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX
+                                        : C_TYPE_INVALID;
+}
 
 typedef struct CArrayBound CArrayBound;
 struct CArrayBound

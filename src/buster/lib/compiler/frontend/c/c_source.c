@@ -2720,6 +2720,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
+    S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -3930,6 +3931,8 @@ BUSTER_C_SHARED u32 c_conditional_precedence(CConditionalOperator operation)
     case C_CONDITIONAL_UNARY_MINUS:
     case C_CONDITIONAL_LOGICAL_NOT:
     case C_CONDITIONAL_BITWISE_NOT:
+    case C_CONDITIONAL_REAL_PART:
+    case C_CONDITIONAL_IMAGINARY_PART:
     case C_CONDITIONAL_ADDRESS_OF:
     case C_CONDITIONAL_DEREFERENCE:
     case C_CONDITIONAL_CAST:

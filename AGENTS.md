@@ -890,11 +890,11 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 77
-are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
-for `_Complex` arithmetic, which the frontend has no type for, and which is
-every remaining unit under `src/complex`; 4 that reach code generation and
-fail on an inline assembly block (`crt/rcrt1`, `ldso/dlstart`,
+harness compiles the portable C instead and lists each one. The remaining 27
+are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 18
+for a `long double _Complex` result, which is every remaining unit under
+`src/complex` and is described with the type below; 4 that reach code
+generation and fail on an inline assembly block (`crt/rcrt1`, `ldso/dlstart`,
 `ldso/dynlink`, `src/thread/__unmapself`); 1 static initializer
 (`src/misc/ioctl`'s `compat_map`); and 4 singletons -- `res_msend` (an
 over-aligned automatic), `lsearch` (a pointer to a VLA), and
@@ -903,6 +903,37 @@ declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
 `long f();` compatible with a non-variadic prototype for the same function,
 which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write
 (measured 2026-08-29).
+
+`_Complex` is a two-field aggregate of its real type, real part first. That is
+the layout every psABI specifies and, with one exception, also the argument
+and result shape each of them classifies a complex value into, so the existing
+struct rules produce the right registers with nothing added to the backends --
+cross-probed against Clang for System V x86-64, Win64, AAPCS64 and Darwin
+AArch64, and differenced against a Clang build across the boundary on the
+first three. The exception is System V x86-64's `long double _Complex`
+*result*, which the psABI returns in ST(0)/ST(1) under its COMPLEX_X87 class
+where the equivalent `struct { long double a, b; }` is returned in memory. No
+backend here emits that pair, so `c_ir_signature_type_supported` refuses the
+result rather than emitting a shape no other compiler would accept; the
+argument position is a sixteen-aligned memory slot under the same psABI and
+goes through, which is why `cabsl`, `cargl`, `creall` and `cimagl` compile and
+the eighteen that return one do not.
+
+Multiplication and division are lowered inline -- the naive product and
+Smith's algorithm, which is what Clang emits for
+`-fcomplex-arithmetic=improved` -- rather than as the `__muldc3`/`__divdc3`
+calls Clang emits by default, because this toolchain neither ships nor links a
+compiler runtime to resolve them. Against `improved` the two agree bit for bit
+over an operand matrix covering the signed zeroes, the subnormal and overflow
+edges and the infinities; `c_ir_emit_complex_divide` in `c_gen.c` records
+where the default's library helpers differ. GNU's imaginary literal suffix
+comes with the type, in both orders and both letters, because it is the only
+way a `<complex.h>` can define `I`: musl spells `_Complex_I` as
+`(0.0f+1.0fi)` and glibc as `(1.0iF)`. Two shapes stay unsupported and
+diagnosed: a complex global initializer, and a complex operand inside an
+integer constant expression, which the parser's folder reduces to the
+operand's real part rather than refusing -- C does not admit one there either
+way.
 
 `long double` is no longer among them. Seventeen units were static
 initializers until the folder learned the two shapes musl writes -- `floorl`,
@@ -1085,32 +1116,28 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 76 of 424 units pass, and all 76 are `src/api`: 76 of its 79 units
-compile against musl's headers under both compilers, two want `_Complex` and
+Today 79 of 424 units pass (measured 2026-08-29). Seventy-eight are `src/api`:
+78 of its 79 units compile against musl's headers under both compilers, and
 one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. Nothing in the three runtime subsets links: `src/functional` is 7
-dynamic, 15 excluded-reference, 2 blocked-compile and 53 blocked-link;
-`src/math` is 144 excluded-reference, 21 blocked-compile and 34 blocked-link;
-`src/regression` is 2 dynamic, 12 excluded-reference, 1 blocked-compile and 54
-blocked-link.
+too. The seventy-ninth is the first runtime test to link and run green, in
+`src/regression`. The rest of the three runtime subsets still does not link:
+`src/functional` is 7 dynamic, 15 excluded-reference, 2 blocked-compile and 53
+blocked-link; `src/math` is 144 excluded-reference, 21 blocked-compile and 34
+blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference, 1
+blocked-compile and 53 blocked-link.
 
-The ranked blockers are `__libc_start_main` (141 tests), `vfprintf` (140) and
-`__syscall_cp` (107), then a long tail led by `strerror`, `__stdout_FILE` and
-`__procfdname`. The weak-alias work moved the list without moving the count:
-`___errno_location`, `malloc`, `munmap` and `mprotect` were four of the top
-eight and are all resolved now, and what remains is three compile failures the
-inventory already names. `src/env/__libc_start_main.c` stops on `_init`, which
-`weak_alias` defines in that same file and the frontend cannot then bind as a
-call; `src/stdio/vfprintf.c` on wide floating-point `va_arg`;
-`src/thread/__syscall_cp.c` on a conflicting declaration. Any one of the three
-is worth more to this stage than everything below it: the first alone gates
-141 of the 424.
+The ranked blockers are now `vfprintf` (140 tests) and `__procfdname` (15),
+then a tail of ones and twos. `__libc_start_main` (141) and `__syscall_cp`
+(107) headed this list until the singleton fixes above let their units
+compile, which is what turned the stage from three walls into one:
+`src/stdio/vfprintf.c` stops on wide floating-point `va_arg`, and it alone
+gates 140 of the 424.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
-Buster pass spent 55,3 seconds of child time over 1349 units — 41 ms each — for
-106,3 MB of preprocessed source, 3.910.724 lines and 4.544.856 tokens, and
-produced 1244 archive members in 5.087.502 bytes against Clang's 1344 in
+Buster pass spent 57,8 seconds of child time over 1349 units — 43 ms each — for
+113,6 MB of preprocessed source, 4.183.300 lines and 4.975.374 tokens, and
+produced 1320 archive members in 5.472.818 bytes against Clang's 1344 in
 2.600.782. Both counts are the manifest minus its `crt/` and `ldso/` units,
 which the startup-object and archive notes above keep out. The Buster archive
 is the larger of the two despite holding fewer members, which is what an
@@ -1118,10 +1145,10 @@ emitter that spills through the frame rather than through registers looks like
 at this scale. The two archives take 0,65 seconds to write and each probe link
 about 4 ms.
 
-Adding libc-test takes the run to 186 seconds wall and 76 MB. The suite's 424
-units cost 29,8 seconds of compiler time across both compilers for 30,6 MB of
-preprocessed source, 939.306 lines and 2.938.231 tokens; the links cost 2,8
-seconds and the runs 62,7. The runs dominate, and almost all of that is the
+Adding libc-test takes the run to 186 seconds wall and 79 MB. The suite's 424
+units cost 30,4 seconds of compiler time across both compilers for 30,6 MB of
+preprocessed source, 939.306 lines and 2.938.231 tokens; the links cost 2,9
+seconds and the runs 62,6. The runs dominate, and almost all of that is the
 reference's own structural hangs — the thread tests wait out the ten-second
 deadline because `clone` is architecture assembly and is in neither archive —
 so that number moves with the deadline rather than with the compiler.

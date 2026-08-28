@@ -16105,8 +16105,8 @@ struct MuslManifest
 // the hash of the newline-joined sorted failing paths is pinned beside it. Both
 // are printed on a mismatch along with the whole failing list, which is what a
 // deliberate rebaseline needs.
-#define MUSL_EXPECTED_COMPILED_UNITS 1272
-#define MUSL_EXPECTED_FAILURE_HASH 0x3b4dd1a182bdc6bcull
+#define MUSL_EXPECTED_COMPILED_UNITS 1322
+#define MUSL_EXPECTED_FAILURE_HASH 0x24b276956cd18914ull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16891,8 +16891,8 @@ struct LibcTestSubsetTotals
 // sorted by unit name, so the file system's order cannot move it. Both are
 // printed on the LIBCTEST_INVENTORY line, which is what a deliberate
 // rebaseline needs.
-#define LIBC_TEST_EXPECTED_PASSING 76
-#define LIBC_TEST_EXPECTED_STATE_HASH 0xfdd6d687ed6ac3e5ull
+#define LIBC_TEST_EXPECTED_PASSING 79
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x5922c7a2030c94b5ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

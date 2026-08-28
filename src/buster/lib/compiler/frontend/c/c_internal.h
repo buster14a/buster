@@ -52,7 +52,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[70];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[72];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
@@ -358,6 +358,11 @@ typedef enum CConditionalOperator
     C_CONDITIONAL_UNARY_MINUS,
     C_CONDITIONAL_LOGICAL_NOT,
     C_CONDITIONAL_BITWISE_NOT,
+    // GNU `__real__` and `__imag__`. They are prefix unary operators spelled
+    // as identifiers, so the expression walker recognizes them itself instead
+    // of through c_conditional_operator, which only classifies punctuators.
+    C_CONDITIONAL_REAL_PART,
+    C_CONDITIONAL_IMAGINARY_PART,
     C_CONDITIONAL_ADDRESS_OF,
     C_CONDITIONAL_DEREFERENCE,
     C_CONDITIONAL_CAST,

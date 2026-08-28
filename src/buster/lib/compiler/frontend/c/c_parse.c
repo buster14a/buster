@@ -830,6 +830,22 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
         size = layout.long_double_type.size;
         alignment = layout.long_double_type.alignment;
         break;
+    // A complex value is two contiguous elements of its real type, so it is
+    // twice as wide and no more strictly aligned. Clang agrees on all three
+    // for every target here: sizeof/_Alignof are {8,4}, {16,8} and
+    // {2*sizeof(long double), _Alignof(long double)}.
+    case C_TYPE_FLOAT_COMPLEX:
+        size = layout.float_type.size * 2;
+        alignment = layout.float_type.alignment;
+        break;
+    case C_TYPE_DOUBLE_COMPLEX:
+        size = layout.double_type.size * 2;
+        alignment = layout.double_type.alignment;
+        break;
+    case C_TYPE_LONG_DOUBLE_COMPLEX:
+        size = layout.long_double_type.size * 2;
+        alignment = layout.long_double_type.alignment;
+        break;
     case C_TYPE_INT128:
         size = layout.integer128.size;
         alignment = layout.integer128.alignment;
@@ -1832,6 +1848,9 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     case C_TYPE_FLOAT:
     case C_TYPE_DOUBLE:
     case C_TYPE_LONG_DOUBLE:
+    case C_TYPE_FLOAT_COMPLEX:
+    case C_TYPE_DOUBLE_COMPLEX:
+    case C_TYPE_LONG_DOUBLE_COMPLEX:
     case C_TYPE_VA_LIST:
     case C_TYPE_NULLPTR:
     case C_TYPE_POINTER:
@@ -2011,8 +2030,38 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
         }
         if (floating)
         {
-            u8 suffix = first_spelling.pointer[first_spelling.length - 1];
-            kind = suffix == 'f' || suffix == 'F' ? C_TYPE_FLOAT : suffix == 'l' || suffix == 'L' ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+            // The whole run of trailing suffix letters, not just the last
+            // one: GNU's imaginary `i`/`j` may sit on either side of the
+            // width suffix, and musl spells `_Complex_I` as `1.0fi` where
+            // glibc spells it `1.0iF`.
+            bool single = false;
+            bool extended = false;
+            bool imaginary = false;
+            for (u64 scan = first_spelling.length; scan; scan -= 1)
+            {
+                u8 letter = first_spelling.pointer[scan - 1];
+                if (letter == 'f' || letter == 'F')
+                {
+                    single = true;
+                }
+                else if (letter == 'l' || letter == 'L')
+                {
+                    extended = true;
+                }
+                else if (letter == 'i' || letter == 'I' || letter == 'j' || letter == 'J')
+                {
+                    imaginary = true;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            kind = single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+            if (imaginary)
+            {
+                kind = c_type_kind_complex_of(kind);
+            }
         }
         else
         {
@@ -4157,16 +4206,20 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
         return string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("unsigned")) || string_equal(spelling, S8("volatile")) ||
                string_equal(spelling, S8("restrict")) || string_equal(spelling, S8("register")) || string_equal(spelling, S8("__thread")) ||
                string_equal(spelling, S8("__inline")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__int128")) ||
-               string_equal(spelling, S8("__typeof"));
+               string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("_Complex"));
     }
     case 9:
     {
-        return string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__const__"));
+        return string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__const__")) || string_equal(spelling, S8("__complex"));
     }
     case 10:
     {
         return string_equal(spelling, S8("__inline__")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__volatile")) ||
-               string_equal(spelling, S8("__restrict")) || string_equal(spelling, S8("__signed__"));
+               string_equal(spelling, S8("__restrict")) || string_equal(spelling, S8("__signed__")) || string_equal(spelling, S8("_Imaginary"));
+    }
+    case 11:
+    {
+        return string_equal(spelling, S8("__complex__"));
     }
     case 12:
     {
@@ -4261,6 +4314,39 @@ BUSTER_C_INTERNAL u32 c_parse_skip_alignment_specifiers(CPreprocessResult prepro
     return index;
 }
 
+// The three spellings of the complex specifier: the C99 keyword and the two
+// GNU aliases. `_Imaginary` is deliberately not here -- it is recognized as a
+// type word so the specifier scans can refuse a declaration that uses it,
+// never accept one.
+BUSTER_C_INTERNAL bool c_parse_complex_specifier_word(String8 spelling)
+{
+    return string_equal(spelling, S8("_Complex")) || string_equal(spelling, S8("__complex")) || string_equal(spelling, S8("__complex__"));
+}
+
+// Which complex kind a specifier set names, or C_TYPE_INVALID when the set is
+// one this frontend refuses: a complex integer (the GNU `_Complex int`
+// extension) or a combination C does not define. Shared by every specifier
+// scan so the three of them cannot answer differently.
+BUSTER_C_INTERNAL CTypeKind c_parse_complex_kind(bool seen_float, bool seen_double, bool seen_bool, bool seen_char, bool seen_short, bool seen_int,
+                                                   bool seen_signed, bool seen_unsigned, bool seen_int128, u32 long_count)
+{
+    if (seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_int128)
+    {
+        return C_TYPE_INVALID;
+    }
+    if (seen_float)
+    {
+        return long_count || seen_double ? C_TYPE_INVALID : C_TYPE_FLOAT_COMPLEX;
+    }
+    if (long_count > 1)
+    {
+        return C_TYPE_INVALID;
+    }
+    // `_Complex` on its own is `double _Complex`; `long _Complex` alone is not
+    // a type, so a `long` here has to be paired with `double`.
+    return long_count ? (seen_double ? C_TYPE_LONG_DOUBLE_COMPLEX : C_TYPE_INVALID) : C_TYPE_DOUBLE_COMPLEX;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
 {
     bool seen_type = false;
@@ -4274,6 +4360,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     bool seen_float = false;
     bool seen_double = false;
     bool seen_int128 = false;
+    bool seen_complex = false;
+    bool seen_imaginary = false;
     u32 long_count = 0;
     CType type = {
         .element_type = C_TYPE_ID_INVALID,
@@ -4363,6 +4451,16 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             seen_double = true;
             seen_type = true;
         }
+        else if (c_parse_complex_specifier_word(spelling))
+        {
+            seen_complex = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("_Imaginary")))
+        {
+            seen_imaginary = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("const")) || string_equal(spelling, S8("__const")) || string_equal(spelling, S8("__const__")))
         {
             type.is_const = true;
@@ -4385,6 +4483,27 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     if (!seen_type || (seen_signed && seen_unsigned))
     {
         return C_TYPE_ID_INVALID;
+    }
+    // `_Imaginary` is recognized only so that a declaration spelled with it
+    // is rejected here instead of parsed as an implicit int with a stray
+    // identifier; no target this compiler emits for has imaginary types.
+    if (seen_imaginary)
+    {
+        return C_TYPE_ID_INVALID;
+    }
+    if (seen_complex)
+    {
+        // `_Complex` alone is `double _Complex`, which is what GCC and Clang
+        // both accept; a complex integer type is a GNU extension this
+        // frontend does not implement, so it refuses rather than dropping
+        // the specifier.
+        type.kind = c_parse_complex_kind(seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned, seen_int128,
+                                         long_count);
+        if (type.kind == C_TYPE_INVALID)
+        {
+            return C_TYPE_ID_INVALID;
+        }
+        return c_parse_add_type(result, type);
     }
     if (seen_void)
     {
@@ -4816,11 +4935,14 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_bool = false;
     bool seen_char = false;
     bool seen_short = false;
+    bool seen_int = false;
     bool seen_signed = false;
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_double = false;
     bool seen_int128 = false;
+    bool seen_complex = false;
+    bool seen_imaginary = false;
     u32 long_count = 0;
     u32 index = start;
     while (index < end)
@@ -4872,6 +4994,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         }
         else if (string_equal(spelling, S8("int")))
         {
+            seen_int = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("__int128")))
@@ -4904,13 +5027,27 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             seen_double = true;
             seen_type = true;
         }
+        else if (c_parse_complex_specifier_word(spelling))
+        {
+            seen_complex = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("_Imaginary")))
+        {
+            seen_imaginary = true;
+            seen_type = true;
+        }
         index += 1;
     }
     *declarator_start = index;
     CTypeKind result;
-    if (!seen_type || (seen_signed && seen_unsigned))
+    if (!seen_type || (seen_signed && seen_unsigned) || seen_imaginary)
     {
         result = C_TYPE_INVALID;
+    }
+    else if (seen_complex)
+    {
+        result = c_parse_complex_kind(seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed, seen_unsigned, seen_int128, long_count);
     }
     else if (seen_void)
     {
@@ -7322,6 +7459,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             case C_TYPE_FLOAT:
             case C_TYPE_DOUBLE:
             case C_TYPE_LONG_DOUBLE:
+            case C_TYPE_FLOAT_COMPLEX:
+            case C_TYPE_DOUBLE_COMPLEX:
+            case C_TYPE_LONG_DOUBLE_COMPLEX:
             case C_TYPE_VA_LIST:
             case C_TYPE_NULLPTR:
             case C_TYPE_POINTER:
@@ -8666,6 +8806,9 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
         case C_TYPE_FLOAT:
         case C_TYPE_DOUBLE:
         case C_TYPE_LONG_DOUBLE:
+        case C_TYPE_FLOAT_COMPLEX:
+        case C_TYPE_DOUBLE_COMPLEX:
+        case C_TYPE_LONG_DOUBLE_COMPLEX:
         case C_TYPE_VA_LIST:
         case C_TYPE_NULLPTR:
         case C_TYPE_COUNT:
@@ -9247,6 +9390,12 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* resul
     // GCC's legacy full barrier is the one __sync builtin the compiler
     // implements; SQLite reaches for it in sqlite3MemoryBarrier.
     predefined_function_name |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__sync_synchronize"));
+    // GNU's complex part operators are spelled as identifiers but name no
+    // entity; the expression walker consumes them as prefix operators.
+    predefined_function_name |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__real__")) ||
+                                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__real")) ||
+                                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__imag__")) ||
+                                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__imag"));
     predefined_function_name |=
         c_preprocess_dialect_is_c23(preprocess.dialect) &&
         (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("false")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("nullptr")));

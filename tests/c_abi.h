@@ -66,7 +66,12 @@
 #define ZIG_NO_F16
 #define ZIG_NO_F80
 #define ZIG_NO_F128
-// _Complex is not parsed.
+// _Complex is parsed and its ABI is the psABI's, but the upstream complex
+// tests read the halves back with creal/cimag, which Clang folds to builtins
+// and Buster emits as libm calls; the c_abi link line carries libc only, so
+// enabling them here would fail the link rather than test the ABI.
+// tests/basic_c_complex_arithmetic.c covers the same argument and result
+// shapes at real call boundaries without the dependency.
 #define ZIG_NO_COMPLEX
 // Calling-convention attributes (ms_abi, sysv_abi, preserve_none) are
 // silently skipped, so testing them would test nothing and break the

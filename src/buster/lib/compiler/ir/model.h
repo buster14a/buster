@@ -340,6 +340,10 @@ struct IrType
     bool is_atomic;
     bool is_nullptr;
     bool is_volatile;
+    // A C complex type, modelled as the two-field struct the psABIs classify
+    // it as (see c_ir_complex_type). Only the C frontend sets and reads it;
+    // to the backends the type is an ordinary aggregate.
+    bool is_complex;
 };
 
 typedef struct IrTypeTable IrTypeTable;

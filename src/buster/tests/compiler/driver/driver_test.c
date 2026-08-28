@@ -5636,6 +5636,47 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(pair_temporary);
     }
 #endif
+    // C99 `_Complex`: the layout, the System V and AAPCS64 argument and result
+    // shapes, the operators, `__real__`/`__imag__` as values and as places,
+    // the conversions, and the anonymous-union compound literal musl's
+    // <complex.h> is written with. Every expected value in the fixture came
+    // from a Clang build of the same file, so the fixture is that comparison
+    // frozen into a program that needs no second compiler at test time. It
+    // runs under every allocator because the lowering emits a branch -- the
+    // two arms of Smith's algorithm for division -- and because the complex
+    // halves live in frame slots that each allocator places differently.
+    String8 c_complex_allocators[] = {
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_complex_allocators); allocator_index += 1)
+    {
+        TemporalArena complex_temporary = scratch_begin(&arguments->arena, 1);
+        String8 complex_path = buster_test_temporary_path(complex_temporary.arena, S8("buster-c-complex-arithmetic"),
+                                                          string_format(complex_temporary.arena, S8("-{u32}"), (u32)allocator_index));
+        String8 complex_command_line[] = {
+            c_complex_allocators[allocator_index], S8("-o"), complex_path, S8("tests/basic_c_complex_arithmetic.c"),
+        };
+        CompilerDriverResult complex_result = compiler_driver_execute_invocation(
+            complex_temporary.arena,
+            compiler_driver_parse_arguments(complex_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(complex_command_line)));
+        BUSTER_TEST(arguments, complex_result.error == COMPILER_DRIVER_ERROR_NONE);
+        if (complex_result.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 complex_arguments[] = {complex_path};
+            ProcessSpawnResult complex_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(complex_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, complex_spawn.handle != 0);
+            if (complex_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(complex_temporary.arena, complex_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(complex_temporary);
+    }
     // A loop body that allocates nothing must carry no stack checkpoint at
     // all: the restore is what read a stale frame slot into RSP, and its
     // absence is the property the runtime fixture above cannot observe on a
