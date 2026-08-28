@@ -1302,6 +1302,11 @@ struct CIrPreparedCall
     // An index into c_ir_simd_builtins, or C_IR_SIMD_BUILTIN_NONE.
     u32 builtin_simd;
     bool emitted;
+    // Set while this call's own callee expression is being lowered. The
+    // callee chain can begin at this call's first token, and a token walk
+    // that reaches it then is walking inside the call rather than arriving at
+    // one to consume.
+    bool emitting;
     // Set when c_ir_prepare_calls_discover left a call inside this one's
     // parentheses unprepared because it sits in a lazily evaluated operand.
     // The child expression that owns that operand prepares it itself, which
@@ -3605,8 +3610,20 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
     return result;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source);
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
 {
+    // C 6.3.2.1p4: a function designator is converted to a pointer to the
+    // function; there is nothing to load out of one. The place reaches here
+    // when the name resolves to an entity rather than to a call — a
+    // block-scope `extern void sighandler(int);` declares such a name, and
+    // sbase's make then stores it in a `struct sigaction`.
+    IrType* designated_type = ir_type_from_id(&builder->program->types, type);
+    if (designated_type && designated_type->kind == IR_TYPE_FUNCTION)
+    {
+        return c_ir_emit_address_of_place(builder, place, type, source);
+    }
     IrValueId value = c_ir_emit_load_place_raw(builder, place, type, source);
     IrField* field = c_ir_bit_field_from_place(builder, place);
     IrType* value_type = ir_type_from_id(&builder->program->types, type);
@@ -9468,7 +9485,8 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
         if (offset < builder->body_token_count)
         {
             u32 index = builder->prepared_call_indices[offset];
-            if (index < builder->prepared_call_count && builder->prepared_calls[index].token_index == token_index)
+            if (index < builder->prepared_call_count && builder->prepared_calls[index].token_index == token_index &&
+                !builder->prepared_calls[index].emitting)
             {
                 return builder->prepared_calls + index;
             }
@@ -9477,7 +9495,7 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* bu
     }
     for (u32 index = 0; index < builder->prepared_call_count; index += 1)
     {
-        if (builder->prepared_calls[index].token_index == token_index)
+        if (builder->prepared_calls[index].token_index == token_index && !builder->prepared_calls[index].emitting)
         {
             return builder->prepared_calls + index;
         }
@@ -10884,79 +10902,98 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                 indexed_callee = true;
             }
         }
-        if (callee_start >= start + 2 && builder->preprocess.tokens[callee_start - 2].kind != C_TOKEN_IDENTIFIER &&
-            c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
-            (c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_DOT) ||
-             c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_ARROW)))
+        // Walk the member chain that leads to the callee. A member access may
+        // be applied to a subscript as well as to a plain name — sbase's `tr`
+        // calls `classes[i].check(rune)` and SQLite destroys its collation
+        // sequences through `pColl[j].xDel(pColl[j].pUser)` — and there the
+        // callee's place starts at the array, not at the token before the dot.
+        // Absorb the bracket group and the base it indexes, then keep walking:
+        // `a[i].b.c` is a chain of both shapes.
+        for (;;)
         {
-            u32 depth = 0;
-            for (u32 cursor = callee_start - 1; cursor > start;)
+            if (callee_start < start + 2 || !(c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_DOT) ||
+                                              c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_ARROW)))
             {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        callee_start = cursor;
-                        break;
-                    }
-                }
+                break;
             }
-        }
-        bool walking_postfix_chain = true;
-        while (walking_postfix_chain)
-        {
-            walking_postfix_chain = false;
-            bool member_access = callee_start >= start + 2 && (c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_DOT) ||
-                                                               c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_ARROW));
-            if (member_access && builder->preprocess.tokens[callee_start - 2].kind == C_TOKEN_IDENTIFIER)
+            u32 base_last = callee_start - 2;
+            if (builder->preprocess.tokens[base_last].kind == C_TOKEN_IDENTIFIER)
             {
-                callee_start -= 2;
-                walking_postfix_chain = true;
+                callee_start = base_last;
+                continue;
             }
-            // The member's base may be an array element: SQLite destroys its
-            // collation sequences through `pColl[j].xDel(pColl[j].pUser)`.
-            // Step over the subscript group and continue from what it indexes,
-            // so the whole chain becomes the callee rather than the member
-            // alone, which resolves to no entity at all.
-            else if (member_access && c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 2], C_PUNCTUATOR_RIGHT_BRACKET))
+            if (c_token_is_punctuator(&builder->preprocess.tokens[base_last], C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
-                u32 bracket_depth = 0;
-                u32 open = UINT32_MAX;
-                for (u32 cursor = callee_start - 1; cursor > start;)
+                // A parenthesized base — sed's `(pc - 1)->fninfo->getarg(...)`
+                // — starts at its own opening parenthesis. Nothing before that
+                // parenthesis belongs to the chain, so the walk ends there.
+                u32 parenthesis_depth = 0;
+                u32 parenthesis_open = UINT32_MAX;
+                for (u32 cursor = base_last + 1; cursor > start;)
                 {
                     cursor -= 1;
                     CToken current = builder->preprocess.tokens[cursor];
-                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS))
                     {
-                        bracket_depth += 1;
+                        parenthesis_depth += 1;
                     }
-                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
-                        bracket_depth -= 1;
-                        if (!bracket_depth)
+                        if (!parenthesis_depth)
                         {
-                            open = cursor;
+                            break;
+                        }
+                        parenthesis_depth -= 1;
+                        if (!parenthesis_depth)
+                        {
+                            parenthesis_open = cursor;
                             break;
                         }
                     }
                 }
-                if (open != UINT32_MAX && open > start && builder->preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
+                if (parenthesis_open == UINT32_MAX)
                 {
-                    callee_start = open - 1;
-                    walking_postfix_chain = true;
+                    break;
+                }
+                callee_start = parenthesis_open;
+                continue;
+            }
+            if (!c_token_is_punctuator(&builder->preprocess.tokens[base_last], C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                break;
+            }
+            u32 bracket_depth = 0;
+            u32 bracket_open = UINT32_MAX;
+            for (u32 cursor = base_last + 1; cursor > start;)
+            {
+                cursor -= 1;
+                CToken current = builder->preprocess.tokens[cursor];
+                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    bracket_depth += 1;
+                }
+                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    if (!bracket_depth)
+                    {
+                        break;
+                    }
+                    bracket_depth -= 1;
+                    if (!bracket_depth)
+                    {
+                        bracket_open = cursor;
+                        break;
+                    }
                 }
             }
+            // The subscripted base has to be a name for the walk to continue;
+            // anything else (a call result, a parenthesized expression) keeps
+            // the callee where it is, as it does today.
+            if (bracket_open == UINT32_MAX || bracket_open <= start || builder->preprocess.tokens[bracket_open - 1].kind != C_TOKEN_IDENTIFIER)
+            {
+                break;
+            }
+            callee_start = bracket_open - 1;
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
@@ -12570,6 +12607,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE)
                 {
+                    selected->emitting = false;
                     if (!child_success)
                     {
                         return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -12607,15 +12645,20 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
                                                                      callee_end, false);
                     }
-                    // The callee's base may be a parenthesized cast over a
-                    // postfix chain: SQLite's memdb VFS calls through
-                    // `ORIGVFS(pVfs)->xDlOpen`, which expands to
-                    // `((sqlite3_vfs*)((pVfs)->pAppData))->xDlOpen`.  The place
-                    // machine forms places for identifier/field chains, and
-                    // that group is an ordinary value expression, so ask for
-                    // the value the callee needs instead of a place for it.
+                    // A callee chain rooted in a parenthesized base is not a
+                    // place the place machine can form -- that machine takes
+                    // identifier/field chains -- but its value is all the call
+                    // needs, and the expression machine produces it. Both
+                    // shapes appear: sed's `(pc - 1)->fninfo->getarg(...)`,
+                    // and SQLite's memdb VFS calling through `ORIGVFS(pVfs)
+                    // ->xDlOpen`, which expands to a cast over a postfix
+                    // chain. The group's first token is also this call's own
+                    // first token, so mark the call while the child runs: a
+                    // walk that reaches that token is walking inside the call
+                    // rather than arriving at one to consume.
                     if (callee_start < callee_end && c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
+                        selected->emitting = true;
                         return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
                                                                      callee_end, false);
                     }
@@ -18875,55 +18918,6 @@ BUSTER_C_INTERNAL bool c_ir_switch_block(CIntegerIrBuilder* builder, IrBlockId b
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_block_is_reachable_impl(CIntegerIrBuilder* builder, IrBlockId block)
-{
-    if (block.value < builder->function->block_count && builder->function->entry.value < builder->function->block_count)
-    {
-        u32 block_count = builder->function->block_count;
-        bool* visited = arena_allocate(builder->temporary_arena, bool, block_count);
-        IrBlockId* work = arena_allocate(builder->temporary_arena, IrBlockId, block_count);
-        memset(visited, 0, sizeof(*visited) * block_count);
-        u32 work_index = 0;
-        u32 work_count = 1;
-        work[0] = builder->function->entry;
-        visited[builder->function->entry.value] = true;
-        while (work_index < work_count)
-        {
-            IrBlockId current = work[work_index++];
-            if (current.value == block.value)
-            {
-                return true;
-            }
-            IrInstructionId terminator = builder->function->blocks[current.value].last_instruction;
-            if (terminator.value >= builder->function->instruction_count)
-            {
-                continue;
-            }
-            IrInstruction* instruction = &builder->function->instructions[terminator.value];
-            for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
-            {
-                IrBlockId target = instruction->targets[target_index];
-                if (target.value >= block_count || visited[target.value])
-                {
-                    continue;
-                }
-                visited[target.value] = true;
-                work[work_count++] = target;
-            }
-        }
-    }
-
-    return false;
-}
-
-BUSTER_C_INTERNAL bool c_ir_block_is_reachable(CIntegerIrBuilder* builder, IrBlockId block)
-{
-    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
-    bool result = c_ir_block_is_reachable_impl(builder, block);
-    scratch_end(temporary);
-    return result;
-}
-
 BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcode, IrValueId* operands, u32 operand_count, IrBlockId* targets,
                                         u32 target_count, IrSourceRange source)
 {
@@ -20079,6 +20073,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
     CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
     bool simple_assignment = false;
     bool compound_assignment = false;
+    // An assignment after a top-level `?` belongs to a conditional arm, not
+    // to this statement: `argc ? mode = '-' : (++argv, --argc);` (sbase's
+    // tar) would otherwise be split at that `=` and its left half lowered as
+    // the unbalanced `argc ? mode`. The same rule as c_ir_has_root_assignment,
+    // and it leaves such a statement to the expression machine below, which
+    // lowers the conditional and its arms.
+    bool conditional_tail = false;
     for (u32 scan = start; scan < end; scan += 1)
     {
         CToken token = builder->preprocess.tokens[scan];
@@ -20106,7 +20107,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
         {
             braces -= 1;
         }
-        else if (!parentheses && !brackets && !braces)
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            conditional_tail = true;
+        }
+        else if (!conditional_tail && !parentheses && !brackets && !braces)
         {
             simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN);
             compound_assignment = c_ir_compound_assignment_operator(token, &assignment_operation);
@@ -22409,6 +22414,23 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                  (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
                   c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+            // `*d++ = value` — the copy loop in sbase's strlcpy — advances the
+            // pointer while forming the place. The place machine parses an
+            // identifier and its field/subscript suffixes, not an update, so
+            // route this shape through the expression path too and recover the
+            // place from the load it ends with, exactly as above.
+            if (!parenthesized_place && start < assignment && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
+            {
+                for (u32 index = start + 1; index < assignment; index += 1)
+                {
+                    if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_PLUS_PLUS) ||
+                        c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_MINUS_MINUS))
+                    {
+                        parenthesized_place = true;
+                        break;
+                    }
+                }
+            }
             if (!(parenthesized_place ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                                          .kind = C_IR_LOWER_FRAME_EXPRESSION,
                                                                          .as.expression =
@@ -27624,6 +27646,13 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 initializer_index = end;
                 u32 declarator_brackets = 0;
                 u32 declarator_parentheses = 0;
+                // The specifiers may define an enumeration inline, and its
+                // enumerators carry `=` of their own: `enum { LCASE = 1 << 0,
+                // ... } conv = 0;` is one declaration in sbase's dd. Those
+                // signs sit inside the braces, so track brace depth here as
+                // well or the first enumerator's `=` is mistaken for this
+                // declarator's initializer.
+                u32 declarator_braces = 0;
                 for (u32 scan = index; scan < end; scan += 1)
                 {
                     CToken token = builder->preprocess.tokens[scan];
@@ -27651,13 +27680,25 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         }
                         declarator_parentheses -= 1;
                     }
-                    else if (!declarator_brackets && !declarator_parentheses && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        declarator_braces += 1;
+                    }
+                    else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                    {
+                        if (!declarator_braces)
+                        {
+                            return false;
+                        }
+                        declarator_braces -= 1;
+                    }
+                    else if (!declarator_brackets && !declarator_parentheses && !declarator_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
                     {
                         initializer_index = scan;
                         break;
                     }
                 }
-                if (declarator_brackets || declarator_parentheses)
+                if (declarator_brackets || declarator_parentheses || declarator_braces)
                 {
                     return false;
                 }
@@ -27869,24 +27910,19 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 return false;
             }
         }
-        else if (builder->current_block.value != builder->function->entry.value && !c_ir_block_is_reachable(builder, builder->current_block))
+        else
         {
+            // Only the root body task has no continuation, so this is the end
+            // of a non-void function's body. Reaching the closing brace is
+            // undefined only if the caller uses the value (C 6.9.1p12), so
+            // this is not a refusal: terminate with unreachable, which is what
+            // Clang and GCC emit. sbase's dc ends `regname` with a call to its
+            // own non-noreturn error(), and the bc its tests drive is
+            // yacc-generated with the same shape.
             IrSourceRange unreachable_source = declaration_source;
             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
             c_ir_append_instruction(builder, unreachable, unreachable_source);
             block->terminated = true;
-        }
-        else
-        {
-            // Only the root body task has no continuation, so this is the end
-            // of the function body: a non-void function whose final block is
-            // still reachable. Every statement lowered fine, so the stale
-            // failure_token_index would blame whichever token a sub-lowering
-            // recorded last; point at the closing brace instead, which is
-            // where control actually falls off.
-            builder->failure_message = S8("control reaches the end of a non-void function");
-            builder->failure_token_index = task.end;
-            return false;
         }
     }
     return true;
@@ -28234,7 +28270,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilder*
                 return false;
             }
         }
-        if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end))
+        // A braced string literal sizes and fills a character array, but the
+        // identical brace content initializes one element of an array of
+        // pointers (`static char *items[] = { "argument" };`). Only the
+        // element type separates them, so an element a string cannot
+        // initialize is left to the ordinary aggregate walk instead of being
+        // claimed here.
+        CIrDecodedString probe = {0};
+        bool string_element =
+            string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end) &&
+            c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &probe) &&
+            c_ir_string_array_element_compatible(builder, type->element_type, probe);
+        if (string_element)
         {
             CIrDecodedString decoded = {0};
             IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
@@ -31878,6 +31925,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     {
         right_pointer = false;
     }
+    // An array lvalue decays to a pointer to its first element before any
+    // arithmetic (C 6.3.2.1p3). sbase's dc writes `static Num one = {.buf =
+    // onestr, .wp = onestr + 1};`, and without the decay `onestr + 1` reaches
+    // the integer path below with an array operand: the addend was dropped and
+    // the initializer silently pointed at element zero.
+    if (left.kind == C_IR_CONSTANT_LVALUE && left_type && left_type->kind == IR_TYPE_ARRAY)
+    {
+        left.type = c_ir_add_pointer_type(builder->program, builder->pointer_types, left_type->element_type);
+        left.kind = C_IR_CONSTANT_POINTER;
+        left_pointer = true;
+    }
+    if (right.kind == C_IR_CONSTANT_LVALUE && right_type && right_type->kind == IR_TYPE_ARRAY)
+    {
+        right.type = c_ir_add_pointer_type(builder->program, builder->pointer_types, right_type->element_type);
+        right.kind = C_IR_CONSTANT_POINTER;
+        right_pointer = true;
+    }
+    // Adding a type may have grown the table, so re-resolve both operands.
+    left_type = ir_type_from_id(&builder->program->types, left.type);
+    right_type = ir_type_from_id(&builder->program->types, right.type);
     if ((left_pointer || (left_type && left_type->kind == IR_TYPE_POINTER)) || (right_pointer || (right_type && right_type->kind == IR_TYPE_POINTER)))
     {
         if (!left_pointer && left.kind == C_IR_CONSTANT_INTEGER && left.integer == 0 && left.integer_high == 0)
@@ -33526,6 +33593,34 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
                               c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) ? operand_alignment : operand_size),
                 C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
             index = consumed_index;
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token))) &&
+            index + 1 < end && !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // `char tmp[sizeof h->chksum]` (sbase's tar) applies sizeof to a
+            // unary expression instead of a parenthesized type name. Its
+            // operand ends where the call-discovery scan says an unevaluated
+            // operand ends, and the sizeof query resolves the expression's
+            // type or fails outright — it never guesses one, so a bound this
+            // pass cannot fold yet is re-queued rather than folded wrong.
+            // Without this the bound stays unresolved and the array becomes a
+            // variable-length one, which a declarator list then rejects.
+            u32 operand_start = index + 1;
+            u32 operand_end = c_ir_unevaluated_operand_end(builder, operand_start, end);
+            u64 operand_size = 0;
+            u32 operand_alignment = 0;
+            if (operand_end <= operand_start || !c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment) ||
+                builder->queries->has_request)
+            {
+                return false;
+            }
+            tokens[token_count++] = c_space_token(
+                &bound_space,
+                string_format(arena, S8("{u64}"),
+                              c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) ? operand_alignment : operand_size),
+                C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+            index = operand_end - 1;
             continue;
         }
         if (token.kind == C_TOKEN_IDENTIFIER)

@@ -7854,8 +7854,34 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
     }
     u32 declarator_end = declaration->body_start ? declaration->body_start - 1 : end;
     u32 name_search_start = declaration->declarator_count ? declaration->declarator_start : declaration->token_start;
+    // The scan below keeps the last occurrence of the name so that a tag
+    // repeating it (`struct head { ... } head;`) does not win over the
+    // declarator. An initializer may repeat it too — an object is in scope
+    // inside its own initializer, which is how `TAILQ_HEAD_INITIALIZER` names
+    // the list it initializes — and that occurrence is not a declarator, so
+    // stop the search at the top-level '=' that starts the initializer.
+    u32 name_search_end = declarator_end;
+    for (u32 index = name_search_start, depth = 0; index < declarator_end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            depth -= depth ? 1 : 0;
+        }
+        else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+        {
+            name_search_end = index;
+            break;
+        }
+    }
     u32 name_index = declarator_end;
-    for (u32 index = name_search_start; index < declarator_end; index += 1)
+    for (u32 index = name_search_start; index < name_search_end; index += 1)
     {
         if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), declaration->name))
         {
@@ -7874,14 +7900,14 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
     // function (or function-pointer) type.
     if (name_index == declarator_end && declaration->kind == C_DECLARATION_FUNCTION)
     {
-        for (u32 index = name_search_start; index < declarator_end; index += 1)
+        for (u32 index = name_search_start; index < name_search_end; index += 1)
         {
             if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 continue;
             }
             u32 candidate = C_ID_UNDERLYING_INVALID;
-            if (c_parse_parenthesized_function_name(preprocess, index, declarator_end, &candidate) && candidate < declarator_end &&
+            if (c_parse_parenthesized_function_name(preprocess, index, name_search_end, &candidate) && candidate < name_search_end &&
                 string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[candidate]), declaration->name))
             {
                 name_index = candidate;
@@ -8335,9 +8361,55 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
             };
             for (u32 parameter_index = 0; parameter_index < left_type.parameter_count; parameter_index += 1)
             {
+                CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
+                CTypeId right_parameter = result->parameters[right_type.parameter_start + parameter_index].type;
+                // C 6.7.6.3p7/p8: a parameter declared as an array or a
+                // function is adjusted to the corresponding pointer, so a
+                // prototype's `char **` and a definition's `char *argv[]`
+                // declare one and the same function. The declared spelling
+                // survives into the parameter type, so decay the halves that
+                // disagree here rather than rejecting them. Qualifiers are
+                // ignored only at the top level, which is why the decayed
+                // pointee pair keeps them.
+                CTypeKind left_parameter_kind =
+                    left_parameter.value < result->type_count ? result->types[left_parameter.value].kind : C_TYPE_INVALID;
+                CTypeKind right_parameter_kind =
+                    right_parameter.value < result->type_count ? result->types[right_parameter.value].kind : C_TYPE_INVALID;
+                if (left_parameter_kind == C_TYPE_ARRAY && right_parameter_kind == C_TYPE_POINTER)
+                {
+                    stack[stack_count++] = (CTypePair){
+                        .left = result->types[left_parameter.value].element_type,
+                        .right = result->types[right_parameter.value].element_type,
+                    };
+                    continue;
+                }
+                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_ARRAY)
+                {
+                    stack[stack_count++] = (CTypePair){
+                        .left = result->types[left_parameter.value].element_type,
+                        .right = result->types[right_parameter.value].element_type,
+                    };
+                    continue;
+                }
+                if (left_parameter_kind == C_TYPE_FUNCTION && right_parameter_kind == C_TYPE_POINTER)
+                {
+                    stack[stack_count++] = (CTypePair){
+                        .left = left_parameter,
+                        .right = result->types[right_parameter.value].element_type,
+                    };
+                    continue;
+                }
+                if (left_parameter_kind == C_TYPE_POINTER && right_parameter_kind == C_TYPE_FUNCTION)
+                {
+                    stack[stack_count++] = (CTypePair){
+                        .left = result->types[left_parameter.value].element_type,
+                        .right = right_parameter,
+                    };
+                    continue;
+                }
                 stack[stack_count++] = (CTypePair){
-                    .left = result->parameters[left_type.parameter_start + parameter_index].type,
-                    .right = result->parameters[right_type.parameter_start + parameter_index].type,
+                    .left = left_parameter,
+                    .right = right_parameter,
                     .ignore_qualifiers = true,
                 };
             }
@@ -10977,13 +11049,19 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
 
 BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preprocess, u32 start, u32 end)
 {
-    u32 index = start;
+    // GNU attributes may sit before the aggregate keyword, between it and the
+    // tag (`struct __attribute__((__may_alias__)) sockaddr_storage { ... };`,
+    // which is how glibc declares it), and after the tag. Skipping them keeps
+    // such a definition classified as a type-only declaration; read as an
+    // object declaration instead, the attribute's name becomes the declared
+    // object and the aggregate is never defined.
+    u32 index = c_parse_skip_attributes(preprocess, start, end);
     while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
            (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("const")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("volatile")) ||
             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("_Atomic")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("static")) ||
             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("extern"))))
     {
-        index += 1;
+        index = c_parse_skip_attributes(preprocess, index + 1, end);
     }
     if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
         (!string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("struct")) && !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("union")) &&
@@ -10991,11 +11069,12 @@ BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preproces
     {
         return false;
     }
-    index += 1;
+    index = c_parse_skip_attributes(preprocess, index + 1, end);
     if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
     {
         index += 1;
     }
+    index = c_parse_skip_attributes(preprocess, index, end);
     if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_COLON))
     {
         while (index < end && !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))

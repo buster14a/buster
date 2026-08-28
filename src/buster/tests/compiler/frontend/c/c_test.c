@@ -6681,9 +6681,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                 S8("in function 'strict_range': GNU case ranges are only available in GNU dialects"));
     {
-        // Control falling off the end of a non-void function must be blamed on
-        // the closing brace, not on whichever token a sub-lowering recorded
-        // last (this fixture used to be diagnosed at the '1' on line 5).
+        // Control falling off the end of a non-void function is undefined only
+        // if the caller uses the value (C 6.9.1p12), so the body lowers and
+        // its final block ends in unreachable, exactly as Clang and GCC emit.
+        // sbase's dc ends a function this way, after a call to its own
+        // non-noreturn error().
         CPreprocessResult falls_off_tokens = c_preprocess(control_flow_temporary.arena,
                                                           S8("int falls_off(int value) {\n"
                                                              "    if (value) {\n"
@@ -6697,14 +6699,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         BUSTER_TEST(arguments, falls_off_parse.diagnostic_count == 0);
         CIRLowerResult falls_off_ir =
             c_lower_to_ir(control_flow_temporary.arena, S8("falls-off.c"), falls_off_tokens, falls_off_parse, target_native);
-        BUSTER_TEST(arguments, falls_off_ir.diagnostic_count == 1);
-        if (falls_off_ir.diagnostic_count == 1)
+        BUSTER_TEST(arguments, falls_off_ir.diagnostic_count == 0);
+        BUSTER_TEST(arguments, falls_off_ir.program != 0);
+        if (falls_off_ir.program)
         {
-            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-            BUSTER_STRING_TEST(arguments, falls_off_ir.diagnostics[0].message,
-                               S8("in function 'falls_off': control reaches the end of a non-void function"));
-            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].location.line == 6);
-            BUSTER_TEST(arguments, falls_off_ir.diagnostics[0].location.column == 1);
+            IrModule* falls_off_module = &falls_off_ir.program->modules[0];
+            bool falls_off_unreachable = false;
+            for (u32 function_index = 0; function_index < falls_off_module->function_count; function_index += 1)
+            {
+                IrFunction* falls_off_function = falls_off_module->functions + function_index;
+                if (!string_equal(falls_off_function->name, S8("falls_off")))
+                {
+                    continue;
+                }
+                for (u32 instruction_index = 0; instruction_index < falls_off_function->instruction_count; instruction_index += 1)
+                {
+                    falls_off_unreachable |= falls_off_function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                }
+            }
+            BUSTER_TEST(arguments, falls_off_unreachable);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(falls_off_ir.program, falls_off_module).error == IR_VALIDATION_NONE);
         }
     }
     CPreprocessResult goto_tokens = c_preprocess(control_flow_temporary.arena,

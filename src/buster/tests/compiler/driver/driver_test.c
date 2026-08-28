@@ -5433,6 +5433,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_sizeof_compound_literal.c"),
         S8("tests/basic_c_sizeof_call_array_bound.c"),
         S8("tests/basic_c_sizeof_function_designator.c"),
+        // The two sbase fixtures belong here for the same reason: a wrong
+        // lowering of a self-referential initializer or of `onestr + 1` still
+        // produces a program, and only running it reads the pointer.
+        S8("tests/basic_c_sbase_declarations.c"),
+        S8("tests/basic_c_sbase_expressions.c"),
     };
     String8 c_runtime_fixture_names[] = {
         S8("buster-c-sizeof-unevaluated"),
@@ -5440,6 +5445,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-sizeof-compound-literal"),
         S8("buster-c-sizeof-call-array-bound"),
         S8("buster-c-sizeof-function-designator"),
+        S8("buster-c-sbase-declarations"),
+        S8("buster-c-sbase-expressions"),
     };
     for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_runtime_fixture_paths); fixture_index += 1)
     {
