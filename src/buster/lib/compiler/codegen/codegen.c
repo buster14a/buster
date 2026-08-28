@@ -172,6 +172,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     S8_INITIALIZER("xchgq"), S8_INITIALIZER("inc"), S8_INITIALIZER("incb"), S8_INITIALIZER("incw"), S8_INITIALIZER("incl"), S8_INITIALIZER("incq"), S8_INITIALIZER("dec"), S8_INITIALIZER("decb"), S8_INITIALIZER("decw"), S8_INITIALIZER("decl"), S8_INITIALIZER("decq"),
     S8_INITIALIZER("neg"), S8_INITIALIZER("negb"), S8_INITIALIZER("negw"), S8_INITIALIZER("negl"), S8_INITIALIZER("negq"), S8_INITIALIZER("not"), S8_INITIALIZER("notb"), S8_INITIALIZER("notw"), S8_INITIALIZER("notl"), S8_INITIALIZER("notq"), S8_INITIALIZER("bswap"),
     S8_INITIALIZER("bswapl"), S8_INITIALIZER("bswapq"),
+    // SYSCALL takes no operands at all, so it needs none of the memory or
+    // immediate machinery this list exists to keep out; its register effects
+    // are exactly what a C-level constraint and clobber list already state.
+    // It is what a libc's system-call layer is written against.
+    S8_INITIALIZER("syscall"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
     S8_INITIALIZER("rax"), S8_INITIALIZER("eax"), S8_INITIALIZER("ax"), S8_INITIALIZER("al"), S8_INITIALIZER("rcx"), S8_INITIALIZER("ecx"), S8_INITIALIZER("cx"), S8_INITIALIZER("cl"), S8_INITIALIZER("rdx"), S8_INITIALIZER("edx"), S8_INITIALIZER("dx"), S8_INITIALIZER("dl"),
@@ -681,6 +686,24 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constra
         return true;
     case IR_INLINE_ASSEMBLY_CONSTRAINT_D:
         *register_out = X64_REGISTER_RDX;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_SI:
+        *register_out = X64_REGISTER_RSI;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_DI:
+        *register_out = X64_REGISTER_RDI;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R8:
+        *register_out = X64_REGISTER_R8;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R9:
+        *register_out = X64_REGISTER_R9;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R10:
+        *register_out = X64_REGISTER_R10;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R11:
+        *register_out = X64_REGISTER_R11;
         return true;
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
@@ -14767,6 +14790,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 if (clobbered_registers[register_index])
                                 {
                                     result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                // R11 is the scratch the indirect operand path
+                                // loads addresses through, which is why the
+                                // generic allocator skips it there. A pinned
+                                // R11 operand cannot give that up, so the pair
+                                // is refused rather than silently clobbered.
+                                if (indirect_operands && register_index == X64_REGISTER_R11)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
                                 for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)

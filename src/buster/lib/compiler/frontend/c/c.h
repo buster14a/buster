@@ -425,8 +425,10 @@ struct CPreprocessorDefinition
 typedef enum CPreprocessDialect
 {
     C_PREPROCESS_DIALECT_GNU17,
+    C_PREPROCESS_DIALECT_GNU99,
     C_PREPROCESS_DIALECT_GNU11,
     C_PREPROCESS_DIALECT_GNU23,
+    C_PREPROCESS_DIALECT_C99,
     C_PREPROCESS_DIALECT_C11,
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
@@ -769,7 +771,11 @@ struct CEntity
     bool constant_is_negative;
     bool has_cleanup;
     bool cleanup_attribute_checked;
-    u8 reserved[2];
+    // Register storage on a local. Only the local declarator path records it,
+    // and only one reader needs it: an assembler label on a `register` local
+    // binds a machine register instead of renaming a symbol.
+    bool is_register;
+    u8 reserved[1];
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;

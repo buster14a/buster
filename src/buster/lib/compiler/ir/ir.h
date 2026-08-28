@@ -124,15 +124,34 @@ typedef enum IrAtomicOperation
     IR_ATOMIC_OPERATION_COUNT,
 } IrAtomicOperation;
 
+// Every class below IR_INLINE_ASSEMBLY_CONSTRAINT_R names one architectural
+// register the operand must occupy; R is the generic "any register" class the
+// emitter allocates. Keeping the fixed classes contiguous and below R lets the
+// "is this operand pinned" question stay a single comparison, so the order is
+// load-bearing rather than cosmetic. SI/DI carry GNU's 'S'/'D' letters; the
+// numbered classes have no constraint letter at all and are reachable only
+// through a local register variable, which is how musl passes syscall
+// arguments four through six. The callee-saved r12-r15 are deliberately absent:
+// the emitter's asm operand pool is the caller-saved set, and pinning a
+// callee-saved register would need prologue preservation that only the
+// B/RBX path has.
 typedef enum IrInlineAssemblyConstraint
 {
     IR_INLINE_ASSEMBLY_CONSTRAINT_A,
     IR_INLINE_ASSEMBLY_CONSTRAINT_B,
     IR_INLINE_ASSEMBLY_CONSTRAINT_C,
     IR_INLINE_ASSEMBLY_CONSTRAINT_D,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_SI,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_DI,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_R8,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_R9,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_R10,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_R11,
     IR_INLINE_ASSEMBLY_CONSTRAINT_R,
     IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT,
 } IrInlineAssemblyConstraint;
+
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(class) ((class) < (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_R)
 
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER 0
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER 1

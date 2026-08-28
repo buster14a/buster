@@ -56,7 +56,11 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, Strin
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* invocation, String8 dialect)
 {
-    if (string_equal(dialect, S8("gnu11")))
+    if (string_equal(dialect, S8("gnu99")) || string_equal(dialect, S8("gnu9x")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU99;
+    }
+    else if (string_equal(dialect, S8("gnu11")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU11;
     }
@@ -67,6 +71,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_dialect(CompilerDriverInvocation* i
     else if (string_equal(dialect, S8("gnu23")) || string_equal(dialect, S8("gnu2x")))
     {
         invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_GNU23;
+    }
+    else if (string_equal(dialect, S8("c99")) || string_equal(dialect, S8("c9x")) || string_equal(dialect, S8("iso9899:1999")))
+    {
+        invocation->c_dialect = COMPILER_DRIVER_C_DIALECT_C99;
     }
     else if (string_equal(dialect, S8("c11")))
     {
@@ -91,12 +99,16 @@ BUSTER_GLOBAL_LOCAL CPreprocessDialect compiler_driver_preprocess_dialect(Compil
 {
     switch (dialect)
     {
+    case COMPILER_DRIVER_C_DIALECT_GNU99:
+        return C_PREPROCESS_DIALECT_GNU99;
     case COMPILER_DRIVER_C_DIALECT_GNU11:
         return C_PREPROCESS_DIALECT_GNU11;
     case COMPILER_DRIVER_C_DIALECT_GNU17:
         return C_PREPROCESS_DIALECT_GNU17;
     case COMPILER_DRIVER_C_DIALECT_GNU23:
         return C_PREPROCESS_DIALECT_GNU23;
+    case COMPILER_DRIVER_C_DIALECT_C99:
+        return C_PREPROCESS_DIALECT_C99;
     case COMPILER_DRIVER_C_DIALECT_C11:
         return C_PREPROCESS_DIALECT_C11;
     case COMPILER_DRIVER_C_DIALECT_C17:
@@ -1259,7 +1271,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
             string_equal(argument, S8("-fno-pic")) || string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common"));
+            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
+            // Buster emits no stack-protector prologue, so the disabling
+            // spelling is already what it does. A libc asks for it on the
+            // translation units that run before thread-local storage exists,
+            // where the canary's own load would fault; accepting the flag lets
+            // one flag set drive this compiler and the reference one.
+            string_equal(argument, S8("-fno-stack-protector"));
         if (optimization_option || debug_option || warning_option || compatible_codegen_option)
         {
             continue;

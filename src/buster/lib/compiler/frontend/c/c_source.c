@@ -5826,13 +5826,17 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 || dialect == C_PREPROCESS_DIALECT_GNU23;
+    return dialect == C_PREPROCESS_DIALECT_GNU99 || dialect == C_PREPROCESS_DIALECT_GNU11 || dialect == C_PREPROCESS_DIALECT_GNU17 ||
+           dialect == C_PREPROCESS_DIALECT_GNU23;
 }
 
 BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect dialect)
 {
     switch (dialect)
     {
+    case C_PREPROCESS_DIALECT_GNU99:
+    case C_PREPROCESS_DIALECT_C99:
+        return S8("199901L");
     case C_PREPROCESS_DIALECT_GNU11:
     case C_PREPROCESS_DIALECT_C11:
         return S8("201112L");

@@ -1700,12 +1700,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation conflicting =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(conflicting_actions));
     BUSTER_TEST(arguments, conflicting.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    // The GNU flavours come first and the strict ones after, which is what the
+    // EXPECTED_GNU split below indexes on. C99 is here because it is the
+    // dialect a libc's own build system asks for: musl's makefile passes
+    // -std=c99 and its headers branch on __STDC_VERSION__.
     String8 dialect_flags[] = {
-        S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23"), S8("-std=c11"), S8("-std=c17"), S8("-std=c23"),
+        S8("-std=gnu99"), S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23"),
+        S8("-std=c99"),   S8("-std=c11"),   S8("-std=c17"),   S8("-std=c23"),
     };
     String8 dialect_versions[] = {
-        S8("-DEXPECTED_STDC_VERSION=201112L"), S8("-DEXPECTED_STDC_VERSION=201710L"), S8("-DEXPECTED_STDC_VERSION=202311L"),
-        S8("-DEXPECTED_STDC_VERSION=201112L"), S8("-DEXPECTED_STDC_VERSION=201710L"), S8("-DEXPECTED_STDC_VERSION=202311L"),
+        S8("-DEXPECTED_STDC_VERSION=199901L"), S8("-DEXPECTED_STDC_VERSION=201112L"), S8("-DEXPECTED_STDC_VERSION=201710L"),
+        S8("-DEXPECTED_STDC_VERSION=202311L"), S8("-DEXPECTED_STDC_VERSION=199901L"), S8("-DEXPECTED_STDC_VERSION=201112L"),
+        S8("-DEXPECTED_STDC_VERSION=201710L"), S8("-DEXPECTED_STDC_VERSION=202311L"),
     };
     for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialect_flags); dialect_index += 1)
     {
@@ -1714,13 +1720,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #if BUSTER_IOS
         String8 dialect_command_line[] = {
             S8("-fsyntax-only"), dialect_flags[dialect_index], dialect_versions[dialect_index],
-            dialect_index < 3 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"), S8("tests/basic_c_dialect.c"),
+            dialect_index < 4 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"), S8("tests/basic_c_dialect.c"),
         };
 #else
         String8 dialect_object_path =
             buster_test_temporary_path(dialect_arena, S8("buster-c-dialect"), string_format(dialect_arena, S8("-{u32}.o"), dialect_index));
         String8 dialect_command_line[] = {
-            S8("-c"), dialect_flags[dialect_index], dialect_versions[dialect_index], dialect_index < 3 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"),
+            S8("-c"), dialect_flags[dialect_index], dialect_versions[dialect_index], dialect_index < 4 ? S8("-DEXPECTED_GNU=1") : S8("-DEXPECTED_GNU=0"),
             S8("-o"), dialect_object_path,          S8("tests/basic_c_dialect.c"),
         };
 #endif
@@ -6092,6 +6098,48 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
 #endif
+    }
+    // Local register variables under every allocator, with -std=c99 because
+    // that is the dialect a libc's build actually asks for. The fixture proves
+    // the binding through the kernel rather than through a round trip: it
+    // passes system-call arguments four, five and six, which have no x86-64
+    // constraint letter and reach R10, R8 and R9 only when the binding holds.
+    {
+        String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
+        {
+            Arena* register_variable_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena register_variable_temporary = scratch_begin(register_variable_conflicts, BUSTER_ARRAY_LENGTH(register_variable_conflicts));
+            Arena* register_variable_arena = register_variable_temporary.arena;
+            String8 register_variable_path = buster_test_temporary_path(register_variable_arena, S8("buster-c-register-variable"),
+                                                                        string_format(register_variable_arena, S8("-{u32}"), allocator_index));
+            String8 register_variable_command_line[] = {
+                S8("-std=c99"),
+                string_format(register_variable_arena, S8("-fregister-allocator={S8}"), allocators[allocator_index]),
+                S8("-o"),
+                register_variable_path,
+                S8("tests/basic_c_register_variable.c"),
+            };
+            CompilerDriverResult register_variable = compiler_driver_execute_invocation(
+                register_variable_arena,
+                compiler_driver_parse_arguments(register_variable_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_variable_command_line)));
+            BUSTER_TEST(arguments, register_variable.error == COMPILER_DRIVER_ERROR_NONE);
+            if (register_variable.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {register_variable_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(register_variable_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(register_variable_temporary);
+        }
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {

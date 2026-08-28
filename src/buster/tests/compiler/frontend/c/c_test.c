@@ -3100,6 +3100,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, builtins, 5, C_TOKEN_PREPROCESSING_NUMBER, S8("2"));
     c_test_preprocessed_token(arguments, &result, builtins, 6, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
 
+    // C99 is the dialect a libc's own build asks for: musl's makefile passes
+    // -std=c99, and its headers read __STDC_VERSION__ to decide which
+    // declarations exist. The GNU flavour of the same year has to keep the
+    // extension keywords the strict one does not.
+    CPreprocessResult c99_version = c_preprocess(arguments->arena, S8("__STDC_VERSION__\n"),
+                                                 (CPreprocessOptions){
+                                                     .source_path = S8("c99-version.c"),
+                                                     .dialect = C_PREPROCESS_DIALECT_C99,
+                                                 });
+    BUSTER_TEST(arguments, c99_version.diagnostic_count == 0);
+    c_test_preprocessed_token(arguments, &result, c99_version, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("199901L"));
+    CPreprocessResult gnu99_version = c_preprocess(arguments->arena, S8("__STDC_VERSION__\n"),
+                                                   (CPreprocessOptions){
+                                                       .source_path = S8("gnu99-version.c"),
+                                                       .dialect = C_PREPROCESS_DIALECT_GNU99,
+                                                   });
+    BUSTER_TEST(arguments, gnu99_version.diagnostic_count == 0);
+    c_test_preprocessed_token(arguments, &result, gnu99_version, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("199901L"));
+
     CPreprocessResult floating_builtins = c_preprocess(arguments->arena,
                                                        S8("__DBL_EPSILON__\n"),
                                                        (CPreprocessOptions){
@@ -13348,6 +13367,130 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, invalid_tied_lowered.diagnostic_count == 1);
             scratch_end(invalid_tied_temporary);
         }
+    }
+    // A local register variable pins the operand it is passed as. The class it
+    // resolves to is checked directly, because a value that reaches the wrong
+    // register is still a lowered function: only the recorded class says which
+    // register the emitter will use.
+    {
+        typedef struct CTestBoundRegisterCase CTestBoundRegisterCase;
+        struct CTestBoundRegisterCase
+        {
+            String8 source;
+            u64 constraint;
+        };
+        CTestBoundRegisterCase bound_register_cases[] = {
+            {S8("long bound_rsi(long input) { register long value __asm__(\"rsi\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_SI},
+            {S8("long bound_rdi(long input) { register long value __asm__(\"rdi\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_DI},
+            {S8("long bound_r8(long input) { register long value __asm__(\"r8\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_R8},
+            {S8("long bound_r9(long input) { register long value __asm__(\"%r9\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_R9},
+            {S8("long bound_r10(long input) { register long value __asm__(\"r10\") = input; long output;"
+                " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_R10},
+            {S8("long letter_rsi(long input) { long output; __asm__(\"\" : \"=r\"(output) : \"S\"(input)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_SI},
+            {S8("long letter_rdi(long input) { long output; __asm__(\"\" : \"=r\"(output) : \"D\"(input)); return output; }\n"),
+             IR_INLINE_ASSEMBLY_CONSTRAINT_DI},
+        };
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(bound_register_cases); case_index += 1)
+        {
+            TemporalArena bound_register_temporary = scratch_begin(0, 0);
+            Target bound_register_target = target_native;
+            bound_register_target.cpu_arch = CPU_ARCH_X86_64;
+            CPreprocessResult bound_register_tokens = {0};
+            CParseResult bound_register_parse = {0};
+            CIRLowerResult bound_register_lowered =
+                c_test_lower_source(bound_register_temporary.arena, bound_register_cases[case_index].source, S8("bound-register.c"), bound_register_target,
+                                    &bound_register_tokens, &bound_register_parse);
+            BUSTER_TEST(arguments, bound_register_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, bound_register_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, bound_register_lowered.diagnostic_count == 0);
+            if (bound_register_lowered.program)
+            {
+                IrModule* module = bound_register_lowered.program->modules;
+                IrInstruction* assembly = 0;
+                for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                        {
+                            assembly = function->instructions + instruction_index;
+                            break;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+                if (assembly && assembly->operand_count == 2)
+                {
+                    BUSTER_TEST(arguments, (assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == bound_register_cases[case_index].constraint);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(bound_register_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(bound_register_temporary);
+        }
+    }
+    // The shapes a binding must refuse: a register the emitter's operand pool
+    // does not cover, an assembler label on a local without register storage
+    // (where the label would otherwise be read as a symbol rename that means
+    // nothing), and a letter constraint that names a different register than
+    // the binding does.
+    {
+        String8 invalid_bound_register_sources[] = {
+            S8("long bound(long input) { register long value __asm__(\"r12\") = input; long output;"
+               " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+            S8("long bound(long input) { register long value __asm__(\"rbp\") = input; long output;"
+               " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+            S8("long bound(long input) { long value __asm__(\"r10\") = input; long output;"
+               " __asm__(\"\" : \"=r\"(output) : \"r\"(value)); return output; }\n"),
+            S8("long bound(long input) { register long value __asm__(\"r10\") = input; long output;"
+               " __asm__(\"\" : \"=r\"(output) : \"a\"(value)); return output; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_bound_register_sources); source_index += 1)
+        {
+            TemporalArena invalid_bound_temporary = scratch_begin(0, 0);
+            Target invalid_bound_target = target_native;
+            invalid_bound_target.cpu_arch = CPU_ARCH_X86_64;
+            CPreprocessResult invalid_bound_tokens = {0};
+            CParseResult invalid_bound_parse = {0};
+            CIRLowerResult invalid_bound_lowered =
+                c_test_lower_source(invalid_bound_temporary.arena, invalid_bound_register_sources[source_index], S8("invalid-bound-register.c"),
+                                    invalid_bound_target, &invalid_bound_tokens, &invalid_bound_parse);
+            BUSTER_TEST(arguments, invalid_bound_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_bound_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_bound_lowered.diagnostic_count == 1);
+            scratch_end(invalid_bound_temporary);
+        }
+    }
+    // A libc spells the variable-argument list type under more than one
+    // typedef name -- musl declares its public prototypes with
+    // __isoc_va_list and its definitions with va_list -- so all of the
+    // spellings have to be one type. Two type ids would make the definition
+    // conflict with its own prototype.
+    {
+        TemporalArena va_list_alias_temporary = scratch_begin(0, 0);
+        CPreprocessResult va_list_alias_tokens = {0};
+        CParseResult va_list_alias_parse = {0};
+        CIRLowerResult va_list_alias_lowered = c_test_lower_source(
+            va_list_alias_temporary.arena,
+            S8("typedef __builtin_va_list va_list;"
+               "typedef __builtin_va_list __isoc_va_list;"
+               "int aliased(char const* format, __isoc_va_list list);"
+               "int aliased(char const* format, va_list list) { (void)format; (void)list; return 0; }\n"),
+            S8("va-list-alias.c"), target_native, &va_list_alias_tokens, &va_list_alias_parse);
+        BUSTER_TEST(arguments, va_list_alias_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, va_list_alias_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, va_list_alias_lowered.diagnostic_count == 0);
+        scratch_end(va_list_alias_temporary);
     }
     {
         TemporalArena aarch64_tied_assembly_temporary = scratch_begin(0, 0);

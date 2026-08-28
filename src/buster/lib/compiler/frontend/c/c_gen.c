@@ -24562,7 +24562,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     }
     else
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64 && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) <= IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+        result = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
     }
 
     return result;
@@ -24586,6 +24587,117 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_decimal_reference(String8 bytes, u32
     }
     *index_out = (u32)value;
     return true;
+}
+
+// The x86-64 register names a local register variable may bind, paired with the
+// operand class that pins an asm operand to them. The set is the emitter's
+// caller-saved asm pool; rbx and r12-r15 are callee-saved and are left out
+// because pinning them would need the prologue preservation only the B class
+// has, and rsp/rbp are the frame the operand loads run against.
+typedef struct CIrBoundRegisterName CIrBoundRegisterName;
+struct CIrBoundRegisterName
+{
+    String8 name;
+    u64 constraint;
+};
+
+BUSTER_C_INTERNAL CIrBoundRegisterName const c_ir_bound_register_names[] = {
+    {S8_INITIALIZER("rax"), IR_INLINE_ASSEMBLY_CONSTRAINT_A},   {S8_INITIALIZER("rcx"), IR_INLINE_ASSEMBLY_CONSTRAINT_C},
+    {S8_INITIALIZER("rdx"), IR_INLINE_ASSEMBLY_CONSTRAINT_D},   {S8_INITIALIZER("rsi"), IR_INLINE_ASSEMBLY_CONSTRAINT_SI},
+    {S8_INITIALIZER("rdi"), IR_INLINE_ASSEMBLY_CONSTRAINT_DI},  {S8_INITIALIZER("r8"), IR_INLINE_ASSEMBLY_CONSTRAINT_R8},
+    {S8_INITIALIZER("r9"), IR_INLINE_ASSEMBLY_CONSTRAINT_R9},   {S8_INITIALIZER("r10"), IR_INLINE_ASSEMBLY_CONSTRAINT_R10},
+    {S8_INITIALIZER("r11"), IR_INLINE_ASSEMBLY_CONSTRAINT_R11},
+};
+
+// The assembler label of a declaration, read from the declaration's own tokens.
+// A label on a function or a file-scope object renames the symbol and is read
+// by c_declaration_link_name; on a `register` local it names a machine register
+// instead, which is what this reads back.
+BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u32 start, u32 end, String8* label_out)
+{
+    for (u32 index = start; index + 3 < end + 1 && index + 3 <= builder->preprocess.token_count; index += 1)
+    {
+        CToken keyword = builder->preprocess.tokens[index];
+        if (keyword.kind != C_TOKEN_IDENTIFIER ||
+            !c_token_in_well_known_set(builder->preprocess.spelling_base, keyword,
+                                       C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT)) ||
+            !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            builder->preprocess.tokens[index + 2].kind != C_TOKEN_STRING_LITERAL ||
+            !c_token_is_punctuator(&builder->preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            continue;
+        }
+        ByteSlice decoded = {0};
+        if (c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2]), '"', &decoded) &&
+            decoded.length)
+        {
+            *label_out = (String8){
+                .pointer = (char8*)decoded.pointer,
+                .length = decoded.length,
+            };
+            return true;
+        }
+    }
+    return false;
+}
+
+// GNU guarantees a local register variable only where the standard leaves the
+// register choice to the compiler: as an operand of an asm statement. The
+// binding therefore refines this operand's class rather than reserving the
+// register across the function, which is exactly what musl needs to place
+// syscall arguments four through six, for which x86-64 has no constraint
+// letter. Only a single unadorned identifier can carry a binding, so anything
+// else -- a cast, a member, an expression -- leaves the class alone.
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u64* constraint_out)
+{
+    if (state->operand_close != state->constraint_index + 3 || builder->target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return false;
+    }
+    u32 identifier_index = state->constraint_index + 2;
+    if (builder->preprocess.tokens[identifier_index].kind != C_TOKEN_IDENTIFIER)
+    {
+        return false;
+    }
+    CEntityId entity_id = c_ir_identifier_entity(builder, identifier_index);
+    if (entity_id.value >= builder->parse.entity_count)
+    {
+        return false;
+    }
+    CEntity* entity = builder->parse.entities + entity_id.value;
+    if (entity->kind != C_ENTITY_LOCAL || entity->is_static_storage || !entity->declaration_token_count)
+    {
+        return false;
+    }
+    u32 declaration_end = entity->declaration_token_start + entity->declaration_token_count;
+    String8 label = {0};
+    if (!c_ir_declaration_asm_label(builder, entity->declaration_token_start, declaration_end, &label))
+    {
+        return false;
+    }
+    if (!entity->is_register)
+    {
+        builder->failure_message = S8("an assembler label on a local object names a register and requires the register storage class");
+        builder->failure_token_index = identifier_index;
+        return false;
+    }
+    // GNU spells the binding with the plain register name, and clang accepts a
+    // leading '%' as well; both forms name the same architectural register.
+    if (label.length > 1 && label.pointer[0] == '%')
+    {
+        label = string_slice(label, 1, label.length);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
+    {
+        if (string_equal(c_ir_bound_register_names[index].name, label))
+        {
+            *constraint_out = c_ir_bound_register_names[index].constraint;
+            return true;
+        }
+    }
+    builder->failure_message = string_format(builder->arena, S8("unsupported register '{S8}' bound to a local register variable"), label);
+    builder->failure_token_index = identifier_index;
+    return false;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
@@ -24622,6 +24734,12 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         case 'd':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
             break;
+        case 'S':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_SI;
+            break;
+        case 'D':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_DI;
+            break;
         case 'r':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
             break;
@@ -24645,6 +24763,12 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             break;
         case 'd':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+            break;
+        case 'S':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_SI;
+            break;
+        case 'D':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_DI;
             break;
         case 'r':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
@@ -24750,6 +24874,21 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     }
     else
     {
+        u64 bound = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+        if (c_ir_inline_assembly_bound_register(builder, state, &bound))
+        {
+            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != IR_INLINE_ASSEMBLY_CONSTRAINT_R &&
+                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != bound)
+            {
+                builder->failure_message = S8("asm operand constraint contradicts the register bound to its local register variable");
+                return false;
+            }
+            constraint = bound;
+        }
+        else if (builder->failure_message.length)
+        {
+            return false;
+        }
         constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
         constraint |= read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
     }
@@ -24879,6 +25018,20 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 c
     case IR_INLINE_ASSEMBLY_CONSTRAINT_D:
         return string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) ||
                string_equal(clobber, S8("dl"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_SI:
+        return string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
+               string_equal(clobber, S8("sil"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_DI:
+        return string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) ||
+               string_equal(clobber, S8("dil"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R8:
+        return string_equal(clobber, S8("r8"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R9:
+        return string_equal(clobber, S8("r9"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R10:
+        return string_equal(clobber, S8("r10"));
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R11:
+        return string_equal(clobber, S8("r11"));
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
         break;
@@ -24907,7 +25060,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
     for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
     {
         u64 constraint = state->constraints[operand_index] & 0xff;
-        if (constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_R || constraint >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+        if (!IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint))
         {
             continue;
         }

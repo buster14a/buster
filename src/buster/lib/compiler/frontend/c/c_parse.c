@@ -262,6 +262,13 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
 // c_token_length's oversized guard.
 #define C_PARSE_ATTRIBUTE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT))
 
+// The three spellings of the assembler keyword, as one interned-id set. A
+// declarator can be followed by `asm("name")`, which renames the object rather
+// than declaring anything, so every declarator scan has to recognize the
+// keyword to step over the group instead of reading it as a declarator name
+// followed by a parameter list.
+#define C_PARSE_ASM_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(ASM) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
+
 // The position index and token census classify the same contiguous sidecar in
 // the same tiles. Keeping the tile width here makes a later tile consumer
 // share the census' 2,048-token working set instead of inventing another pass
@@ -3962,6 +3969,40 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     }
 }
 
+// The variable-argument list type, created once per translation unit. A libc
+// spells the same builtin under several typedef names -- musl declares
+// `va_list` in <stdarg.h> and `__isoc_va_list` in the public prototypes, both
+// as `__builtin_va_list` -- and a prototype written with one name has to stay
+// compatible with a definition written with the other, so all of them have to
+// land on one type id rather than on a fresh one each.
+BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
+{
+    for (u32 index = 0; index < result->type_count; index += 1)
+    {
+        if (result->types[index].kind == C_TYPE_VA_LIST)
+        {
+            return (CTypeId){.value = index};
+        }
+    }
+    return c_parse_add_type(result, (CType){
+                                        .element_type = C_TYPE_ID_INVALID,
+                                        .return_type = C_TYPE_ID_INVALID,
+                                        .array_bound = C_ARRAY_BOUND_INVALID,
+                                        .kind = C_TYPE_VA_LIST,
+                                        .is_complete = true,
+                                    });
+}
+
+// The typedef names that introduce the variable-argument list type. The set is
+// closed rather than "any typedef of __builtin_va_list" because the underlying
+// spelling is what these names are declared from, and matching on the name is
+// what keeps a library's own alias out of the builtin's identity.
+BUSTER_C_INTERNAL bool c_parse_variable_argument_list_name(String8 name)
+{
+    return string_equal(name, S8("va_list")) || string_equal(name, S8("__gnuc_va_list")) || string_equal(name, S8("__builtin_va_list")) ||
+           string_equal(name, S8("__isoc_va_list"));
+}
+
 BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
 {
     if (!c_parse_result_reserve_types(result, 1))
@@ -4440,19 +4481,59 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
     return C_TYPE_ID_INVALID;
 }
 
+// True when `index` starts a GNU assembler label: the keyword, a parenthesis, at
+// least one string literal, and the matching close. The shape is checked rather
+// than assumed because the same keyword also introduces an assembly statement,
+// which carries qualifiers, colons, or operands the label form never has;
+// `after_out` receives the token past the group.
+BUSTER_C_INTERNAL bool c_parse_asm_label_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out)
+{
+    if (index + 2 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_ASM_KEYWORDS) ||
+        !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return false;
+    }
+    u32 scan = index + 2;
+    while (scan < end && preprocess.tokens[scan].kind == C_TOKEN_STRING_LITERAL)
+    {
+        scan += 1;
+    }
+    if (scan == index + 2 || scan >= end || !c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        return false;
+    }
+    *after_out = scan + 1;
+    return true;
+}
+
 BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end)
 {
     for (;;)
     {
-        if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__extension__")))
+        // Every decoration this skips is spelled as an identifier, so the one
+        // shared guard answers for all three of them and the token is loaded
+        // once instead of once per candidate.
+        if (index >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+        {
+            break;
+        }
+        CToken token = preprocess.tokens[index];
+        if (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__extension__")))
         {
             index += 1;
             continue;
         }
-        bool attribute =
-            index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-            (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__attribute__")) || string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__attribute")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__declspec")));
+        u32 asm_label_end = 0;
+        if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) &&
+            c_parse_asm_label_at(preprocess, index, end, &asm_label_end))
+        {
+            index = asm_label_end;
+            continue;
+        }
+        bool attribute = string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute__")) ||
+                         string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__attribute")) ||
+                         string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__declspec"));
         if (!attribute || index + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             break;
@@ -10101,16 +10182,9 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
             type = object_type;
         }
-        if (is_typedef && (string_equal(c_token_spelling(preprocess.spelling_base, name), S8("va_list")) || string_equal(c_token_spelling(preprocess.spelling_base, name), S8("__gnuc_va_list")) ||
-                           string_equal(c_token_spelling(preprocess.spelling_base, name), S8("__builtin_va_list"))))
+        if (is_typedef && c_parse_variable_argument_list_name(c_token_spelling(preprocess.spelling_base, name)))
         {
-            type = c_parse_add_type(result, (CType){
-                                                .element_type = C_TYPE_ID_INVALID,
-                                                .return_type = C_TYPE_ID_INVALID,
-                                                .array_bound = C_ARRAY_BOUND_INVALID,
-                                                .kind = C_TYPE_VA_LIST,
-                                                .is_complete = true,
-                                            });
+            type = c_parse_variable_argument_list_type(result);
         }
         // A block-scope declarator with a parameter list declares a function
         // with external linkage rather than an object -- DoomGeneric's
@@ -10200,6 +10274,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = is_constexpr,
+            .is_register = is_register,
         };
         CEntity* local_entity = &result->entities[entity.value];
         if (cleanup.count)
@@ -11680,6 +11755,13 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
+        u32 asm_label_end = 0;
+        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && !delimiter_count &&
+            !declarator.seen_equal && c_parse_asm_label_at(preprocess, index, end, &asm_label_end))
+        {
+            index = asm_label_end - 1;
+            continue;
+        }
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             bool keyword = c_declaration_keyword_for_dialect_token(preprocess, token);
@@ -11807,6 +11889,13 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 if (shape == C_TOKEN_END_OF_FILE)
                 {
                     break;
+                }
+                u32 asm_label_end = 0;
+                if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
+                    !delimiter_count && !seen_equal && c_parse_asm_label_at(preprocess, index, token_count, &asm_label_end))
+                {
+                    index = asm_label_end;
+                    continue;
                 }
                 if (shape == C_TOKEN_IDENTIFIER)
                 {
@@ -12547,16 +12636,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                                                });
             }
             c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
-            if (kind == C_DECLARATION_TYPEDEF && (string_equal(declaration->name, S8("va_list")) || string_equal(declaration->name, S8("__gnuc_va_list")) ||
-                                                  string_equal(declaration->name, S8("__builtin_va_list"))))
+            if (kind == C_DECLARATION_TYPEDEF && c_parse_variable_argument_list_name(declaration->name))
             {
-                declaration->type = c_parse_add_type(&result, (CType){
-                                                                  .element_type = C_TYPE_ID_INVALID,
-                                                                  .return_type = C_TYPE_ID_INVALID,
-                                                                  .array_bound = C_ARRAY_BOUND_INVALID,
-                                                                  .kind = C_TYPE_VA_LIST,
-                                                                  .is_complete = true,
-                                                              });
+                declaration->type = c_parse_variable_argument_list_type(&result);
             }
         }
         if (!static_assertion && !declaration->name.length && c_preprocess_dialect_is_c23(preprocess.dialect))
