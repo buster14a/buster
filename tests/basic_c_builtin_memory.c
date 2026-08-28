@@ -1,4 +1,10 @@
-#include <string.h>
+// No system headers: the driver test compiles this without an -isysroot, and
+// on macOS there are none to find without the SDK.  memcpy and memcmp are
+// declared here so the builtins take the translation unit's own prototype,
+// while memset and memmove are left undeclared so the other half of the
+// lowering -- importing the standard signature -- is covered too.
+extern void *memcpy(void *destination, const void *source, unsigned long count);
+extern int memcmp(const void *left, const void *right, unsigned long count);
 
 // LZ4 spells its block copies __builtin_memcpy/__builtin_memmove once
 // __clang__ is defined, so the builtins have to lower to the library calls

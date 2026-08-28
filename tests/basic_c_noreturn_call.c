@@ -1,4 +1,8 @@
-#include <stdlib.h>
+// Declared rather than included: the driver test compiles this without an
+// -isysroot.  The attribute is the point -- it is how glibc spells exit, and
+// what the flow analysis has to read -- so declaring it here tests the same
+// mechanism as <stdlib.h> would have.
+__attribute__((noreturn)) void exit(int status);
 
 // A call to a noreturn callee ends control flow, so a non-void function whose
 // body ends in one has not fallen off its end.  glibc marks exit and abort

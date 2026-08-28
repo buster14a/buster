@@ -1,4 +1,6 @@
-#include <string.h>
+// Declared rather than included: the driver test compiles this without an
+// -isysroot.
+extern void *memcpy(void *destination, const void *source, unsigned long count);
 
 static unsigned read_little_endian_32(const void *bytes)
 {

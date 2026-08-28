@@ -1,5 +1,7 @@
-#include <stdio.h>
-#include <string.h>
+// Declared rather than included: the driver test compiles this without an
+// -isysroot, and on macOS there are no system headers to find without the SDK.
+extern int sprintf(char *buffer, const char *format, ...);
+extern int strcmp(const char *left, const char *right);
 
 // System V on x86-64 is the one target whose `long double` is the 80-bit x87
 // format; Win64 and the AArch64 ABIs give it a narrower or a different
