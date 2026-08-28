@@ -590,6 +590,10 @@ struct CIrSignature
     bool body_supported;
     bool returns_void;
     bool is_variadic;
+    // The callee's declaration carried _Noreturn, __attribute__((noreturn)),
+    // __declspec(noreturn) or [[noreturn]]. A call to it terminates control
+    // flow, so nothing after it in the block is reachable.
+    bool is_noreturn;
 };
 
 BUSTER_C_INTERNAL bool c_ir_va_list_parameter_decays(Target target)
@@ -873,6 +877,108 @@ CType* c_type_from_id(CParseResult* parse, CTypeId id)
     return result;
 }
 
+// The three spellings of the marker itself. `_Noreturn` is the C11 specifier,
+// `noreturn` the attribute name C23 and GNU use, and `__noreturn__` the
+// reserved form glibc writes so a user macro named `noreturn` cannot capture
+// it.
+BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
+{
+    return string_equal(spelling, S8("noreturn")) || string_equal(spelling, S8("__noreturn__")) || string_equal(spelling, S8("_Noreturn"));
+}
+
+/* Whether an attribute in [start, end) marks the declaration noreturn. The
+   reserved spellings `_Noreturn` and `__noreturn__` mean it wherever they
+   appear in a declaration; the bare `noreturn` is an ordinary identifier, so
+   it is only read inside a GNU `__attribute__`/`__declspec` list or a C23
+   `[[...]]` list, where nothing else can be spelled that way. */
+BUSTER_C_INTERNAL bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool result = false;
+    u32 index = start;
+    while (index < end && !result)
+    {
+        CToken token = preprocess.tokens[index];
+        u32 list_start = UINT32_MAX;
+        u32 list_end = UINT32_MAX;
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            if (string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__noreturn__")))
+            {
+                result = true;
+            }
+            else if (index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                     (string_equal(spelling, S8("__attribute__")) || string_equal(spelling, S8("__attribute")) ||
+                      string_equal(spelling, S8("__declspec"))))
+            {
+                u32 depth = 0;
+                u32 scan = index + 1;
+                while (scan < end)
+                {
+                    if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                    {
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            break;
+                        }
+                    }
+                    scan += 1;
+                }
+                list_start = index + 2;
+                list_end = scan < end ? scan : end;
+                index = list_end;
+            }
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) && index + 1 < end &&
+                 c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 scan = index + 2;
+            while (scan + 1 < end && !(c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET) &&
+                                       c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_RIGHT_BRACKET)))
+            {
+                scan += 1;
+            }
+            list_start = index + 2;
+            list_end = scan < end ? scan : end;
+            index = list_end;
+        }
+        for (u32 marker = list_start; marker < list_end && !result; marker += 1)
+        {
+            result = preprocess.tokens[marker].kind == C_TOKEN_IDENTIFIER &&
+                     c_ir_noreturn_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[marker]));
+        }
+        index += 1;
+    }
+
+    return result;
+}
+
+/* Whether a function declaration is marked noreturn. glibc declares exit,
+   abort, _Exit and longjmp with __attribute__((__noreturn__)), so reading the
+   attribute is what lets a call to any of them terminate control flow without
+   the compiler carrying a list of library names. Only the declaration's
+   specifiers and its declarator are scanned: a body cannot carry the marker,
+   and scanning one would find an unrelated identifier. */
+BUSTER_C_INTERNAL bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
+    u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
+    u32 specifier_end = declaration.token_start + declaration.token_count;
+    u32 declarator_end = declaration.declarator_start + declaration.declarator_count;
+    specifier_end = specifier_end < limit ? specifier_end : limit;
+    declarator_end = declarator_end < limit ? declarator_end : limit;
+    specifier_end = body < specifier_end ? body : specifier_end;
+    declarator_end = body < declarator_end ? body : declarator_end;
+
+    return c_ir_noreturn_marker_in_range(preprocess, declaration.token_start, specifier_end) ||
+           (declaration.declarator_count != 0 && c_ir_noreturn_marker_in_range(preprocess, declaration.declarator_start, declarator_end));
+}
+
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
                                                          CIrWideFloatCache* wide_float_cache, CParseResult* parse, CDeclaration declaration,
                                                          IrTypeId* c_type_ir_map, Target target)
@@ -1152,6 +1258,18 @@ typedef enum CIrAtomicBuiltin
     C_IR_ATOMIC_BUILTIN_COUNT,
 } CIrAtomicBuiltin;
 
+// The block-memory builtins, in the order of the two tables below.
+// C_IR_MEMORY_BUILTIN_COUNT doubles as the "not one of these" value, the same
+// convention CIrAtomicBuiltin uses.
+typedef enum CIrMemoryBuiltin
+{
+    C_IR_MEMORY_BUILTIN_MEMCPY,
+    C_IR_MEMORY_BUILTIN_MEMMOVE,
+    C_IR_MEMORY_BUILTIN_MEMSET,
+    C_IR_MEMORY_BUILTIN_MEMCMP,
+    C_IR_MEMORY_BUILTIN_COUNT,
+} CIrMemoryBuiltin;
+
 struct CIrPreparedCall
 {
     String8 builtin_math_link_name;
@@ -1167,6 +1285,7 @@ struct CIrPreparedCall
     CTypeId indirect_function_type;
     IrUnaryOperation builtin_unary;
     CIrAtomicBuiltin builtin_atomic;
+    CIrMemoryBuiltin builtin_memory;
     // An index into c_ir_simd_builtins, or C_IR_SIMD_BUILTIN_NONE.
     u32 builtin_simd;
     bool emitted;
@@ -1268,6 +1387,38 @@ BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
         }
     }
     return (String8){0};
+}
+
+// The two halves of the block-memory builtin mapping, both indexed by
+// CIrMemoryBuiltin: the spelling the source writes and the library function
+// the call lowers to. Two parallel tables rather than one of pairs because
+// only the spelling is ever scanned and only the link name is ever looked up.
+BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_spellings[C_IR_MEMORY_BUILTIN_COUNT] = {
+    S8_INITIALIZER("__builtin_memcpy"),
+    S8_INITIALIZER("__builtin_memmove"),
+    S8_INITIALIZER("__builtin_memset"),
+    S8_INITIALIZER("__builtin_memcmp"),
+};
+
+BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_link_names[C_IR_MEMORY_BUILTIN_COUNT] = {
+    S8_INITIALIZER("memcpy"),
+    S8_INITIALIZER("memmove"),
+    S8_INITIALIZER("memset"),
+    S8_INITIALIZER("memcmp"),
+};
+
+BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
+{
+    CIrMemoryBuiltin result = C_IR_MEMORY_BUILTIN_COUNT;
+    for (u32 index = 0; index < C_IR_MEMORY_BUILTIN_COUNT && result == C_IR_MEMORY_BUILTIN_COUNT; index += 1)
+    {
+        if (string_equal(name, c_ir_memory_builtin_spellings[index]))
+        {
+            result = (CIrMemoryBuiltin)index;
+        }
+    }
+
+    return result;
 }
 
 // What each position of a SIMD builtin's argument list has to be. Anything but
@@ -7199,7 +7350,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_VA_COPY,
     C_IR_PREPARED_CALL_CONTINUATION_VA_ARG,
     C_IR_PREPARED_CALL_CONTINUATION_IDENTITY,
-    C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT,
+    C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT,
     C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
     C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
     C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT,
@@ -7246,6 +7397,7 @@ struct CIrLowerVlaLayoutState
 
 typedef struct CIrBodyTask CIrBodyTask;
 typedef struct CIrSwitchCase CIrSwitchCase;
+typedef struct CIrSubstatementCase CIrSubstatementCase;
 typedef struct CIrLabel CIrLabel;
 
 typedef enum CIrLowerBodyContinuation
@@ -7269,6 +7421,7 @@ struct CIrLowerBodyState
     CIrBodyTask* tasks;
     CIrBodyTask* current_task;
     CIrSwitchCase* switch_cases;
+    CIrSubstatementCase* substatement_cases;
     CIrLabel* labels;
     IrSourceRange declaration_source;
     IrSourceRange child_source;
@@ -7283,6 +7436,7 @@ struct CIrLowerBodyState
     u32 task_count;
     u32 task_capacity;
     u32 switch_case_capacity;
+    u32 substatement_case_count;
     u32 label_count;
     u32 index;
     u32 switch_case_count;
@@ -8788,21 +8942,48 @@ BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder,
 // enclosing expression walker.  Keep the context query local to lowering so
 // the call emitter can avoid inserting an early unreachable terminator in
 // those nested bodies (the body walker already knows how to close them).
-BUSTER_C_INTERNAL bool c_ir_lowering_in_statement_expression(CIntegerIrBuilder* builder)
+/* Whether something enclosing the call being lowered resumes after it, which
+   is what decides that a noreturn callee may not end its block. A GNU
+   statement expression is resumed by the enclosing expression frame; every
+   branching expression -- `? :`, `&&`, `||`, and a lowered branch condition --
+   created a merge block its arm is expected to reach. Buster's own
+   BUSTER_CHECK puts a noreturn call in a conditional operand, so this is not
+   a hypothetical shape. */
+BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* builder)
 {
-    for (u32 index = 0; index < builder->lower_machine.frame_count; index += 1)
+    bool result = false;
+    for (u32 index = 0; index < builder->lower_machine.frame_count && !result; index += 1)
     {
         CIrLowerFrame* frame = &builder->lower_machine.frames[index];
-        if (frame->kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION)
+        switch (frame->kind)
         {
-            return true;
-        }
-        if (frame->kind == C_IR_LOWER_FRAME_BODY && frame->as.body.state && frame->as.body.state->statement_expression_mode)
-        {
-            return true;
+        case C_IR_LOWER_FRAME_LOGICAL_VALUE:
+            // Every expression is lowered through one of these, and it only
+            // branches once it has found a root `&&`/`||`; the stage says
+            // which, because the frame that merely forwards to the expression
+            // core sets LOGICAL_CORE before pushing anything.
+            result = frame->stage != (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
+            break;
+        case C_IR_LOWER_FRAME_STATEMENT_EXPRESSION:
+        case C_IR_LOWER_FRAME_CONDITION:
+        case C_IR_LOWER_FRAME_CONDITION_LEAF:
+        case C_IR_LOWER_FRAME_CONDITIONAL_VALUE:
+        case C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_LEFT:
+        case C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_COMPLETION:
+        case C_IR_LOWER_FRAME_ARITHMETIC_CONDITIONAL_FALSE_COMPLETION:
+        case C_IR_LOWER_FRAME_SELECTION_EXPRESSION:
+        case C_IR_LOWER_FRAME_SELECTION_CONTINUE:
+            result = true;
+            break;
+        case C_IR_LOWER_FRAME_BODY:
+            result = frame->as.body.state && frame->as.body.state->statement_expression_mode;
+            break;
+        default:
+            break;
         }
     }
-    return false;
+
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
@@ -8850,14 +9031,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.symbol = target->symbol;
     call.result = result;
     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-    // libc's abort (and the assertion helpers built on it) are noreturn.  A
-    // direct body therefore must not fall through after the call; GNU
-    // statement expressions are the exception because their nested body is
-    // resumed by the enclosing expression frame, which emits the proper
-    // continuation after this call.
-    bool noreturn = (string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+    // A call to a noreturn callee ends control flow, so a direct body must not
+    // fall through after it.  The declaration's attribute is the general
+    // answer -- glibc marks exit, abort and longjmp with it -- and the three
+    // names remain because a platform's headers may declare the assertion
+    // helpers without one, and losing that would silently reintroduce a
+    // fall-through past an assertion failure.  GNU statement expressions are
+    // the exception because their nested body is resumed by the enclosing
+    // expression frame, which emits the proper continuation after this call.
+    bool noreturn = (signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
                      string_equal(target->name, S8("__assert_perror_fail"))) &&
-                    !c_ir_lowering_in_statement_expression(builder);
+                    !c_ir_lowering_resumes_after_call(builder);
     if (noreturn)
     {
         IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
@@ -8910,6 +9094,120 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_builtin_float_bits(CIntegerIrBuilder* buil
     IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
     ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
     builder->function->values[result.value].definition = id;
+    return result;
+}
+
+/* Lowers one `__builtin_mem*` call to the library function it names. Clang
+   makes these available with no declaration in scope, which is exactly why
+   freestanding sources reach for them, so the prototype cannot be assumed to
+   exist: prefer the translation unit's own declaration when it has one — that
+   keeps a single symbol when the same unit also calls `memcpy` directly — and
+   otherwise import the standard signature. The argument conversions are the
+   prototype's, so a size passed as `int` still widens the way a declared call
+   would. */
+BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* builder, CToken token, CIrMemoryBuiltin kind, IrValueId* arguments,
+                                                            u32 argument_count)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId void_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+    // memset takes an int fill where the copies take a source pointer, and
+    // memcmp answers an int where the others answer the destination.
+    bool fill = kind == C_IR_MEMORY_BUILTIN_MEMSET;
+    bool compare = kind == C_IR_MEMORY_BUILTIN_MEMCMP;
+    IrTypeId parameter_types[3] = {void_pointer_type, fill ? builder->s32_type : void_pointer_type, builder->size_type};
+    IrTypeId return_type = compare ? builder->s32_type : void_pointer_type;
+    if (argument_count == BUSTER_ARRAY_LENGTH(parameter_types) && void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        String8 link_name = c_ir_memory_builtin_link_names[kind];
+        u32 declaration_index = c_ir_find_function(builder, link_name);
+        bool declared = declaration_index != UINT32_MAX && builder->declaration_functions[declaration_index] &&
+                        builder->signatures[declaration_index].valid && !builder->signatures[declaration_index].is_variadic &&
+                        builder->signatures[declaration_index].parameter_count == argument_count;
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        bool converted = true;
+        for (u32 argument_index = 0; argument_index < argument_count && converted; argument_index += 1)
+        {
+            IrTypeId target_type = declared ? builder->signatures[declaration_index].parameter_types[argument_index] : parameter_types[argument_index];
+            arguments[argument_index] = c_ir_decay_array(builder, arguments[argument_index], target_type, source);
+            arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], target_type, source);
+            converted = arguments[argument_index].value != IR_ID_UNDERLYING_INVALID;
+        }
+        if (converted && declared)
+        {
+            result = c_ir_emit_call_values(builder, token, declaration_index, arguments, argument_count);
+        }
+        else if (converted)
+        {
+            IrTypeId* imported_parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count);
+            for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+            {
+                imported_parameter_types[argument_index] = parameter_types[argument_index];
+            }
+            IrTypeId function_type = ir_program_add_type(builder->program, (IrType){
+                                                                              .name = S8("C memory function"),
+                                                                              .parameter_types = imported_parameter_types,
+                                                                              .element_type = IR_TYPE_ID_INVALID,
+                                                                              .return_type = return_type,
+                                                                              .layout =
+                                                                                  {
+                                                                                      .size = builder->program->data_layout.pointer.size,
+                                                                                      .alignment = builder->program->data_layout.pointer.alignment,
+                                                                                      .resolved = true,
+                                                                                  },
+                                                                              .kind = IR_TYPE_FUNCTION,
+                                                                              .calling_convention = IR_CALLING_CONVENTION_C,
+                                                                              .parameter_count = argument_count,
+                                                                          });
+            IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+            for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
+            {
+                IrSymbol* candidate = &builder->program->symbols.symbols[symbol_index];
+                if (candidate->kind == IR_SYMBOL_FUNCTION && string_equal(candidate->link_name, link_name))
+                {
+                    symbol = candidate->id;
+                    function_type = candidate->type;
+                }
+            }
+            if (symbol.value == IR_ID_UNDERLYING_INVALID)
+            {
+                symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                                     .name = link_name,
+                                                                     .link_name = link_name,
+                                                                     .source = source,
+                                                                     .type = function_type,
+                                                                     .kind = IR_SYMBOL_FUNCTION,
+                                                                     .linkage = IR_LINKAGE_IMPORT,
+                                                                 });
+            }
+            if (symbol.value != IR_ID_UNDERLYING_INVALID && function_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrValueId reference_result = c_ir_add_result(builder, function_type);
+                IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+                reference.symbol = symbol;
+                reference.result = reference_result;
+                IrSourceRange reference_source = source;
+                IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
+                builder->function->values[reference_result.value].definition = reference_id;
+                IrValueId call_result = c_ir_add_result(builder, return_type);
+                IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
+                operands[0] = reference_result;
+                for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+                {
+                    operands[argument_index + 1] = arguments[argument_index];
+                }
+                IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, return_type);
+                call.operands = operands;
+                call.operand_count = argument_count + 1;
+                call.symbol = symbol;
+                call.result = call_result;
+                IrSourceRange call_source = source;
+                IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+                builder->function->values[call_result.value].definition = call_id;
+                result = call_result;
+            }
+        }
+    }
+
     return result;
 }
 
@@ -10421,6 +10719,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         CIrAtomicBuiltin builtin_atomic = builtin_kind == C_SYMBOL_BUILTIN_ATOMIC ? c_ir_atomic_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_ATOMIC_BUILTIN_COUNT;
         u32 builtin_simd = builtin_kind == C_SYMBOL_BUILTIN_SIMD ? c_ir_simd_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_SIMD_BUILTIN_NONE;
         String8 builtin_math_link_name = builtin_kind == C_SYMBOL_BUILTIN_MATH ? c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)) : (String8){0};
+        CIrMemoryBuiltin builtin_memory = builtin_kind == C_SYMBOL_BUILTIN_MEMORY ? c_ir_memory_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_MEMORY_BUILTIN_COUNT;
         IrUnaryOperation builtin_unary = builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS      ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
                                          : builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS  ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
                                          : builtin_kind == C_SYMBOL_BUILTIN_POPULATION_COUNT       ? IR_UNARY_INTEGER_POPULATION_COUNT
@@ -10547,7 +10846,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
              !builtin_assume_aligned && !builtin_debugtrap && !builtin_unreachable && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
-             !builtin_math_link_name.length && builtin_unary == IR_UNARY_COUNT && builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
+             !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
+             builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
              !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
             (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start))
         {
@@ -10595,6 +10895,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_generic = builtin_generic,
             .deferred_calls = builtin_generic,
             .builtin_atomic = builtin_atomic,
+            .builtin_memory = builtin_memory,
             .builtin_math_link_name = builtin_math_link_name,
             .builtin_unary = builtin_unary,
             .builtin_simd = builtin_simd,
@@ -11994,12 +12295,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             remaining -= 1;
             continue;
         }
-        if (selected->builtin_math_link_name.length)
+        // The library-shaped builtins — the math intrinsics and the block-memory
+        // family — differ only in what they emit once every argument is a
+        // value, so they share one comma walk over the argument list.
+        if (selected->builtin_math_link_name.length || selected->builtin_memory != C_IR_MEMORY_BUILTIN_COUNT)
         {
             u32 argument_count = frame->as.prepared_call.state->argument_count;
             u32 argument_end = selected->close_index;
             u32 argument_index = selected->open_index + 1;
-            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT)
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT)
             {
                 if (!child_success)
                 {
@@ -12058,10 +12362,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 frame->as.prepared_call.state->argument_count = argument_count;
                 frame->as.prepared_call.state->separator = separator;
-                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT, argument_index, separator, false);
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_LIBRARY_ARGUMENT, argument_index, separator, false);
             }
             selected->argument_count = argument_count;
-            selected->result = c_ir_emit_math_call(builder, token, selected->builtin_math_link_name, selected->arguments, argument_count);
+            selected->result = selected->builtin_math_link_name.length
+                                   ? c_ir_emit_math_call(builder, token, selected->builtin_math_link_name, selected->arguments, argument_count)
+                                   : c_ir_emit_memory_builtin_call(builder, token, selected->builtin_memory, selected->arguments, argument_count);
             if (selected->result.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
@@ -21898,8 +22204,10 @@ struct CIrBodyTask
     u32 break_token;
     u32 continue_token;
     bool allow_trailing_expression;
-    bool save_stack_at_entry;
     bool restore_before_continuation;
+    // A loop body: when a variably modified declaration inside it takes a
+    // stack checkpoint, that checkpoint is also what `break` and `continue`
+    // restore, so the allocation is reclaimed once per iteration.
     bool checkpoint_is_break;
     bool checkpoint_is_continue;
     bool has_stack_checkpoint;
@@ -21913,6 +22221,12 @@ BUSTER_C_INTERNAL void c_ir_body_task_inherit_control(CIrBodyTask* child, CIrBod
     child->continue_checkpoint = parent.continue_checkpoint;
     child->has_break_checkpoint = parent.has_break_checkpoint;
     child->has_continue_checkpoint = parent.has_continue_checkpoint;
+    // The loop body's claim travels with its nested statements: a variably
+    // modified declaration in a block inside the body is the one whose
+    // checkpoint `break` and `continue` must restore, and the loop body task
+    // itself never sees it.
+    child->checkpoint_is_break = parent.checkpoint_is_break;
+    child->checkpoint_is_continue = parent.checkpoint_is_continue;
     child->break_scope = parent.break_scope;
     child->continue_scope = parent.continue_scope;
     child->break_token = parent.break_token;
@@ -22459,10 +22773,44 @@ struct CIrSwitchCase
     IrBlockId block;
     bool is_default;
     bool is_range;
-    u8 reserved[2];
+    // Set when the label prefixes a control statement's substatement rather
+    // than opening a new statement of the switch body — `if (c) case 1: ...`.
+    // Such a case still dispatches to a block of its own, but the block is
+    // reached by falling into it from the statement stream that contains it,
+    // so it owns no token range and gets no task.
+    bool in_substatement;
+    u8 reserved[1];
+};
+
+// One case label whose block the statement stream has to branch into when it
+// reaches the label, keyed by the label's token index. Nested switches reuse
+// the switch-case scratch array, so this registry lives for the whole body.
+typedef struct CIrSubstatementCase CIrSubstatementCase;
+struct CIrSubstatementCase
+{
+    u32 label_start;
+    u32 content_start;
+    IrBlockId block;
 };
 
 typedef struct CIrLabel CIrLabel;
+
+// The registry is keyed by token index, which is unique across the body, so a
+// nested switch's labels can never be mistaken for an outer switch's. Bodies
+// carry a handful of these at most, so a linear scan is the whole lookup.
+BUSTER_C_INTERNAL CIrSubstatementCase* c_ir_substatement_case_find(CIrLowerBodyState* state, u32 label_start)
+{
+    CIrSubstatementCase* result = 0;
+    for (u32 index = 0; index < state->substatement_case_count && !result; index += 1)
+    {
+        if (state->substatement_cases[index].label_start == label_start)
+        {
+            result = state->substatement_cases + index;
+        }
+    }
+
+    return result;
+}
 
 // A colon only introduces a labeled statement when it is itself a label,
 // case, or default colon; a conditional's colon can directly precede an
@@ -22539,67 +22887,86 @@ BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CTok
     return true;
 }
 
+/* True when the statement beginning at `index` stands where a control statement
+   expects its substatement: directly after an `if (...)`, `for (...)`,
+   `while (...)` or `switch (...)` header, or after `do` or `else`. This is the
+   position that makes both `if (c) again: x -= 1;` and the Duff's-device
+   `if (c) case 1: { ... }` legal — the label prefixes the controlled
+   substatement rather than opening a new statement of the enclosing block. */
+BUSTER_C_SHARED bool c_ir_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    bool result = false;
+    if (index > body_start && index <= preprocess->token_count)
+    {
+        CToken previous = preprocess->tokens[index - 1];
+        if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            u32 depth = 0;
+            u32 open = UINT32_MAX;
+            for (u32 scan = index - 1; scan >= body_start; scan -= 1)
+            {
+                u8 punctuator = preprocess->tokens[scan].punctuator;
+                if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
+                {
+                    if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                    {
+                        depth += 1;
+                    }
+                    else
+                    {
+                        if (!depth)
+                        {
+                            break;
+                        }
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            open = scan;
+                            break;
+                        }
+                    }
+                }
+                if (scan == body_start)
+                {
+                    break;
+                }
+            }
+            if (open != UINT32_MAX && open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                CToken control = preprocess->tokens[open - 1];
+                result = c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_IF) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_FOR) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_WHILE) ||
+                         c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_SWITCH);
+            }
+        }
+        else
+        {
+            result = previous.kind == C_TOKEN_IDENTIFIER &&
+                     (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
+                      c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE));
+        }
+    }
+
+    return result;
+}
+
 BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
 {
-    if (body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
-        index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
-        c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
-        c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
-        !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON))
+    bool result = false;
+    if (!(body_start >= body_end || body_end > preprocess->token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
+          index + 1 >= body_end || preprocess->tokens[index].kind != C_TOKEN_IDENTIFIER ||
+          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_CASE) ||
+          c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
+          !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
     {
-        return false;
+        CToken previous = index > body_start ? preprocess->tokens[index - 1] : (CToken){0};
+        result = index == body_start || c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
+                 (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
+                 c_ir_control_substatement_position(preprocess, body_start, index);
     }
-    if (index == body_start)
-    {
-        return true;
-    }
-    CToken previous = preprocess->tokens[index - 1];
-    if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-    {
-        u32 depth = 0;
-        u32 open = UINT32_MAX;
-        for (u32 scan = index - 1; scan >= body_start; scan -= 1)
-        {
-            u8 punctuator = preprocess->tokens[scan].punctuator;
-            if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
-            {
-                if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                {
-                    depth += 1;
-                }
-                else
-                {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        open = scan;
-                        break;
-                    }
-                }
-            }
-            if (scan == body_start)
-            {
-                break;
-            }
-        }
-        if (open != UINT32_MAX && open > body_start && preprocess->tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
-        {
-            CToken control = preprocess->tokens[open - 1];
-            return c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_IF) ||
-                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_FOR) ||
-                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_WHILE) ||
-                   c_token_is_well_known(preprocess->spelling_base, control, C_SYMBOL_WELL_KNOWN_SWITCH);
-        }
-        return false;
-    }
-    return c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
-           (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
-           (previous.kind == C_TOKEN_IDENTIFIER && (c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_DO) ||
-                                                    c_token_is_well_known(preprocess->spelling_base, previous, C_SYMBOL_WELL_KNOWN_ELSE)));
+
+    return result;
 }
 
 BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, String8 name)
@@ -22656,6 +23023,66 @@ BUSTER_C_INTERNAL bool c_ir_control_statement_ends_with_body(CPreprocessResult p
     }
     String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);
     return string_equal(spelling, S8("switch")) || string_equal(spelling, S8("for")) || string_equal(spelling, S8("while"));
+}
+
+/* The label prefixes of a statement, if any. `name :`, `default :`, and
+   `case <constant> :` may repeat before the statement they label, and a
+   controlled substatement is allowed to carry them — `if (c) case 1: { ... }`
+   is the Duff's-device fallthrough shape. Measuring the statement has to start
+   past them, because the extent of `case 1: { ... }` is the closing brace and
+   not the next semicolon after it. */
+BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 result = start;
+    bool scanning = result < end;
+    while (scanning)
+    {
+        scanning = false;
+        CToken token = preprocess.tokens[result];
+        bool is_case = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
+        if (is_case)
+        {
+            // The label constant may itself be a conditional expression, so the
+            // ':' that ends the label is the one c_ir_label_colon_at accepts.
+            u32 nested = 0;
+            u32 colon = result + 1;
+            while (colon < end)
+            {
+                CToken current = preprocess.tokens[colon];
+                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    nested += 1;
+                }
+                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    if (!nested)
+                    {
+                        break;
+                    }
+                    nested -= 1;
+                }
+                else if (!nested && c_token_is_punctuator(&current, C_PUNCTUATOR_COLON) &&
+                         c_ir_label_colon_at(preprocess.tokens, result, colon))
+                {
+                    break;
+                }
+                colon += 1;
+            }
+            if (colon < end && c_token_is_punctuator(&preprocess.tokens[colon], C_PUNCTUATOR_COLON))
+            {
+                result = colon + 1;
+                scanning = result < end;
+            }
+        }
+        else if (token.kind == C_TOKEN_IDENTIFIER && result + 1 < end &&
+                 c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_COLON))
+        {
+            result += 2;
+            scanning = result < end;
+        }
+    }
+
+    return result;
 }
 
 BUSTER_C_INTERNAL u32 c_ir_if_statement_end(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
@@ -22724,6 +23151,9 @@ BUSTER_C_INTERNAL u32 c_ir_if_statement_end(Arena* arena, CPreprocessResult prep
             }
             continue;
         }
+        // The controlled substatement may carry label prefixes, so its extent
+        // is measured from the statement they label.
+        child_start = c_ir_statement_labels_end(preprocess, child_start, end);
         if (child_start >= end)
         {
             return UINT32_MAX;
@@ -22806,21 +23236,33 @@ BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResul
 {
     if (start < end)
     {
-        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE))
+        // Labels prefixing the substatement are part of it, so the extent is
+        // measured from the statement they label while the range still opens
+        // at the first label — that is what lowering has to walk.
+        u32 statement = c_ir_statement_labels_end(preprocess, start, end);
+        if (statement >= end)
         {
-            u32 close = c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            return false;
+        }
+        if (c_token_is_punctuator(&preprocess.tokens[statement], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_ir_matching_delimiter(preprocess, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
             if (close == UINT32_MAX)
             {
                 return false;
             }
-            *content_start = start + 1;
-            *content_end = close;
+            // An unlabelled compound statement hands its interior straight to
+            // the caller; a labelled one keeps its braces so the stream lowers
+            // the labels first and then the block.
+            *content_start = statement == start ? start + 1 : start;
+            *content_end = statement == start ? close : close + 1;
             *after = close + 1;
             return true;
         }
-        if (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("if")))
+        if (preprocess.tokens[statement].kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[statement]), S8("if")))
         {
-            u32 statement_end = c_ir_if_statement_end(arena, preprocess, start, end);
+            u32 statement_end = c_ir_if_statement_end(arena, preprocess, statement, end);
             if (statement_end == UINT32_MAX)
             {
                 return false;
@@ -22833,8 +23275,8 @@ BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResul
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
-        bool ends_with_body = c_ir_control_statement_ends_with_body(preprocess, start, end);
-        for (u32 index = start; index < end; index += 1)
+        bool ends_with_body = c_ir_control_statement_ends_with_body(preprocess, statement, end);
+        for (u32 index = statement; index < end; index += 1)
         {
             CToken token = preprocess.tokens[index];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -25011,6 +25453,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
     }
     state->tasks = arena_allocate(builder->scratch_arena, CIrBodyTask, (u32)task_capacity);
     state->switch_cases = arena_allocate(builder->scratch_arena, CIrSwitchCase, switch_case_capacity ? switch_case_capacity : 1);
+    // At most every case label of the body stands in substatement position.
+    state->substatement_cases = arena_allocate(builder->scratch_arena, CIrSubstatementCase, switch_case_capacity ? switch_case_capacity : 1);
+    state->substatement_case_count = 0;
     state->task_capacity = (u32)task_capacity;
     state->switch_case_capacity = switch_case_capacity;
     state->task_count = 1;
@@ -25334,7 +25779,34 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             for (u32 case_index = state->switch_case_count; case_index != 0; case_index -= 1)
             {
                 u32 current = case_index - 1;
-                IrBlockId fallthrough = current + 1 < state->switch_case_count ? switch_cases[current + 1].block : merge;
+                if (switch_cases[current].in_substatement)
+                {
+                    // No task: the tokens belong to the case that encloses the
+                    // control statement. Publish the block so the statement
+                    // stream can branch into it when it reaches the label.
+                    if (state->substatement_case_count >= state->switch_case_capacity)
+                    {
+                        return false;
+                    }
+                    state->substatement_cases[state->substatement_case_count++] = (CIrSubstatementCase){
+                        .label_start = switch_cases[current].label_start,
+                        .content_start = switch_cases[current].content_start,
+                        .block = switch_cases[current].block,
+                    };
+                    continue;
+                }
+                // Fallthrough runs to the next case that owns a range; a
+                // substatement case is entered from inside a range, never by
+                // falling off the end of the previous one.
+                IrBlockId fallthrough = merge;
+                for (u32 next = current + 1; next < state->switch_case_count; next += 1)
+                {
+                    if (!switch_cases[next].in_substatement)
+                    {
+                        fallthrough = switch_cases[next].block;
+                        break;
+                    }
+                }
                 tasks[task_count++] = (CIrBodyTask){
                     .start = switch_cases[current].content_start,
                     .end = switch_cases[current].content_end,
@@ -25413,25 +25885,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                        },
                                                });
                 return false;
-            }
-            if (task.save_stack_at_entry)
-            {
-                task.stack_checkpoint = c_ir_emit_stack_save(builder, declaration_source);
-                if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
-                {
-                    return false;
-                }
-                task.has_stack_checkpoint = true;
-                if (task.checkpoint_is_break)
-                {
-                    task.break_checkpoint = task.stack_checkpoint;
-                    task.has_break_checkpoint = true;
-                }
-                if (task.checkpoint_is_continue)
-                {
-                    task.continue_checkpoint = task.stack_checkpoint;
-                    task.has_continue_checkpoint = true;
-                }
             }
             index = task.start;
         }
@@ -25550,6 +26003,25 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 index += 2;
                 continue;
             }
+            // A case label the enclosing switch left inside this range: enter
+            // its dispatch block exactly the way a named label is entered, so
+            // the fallthrough edge and the switch edge meet in the same block.
+            CIrSubstatementCase* substatement_case = c_ir_substatement_case_find(state, index);
+            if (substatement_case)
+            {
+                IrBlock* current = &builder->function->blocks[builder->current_block.value];
+                if (!current->terminated && !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &substatement_case->block, 1,
+                                                            c_ir_token_source_range(builder, first)))
+                {
+                    return false;
+                }
+                if (!c_ir_switch_block(builder, substatement_case->block))
+                {
+                    return false;
+                }
+                index = substatement_case->content_start;
+                continue;
+            }
             if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_STATIC_ASSERT))
             {
                 u32 assertion_end = index + 1;
@@ -25614,6 +26086,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 case_count = 0;
                 u32 brace_depth = 0;
                 bool has_default = false;
+                // The last case that owns a token range. A label standing as a
+                // control statement's substatement owns none, so it neither
+                // closes the previous case's range nor opens one of its own.
+                u32 last_ranged_case = UINT32_MAX;
                 for (u32 scan = body_open + 1; scan < body_close; scan += 1)
                 {
                     CToken token = builder->preprocess.tokens[scan];
@@ -25694,14 +26170,26 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         return false;
                     }
-                    if (case_count)
+                    // A label in substatement position only becomes a dispatch
+                    // target; the enclosing case keeps the tokens, and its
+                    // statement stream branches into the block at the label.
+                    // The very first label of a switch is never treated that
+                    // way: with no enclosing case there would be no stream to
+                    // reach it from.
+                    bool in_substatement = case_count != 0 && c_ir_control_substatement_position(&builder->preprocess, body_open + 1, scan);
+                    if (!in_substatement)
                     {
-                        cases[case_count - 1].content_end = scan;
+                        if (last_ranged_case != UINT32_MAX)
+                        {
+                            cases[last_ranged_case].content_end = scan;
+                        }
+                        last_ranged_case = case_count;
                     }
                     CIrSwitchCase switch_case = {
                         .label_start = scan,
                         .content_start = colon + 1,
                         .is_default = is_default,
+                        .in_substatement = in_substatement,
                     };
                     if (is_case)
                     {
@@ -25750,9 +26238,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     cases[case_count++] = switch_case;
                     scan = colon;
                 }
-                if (case_count)
+                if (last_ranged_case != UINT32_MAX)
                 {
-                    cases[case_count - 1].content_end = body_close;
+                    cases[last_ranged_case].content_end = body_close;
                 }
                 state->switch_case_count = case_count;
                 state->switch_body_start = body_open + 1;
@@ -25910,8 +26398,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = condition_block,
                     .break_block = exit_block,
                     .continue_block = condition_block,
-                    .save_stack_at_entry = true,
-                    .restore_before_continuation = true,
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
@@ -26009,8 +26495,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = increment_block,
                     .break_block = exit_block,
                     .continue_block = increment_block,
-                    .save_stack_at_entry = true,
-                    .restore_before_continuation = true,
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
@@ -26090,8 +26574,6 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = condition_block,
                     .break_block = exit_block,
                     .continue_block = condition_block,
-                    .save_stack_at_entry = true,
-                    .restore_before_continuation = true,
                     .checkpoint_is_break = true,
                     .checkpoint_is_continue = true,
                 };
@@ -26596,6 +27078,16 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     if (!task.has_stack_checkpoint)
                     {
+                        // The save is taken here, at the declaration that
+                        // moves the stack pointer, and never at the entry of
+                        // the enclosing loop body. An entry save does not
+                        // dominate a label inside the body, so a `goto` into
+                        // the body would reach the end-of-iteration restore
+                        // having never executed the save and would load the
+                        // frame slot's stale contents into RSP. C forbids
+                        // jumping into the scope of a variably modified
+                        // declaration, so taking the save at the declaration
+                        // leaves no conforming program without one.
                         task.stack_checkpoint = c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, name));
                         if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
                         {
@@ -26603,6 +27095,21 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         }
                         task.has_stack_checkpoint = true;
                         task.restore_before_continuation = true;
+                        // The outermost checkpoint inside the loop body is the
+                        // one `break` and `continue` restore; a nested block's
+                        // later checkpoint would leave everything the body
+                        // allocated before it on the stack, and the next
+                        // iteration would allocate again below it.
+                        if (task.checkpoint_is_break && !task.has_break_checkpoint)
+                        {
+                            task.break_checkpoint = task.stack_checkpoint;
+                            task.has_break_checkpoint = true;
+                        }
+                        if (task.checkpoint_is_continue && !task.has_continue_checkpoint)
+                        {
+                            task.continue_checkpoint = task.stack_checkpoint;
+                            task.has_continue_checkpoint = true;
+                        }
                     }
                     if (c_ir_declaration_initializer_range(builder->preprocess,
                                                            (CDeclaration){
@@ -34057,6 +34564,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &wide_float_cache, &parse, declaration,
                                                                      c_type_ir_map, target);
+            signatures[declaration_index].is_noreturn = c_ir_declaration_is_noreturn(preprocess, declaration);
         }
     }
     bool* function_needed = arena_allocate(arena, bool, parse.declaration_count);

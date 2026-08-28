@@ -1732,7 +1732,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     }
     // Vector operands must be reached through the same frame rebase as every
     // other canonical value. A Win64 function whose scope emits a stack restore
-    // -- which every loop body does -- keeps rbp at the bottom of its frame and
+    // -- one holding a variably modified declaration -- keeps rbp at the bottom of its frame and
     // addresses values at positive displacements, where every other target
     // keeps rbp at the top and uses negative ones. Spelling a vector operand's
     // displacement as a bare negation is only right where the rebase is the
@@ -1743,7 +1743,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "typedef unsigned char Bytes16 __attribute__((vector_size(16)));\n"
         "void vector_with_loop(Bytes16 *out, Bytes16 *left, Bytes16 *right, int count, int *total_out) {\n"
         "    int total = 0;\n"
-        "    for (int index = 0; index < count; index += 1) { total += index; }\n"
+        "    for (int index = 0; index < count; index += 1) { int scratch[count]; scratch[index] = index; total += scratch[index]; }\n"
         "    *total_out = total;\n"
         "    Bytes16 sum = *left + *right;\n"
         "    *out = sum;\n"

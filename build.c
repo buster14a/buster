@@ -80,6 +80,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_LUA,
     BUILD_COMMAND_TEST_YYJSON,
     BUILD_COMMAND_TEST_STB,
+    BUILD_COMMAND_TEST_LZ4,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -626,7 +627,22 @@ struct TestStbOptions
     String8 config;
 };
 
+// LZ4 is consumed from a caller-provided pristine checkout.  The harness owns
+// an explicit source manifest rather than driving the upstream make or CMake
+// files: upstream build-system detection is a separate driver milestone, and
+// an explicit manifest is what makes a missing translation unit an error
+// instead of a silent omission.
+typedef struct TestLz4Options TestLz4Options;
+struct TestLz4Options
+{
+    String8 source_directory;
+    String8 config;
+};
+
 #define STB_COMPATIBILITY_COMMIT "2c980bb59875b0d32144a71867fbdebb2f77cd20"
+
+#define LZ4_COMPATIBILITY_TAG "v1.10.0"
+#define LZ4_COMPATIBILITY_COMMIT "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -11053,6 +11069,1141 @@ BUSTER_GLOBAL_LOCAL void test_yyjson_action_add(Arena* arena, TestYyjsonOptions 
     TestYyjsonOptions* options_copy = arena_allocate(arena, TestYyjsonOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_yyjson_action, .callback_data = options_copy};
+}
+
+// --- LZ4 compatibility harness ------------------------------------------
+// The manifest below is the whole build system for this harness.  Upstream's
+// make and CMake files are deliberately not driven: the acceptance criteria
+// ask for the staging order -- portable block library, then frame library,
+// then CLI -- to be visible in the log, and for a missing translation unit to
+// be an error rather than a silent omission.  Upstream build-system detection
+// is a later driver milestone.  The checkout stays outside this repository
+// and is never copied or patched.
+//
+// Two measurements are kept apart on purpose.  LZ4_METRIC reports what the
+// compiler cost to produce a unit; LZ4_THROUGHPUT and LZ4_CODEGEN report what
+// the produced code then did on a compression workload.  Conflating them
+// hides a codegen regression behind a compile-time win and the reverse.
+typedef struct Lz4CommandResult Lz4CommandResult;
+struct Lz4CommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+// One configuration of the CPU axis.  The portable row must pass before the
+// explicit rows run, so a baseline or native failure can never mask a
+// portable one; only the portable row carries the upstream test suite, which
+// is a property of the library sources rather than of the selected CPU.
+typedef struct Lz4Configuration Lz4Configuration;
+struct Lz4Configuration
+{
+    String8 name;
+    String8 cpu;
+    u32 upstream_tests;
+};
+
+// One row of the compressed-bytes cross-check.  LZ4 output is deterministic
+// for a given level and frame shape, so the two compressors must agree
+// byte-for-byte and not merely round-trip.
+typedef struct Lz4CrossCase Lz4CrossCase;
+struct Lz4CrossCase
+{
+    String8 name;
+    String8 corpus;
+    // Up to four CLI options; empty entries are skipped, so one row describes
+    // both `-1` and `-9 -BD -BX --content-size`.
+    String8 options[4];
+};
+
+BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: lz4 harness could not start the command above\n"));
+        return (Lz4CommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    Lz4CommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+// Wall time and instructions retired for one child.  The counter opened in
+// entry_point covers this process and its descendants, and the harness runs
+// its children one at a time, so the delta is that child alone.  Linux-only:
+// a zero count means no counter, which is never an error.
+BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command_measured(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, u64* elapsed_us,
+                                                          u64* instructions)
+{
+    u64 start_instructions = instruction_counter_read();
+    u64 start_us = os_now_microseconds();
+    Lz4CommandResult result = lz4_command(arena, arguments, working_directory, capture);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start_us;
+    }
+    if (instructions)
+    {
+        u64 end_instructions = instruction_counter_read();
+        *instructions = end_instructions > start_instructions ? end_instructions - start_instructions : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_run_arguments(Arena* arena, String8* arguments, u64 argument_count, String8 working_directory, String8* output, u64* elapsed_us,
+                                           u64* instructions)
+{
+    SliceString8 slice = {.pointer = arguments, .length = argument_count};
+    Lz4CommandResult command = lz4_command_measured(arena, slice, working_directory, output != 0, elapsed_us, instructions);
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lz4_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lz4_basename(String8 path)
+{
+    u64 start = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    return string_slice(path, start, path.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_lz4 requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    Lz4CommandResult head = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = lz4_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(LZ4_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_lz4 requires pristine lz4 tag {S8} commit {S8}; found {S8}\n"), S8(LZ4_COMPATIBILITY_TAG), S8(LZ4_COMPATIBILITY_COMMIT),
+                     commit);
+        return false;
+    }
+    // The commit alone would accept a detached checkout of the same tree under
+    // a different name; the tag is what the harness reports and pins.
+    String8 tag_arguments[] = {git, S8("describe"), S8("--tags"), S8("--exact-match"), S8("HEAD")};
+    Lz4CommandResult tag = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tag_arguments), source_directory, true);
+    String8 tag_name = lz4_trim_ascii_space(tag.output);
+    if (tag.result != PROCESS_RESULT_SUCCESS || !string_equal(tag_name, S8(LZ4_COMPATIBILITY_TAG)))
+    {
+        string_print(S8("error: test_lz4 requires lz4 tag {S8}; found {S8}\n"), S8(LZ4_COMPATIBILITY_TAG), tag_name);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    Lz4CommandResult status = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_lz4 checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("LZ4_SOURCE tag={S8} commit={S8} pristine=1 path={S8}\n"), tag_name, commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 lz4_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (configs[index].length)
+        {
+            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+            if (path_exists(arena, candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_metrics_report(Arena* arena, String8 config_name, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: lz4 compiler metrics missing config={S8} allocator={S8} unit={S8}: {S8}\n"), config_name, mode, unit, path);
+        return false;
+    }
+    string_print(S8("LZ4_METRIC config={S8} allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"),
+                 config_name, mode, unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    return true;
+}
+
+// The include and macro set every unit shares.  lib, programs, and tests are
+// built with one flag set on purpose: upstream's three makefiles agree on
+// XXH_NAMESPACE, and objects compiled without it would not link against
+// objects compiled with it.
+// The include flags are formatted before any argument builder is started:
+// OsArgumentBuilder accumulates String8 entries at the arena head, so an
+// allocation made between start and flush lands inside its argument array.
+typedef struct Lz4CommonFlags Lz4CommonFlags;
+struct Lz4CommonFlags
+{
+    String8 library_include;
+    String8 programs_include;
+};
+
+BUSTER_GLOBAL_LOCAL Lz4CommonFlags lz4_common_flags(Arena* arena, String8 source_directory)
+{
+    Lz4CommonFlags result = {
+        .library_include = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("lib"))),
+        .programs_include = string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("programs"))),
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void lz4_append_common_flags(OsArgumentBuilder* builder, Lz4CommonFlags flags)
+{
+    os_argument_builder_append(builder, flags.library_include);
+    os_argument_builder_append(builder, flags.programs_include);
+    os_argument_builder_append(builder, S8("-DXXH_NAMESPACE=LZ4_"));
+    os_argument_builder_append(builder, S8("-DNDEBUG"));
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics, String8 mode,
+                                            String8 cpu, bool verbose, u64* elapsed_us)
+{
+    Lz4CommonFlags flags = lz4_common_flags(arena, source_directory);
+    String8 cpu_flag = cpu.length ? string_format(arena, S8("-march={S8}"), cpu) : (String8){0};
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    lz4_append_common_flags(&builder, flags);
+    if (cpu_flag.length)
+    {
+        os_argument_builder_append(&builder, cpu_flag);
+    }
+    os_argument_builder_append(&builder, allocator_flag);
+    os_argument_builder_append(&builder, metrics_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output)
+{
+    Lz4CommonFlags flags = lz4_common_flags(arena, source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    lz4_append_common_flags(&builder, flags);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_archive(Arena* arena, String8 archive, String8 ar, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ar);
+    os_argument_builder_append(&builder, S8("rcs"));
+    os_argument_builder_append(&builder, archive);
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// `buster_driver` links through `ide cc` rather than Clang.  The CLI is linked
+// that way on purpose -- a multi-file library plus executable is exactly the
+// driver path the issue asks to cover -- while the upstream test binaries and
+// the probe link with Clang, so a codegen failure stays distinguishable from
+// a driver or linker failure.
+BUSTER_GLOBAL_LOCAL bool lz4_link(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, bool buster_driver, String8 cpu)
+{
+    String8 cpu_flag = buster_driver && cpu.length ? string_format(arena, S8("-march={S8}"), cpu) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, linker);
+    if (buster_driver)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    // Clang accepts the linker spelling -no-pie, while ide cc exposes the
+    // compatible code-generation spelling -fno-pie (and rejects -no-pie).
+    os_argument_builder_append(&builder, buster_driver ? S8("-fno-pie") : S8("-no-pie"));
+    if (cpu_flag.length)
+    {
+        os_argument_builder_append(&builder, cpu_flag);
+    }
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// File contents are read into a scratch arena: the corpora reach tens of
+// megabytes and the harness compares them hundreds of times, which would
+// otherwise accumulate in the build driver's arena for the whole run.
+BUSTER_GLOBAL_LOCAL u64 lz4_hash_file(Arena* arena, String8 path, u64* size_out)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    u64 hash = bytes.pointer ? buster_hash_64(bytes.pointer, bytes.length) : 0;
+    if (size_out)
+    {
+        *size_out = bytes.pointer ? bytes.length : 0;
+    }
+    scratch_end(scratch);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_files_equal(Arena* arena, String8 left, String8 right)
+{
+    u64 left_size = 0;
+    u64 right_size = 0;
+    u64 left_hash = lz4_hash_file(arena, left, &left_size);
+    u64 right_hash = lz4_hash_file(arena, right, &right_size);
+    return left_size != 0 && left_size == right_size && left_hash == right_hash;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_bytes_match_file(Arena* arena, String8 bytes, String8 path)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice file_bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    bool equal = file_bytes.length == bytes.length && (!bytes.length || memcmp(file_bytes.pointer, bytes.pointer, (size_t)bytes.length) == 0);
+    scratch_end(scratch);
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL bool lz4_concatenate(Arena* arena, String8 output, String8* inputs, u64 input_count)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u64 total = 0;
+    ByteSlice* parts = arena_allocate(scratch.arena, ByteSlice, input_count);
+    bool ok = true;
+    for (u64 index = 0; index < input_count && ok; index += 1)
+    {
+        parts[index] = file_read(scratch.arena, inputs[index], (FileReadOptions){0});
+        ok = parts[index].pointer != 0;
+        total += parts[index].length;
+    }
+    if (ok)
+    {
+        u8* bytes = arena_allocate(scratch.arena, u8, total);
+        u64 offset = 0;
+        for (u64 index = 0; index < input_count; index += 1)
+        {
+            memcpy(bytes + offset, parts[index].pointer, (size_t)parts[index].length);
+            offset += parts[index].length;
+        }
+        ok = file_write(output, (ByteSlice){.pointer = bytes, .length = total});
+    }
+    scratch_end(scratch);
+    return ok;
+}
+
+// Deterministic corpora, written by the driver rather than generated by a
+// child process, so a cross-check failure can never be a corpus difference.
+// Kind 0 is repeated text for the match finder, kind 1 alternates 64 KiB
+// regions of text, unaligned little-endian records, and incompressible bytes
+// across the LZ4 window boundary, kind 2 is incompressible throughout.
+BUSTER_GLOBAL_LOCAL bool lz4_write_corpus(Arena* arena, String8 path, u32 kind, u64 size)
+{
+    static const char words[] = "the quick brown fox jumps over the lazy dog while lz4 hashes four bytes at a time and copies eight bytes at a time ";
+    u64 word_length = (u64)(sizeof(words) - 1);
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u8* bytes = arena_allocate(scratch.arena, u8, size);
+    u32 state = 0x9e3779b9u;
+    for (u64 index = 0; index < size; index += 1)
+    {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        u64 region = (index >> 16) & 3;
+        if (kind == 2 || (kind == 1 && region == 3))
+        {
+            bytes[index] = (u8)((state >> 13) & 0xffu);
+        }
+        else if (kind == 1 && region == 2)
+        {
+            bytes[index] = (u8)((index * 2654435761ull) >> ((index & 3) * 8));
+        }
+        else
+        {
+            bytes[index] = (u8)words[index % word_length];
+        }
+    }
+    bool written = file_write(path, (ByteSlice){.pointer = bytes, .length = size});
+    scratch_end(scratch);
+    return written;
+}
+
+// Reads one `key=value` line out of the probe's own output.  The workload
+// size is a property of the fixture, so parsing it back is what keeps the
+// reported throughput from drifting when the fixture changes.
+BUSTER_GLOBAL_LOCAL bool lz4_output_value(String8 output, String8 key, u64* value)
+{
+    String8 text = output;
+    String8 line = {0};
+    while (text_next_line(&text, &line))
+    {
+        String8 line_key = {0};
+        String8 line_value = {0};
+        if (text_split_field(lz4_trim_ascii_space(line), &line_key, &line_value) && string_equal(line_key, key))
+        {
+            return text_parse_u64(line_value, value);
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void lz4_report_rate(String8 label, String8 config_name, String8 mode, String8 direction, u64 bytes, u64 elapsed_us, u64 instructions)
+{
+    u64 milli_mb_s = elapsed_us ? (bytes * 1000ull) / elapsed_us : 0;
+    string_print(S8("LZ4_THROUGHPUT config={S8} allocator={S8} workload={S8} direction={S8} bytes={u64} elapsed_us={u64} throughput_mb_s={u64}.{u64:width=[0,3]}\n"),
+                 config_name, mode, label, direction, bytes, elapsed_us, milli_mb_s / 1000, milli_mb_s % 1000);
+    // Absent hardware counters are ordinary; the line is simply omitted, never
+    // reported as a failure.  See the STEP_INSTRUCTIONS discussion in AGENTS.md.
+    if (instructions && bytes)
+    {
+        u64 milli_per_byte = (instructions * 1000ull + bytes / 2) / bytes;
+        string_print(S8("LZ4_CODEGEN config={S8} allocator={S8} workload={S8} direction={S8} bytes={u64} instructions={u64} instructions_per_byte={u64}.{u64:width=[0,3]}\n"),
+                     config_name, mode, label, direction, bytes, instructions, milli_per_byte / 1000, milli_per_byte % 1000);
+    }
+}
+
+// One manifest stage.  The stage name is printed on success and named in the
+// diagnostic on failure, because the acceptance criteria ask for the staging
+// order to be observable and for the first broken stage to be identified.
+BUSTER_GLOBAL_LOCAL bool lz4_compile_stage(Arena* arena, String8 ide, String8 source_directory, String8 stage, String8 config_name, String8 mode, String8 cpu,
+                                           String8* sources, u64 source_count, String8 object_directory, String8 metrics_directory, bool verbose,
+                                           String8* objects_out)
+{
+    for (u64 index = 0; index < source_count; index += 1)
+    {
+        String8 name = lz4_basename(sources[index]);
+        objects_out[index] = path_join(arena, object_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+        u64 elapsed_us = 0;
+        if (!lz4_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, sources[index]), objects_out[index], metrics, mode, cpu,
+                                verbose && index == 0, &elapsed_us) ||
+            !lz4_metrics_report(arena, config_name, mode, name, metrics, elapsed_us))
+        {
+            string_print(S8("error: test_lz4 stage={S8} config={S8} allocator={S8} failed at {S8}\n"), stage, config_name, mode, sources[index]);
+            return false;
+        }
+    }
+    string_print(S8("LZ4_STAGE config={S8} allocator={S8} stage={S8} units={u64} status=pass\n"), config_name, mode, stage, source_count);
+    return true;
+}
+
+// Compresses one corpus with both CLIs and requires the compressed bytes to
+// match, then decompresses each side's output with the other side's binary.
+// The byte comparison is the strong half: a round-trip alone would accept two
+// compressors that merely agree on what they can each undo.
+BUSTER_GLOBAL_LOCAL bool lz4_cross_check(Arena* arena, String8 buster_cli, String8 clang_cli, String8 directory, String8 corpus_directory, Lz4CrossCase entry,
+                                         String8 config_name, String8 mode)
+{
+    String8 corpus = path_join(arena, corpus_directory, entry.corpus);
+    String8 buster_frame = path_join(arena, directory, string_format(arena, S8("{S8}-buster.lz4"), entry.name));
+    String8 clang_frame = path_join(arena, directory, string_format(arena, S8("{S8}-clang.lz4"), entry.name));
+    String8 buster_from_clang = path_join(arena, directory, string_format(arena, S8("{S8}-buster-from-clang.bin"), entry.name));
+    String8 clang_from_buster = path_join(arena, directory, string_format(arena, S8("{S8}-clang-from-buster.bin"), entry.name));
+    String8 arguments[12];
+    u64 count = 0;
+
+    for (u64 side = 0; side < 2; side += 1)
+    {
+        count = 0;
+        arguments[count] = side ? clang_cli : buster_cli;
+        count += 1;
+        for (u64 option = 0; option < BUSTER_ARRAY_LENGTH(entry.options); option += 1)
+        {
+            if (entry.options[option].length)
+            {
+                arguments[count] = entry.options[option];
+                count += 1;
+            }
+        }
+        arguments[count] = S8("-f");
+        count += 1;
+        arguments[count] = S8("-q");
+        count += 1;
+        arguments[count] = corpus;
+        count += 1;
+        arguments[count] = side ? clang_frame : buster_frame;
+        count += 1;
+        if (!lz4_run_arguments(arena, arguments, count, directory, 0, 0, 0))
+        {
+            string_print(S8("error: lz4 cross-check compress failed config={S8} allocator={S8} case={S8} side={S8}\n"), config_name, mode, entry.name,
+                         side ? S8("clang") : S8("buster"));
+            return false;
+        }
+    }
+
+    u64 compressed_size = 0;
+    u64 corpus_size = 0;
+    lz4_hash_file(arena, corpus, &corpus_size);
+    lz4_hash_file(arena, buster_frame, &compressed_size);
+    if (!lz4_files_equal(arena, buster_frame, clang_frame))
+    {
+        string_print(S8("error: lz4 compressed bytes differ config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
+        return false;
+    }
+
+    String8 decompress_clang[] = {clang_cli, S8("-d"), S8("-f"), S8("-q"), buster_frame, clang_from_buster};
+    String8 decompress_buster[] = {buster_cli, S8("-d"), S8("-f"), S8("-q"), clang_frame, buster_from_clang};
+    String8 test_clang[] = {clang_cli, S8("-t"), S8("-q"), buster_frame};
+    String8 test_buster[] = {buster_cli, S8("-t"), S8("-q"), clang_frame};
+    if (!lz4_run_arguments(arena, decompress_clang, BUSTER_ARRAY_LENGTH(decompress_clang), directory, 0, 0, 0) ||
+        !lz4_run_arguments(arena, decompress_buster, BUSTER_ARRAY_LENGTH(decompress_buster), directory, 0, 0, 0) ||
+        !lz4_run_arguments(arena, test_clang, BUSTER_ARRAY_LENGTH(test_clang), directory, 0, 0, 0) ||
+        !lz4_run_arguments(arena, test_buster, BUSTER_ARRAY_LENGTH(test_buster), directory, 0, 0, 0))
+    {
+        string_print(S8("error: lz4 cross-check decompress failed config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
+        return false;
+    }
+    if (!lz4_files_equal(arena, clang_from_buster, corpus) || !lz4_files_equal(arena, buster_from_clang, corpus))
+    {
+        string_print(S8("error: lz4 cross-check round-trip differs from the corpus config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
+        return false;
+    }
+    string_print(S8("LZ4_CROSS config={S8} allocator={S8} case={S8} corpus={S8} corpus_bytes={u64} compressed_bytes={u64} compressed_equal=1 "
+                    "buster_to_clang=pass clang_to_buster=pass\n"),
+                 config_name, mode, entry.name, entry.corpus, corpus_size, compressed_size);
+    return true;
+}
+
+// The skippable-frame leg.  `tests/goldenSamples/skip.bin` is a bare skippable
+// frame; both CLIs must ignore it, and must ignore it in the middle of a
+// concatenated stream, recovering exactly the embedded payload.
+BUSTER_GLOBAL_LOCAL bool lz4_golden_sample_check(Arena* arena, String8 buster_cli, String8 clang_cli, String8 directory, String8 corpus_directory,
+                                                 String8 golden_sample, String8 config_name, String8 mode)
+{
+    String8 payload = path_join(arena, corpus_directory, S8("payload.bin"));
+    String8 payload_frame = path_join(arena, directory, S8("payload.lz4"));
+    String8 concatenated = path_join(arena, directory, S8("skippable-concatenated.lz4"));
+    String8 compress[] = {buster_cli, S8("-9"), S8("-f"), S8("-q"), payload, payload_frame};
+    if (!lz4_run_arguments(arena, compress, BUSTER_ARRAY_LENGTH(compress), directory, 0, 0, 0))
+    {
+        return false;
+    }
+    String8 parts[] = {golden_sample, payload_frame, golden_sample};
+    if (!lz4_concatenate(arena, concatenated, parts, BUSTER_ARRAY_LENGTH(parts)))
+    {
+        string_print(S8("error: lz4 could not build the skippable-frame stream config={S8} allocator={S8}\n"), config_name, mode);
+        return false;
+    }
+    String8 skip_buster[] = {buster_cli, S8("-d"), S8("-c"), S8("-q"), golden_sample};
+    String8 skip_clang[] = {clang_cli, S8("-d"), S8("-c"), S8("-q"), golden_sample};
+    String8 concatenated_buster[] = {buster_cli, S8("-d"), S8("-c"), S8("-q"), concatenated};
+    String8 concatenated_clang[] = {clang_cli, S8("-d"), S8("-c"), S8("-q"), concatenated};
+    String8 skip_buster_output = {0};
+    String8 skip_clang_output = {0};
+    String8 concatenated_buster_output = {0};
+    String8 concatenated_clang_output = {0};
+    if (!lz4_run_arguments(arena, skip_buster, BUSTER_ARRAY_LENGTH(skip_buster), directory, &skip_buster_output, 0, 0) ||
+        !lz4_run_arguments(arena, skip_clang, BUSTER_ARRAY_LENGTH(skip_clang), directory, &skip_clang_output, 0, 0) ||
+        !lz4_run_arguments(arena, concatenated_buster, BUSTER_ARRAY_LENGTH(concatenated_buster), directory, &concatenated_buster_output, 0, 0) ||
+        !lz4_run_arguments(arena, concatenated_clang, BUSTER_ARRAY_LENGTH(concatenated_clang), directory, &concatenated_clang_output, 0, 0))
+    {
+        string_print(S8("error: lz4 skippable-frame decode failed config={S8} allocator={S8}\n"), config_name, mode);
+        return false;
+    }
+    if (skip_buster_output.length || skip_clang_output.length || !string_equal(concatenated_buster_output, concatenated_clang_output) ||
+        !lz4_bytes_match_file(arena, concatenated_buster_output, payload))
+    {
+        string_print(S8("error: lz4 skippable-frame payload differs config={S8} allocator={S8}\n"), config_name, mode);
+        return false;
+    }
+    string_print(S8("LZ4_INTEROP config={S8} allocator={S8} sample={S8} skippable_bytes={u64} payload_bytes={u64} status=pass\n"), config_name, mode,
+                 lz4_basename(golden_sample), skip_buster_output.length, concatenated_buster_output.length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
+{
+    TestLz4Options options = *(TestLz4Options*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_lz4 requires an external lz4 {S8} checkout path\n"), S8(LZ4_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build/build test_lz4 [--config Debug|Release] /path/to/lz4-{S8}\n"), S8(LZ4_COMPATIBILITY_TAG));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+
+    // The manifest, in the staging order the acceptance criteria name: the
+    // portable block library first, then the frame library, then the CLI.
+    String8 block_sources[] = {S8("lib/lz4.c"), S8("lib/lz4hc.c"), S8("lib/xxhash.c")};
+    String8 frame_sources[] = {S8("lib/lz4frame.c"), S8("lib/lz4file.c")};
+    // Built without -DLZ4IO_MULTITHREAD, the upstream `lz4-nomt` shape:
+    // threadpool.c compiles its single-threaded fallback, and a single-threaded
+    // CLI keeps the compressed bytes reproducible for the cross-check below.
+    String8 cli_sources[] = {S8("programs/lz4cli.c"),    S8("programs/lz4io.c"),  S8("programs/bench.c"), S8("programs/lorem.c"),
+                             S8("programs/threadpool.c"), S8("programs/timefn.c"), S8("programs/util.c")};
+    // tests/freestanding.c is excluded: it declares named-register variables
+    // for a raw syscall, which the C frontend does not support.  It is the one
+    // upstream test unit outside the manifest, and it is left out rather than
+    // patched.
+    String8 test_sources[] = {S8("tests/fuzzer.c"),
+                              S8("tests/frametest.c"),
+                              S8("tests/fullbench.c"),
+                              S8("tests/roundTripTest.c"),
+                              S8("tests/decompress-partial.c"),
+                              S8("tests/decompress-partial-usingDict.c"),
+                              S8("tests/checkFrame.c"),
+                              S8("tests/abiTest.c"),
+                              S8("tests/checkTag.c")};
+    // datagen links the CLI's lorem.o, so lorem.c is not repeated here.
+    String8 datagen_sources[] = {S8("tests/datagen.c"), S8("tests/datagencli.c"), S8("tests/loremOut.c")};
+    String8 golden_sample_relative = S8("tests/goldenSamples/skip.bin");
+    String8 fixture = S8("tests/basic_lz4_roundtrip.c");
+
+    String8* manifests[] = {block_sources, frame_sources, cli_sources, test_sources, datagen_sources};
+    u64 manifest_counts[] = {BUSTER_ARRAY_LENGTH(block_sources), BUSTER_ARRAY_LENGTH(frame_sources), BUSTER_ARRAY_LENGTH(cli_sources),
+                             BUSTER_ARRAY_LENGTH(test_sources), BUSTER_ARRAY_LENGTH(datagen_sources)};
+    u64 manifest_total = 0;
+    for (u64 manifest = 0; manifest < BUSTER_ARRAY_LENGTH(manifests); manifest += 1)
+    {
+        for (u64 index = 0; index < manifest_counts[manifest]; index += 1)
+        {
+            if (!path_exists(arena, path_join(arena, source_directory, manifests[manifest][index])))
+            {
+                string_print(S8("error: lz4 manifest source is missing: {S8}\n"), manifests[manifest][index]);
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        manifest_total += manifest_counts[manifest];
+    }
+    if (!path_exists(arena, path_join(arena, source_directory, golden_sample_relative)))
+    {
+        string_print(S8("error: lz4 golden sample is missing: {S8}\n"), golden_sample_relative);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!path_exists(arena, fixture))
+    {
+        string_print(S8("error: lz4 compatibility fixture is missing: {S8}\n"), fixture);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!lz4_git_verify(arena, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = lz4_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    if (!ar.length)
+    {
+        ar = executable_resolve_in_path(arena, S8("llvm-ar"));
+    }
+    if (!ide.length || !clang.length || !ar.length)
+    {
+        string_print(S8("error: test_lz4 requires a built ide executable and clang and ar/llvm-ar in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 golden_sample = path_join(arena, source_directory, golden_sample_relative);
+
+    String8 output_directory = string_format_z(arena, S8("build/lz4-{S8}-{u64}"), S8(LZ4_COMPATIBILITY_TAG), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_root = path_join(arena, output_directory, S8("metrics"));
+    String8 corpus_directory = path_join(arena, output_directory, S8("corpus"));
+    String8 clang_directory = path_join(arena, output_directory, S8("clang"));
+    make_directory_recursive(arena, metrics_root);
+    make_directory_recursive(arena, corpus_directory);
+    make_directory_recursive(arena, clang_directory);
+    string_print(S8("LZ4_HARNESS ide={S8} clang={S8} ar={S8} output={S8} multithread=disabled\n"), ide, clang, ar, output_directory);
+    string_print(S8("LZ4_MANIFEST block_sources={u64} frame_sources={u64} cli_sources={u64} test_sources={u64} datagen_sources={u64} total_units={u64} "
+                    "excluded=tests/freestanding.c fixture={S8}\n"),
+                 BUSTER_ARRAY_LENGTH(block_sources), BUSTER_ARRAY_LENGTH(frame_sources), BUSTER_ARRAY_LENGTH(cli_sources), BUSTER_ARRAY_LENGTH(test_sources),
+                 BUSTER_ARRAY_LENGTH(datagen_sources), manifest_total, fixture);
+
+    // The corpora the cross-check and the throughput measurement run on.  They
+    // are written once and shared by every configuration so a difference can
+    // only come from the compressors.
+    String8 corpus_names[] = {S8("text.bin"), S8("mixed.bin"), S8("random.bin"), S8("large.bin"), S8("payload.bin")};
+    u32 corpus_kinds[] = {0, 1, 2, 1, 0};
+    u64 corpus_sizes[] = {2097152ull, 1048576ull, 262144ull, 8388608ull, 65536ull};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(corpus_names); index += 1)
+    {
+        String8 path = path_join(arena, corpus_directory, corpus_names[index]);
+        if (!lz4_write_corpus(arena, path, corpus_kinds[index], corpus_sizes[index]))
+        {
+            string_print(S8("error: lz4 could not write the corpus file {S8}\n"), path);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("LZ4_CORPUS name={S8} kind={u32} bytes={u64} hash={u64:x}\n"), corpus_names[index], corpus_kinds[index], corpus_sizes[index],
+                     lz4_hash_file(arena, path, 0));
+    }
+
+    // The Clang reference: the same manifest, the same flags, its own archive
+    // and CLI.  Every Buster artifact below is compared against it.
+    u64 library_count = BUSTER_ARRAY_LENGTH(block_sources) + BUSTER_ARRAY_LENGTH(frame_sources);
+    String8* clang_library_objects = arena_allocate(arena, String8, library_count);
+    String8* clang_cli_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(cli_sources) + 1);
+    for (u64 index = 0; index < library_count; index += 1)
+    {
+        String8 relative = index < BUSTER_ARRAY_LENGTH(block_sources) ? block_sources[index] : frame_sources[index - BUSTER_ARRAY_LENGTH(block_sources)];
+        clang_library_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), lz4_basename(relative)));
+        if (!lz4_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, relative), clang_library_objects[index]))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 clang_archive = path_join(arena, clang_directory, S8("liblz4.a"));
+    if (!lz4_archive(arena, clang_archive, ar, clang_library_objects, library_count))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cli_sources); index += 1)
+    {
+        clang_cli_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), lz4_basename(cli_sources[index])));
+        if (!lz4_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, cli_sources[index]), clang_cli_objects[index]))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    clang_cli_objects[BUSTER_ARRAY_LENGTH(cli_sources)] = clang_archive;
+    String8 clang_cli = path_join(arena, clang_directory, S8("lz4"));
+    if (!lz4_link(arena, clang, clang_cli, clang_cli_objects, BUSTER_ARRAY_LENGTH(cli_sources) + 1, false, (String8){0}))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_fixture_object = path_join(arena, clang_directory, S8("probe.o"));
+    String8 clang_probe = path_join(arena, clang_directory, S8("probe"));
+    String8 clang_probe_objects[] = {clang_fixture_object, clang_archive};
+    if (!lz4_compile_clang(arena, clang, source_directory, fixture, clang_fixture_object) ||
+        !lz4_link(arena, clang, clang_probe, clang_probe_objects, BUSTER_ARRAY_LENGTH(clang_probe_objects), false, (String8){0}))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 reference_output = {0};
+    u64 reference_elapsed = 0;
+    u64 reference_instructions = 0;
+    String8 reference_arguments[] = {clang_probe};
+    if (!lz4_run_arguments(arena, reference_arguments, BUSTER_ARRAY_LENGTH(reference_arguments), clang_directory, &reference_output, &reference_elapsed,
+                           &reference_instructions))
+    {
+        string_print(S8("error: the Clang reference probe failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 workload_bytes = 0;
+    if (!lz4_output_value(reference_output, S8("lz4_workload_bytes"), &workload_bytes) || !workload_bytes)
+    {
+        string_print(S8("error: the Clang reference probe did not report lz4_workload_bytes\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("LZ4_REFERENCE elapsed_us={u64} workload_bytes={u64} output_bytes={u64}\n"), reference_elapsed, workload_bytes, reference_output.length);
+    lz4_report_rate(S8("probe"), S8("clang"), S8("clang"), S8("compress+decompress"), workload_bytes, reference_elapsed, reference_instructions);
+
+    Lz4Configuration configurations[] = {
+        {S8_INITIALIZER("portable"), S8_INITIALIZER(""), 1},
+        {S8_INITIALIZER("baseline"), S8_INITIALIZER("baseline"), 0},
+        {S8_INITIALIZER("native"), S8_INITIALIZER("native"), 0},
+    };
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    Lz4CrossCase cross_cases[] = {
+        {S8_INITIALIZER("frame-level-1"), S8_INITIALIZER("text.bin"), {S8_INITIALIZER("-1")}},
+        {S8_INITIALIZER("frame-level-9-linked-checksums"),
+         S8_INITIALIZER("mixed.bin"),
+         {S8_INITIALIZER("-9"), S8_INITIALIZER("-BD"), S8_INITIALIZER("-BX"), S8_INITIALIZER("--content-size")}},
+        {S8_INITIALIZER("frame-level-12"), S8_INITIALIZER("mixed.bin"), {S8_INITIALIZER("-12")}},
+        {S8_INITIALIZER("frame-level-9-incompressible"), S8_INITIALIZER("random.bin"), {S8_INITIALIZER("-9")}},
+        {S8_INITIALIZER("legacy-frame"), S8_INITIALIZER("text.bin"), {S8_INITIALIZER("-l")}},
+        {S8_INITIALIZER("frame-large-4m-blocks"), S8_INITIALIZER("large.bin"), {S8_INITIALIZER("-1"), S8_INITIALIZER("-B7"), S8_INITIALIZER("--no-frame-crc")}},
+    };
+
+    u64 cross_case_total = 0;
+    for (u64 configuration_index = 0; configuration_index < BUSTER_ARRAY_LENGTH(configurations); configuration_index += 1)
+    {
+        Lz4Configuration configuration = configurations[configuration_index];
+        String8 config_name = configuration.name;
+        string_print(S8("LZ4_CONFIG name={S8} march={S8} upstream_tests={u32} allocators={u64}\n"), config_name,
+                     configuration.cpu.length ? configuration.cpu : S8("(default)"), configuration.upstream_tests, BUSTER_ARRAY_LENGTH(allocator_modes));
+        for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+        {
+            String8 mode = allocator_modes[mode_index];
+            String8 directory = path_join(arena, path_join(arena, output_directory, config_name), mode);
+            String8 metrics_directory = path_join(arena, path_join(arena, metrics_root, config_name), mode);
+            make_directory_recursive(arena, directory);
+            make_directory_recursive(arena, metrics_directory);
+            bool verbose = configuration_index == 0 && mode_index == 0;
+
+            // Stage (a): the portable block library.  Nothing below it can be
+            // trusted until it compiles, so it is the first thing that fails.
+            String8* library_objects = arena_allocate(arena, String8, library_count);
+            if (!lz4_compile_stage(arena, ide, source_directory, S8("block-library"), config_name, mode, configuration.cpu, block_sources,
+                                   BUSTER_ARRAY_LENGTH(block_sources), directory, metrics_directory, verbose, library_objects))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            // Stage (b): the frame library, which is built on top of it.
+            if (!lz4_compile_stage(arena, ide, source_directory, S8("frame-library"), config_name, mode, configuration.cpu, frame_sources,
+                                   BUSTER_ARRAY_LENGTH(frame_sources), directory, metrics_directory, false,
+                                   library_objects + BUSTER_ARRAY_LENGTH(block_sources)))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            String8 archive = path_join(arena, directory, S8("liblz4.a"));
+            if (!lz4_archive(arena, archive, ar, library_objects, library_count))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            // Stage (c): the CLI, linked through `ide cc` so the driver itself
+            // is exercised across a multi-file library plus executable.
+            String8* cli_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(cli_sources) + 1);
+            if (!lz4_compile_stage(arena, ide, source_directory, S8("cli"), config_name, mode, configuration.cpu, cli_sources,
+                                   BUSTER_ARRAY_LENGTH(cli_sources), directory, metrics_directory, false, cli_objects))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            cli_objects[BUSTER_ARRAY_LENGTH(cli_sources)] = archive;
+            String8 buster_cli = path_join(arena, directory, S8("lz4"));
+            if (!lz4_link(arena, ide, buster_cli, cli_objects, BUSTER_ARRAY_LENGTH(cli_sources) + 1, true, configuration.cpu))
+            {
+                string_print(S8("error: test_lz4 stage=cli-link config={S8} allocator={S8} failed\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("LZ4_STAGE config={S8} allocator={S8} stage=cli-link driver=ide status=pass\n"), config_name, mode);
+
+            // The deterministic probe, in both link directions: a Buster probe
+            // over the Buster archive, and the Clang probe over the Buster
+            // archive, so a codegen difference stays separable from a linkage
+            // one.  Both must reproduce the Clang reference exactly.
+            String8 fixture_object = path_join(arena, directory, S8("probe.o"));
+            String8 fixture_metrics = path_join(arena, metrics_directory, S8("basic_lz4_roundtrip.c.metrics"));
+            u64 elapsed_us = 0;
+            if (!lz4_compile_buster(arena, ide, source_directory, fixture, fixture_object, fixture_metrics, mode, configuration.cpu, false, &elapsed_us) ||
+                !lz4_metrics_report(arena, config_name, mode, S8("basic_lz4_roundtrip.c"), fixture_metrics, elapsed_us))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            String8 probe = path_join(arena, directory, S8("probe"));
+            String8 probe_cross = path_join(arena, directory, S8("probe-clang-fixture-buster-archive"));
+            String8 probe_cross_buster = path_join(arena, directory, S8("probe-buster-fixture-clang-archive"));
+            String8 probe_objects[] = {fixture_object, archive};
+            String8 probe_cross_objects[] = {clang_fixture_object, archive};
+            String8 probe_cross_buster_objects[] = {fixture_object, clang_archive};
+            if (!lz4_link(arena, clang, probe, probe_objects, BUSTER_ARRAY_LENGTH(probe_objects), false, (String8){0}) ||
+                !lz4_link(arena, clang, probe_cross, probe_cross_objects, BUSTER_ARRAY_LENGTH(probe_cross_objects), false, (String8){0}) ||
+                !lz4_link(arena, clang, probe_cross_buster, probe_cross_buster_objects, BUSTER_ARRAY_LENGTH(probe_cross_buster_objects), false, (String8){0}))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            String8 probe_output = {0};
+            String8 probe_cross_output = {0};
+            String8 probe_cross_buster_output = {0};
+            u64 probe_elapsed = 0;
+            u64 probe_instructions = 0;
+            String8 probe_arguments[] = {probe};
+            String8 probe_cross_arguments[] = {probe_cross};
+            String8 probe_cross_buster_arguments[] = {probe_cross_buster};
+            if (!lz4_run_arguments(arena, probe_arguments, BUSTER_ARRAY_LENGTH(probe_arguments), directory, &probe_output, &probe_elapsed,
+                                   &probe_instructions) ||
+                !string_equal(probe_output, reference_output))
+            {
+                string_print(S8("error: lz4 probe differs from the Clang reference config={S8} allocator={S8}\n"), config_name, mode);
+                if (probe_output.length)
+                {
+                    os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(probe_output));
+                }
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, probe_cross_arguments, BUSTER_ARRAY_LENGTH(probe_cross_arguments), directory, &probe_cross_output, 0, 0) ||
+                !string_equal(probe_cross_output, reference_output))
+            {
+                string_print(S8("error: lz4 Clang fixture over the Buster archive differs from the reference config={S8} allocator={S8}\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, probe_cross_buster_arguments, BUSTER_ARRAY_LENGTH(probe_cross_buster_arguments), directory,
+                                   &probe_cross_buster_output, 0, 0) ||
+                !string_equal(probe_cross_buster_output, reference_output))
+            {
+                string_print(S8("error: lz4 Buster fixture over the Clang archive differs from the reference config={S8} allocator={S8}\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("LZ4_PROBE config={S8} allocator={S8} equal_reference=1 clang_fixture_buster_archive=pass buster_fixture_clang_archive=pass "
+                            "elapsed_us={u64} workload_bytes={u64}\n"),
+                         config_name,
+                         mode, probe_elapsed, workload_bytes);
+            lz4_report_rate(S8("probe"), config_name, mode, S8("compress+decompress"), workload_bytes, probe_elapsed, probe_instructions);
+
+            // The compression workload itself, measured separately from every
+            // compiler number above: one CLI compress and one CLI decompress
+            // over the large corpus, each with its own rate and instruction
+            // count.
+            String8 large_corpus = path_join(arena, corpus_directory, S8("large.bin"));
+            String8 large_frame = path_join(arena, directory, S8("large.lz4"));
+            String8 large_restored = path_join(arena, directory, S8("large-restored.bin"));
+            String8 workload_compress[] = {buster_cli, S8("-1"), S8("-f"), S8("-q"), large_corpus, large_frame};
+            String8 workload_decompress[] = {buster_cli, S8("-d"), S8("-f"), S8("-q"), large_frame, large_restored};
+            u64 compress_elapsed = 0;
+            u64 compress_instructions = 0;
+            u64 decompress_elapsed = 0;
+            u64 decompress_instructions = 0;
+            if (!lz4_run_arguments(arena, workload_compress, BUSTER_ARRAY_LENGTH(workload_compress), directory, 0, &compress_elapsed,
+                                   &compress_instructions) ||
+                !lz4_run_arguments(arena, workload_decompress, BUSTER_ARRAY_LENGTH(workload_decompress), directory, 0, &decompress_elapsed,
+                                   &decompress_instructions) ||
+                !lz4_files_equal(arena, large_restored, large_corpus))
+            {
+                string_print(S8("error: lz4 large-input workload failed config={S8} allocator={S8}\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            u64 large_size = 0;
+            u64 large_frame_size = 0;
+            lz4_hash_file(arena, large_corpus, &large_size);
+            lz4_hash_file(arena, large_frame, &large_frame_size);
+            lz4_report_rate(S8("cli-large"), config_name, mode, S8("compress"), large_size, compress_elapsed, compress_instructions);
+            lz4_report_rate(S8("cli-large"), config_name, mode, S8("decompress"), large_size, decompress_elapsed, decompress_instructions);
+            string_print(S8("LZ4_WORKLOAD config={S8} allocator={S8} corpus_bytes={u64} compressed_bytes={u64} status=pass\n"), config_name, mode, large_size,
+                         large_frame_size);
+
+            // Cross-check both directions over every frame shape, then the
+            // skippable-frame golden sample.
+            for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cross_cases); case_index += 1)
+            {
+                if (!lz4_cross_check(arena, buster_cli, clang_cli, directory, corpus_directory, cross_cases[case_index], config_name, mode))
+                {
+                    return PROCESS_RESULT_FAILED;
+                }
+                cross_case_total += 1;
+            }
+            if (!lz4_golden_sample_check(arena, buster_cli, clang_cli, directory, corpus_directory, golden_sample, config_name, mode))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+
+            if (!configuration.upstream_tests)
+            {
+                continue;
+            }
+
+            // The upstream unit, round-trip, corruption, and interoperability
+            // programs, compiled by Buster and linked against the Buster
+            // archive.  The iteration counts are the bounded forms the upstream
+            // makefile uses for CI, so the harness stays minutes rather than
+            // hours.
+            String8* test_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(test_sources));
+            String8* datagen_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(datagen_sources) + 1);
+            if (!lz4_compile_stage(arena, ide, source_directory, S8("upstream-tests"), config_name, mode, configuration.cpu, test_sources,
+                                   BUSTER_ARRAY_LENGTH(test_sources), directory, metrics_directory, false, test_objects) ||
+                !lz4_compile_stage(arena, ide, source_directory, S8("datagen"), config_name, mode, configuration.cpu, datagen_sources,
+                                   BUSTER_ARRAY_LENGTH(datagen_sources), directory, metrics_directory, false, datagen_objects))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            // datagen needs the CLI's lorem generator; take the object the CLI
+            // stage already produced rather than compiling lorem.c twice.
+            String8 lorem_object = {0};
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cli_sources); index += 1)
+            {
+                if (string_equal(lz4_basename(cli_sources[index]), S8("lorem.c")))
+                {
+                    lorem_object = cli_objects[index];
+                }
+            }
+            if (!lorem_object.length)
+            {
+                string_print(S8("error: lz4 manifest lost programs/lorem.c, which datagen links against\n"));
+                return PROCESS_RESULT_FAILED;
+            }
+            datagen_objects[BUSTER_ARRAY_LENGTH(datagen_sources)] = lorem_object;
+            String8 datagen = path_join(arena, directory, S8("datagen"));
+            if (!lz4_link(arena, clang, datagen, datagen_objects, BUSTER_ARRAY_LENGTH(datagen_sources) + 1, false, (String8){0}))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            String8* test_binaries = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(test_sources));
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_sources); index += 1)
+            {
+                String8 name = lz4_basename(test_sources[index]);
+                test_binaries[index] = path_join(arena, directory, string_slice(name, 0, name.length - 2));
+                String8 link_objects[] = {test_objects[index], archive};
+                if (!lz4_link(arena, clang, test_binaries[index], link_objects, BUSTER_ARRAY_LENGTH(link_objects), false, (String8){0}))
+                {
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+
+            // datagen is the corpus generator the upstream tests are written
+            // against; its output lands in a file because the harness composes
+            // processes through the filesystem rather than a shell pipeline.
+            String8 generated = path_join(arena, directory, S8("datagen-1m.bin"));
+            String8 datagen_arguments[] = {datagen, S8("-g1048576"), S8("-s7")};
+            String8 datagen_output = {0};
+            if (!lz4_run_arguments(arena, datagen_arguments, BUSTER_ARRAY_LENGTH(datagen_arguments), directory, &datagen_output, 0, 0) ||
+                !datagen_output.length || !file_write(generated, BUSTER_SLICE_TO_BYTE_SLICE(datagen_output)))
+            {
+                string_print(S8("error: lz4 datagen failed config={S8} allocator={S8}\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("LZ4_TEST config={S8} allocator={S8} name=datagen bytes={u64} status=pass\n"), config_name, mode, datagen_output.length);
+
+            String8 mixed_corpus = path_join(arena, corpus_directory, S8("mixed.bin"));
+            // test_binaries is indexed in test_sources order: 0 fuzzer,
+            // 1 frametest, 2 fullbench, 3 roundTripTest, 4 decompress-partial,
+            // 5 decompress-partial-usingDict, 6 checkFrame, 7 abiTest,
+            // 8 checkTag.
+            // -i is the bounded iteration form the upstream makefile's valgrind
+            // targets use, in place of the wall-clock -T90s the CI targets use.
+            // The fuzzer runs its unit tests only when no seed is pinned, so its
+            // seed is deliberately left unset -- it prints the seed it chose, so
+            // a failure is still reproducible from the log -- while frametest is
+            // pinned, since it runs its unit tests either way.  fullbench -i0 is
+            // its own quick mode: 20 ms per function instead of 1.9 s, which is
+            // 0.7 s rather than 57 s for one pass over the corpus.
+            String8 fuzzer_arguments[] = {test_binaries[0], S8("-i64")};
+            String8 frametest_arguments[] = {test_binaries[1], S8("-v"), S8("-i256"), S8("-s1")};
+            String8 fullbench_arguments[] = {test_binaries[2], S8("--no-prompt"), S8("-i0"), mixed_corpus};
+            String8 roundtrip_arguments[] = {test_binaries[3], generated};
+            String8 roundtrip_hc_arguments[] = {test_binaries[3], S8("-9"), mixed_corpus};
+            String8 decompress_partial_arguments[] = {test_binaries[4]};
+            String8 decompress_partial_dict_arguments[] = {test_binaries[5]};
+            String8 abitest_arguments[] = {test_binaries[7], mixed_corpus};
+            String8 checktag_arguments[] = {test_binaries[8], S8(LZ4_COMPATIBILITY_TAG)};
+            if (!lz4_run_arguments(arena, fuzzer_arguments, BUSTER_ARRAY_LENGTH(fuzzer_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: fuzzer (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, frametest_arguments, BUSTER_ARRAY_LENGTH(frametest_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: frametest (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, fullbench_arguments, BUSTER_ARRAY_LENGTH(fullbench_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: fullbench (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, roundtrip_arguments, BUSTER_ARRAY_LENGTH(roundtrip_arguments), directory, 0, 0, 0) ||
+                !lz4_run_arguments(arena, roundtrip_hc_arguments, BUSTER_ARRAY_LENGTH(roundtrip_hc_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: roundTripTest (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, decompress_partial_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_arguments), directory, 0, 0, 0) ||
+                !lz4_run_arguments(arena, decompress_partial_dict_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_dict_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: decompress-partial (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, abitest_arguments, BUSTER_ARRAY_LENGTH(abitest_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: abiTest (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!lz4_run_arguments(arena, checktag_arguments, BUSTER_ARRAY_LENGTH(checktag_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: checkTag (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+
+            // checkFrame reads a concatenated stream back and asserts the frame
+            // parameters it was told to expect, which is the corruption-side
+            // check the upstream custom-block-size script performs.
+            String8 checkframe_first = path_join(arena, directory, S8("checkframe-first.lz4"));
+            String8 checkframe_second = path_join(arena, directory, S8("checkframe-second.lz4"));
+            String8 checkframe_stream = path_join(arena, directory, S8("checkframe.lz4"));
+            String8 checkframe_compress_first[] = {buster_cli, S8("-f"), S8("-q"), S8("-B65536"), mixed_corpus, checkframe_first};
+            String8 checkframe_compress_second[] = {buster_cli, S8("-f"), S8("-q"), S8("-B65536"), generated, checkframe_second};
+            String8 checkframe_parts[] = {checkframe_first, checkframe_second};
+            String8 checkframe_arguments[] = {test_binaries[6], S8("-B65536"), S8("-b4"), checkframe_stream};
+            if (!lz4_run_arguments(arena, checkframe_compress_first, BUSTER_ARRAY_LENGTH(checkframe_compress_first), directory, 0, 0, 0) ||
+                !lz4_run_arguments(arena, checkframe_compress_second, BUSTER_ARRAY_LENGTH(checkframe_compress_second), directory, 0, 0, 0) ||
+                !lz4_concatenate(arena, checkframe_stream, checkframe_parts, BUSTER_ARRAY_LENGTH(checkframe_parts)) ||
+                !lz4_run_arguments(arena, checkframe_arguments, BUSTER_ARRAY_LENGTH(checkframe_arguments), directory, 0, 0, 0))
+            {
+                string_print(S8("error: lz4 upstream test failed: checkFrame (config={S8} allocator={S8})\n"), config_name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("LZ4_TEST config={S8} allocator={S8} programs={u64} status=pass\n"), config_name, mode, BUSTER_ARRAY_LENGTH(test_sources));
+        }
+    }
+
+    string_print(S8("LZ4_RESULT tag={S8} commit={S8} units={u64} configurations={u64} allocators={u64} cross_cases={u64} excluded=tests/freestanding.c "
+                    "status=pass\n"),
+                 S8(LZ4_COMPATIBILITY_TAG), S8(LZ4_COMPATIBILITY_COMMIT), manifest_total, BUSTER_ARRAY_LENGTH(configurations),
+                 BUSTER_ARRAY_LENGTH(allocator_modes), cross_case_total);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_lz4_action_add(Arena* arena, TestLz4Options options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestLz4Options* options_copy = arena_allocate(arena, TestLz4Options, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_lz4_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -24198,6 +25349,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_LUA] = S8_INITIALIZER("test_lua"),
         [BUILD_COMMAND_TEST_YYJSON] = S8_INITIALIZER("test_yyjson"),
         [BUILD_COMMAND_TEST_STB] = S8_INITIALIZER("test_stb"),
+        [BUILD_COMMAND_TEST_LZ4] = S8_INITIALIZER("test_lz4"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -24272,6 +25424,7 @@ ProcessResult process_arguments(void)
     TestLuaOptions test_lua_options = {0};
     TestYyjsonOptions test_yyjson_options = {0};
     TestStbOptions test_stb_options = {0};
+    TestLz4Options test_lz4_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -24401,6 +25554,11 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_stb_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_LZ4 && !test_lz4_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_lz4_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -24666,6 +25824,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_STB)
                 {
                     test_stb_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_LZ4)
+                {
+                    test_lz4_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -25221,6 +26383,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_STB:
         {
             test_stb_action_add(arena, test_stb_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_LZ4:
+        {
+            test_lz4_action_add(arena, test_lz4_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

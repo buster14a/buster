@@ -4694,12 +4694,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_fallback_lookup(UnitTestArgume
     BUSTER_TEST(arguments, fallback_typedef.value == oldest_typedef.value);
     if (value_id.value < parse.entity_count)
     {
-        // The global object makes the scoped probe reject TypeName, forcing
-        // the scalar fallback. The old entity walk then selected the oldest
-        // typedef (long), while the ordinary scope lookup still sees the
-        // inner short typedef.
+        // The declaration resolves in its own block, so the inner short
+        // typedef wins over both the enclosing long one and the file-scope
+        // object of the same name.  The fallback below still answers with the
+        // oldest typedef, which is what this test pins; it is only consulted
+        // when the scoped lookup finds nothing at all.
         CType* value_type = c_type_from_id(&parse, parse.entities[value_id.value].type);
-        BUSTER_TEST(arguments, value_type && value_type->kind == C_TYPE_LONG && value_type->is_const);
+        BUSTER_TEST(arguments, value_type && value_type->kind == C_TYPE_SHORT && value_type->is_const);
         CEntityId scoped_name = c_parse_lookup_entity(&parse, parse.entities[value_id.value].scope, S8("TypeName"));
         BUSTER_TEST(arguments, scoped_name.value == newest_typedef.value);
         if (scoped_name.value < parse.entity_count)

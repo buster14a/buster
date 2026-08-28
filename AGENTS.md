@@ -291,7 +291,74 @@ records unique/lexed file and byte counts (include amplification) plus
 preprocessed token and spelling-byte totals. Generated wrappers, objects,
 metrics, synthetic fonts, and logs remain under `build/stb-<hash>-<pid>/`.
 
-`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`,
+The opt-in LZ4 compatibility harness takes an external, pristine LZ4 v1.10.0
+checkout; upstream sources are never copied into or patched in this
+repository:
+
+```sh
+./build.sh build --config Release -t ide
+./build/build test_lz4 --config Release /path/to/lz4-v1.10.0
+```
+
+The checkout must be tag `v1.10.0` at commit
+`ebb370ca83af193212df4dcbadcc5d87bc0de2f0` with no tracked or untracked
+changes. The harness owns an explicit 24-unit source manifest and does not
+drive upstream's make or CMake files — upstream build-system detection is a
+later driver milestone — so it compiles in named stages and fails at the
+first one that breaks: the portable block library (`lz4.c`, `lz4hc.c`,
+`xxhash.c`), then the frame library (`lz4frame.c`, `lz4file.c`), then the CLI
+(`programs/*.c`), which is linked through `ide cc` so the driver itself is
+covered across a multi-file library plus executable. Everything is built with
+one flag set (`-I lib -I programs -DXXH_NAMESPACE=LZ4_ -DNDEBUG -O2`) because
+upstream's three makefiles agree on it and objects that disagree would not
+link. The CLI is the upstream `lz4-nomt` shape, without `-DLZ4IO_MULTITHREAD`,
+which keeps the compressed bytes reproducible. `tests/freestanding.c` is the
+one upstream unit left out of the manifest: it declares named-register
+variables for a raw syscall, which the C frontend does not support, and it is
+excluded rather than patched.
+
+It then compiles and runs the upstream unit, round-trip, corruption, and
+interoperability programs — `fuzzer`, `frametest`, `fullbench`,
+`roundTripTest`, `decompress-partial`, `decompress-partial-usingDict`,
+`checkFrame`, `abiTest`, `checkTag`, plus `datagen` as the corpus generator
+they are written against — in the bounded `-i` forms upstream's makefile uses,
+so a run is minutes rather than hours. `abiTest` links against the harness's
+own static archive rather than an installed shared `liblz4`, since the harness
+must not depend on a system-installed lz4; it therefore checks the
+same-version API/ABI surface rather than cross-version stability.
+Cross-checking runs both directions over a deterministic corpus: each frame
+shape is compressed by the Buster CLI and by the Clang CLI, the compressed
+bytes must be identical — LZ4 output is deterministic for a given level, so a
+round-trip alone would accept two compressors that merely agree on what they
+can each undo — and each side's output is then decompressed and integrity-
+tested by the other. The rows cover `-1`, `-9` with linked blocks, block
+checksums and content size, `-12`, an incompressible corpus, legacy frames,
+and 4 MB blocks over an 8 MiB input; `tests/goldenSamples/skip.bin` covers
+skippable frames alone and embedded in a concatenated stream.
+`tests/basic_lz4_roundtrip.c` is the deterministic probe both compilers build
+and whose output must match byte-for-byte: it drives the block, HC, and frame
+APIs over unaligned little-endian records, explicit endian assertions, and a
+4 MiB input, and it is cross-linked in both directions (Buster probe over the
+Buster archive, Clang probe over the Buster archive, Buster probe over the
+Clang archive) so a codegen difference stays separable from a linkage one.
+
+Every workload runs under FAST, NONE, MIR_STACK, and QUALITY. The CPU axis is
+ordered so it cannot mask a portable failure: the `portable` configuration
+runs first and carries the upstream test suite, and only then do the explicit
+`-march=baseline` and `-march=native` configurations repeat the three compile
+stages, the probe, the large-input workload, and the full cross-check for all
+four allocators. Compiler cost and generated-code quality are reported
+separately and must not be conflated: `LZ4_METRIC` lines carry per-unit
+compiler wall time with the `-fsource-metrics=` source metrics, while
+`LZ4_THROUGHPUT` reports compress and decompress MB/s for the compression
+workload and `LZ4_CODEGEN` reports instructions retired and instructions per
+byte for the same runs. The instruction counts come from the same Linux
+hardware counter as `STEP_INSTRUCTIONS`, read either side of a child that runs
+alone; where no counter is available the `LZ4_CODEGEN` line is simply absent,
+which is never an error. Generated objects, metrics, archives, corpora, and
+logs remain under `build/lz4-v1.10.0-<pid>/`.
+
+`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,
@@ -700,7 +767,7 @@ compilation is explicitly enabled.
 
   ```sh
   ./build.sh build --config Release -t ide
-  perf record -F 999 -g --call-graph fp -o release.data -- ./build/Release/ide bench
+  perf record -F 999 -g --call-graph fp -o release.data — ./build/Release/ide bench
   ```
 
   The `perf script`/`llvm-symbolizer` rules below apply unchanged; the Release
@@ -714,7 +781,7 @@ compilation is explicitly enabled.
   ```sh
   ./build.sh generate --sanitize && ./build.sh build -t ide
   LD_PRELOAD= perf record -F 999 -g --call-graph fp -o asan.data \
-      -- ./build/Debug/ide test --verbose=1
+      — ./build/Debug/ide test --verbose=1
   ```
 
   Four things must be right, and each one silently produces a *plausible but

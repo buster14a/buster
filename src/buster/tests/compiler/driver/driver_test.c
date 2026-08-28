@@ -5103,6 +5103,99 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         u64 branch_test = string_first_sequence(after_call, S8("test "));
         BUSTER_TEST(arguments, normalize != BUSTER_STRING_NO_MATCH && branch_test != BUSTER_STRING_NO_MATCH && normalize < branch_test);
     }
+    // LZ4 compatibility reduced six independent frontend and lowering
+    // failures to these focused runtime fixtures: the __builtin_mem* family,
+    // a case label standing as a control statement's substatement, a call to
+    // a noreturn callee ending control flow, the address of an array lvalue,
+    // a block-local typedef shadowing an outer one, and a goto into a loop
+    // body whose end-of-iteration stack restore had no matching save.
+    // Keep each source separate so a future regression identifies the exact
+    // language or lowering contract that broke, and run each one under every
+    // register allocator, because three of the six are lowering rather than
+    // parsing defects.
+    String8 c_lz4_regression_paths[] = {
+        S8("tests/basic_c_builtin_memory.c"),
+        S8("tests/basic_c_case_substatement.c"),
+        S8("tests/basic_c_noreturn_call.c"),
+        S8("tests/basic_c_address_of_array.c"),
+        S8("tests/basic_c_local_typedef_scope.c"),
+        S8("tests/basic_c_goto_into_loop.c"),
+    };
+    String8 c_lz4_regression_names[] = {
+        S8("buster-c-builtin-memory"),
+        S8("buster-c-case-substatement"),
+        S8("buster-c-noreturn-call"),
+        S8("buster-c-address-of-array"),
+        S8("buster-c-local-typedef-scope"),
+        S8("buster-c-goto-into-loop"),
+    };
+    String8 c_lz4_regression_allocators[] = {
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            String8 fixture_path = buster_test_temporary_path(arguments->arena, c_lz4_regression_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_lz4_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+    // A loop body that allocates nothing must carry no stack checkpoint at
+    // all: the restore is what read a stale frame slot into RSP, and its
+    // absence is the property the runtime fixture above cannot observe on a
+    // host whose stack happens to hold a benign value there.
+    String8 goto_loop_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_goto_into_loop.c"),
+    };
+    CompilerDriverResult goto_loop_assembly = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(goto_loop_assembly_command_line)));
+    BUSTER_TEST(arguments, goto_loop_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    u64 jump_into_body = string_first_sequence(goto_loop_assembly.output, S8("\njump_into_body:\n"));
+    BUSTER_TEST(arguments, jump_into_body != BUSTER_STRING_NO_MATCH);
+    if (jump_into_body != BUSTER_STRING_NO_MATCH)
+    {
+        // The emitter writes every `.size` directive after every function, so
+        // the body ends at the next function label rather than at its own size
+        // directive.
+        String8 body = string_slice(goto_loop_assembly.output, jump_into_body, goto_loop_assembly.output.length);
+        u64 body_end = string_first_sequence(string_slice(body, 1, body.length), S8("\n\t.type "));
+        body = string_slice(body, 0, body_end != BUSTER_STRING_NO_MATCH ? body_end + 1 : body.length);
+        // A stack save is the only thing that reads RSP into another operand;
+        // the prologue's `mov rbp, rsp` is the one legitimate occurrence.
+        u32 stack_pointer_reads = 0;
+        u64 scan = 0;
+        bool scanning = true;
+        while (scanning)
+        {
+            u64 read = string_first_sequence(string_slice(body, scan, body.length), S8(", rsp"));
+            scanning = read != BUSTER_STRING_NO_MATCH;
+            if (scanning)
+            {
+                stack_pointer_reads += 1;
+                scan += read + 1;
+            }
+        }
+        BUSTER_TEST(arguments, stack_pointer_reads == 1);
+    }
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.

@@ -67,6 +67,10 @@ BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
+// Whether the statement at `index` is the substatement a control statement is
+// waiting for. Shared by the named-label proof below and by the switch body
+// scan, which must not split a case range at a label standing there.
+BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const* preprocess, u32 body_start, u32 index);
 // The cold half of c_ir_named_label_at: the full proof, reached only for a
 // token that already looks like `<identifier> :`.
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
@@ -215,6 +219,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_GENERIC,
     C_SYMBOL_BUILTIN_ATOMIC,
     C_SYMBOL_BUILTIN_MATH,
+    C_SYMBOL_BUILTIN_MEMORY,
     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,

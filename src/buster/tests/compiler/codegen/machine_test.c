@@ -1851,7 +1851,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   // caller-saved file over every whole interval and the
                                   // callee-saved file cannot hold them all, so the only
                                   // register residency left for the rest is a split to the
-                                  // first loop.
+                                  // first loop. The pin candidate is the loop-body value
+                                  // with the weighted in-loop traffic to pay for a
+                                  // register: the variably modified declaration's stack
+                                  // checkpoint, stored at the body's head and reloaded at
+                                  // its tail. Loop bodies used to carry one whether or not
+                                  // they allocated, and when that stopped this assertion
+                                  // measured nothing; adding live values does not bring it
+                                  // back, because candidacy is traffic and not pressure.
                                   "static unsigned long sp_mix(unsigned long v) { v ^= v >> 31; v *= 0x9e3779b97f4a7c15UL; v ^= v >> 27; return v; }\n"
                                   "unsigned long split_phase(unsigned long seed, unsigned long rounds) {\n"
                                   "    unsigned long k0 = seed + 1; unsigned long k1 = seed + 2; unsigned long k2 = seed + 3; unsigned long k3 = seed + 4;\n"
@@ -1868,6 +1875,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "        acc += k12 ^ (acc << 6); acc += k13 ^ (acc << 7); acc += k14 ^ (acc << 1); acc += k15 ^ (acc << 2);\n"
                                   "        acc += k16 ^ (acc << 3); acc += k17 ^ (acc << 4); acc += k18 ^ (acc << 5); acc += k19 ^ (acc << 6);\n"
                                   "        acc += k20 ^ (acc << 7); acc += k21 ^ (acc << 1); acc += k22 ^ (acc << 2); acc += k23 ^ (acc << 3);\n"
+                                  "        unsigned long lane[(rounds & 3) + 1]; lane[rounds & 3] = acc; acc += lane[rounds & 3];\n"
                                   "    }\n"
                                   "    for (unsigned long round = 0; round < rounds; round += 1) { acc += sp_mix(acc ^ k0 ^ k23); }\n"
                                   "    return acc ^ k1 ^ k2 ^ k3 ^ k4 ^ k5 ^ k6 ^ k7 ^ k8 ^ k9 ^ k10 ^ k11 ^ k12 ^ k13 ^ k14 ^ k15 ^ k16 ^ k17 ^ k18 ^ k19 ^\n"

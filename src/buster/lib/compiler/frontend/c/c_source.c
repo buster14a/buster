@@ -2486,6 +2486,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_isinf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isfinite"), C_SYMBOL_BUILTIN_MATH },
+    // The block-memory family. Clang declares these without <string.h>, so
+    // freestanding sources spell their copies this way once __clang__ is
+    // defined; lowering routes them to the ordinary library call.
+    { S8_INITIALIZER("__builtin_memcpy"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_memmove"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_memset"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin_memcmp"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -4171,6 +4178,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_inff",          "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
+        "__builtin_memcpy",        "__builtin_memmove",
+        "__builtin_memset",        "__builtin_memcmp",
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_types_compatible_p",

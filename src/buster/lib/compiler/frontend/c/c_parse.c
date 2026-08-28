@@ -2586,7 +2586,7 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                 u32 type_start = start + 3 + expression_index;
                 u32 type_end = start + 2 + cast_close;
                 u32 type_index = type_start;
-                CTypeId cast_type = machine ? c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &type_index)
+                CTypeId cast_type = machine ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
                                             : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
                 if (cast_type.value == C_ID_UNDERLYING_INVALID && type_start + 1 == type_end && preprocess.tokens[type_start].kind == C_TOKEN_IDENTIFIER)
                 {
@@ -2653,7 +2653,11 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                 literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
             }
             u32 type_index = type_start;
-            CTypeId type = machine ? c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &type_index)
+            // The machineless half already resolves in the assertion's scope;
+            // the machine half has to as well, or a block-local typedef
+            // shadowing an outer name of the same spelling sizes the outer
+            // type.
+            CTypeId type = machine ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
                                    : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
             if (type.value != C_ID_UNDERLYING_INVALID)
             {
@@ -5685,9 +5689,16 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         if (!is_typeof && !is_atomic)
         {
             frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+            // The core frame resolves the declaration's typedef name, so it
+            // has to keep the scope this frame was entered with. Scope id 0 is
+            // the file scope rather than an invalid sentinel, so omitting the
+            // field here did not fail -- it silently resolved every local
+            // declaration's base type at file scope, and a block-local typedef
+            // shadowing an outer name of the same spelling lost.
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = result,
                                                       .preprocess = preprocess,
+                                                      .scope = frame->scope,
                                                       .start = start,
                                                       .end = frame->end,
                                                       .mutation_mark = machine->mutation_count,
