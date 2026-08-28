@@ -5059,6 +5059,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_float_literal_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The same conversion must answer for a literal that initializes static
+    // storage.  The global initializer writers used to decode by accumulating
+    // digits into an f64, so a large or small decimal exponent landed ulps
+    // away from the value the identical literal produced inside a function
+    // body, and a subnormal flushed to zero.
+    String8 c_static_float_literal_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-float-literal"), S8(""));
+    String8 c_static_float_literal_command_line[] = {
+        S8("-o"),
+        c_static_float_literal_path,
+        S8("tests/basic_c_static_float_literal.c"),
+    };
+    CompilerDriverResult c_static_float_literal = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_float_literal_command_line)));
+    BUSTER_TEST(arguments, c_static_float_literal.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_static_float_literal.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_static_float_literal_arguments[] = {
+            c_static_float_literal_path,
+        };
+        ProcessSpawnResult c_static_float_literal_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_float_literal_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_static_float_literal_spawn.handle != 0);
+        if (c_static_float_literal_spawn.handle)
+        {
+            ProcessWaitResult c_static_float_literal_wait = os_process_wait_sync(arguments->arena, c_static_float_literal_spawn);
+            BUSTER_TEST(arguments, c_static_float_literal_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // A void cast around an assignment must still execute its store.  This is
     // the exact loop-update shape used by cJSON_Utils.c.
     String8 c_void_assignment_path = buster_test_temporary_path(arguments->arena, S8("buster-c-void-assignment"), S8(""));

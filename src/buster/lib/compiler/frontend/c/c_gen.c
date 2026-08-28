@@ -5318,6 +5318,54 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrEx
     return true;
 }
 
+// The value a float literal denotes, for the static-initializer paths that
+// need it as one f64: constant-expression evaluation and the two global
+// initializer writers.  A literal has to decode identically wherever it
+// appears, so this rounds from the exact rational the same way
+// c_ir_emit_float does for a value in a function body; c_ir_float_parse's
+// digit-by-digit accumulation drifts by ulps once the decimal exponent
+// leaves its small exact window, and flushes subnormals to zero, which is
+// what made a global disagree with a local.
+//
+// The rational path answers only for finite nonzero results, so the
+// accumulation stays as the fallback that turns an overflowing or
+// underflowing spelling into the infinity or zero it must become.
+//
+// An f suffix rounds to float first and widens the result: the literal's own
+// type is float, so `double d = 1.1f;` must hold that float, and the
+// widening back to f64 is exact, leaving a caller that narrows to f32 again
+// with the same bits.
+BUSTER_C_INTERNAL bool c_ir_float_literal_value(String8 spelling, f64* value_out, char8* suffix_out)
+{
+    bool result = c_ir_float_parse(spelling, value_out, suffix_out);
+    if (result)
+    {
+        bool single = *suffix_out == 'f' || *suffix_out == 'F';
+        CIrExt80Big numerator = {0};
+        CIrExt80Big denominator = {0};
+        s32 binary_exponent = 0;
+        u64 bits = 0;
+        if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent) &&
+            c_ir_ieee_from_rational(numerator, denominator, binary_exponent, false, single ? 23 : 52, single ? -126 : -1022,
+                                    single ? 127 : 1023, single ? 8 : 11, &bits))
+        {
+            if (single)
+            {
+                u32 narrowed_bits = (u32)bits;
+                f32 narrowed = 0.0f;
+                memcpy(&narrowed, &narrowed_bits, sizeof(narrowed));
+                *value_out = (f64)narrowed;
+            }
+            else
+            {
+                memcpy(value_out, &bits, sizeof(*value_out));
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
                                                   u64* significand_out, u16* exponent_sign_out)
 {
@@ -27543,7 +27591,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                 }
                 f64 value = 0.0;
                 char8 suffix = 0;
-                if (!c_ir_float_parse(c_token_spelling(preprocess.spelling_base, preprocess.tokens[task.start]), &value, &suffix))
+                if (!c_ir_float_literal_value(c_token_spelling(preprocess.spelling_base, preprocess.tokens[task.start]), &value, &suffix))
                 {
                     return false;
                 }
@@ -31435,7 +31483,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 {
                     f64 floating = 0.0;
                     char8 suffix = 0;
-                    if (!c_ir_float_parse(c_token_spelling(builder->preprocess.spelling_base, token), &floating, &suffix)) return false;
+                    if (!c_ir_float_literal_value(c_token_spelling(builder->preprocess.spelling_base, token), &floating, &suffix)) return false;
                     IrTypeId type = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
                     value = (CIrConstantValue){.type = type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
                 }
@@ -32393,7 +32441,7 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
     {
         f64 value = 0.0;
         char8 suffix = 0;
-        if (!c_ir_float_parse(c_token_spelling(builder->preprocess.spelling_base, token), &value, &suffix))
+        if (!c_ir_float_literal_value(c_token_spelling(builder->preprocess.spelling_base, token), &value, &suffix))
         {
             return false;
         }
