@@ -83,6 +83,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_LZ4,
     BUILD_COMMAND_TEST_SQLITE,
     BUILD_COMMAND_TEST_SBASE,
+    BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -659,6 +660,23 @@ struct TestSbaseOptions
 #define SBASE_PROCESS_TIMEOUT_US (120ull * 1000ull * 1000ull)
 
 #define STB_COMPATIBILITY_COMMIT "2c980bb59875b0d32144a71867fbdebb2f77cd20"
+
+// DoomGeneric is consumed from a caller-provided pristine checkout, together
+// with an IWAD the caller supplies separately: no Doom data and no upstream
+// source is copied into or patched in this repository. The harness owns an
+// explicit source manifest -- upstream's makefile is a link line for one
+// window-system backend, and driving it is a later driver milestone -- plus
+// the headless platform layer in tests/basic_doom_headless.c, which replaces
+// the backend that would otherwise need a window and a wall clock.
+typedef struct TestDoomOptions TestDoomOptions;
+struct TestDoomOptions
+{
+    String8 source_directory;
+    String8 iwad_path;
+    String8 config;
+};
+
+#define DOOM_COMPATIBILITY_COMMIT "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284"
 
 #define LZ4_COMPATIBILITY_TAG "v1.10.0"
 #define LZ4_COMPATIBILITY_COMMIT "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
@@ -14195,6 +14213,658 @@ BUSTER_GLOBAL_LOCAL void test_sbase_action_add(Arena* arena, TestSbaseOptions op
     *run = (ProcessRun){.callback = test_sbase_action, .callback_data = options_copy};
 }
 
+typedef struct DoomCommandResult DoomCommandResult;
+struct DoomCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL DoomCommandResult doom_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: doom harness could not start the command above\n"));
+        return (DoomCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    DoomCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+// Wall time and instructions retired for one child. The counter opened in
+// entry_point follows this process tree, and the harness runs its children one
+// at a time, so the delta is that child alone. Linux-only: a zero count means
+// there is no counter, which is never an error.
+BUSTER_GLOBAL_LOCAL bool doom_run_arguments(Arena* arena, String8* arguments, u64 argument_count, String8 working_directory, String8* output, u64* elapsed_us,
+                                            u64* instructions)
+{
+    SliceString8 slice = {.pointer = arguments, .length = argument_count};
+    u64 start_instructions = instruction_counter_read();
+    u64 start_us = os_now_microseconds();
+    DoomCommandResult command = doom_command(arena, slice, working_directory, output != 0);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start_us;
+    }
+    if (instructions)
+    {
+        u64 end_instructions = instruction_counter_read();
+        *instructions = end_instructions > start_instructions ? end_instructions - start_instructions : 0;
+    }
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL String8 doom_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL bool doom_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_doom requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    DoomCommandResult head = doom_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = doom_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(DOOM_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_doom requires pristine doomgeneric commit {S8}; found {S8}\n"), S8(DOOM_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    DoomCommandResult status = doom_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_doom checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("DOOM_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 doom_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (configs[index].length)
+        {
+            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+            if (path_exists(arena, candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL u64 doom_hash_file(Arena* arena, String8 path, u64* size_out)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    u64 hash = bytes.pointer ? buster_hash_64(bytes.pointer, bytes.length) : 0;
+    if (size_out)
+    {
+        *size_out = bytes.pointer ? bytes.length : 0;
+    }
+    scratch_end(scratch);
+    return hash;
+}
+
+// The IWAD is data the caller supplies; the harness only checks that it is one
+// and records what it was handed, so that a transcript can be traced back to
+// the file that produced it. The shareware DOOM1.WAD (4.196.020 bytes) is what
+// the fixture's script was written against; any IWAD runs, since both
+// compilers are handed the same one.
+BUSTER_GLOBAL_LOCAL bool doom_iwad_verify(Arena* arena, String8 path)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    bool valid = bytes.pointer && bytes.length > 12 && (memcmp(bytes.pointer, "IWAD", 4) == 0 || memcmp(bytes.pointer, "PWAD", 4) == 0);
+    u64 hash = valid ? buster_hash_64(bytes.pointer, bytes.length) : 0;
+    u64 size = bytes.pointer ? bytes.length : 0;
+    scratch_end(scratch);
+    if (!valid)
+    {
+        string_print(S8("error: test_doom needs a WAD file; {S8} is not one\n"), path);
+        string_print(S8("       the shareware DOOM1.WAD is the reference data set and is not part of this repository\n"));
+        return false;
+    }
+    string_print(S8("DOOM_IWAD path={S8} bytes={u64} hash={u64:x}\n"), path, size, hash);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool doom_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: doom compiler metrics missing allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+        return false;
+    }
+    string_print(S8("DOOM_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"), mode, unit,
+                 elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    return true;
+}
+
+// Reads one `key=value` field out of a whitespace-separated report line.
+BUSTER_GLOBAL_LOCAL bool doom_line_field(String8 line, String8 key, u64* value)
+{
+    u64 index = 0;
+    while (index < line.length)
+    {
+        while (index < line.length && line.pointer[index] == ' ')
+        {
+            index += 1;
+        }
+        u64 field_start = index;
+        while (index < line.length && line.pointer[index] != ' ')
+        {
+            index += 1;
+        }
+        String8 field_key = {0};
+        String8 field_value = {0};
+        if (text_split_field(string_slice(line, field_start, index), &field_key, &field_value) && string_equal(field_key, key))
+        {
+            return text_parse_u64(field_value, value);
+        }
+    }
+    return false;
+}
+
+// The compiler's own report of how many functions fell back to the canonical
+// emitter, summed over a unit's `-v` output. This is code quality, not
+// correctness: a fallback function is still correct, and the number is
+// recorded so a change in it is visible rather than silent.
+BUSTER_GLOBAL_LOCAL u64 doom_fallback_functions(String8 output)
+{
+    String8 text = output;
+    String8 line = {0};
+    u64 total = 0;
+    while (text_next_line(&text, &line))
+    {
+        u64 value = 0;
+        if (string_starts_with_sequence(line, S8("CODEGEN ")) && doom_line_field(line, S8("fallback_functions"), &value))
+        {
+            total += value;
+        }
+    }
+    return total;
+}
+
+// The include and macro set every unit shares. NORMALUNIX and LINUX are what
+// upstream's own makefile defines for a POSIX build; the platform backend is
+// this repository's, so no backend macro is needed.
+BUSTER_GLOBAL_LOCAL void doom_append_common_flags(OsArgumentBuilder* builder, String8 include_flag)
+{
+    os_argument_builder_append(builder, include_flag);
+    os_argument_builder_append(builder, S8("-DNORMALUNIX"));
+    os_argument_builder_append(builder, S8("-DLINUX"));
+}
+
+BUSTER_GLOBAL_LOCAL bool doom_compile_buster(Arena* arena, String8 ide, String8 include_flag, String8 source, String8 output, String8 metrics, String8 mode,
+                                             u64* elapsed_us, u64* fallback_functions)
+{
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    doom_append_common_flags(&builder, include_flag);
+    os_argument_builder_append(&builder, allocator_flag);
+    os_argument_builder_append(&builder, metrics_flag);
+    // -v is what reports the codegen census the fallback count comes from; its
+    // output is captured rather than printed, so a passing unit stays one line
+    // of log instead of a page.
+    os_argument_builder_append(&builder, S8("-v"));
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    DoomCommandResult command = doom_command(arena, os_argument_builder_flush(&builder), S8("."), true);
+    *elapsed_us = os_now_microseconds() - start;
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        if (command.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(command.output));
+        }
+        return false;
+    }
+    *fallback_functions = doom_fallback_functions(command.output);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool doom_compile_clang(Arena* arena, String8 clang, String8 include_flag, String8 source, String8 output)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, S8("-w"));
+    doom_append_common_flags(&builder, include_flag);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    DoomCommandResult command = doom_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// The Buster executable is linked by `ide cc` on purpose: an eighty-unit
+// program plus libm is the driver path the issue asks to cover, and a link
+// failure there stays distinguishable from a codegen failure because every
+// unit compiled first.
+BUSTER_GLOBAL_LOCAL bool doom_link(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, bool buster_driver)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, linker);
+    if (buster_driver)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    // Clang accepts the linker spelling -no-pie, while ide cc exposes the
+    // compatible code-generation spelling -fno-pie (and rejects -no-pie).
+    os_argument_builder_append(&builder, buster_driver ? S8("-fno-pie") : S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    DoomCommandResult command = doom_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// The comparable part of a run's output. Doom prints its own startup banner,
+// the paths it opened and the lumps it loaded; the DOOM_ lines are the ones
+// that are a property of the compiled code rather than of where the run
+// happened.
+BUSTER_GLOBAL_LOCAL String8 doom_transcript(Arena* arena, String8 output, u64* line_count)
+{
+    u64 length = 0;
+    u64 count = 0;
+    String8 text = output;
+    String8 line = {0};
+    while (text_next_line(&text, &line))
+    {
+        if (string_starts_with_sequence(line, S8("DOOM_")))
+        {
+            length += line.length + 1;
+            count += 1;
+        }
+    }
+    char8* bytes = arena_allocate(arena, char8, length ? length : 1);
+    u64 offset = 0;
+    text = output;
+    while (text_next_line(&text, &line))
+    {
+        if (!string_starts_with_sequence(line, S8("DOOM_")))
+        {
+            continue;
+        }
+        if (line.length)
+        {
+            memcpy(bytes + offset, line.pointer, (size_t)line.length);
+        }
+        offset += line.length;
+        bytes[offset] = '\n';
+        offset += 1;
+    }
+    if (line_count)
+    {
+        *line_count = count;
+    }
+    return (String8){.pointer = bytes, .length = offset};
+}
+
+// Names the first tic whose frame or simulation state differs, which is what
+// makes a divergence a lead rather than a hash mismatch: the tic number is the
+// input to the fixture that produced it, and the two hashes say whether the
+// pixels moved, the simulation moved, or both.
+BUSTER_GLOBAL_LOCAL bool doom_transcript_compare(String8 reference, String8 candidate, String8 mode)
+{
+    if (string_equal(reference, candidate))
+    {
+        return true;
+    }
+    String8 reference_text = reference;
+    String8 candidate_text = candidate;
+    String8 reference_line = {0};
+    String8 candidate_line = {0};
+    u64 line_index = 0;
+    while (true)
+    {
+        bool reference_more = text_next_line(&reference_text, &reference_line);
+        bool candidate_more = text_next_line(&candidate_text, &candidate_line);
+        if (!reference_more || !candidate_more)
+        {
+            string_print(S8("error: doom transcript length differs allocator={S8} line={u64} reference_more={u32} candidate_more={u32}\n"), mode, line_index,
+                         (u32)reference_more, (u32)candidate_more);
+            return false;
+        }
+        if (!string_equal(reference_line, candidate_line))
+        {
+            u64 tic = UINT64_MAX;
+            doom_line_field(reference_line, S8("tic"), &tic);
+            string_print(S8("DOOM_DIVERGENCE allocator={S8} line={u64} tic={u64}\n"), mode, line_index, tic);
+            string_print(S8("  reference: {S8}\n"), reference_line);
+            string_print(S8("  candidate: {S8}\n"), candidate_line);
+            return false;
+        }
+        line_index += 1;
+    }
+}
+
+// One manifest stage. The stage name is printed on success and named in the
+// diagnostic on failure, so the first stage that breaks is the one reported.
+BUSTER_GLOBAL_LOCAL String8 doom_basename(String8 path)
+{
+    u64 start = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    return string_slice(path, start, path.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool doom_compile_stage(Arena* arena, String8 ide, String8 include_flag, String8 source_directory, String8 stage, String8 mode,
+                                            String8* sources, u64 source_count, String8 object_directory, String8 metrics_directory, String8* objects_out,
+                                            u64* fallback_total)
+{
+    for (u64 index = 0; index < source_count; index += 1)
+    {
+        // The headless platform is named by its path in this repository, so
+        // the object and metrics files are named after the file rather than
+        // after the whole relative path.
+        String8 name = doom_basename(sources[index]);
+        objects_out[index] = path_join(arena, object_directory, string_format(arena, S8("{S8}.o"), name));
+        String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
+        u64 elapsed_us = 0;
+        u64 fallback_functions = 0;
+        if (!doom_compile_buster(arena, ide, include_flag, path_join(arena, source_directory, sources[index]), objects_out[index], metrics, mode, &elapsed_us,
+                                 &fallback_functions) ||
+            !doom_metrics_report(arena, mode, sources[index], metrics, elapsed_us))
+        {
+            string_print(S8("error: test_doom stage={S8} allocator={S8} failed at {S8}\n"), stage, mode, sources[index]);
+            return false;
+        }
+        *fallback_total += fallback_functions;
+    }
+    string_print(S8("DOOM_STAGE allocator={S8} stage={S8} units={u64} status=pass\n"), mode, stage, source_count);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_doom_action(Arena* arena, void* data)
+{
+    TestDoomOptions options = *(TestDoomOptions*)data;
+    if (!options.source_directory.length || !options.iwad_path.length)
+    {
+        string_print(S8("error: test_doom requires an external doomgeneric checkout and a WAD file\n"));
+        string_print(S8("usage: ./build/build test_doom [--config Debug|Release] /path/to/doomgeneric /path/to/DOOM1.WAD\n"));
+        string_print(S8("       the WAD is game data and is deliberately not part of this repository; the shareware\n"));
+        string_print(S8("       DOOM1.WAD is what the fixture's input script was written against\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = path_join(arena, os_path_absolute(arena, options.source_directory, true), S8("doomgeneric"));
+    String8 iwad_path = os_path_absolute(arena, options.iwad_path, true);
+
+    // The portable manifest: upstream's makefile object list, minus the X11
+    // backend it links, plus this repository's headless platform layer. The
+    // stages are named so that a break is attributed: the game simulation and
+    // renderer first, then the file, timing and video layer that the platform
+    // sits under, then the platform itself and the link.
+    String8 engine_sources[] = {
+        S8_INITIALIZER("am_map.c"),   S8_INITIALIZER("d_event.c"),  S8_INITIALIZER("d_items.c"),  S8_INITIALIZER("d_iwad.c"),
+        S8_INITIALIZER("d_loop.c"),   S8_INITIALIZER("d_main.c"),   S8_INITIALIZER("d_mode.c"),   S8_INITIALIZER("d_net.c"),
+        S8_INITIALIZER("doomdef.c"),  S8_INITIALIZER("doomstat.c"), S8_INITIALIZER("dstrings.c"), S8_INITIALIZER("dummy.c"),
+        S8_INITIALIZER("f_finale.c"), S8_INITIALIZER("f_wipe.c"),   S8_INITIALIZER("g_game.c"),   S8_INITIALIZER("hu_lib.c"),
+        S8_INITIALIZER("hu_stuff.c"), S8_INITIALIZER("info.c"),     S8_INITIALIZER("m_argv.c"),   S8_INITIALIZER("m_bbox.c"),
+        S8_INITIALIZER("m_cheat.c"),  S8_INITIALIZER("m_config.c"), S8_INITIALIZER("m_controls.c"), S8_INITIALIZER("m_fixed.c"),
+        S8_INITIALIZER("m_menu.c"),   S8_INITIALIZER("m_misc.c"),   S8_INITIALIZER("m_random.c"), S8_INITIALIZER("p_ceilng.c"),
+        S8_INITIALIZER("p_doors.c"),  S8_INITIALIZER("p_enemy.c"),  S8_INITIALIZER("p_floor.c"),  S8_INITIALIZER("p_inter.c"),
+        S8_INITIALIZER("p_lights.c"), S8_INITIALIZER("p_map.c"),    S8_INITIALIZER("p_maputl.c"), S8_INITIALIZER("p_mobj.c"),
+        S8_INITIALIZER("p_plats.c"),  S8_INITIALIZER("p_pspr.c"),   S8_INITIALIZER("p_saveg.c"),  S8_INITIALIZER("p_setup.c"),
+        S8_INITIALIZER("p_sight.c"),  S8_INITIALIZER("p_spec.c"),   S8_INITIALIZER("p_switch.c"), S8_INITIALIZER("p_telept.c"),
+        S8_INITIALIZER("p_tick.c"),   S8_INITIALIZER("p_user.c"),   S8_INITIALIZER("r_bsp.c"),    S8_INITIALIZER("r_data.c"),
+        S8_INITIALIZER("r_draw.c"),   S8_INITIALIZER("r_main.c"),   S8_INITIALIZER("r_plane.c"),  S8_INITIALIZER("r_segs.c"),
+        S8_INITIALIZER("r_sky.c"),    S8_INITIALIZER("r_things.c"), S8_INITIALIZER("sha1.c"),     S8_INITIALIZER("sounds.c"),
+        S8_INITIALIZER("s_sound.c"),  S8_INITIALIZER("statdump.c"), S8_INITIALIZER("st_lib.c"),   S8_INITIALIZER("st_stuff.c"),
+        S8_INITIALIZER("tables.c"),   S8_INITIALIZER("v_video.c"),  S8_INITIALIZER("wi_stuff.c"),
+    };
+    String8 platform_sources[] = {
+        S8_INITIALIZER("doomgeneric.c"), S8_INITIALIZER("i_cdmus.c"),     S8_INITIALIZER("i_endoom.c"), S8_INITIALIZER("i_input.c"),
+        S8_INITIALIZER("i_joystick.c"),  S8_INITIALIZER("i_scale.c"),     S8_INITIALIZER("i_sound.c"),  S8_INITIALIZER("i_system.c"),
+        S8_INITIALIZER("i_timer.c"),     S8_INITIALIZER("i_video.c"),     S8_INITIALIZER("memio.c"),    S8_INITIALIZER("w_checksum.c"),
+        S8_INITIALIZER("w_file.c"),      S8_INITIALIZER("w_file_stdc.c"), S8_INITIALIZER("w_main.c"),   S8_INITIALIZER("w_wad.c"),
+        S8_INITIALIZER("z_zone.c"),
+    };
+    String8 fixture = S8("tests/basic_doom_headless.c");
+    u64 engine_count = BUSTER_ARRAY_LENGTH(engine_sources);
+    u64 platform_count = BUSTER_ARRAY_LENGTH(platform_sources);
+    u64 upstream_count = engine_count + platform_count;
+
+    for (u64 index = 0; index < upstream_count; index += 1)
+    {
+        String8 source = index < engine_count ? engine_sources[index] : platform_sources[index - engine_count];
+        if (!path_exists(arena, path_join(arena, source_directory, source)))
+        {
+            string_print(S8("error: doom manifest source is missing: {S8}\n"), source);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    if (!path_exists(arena, fixture))
+    {
+        string_print(S8("error: doom headless platform is missing: {S8}\n"), fixture);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!doom_git_verify(arena, source_directory) || !doom_iwad_verify(arena, iwad_path))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = doom_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_doom requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 include_flag = string_format(arena, S8("-I{S8}"), source_directory);
+
+    String8 output_directory = string_format_z(arena, S8("build/doomgeneric-{u64}"), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 clang_directory = path_join(arena, output_directory, S8("clang"));
+    String8 clang_run_directory = path_join(arena, clang_directory, S8("run"));
+    make_directory_recursive(arena, clang_run_directory);
+    string_print(S8("DOOM_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+    string_print(S8("DOOM_MANIFEST engine_sources={u64} platform_sources={u64} upstream_units={u64} platform={S8} excluded=doomgeneric_xlib.c\n"), engine_count,
+                 platform_count, upstream_count, fixture);
+
+    // The Clang reference: the same manifest, the same flags, the same headless
+    // platform, run on the same IWAD. Every Buster transcript below is compared
+    // against its output.
+    String8* clang_objects = arena_allocate(arena, String8, upstream_count + 1);
+    for (u64 index = 0; index < upstream_count; index += 1)
+    {
+        String8 source = index < engine_count ? engine_sources[index] : platform_sources[index - engine_count];
+        clang_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), source));
+        if (!doom_compile_clang(arena, clang, include_flag, path_join(arena, source_directory, source), clang_objects[index]))
+        {
+            string_print(S8("error: the Clang reference failed to compile {S8}\n"), source);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    clang_objects[upstream_count] = path_join(arena, clang_directory, S8("basic_doom_headless.c.o"));
+    String8 clang_executable = path_join(arena, clang_directory, S8("doom"));
+    if (!doom_compile_clang(arena, clang, include_flag, fixture, clang_objects[upstream_count]) ||
+        !doom_link(arena, clang, clang_executable, clang_objects, upstream_count + 1, false))
+    {
+        string_print(S8("error: the Clang reference failed to link\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 run_arguments[] = {clang_executable, S8("-iwad"), iwad_path, S8("-mb"), S8("8"), S8("-warp"), S8("1"), S8("1"), S8("-skill"), S8("3")};
+    String8 reference_output = {0};
+    u64 reference_elapsed = 0;
+    u64 reference_instructions = 0;
+    if (!doom_run_arguments(arena, run_arguments, BUSTER_ARRAY_LENGTH(run_arguments), clang_run_directory, &reference_output, &reference_elapsed,
+                            &reference_instructions))
+    {
+        string_print(S8("error: the Clang reference run failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 reference_lines = 0;
+    String8 reference = doom_transcript(arena, reference_output, &reference_lines);
+    if (!reference_lines)
+    {
+        string_print(S8("error: the Clang reference run printed no transcript\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 savegame_relative = S8(".savegame/doomsav0.dsg");
+    u64 reference_savegame_bytes = 0;
+    doom_hash_file(arena, path_join(arena, clang_run_directory, savegame_relative), &reference_savegame_bytes);
+    string_print(S8("DOOM_REFERENCE compiler=clang elapsed_us={u64} instructions={u64} transcript_lines={u64} savegame_bytes={u64}\n"), reference_elapsed,
+                 reference_instructions, reference_lines, reference_savegame_bytes);
+
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 directory = path_join(arena, output_directory, mode);
+        String8 metrics_directory = path_join(arena, directory, S8("metrics"));
+        String8 run_directory = path_join(arena, directory, S8("run"));
+        make_directory_recursive(arena, metrics_directory);
+        make_directory_recursive(arena, run_directory);
+
+        String8* objects = arena_allocate(arena, String8, upstream_count + 1);
+        u64 fallback_total = 0;
+        if (!doom_compile_stage(arena, ide, include_flag, source_directory, S8("engine"), mode, engine_sources, engine_count, directory, metrics_directory,
+                                objects, &fallback_total) ||
+            !doom_compile_stage(arena, ide, include_flag, source_directory, S8("platform-io"), mode, platform_sources, platform_count, directory,
+                                metrics_directory, objects + engine_count, &fallback_total))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 fixture_sources[] = {fixture};
+        if (!doom_compile_stage(arena, ide, include_flag, S8("."), S8("headless-platform"), mode, fixture_sources, BUSTER_ARRAY_LENGTH(fixture_sources),
+                                directory, metrics_directory, objects + upstream_count, &fallback_total))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("DOOM_FALLBACK allocator={S8} units={u64} fallback_functions={u64}\n"), mode, upstream_count + 1, fallback_total);
+
+        String8 executable = path_join(arena, directory, S8("doom"));
+        if (!doom_link(arena, ide, executable, objects, upstream_count + 1, true))
+        {
+            string_print(S8("error: test_doom stage=link allocator={S8} driver=ide failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("DOOM_STAGE allocator={S8} stage=link driver=ide units={u64} status=pass\n"), mode, upstream_count + 1);
+
+        String8 candidate_arguments[] = {executable, S8("-iwad"), iwad_path, S8("-mb"), S8("8"), S8("-warp"), S8("1"), S8("1"), S8("-skill"), S8("3")};
+        String8 candidate_output = {0};
+        u64 candidate_elapsed = 0;
+        u64 candidate_instructions = 0;
+        if (!doom_run_arguments(arena, candidate_arguments, BUSTER_ARRAY_LENGTH(candidate_arguments), run_directory, &candidate_output, &candidate_elapsed,
+                                &candidate_instructions))
+        {
+            string_print(S8("error: the Buster run failed allocator={S8}\n"), mode);
+            if (candidate_output.length)
+            {
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(candidate_output));
+            }
+            return PROCESS_RESULT_FAILED;
+        }
+        u64 candidate_lines = 0;
+        String8 candidate = doom_transcript(arena, candidate_output, &candidate_lines);
+        if (!doom_transcript_compare(reference, candidate, mode))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        // The savegame the run wrote and read back. Its bytes are not compared:
+        // a vanilla savegame stores mobj pointers as the addresses they had, so
+        // the file differs between two runs of one binary. What the savegame
+        // restored is checked inside the run, by the DOOM_SAVELOAD line the
+        // transcript comparison above already covers.
+        u64 candidate_savegame_bytes = 0;
+        doom_hash_file(arena, path_join(arena, run_directory, savegame_relative), &candidate_savegame_bytes);
+        if (candidate_savegame_bytes != reference_savegame_bytes)
+        {
+            string_print(S8("error: doom savegame size differs allocator={S8} reference={u64} candidate={u64}\n"), mode, reference_savegame_bytes,
+                         candidate_savegame_bytes);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("DOOM_RUN allocator={S8} elapsed_us={u64} instructions={u64} transcript_lines={u64} savegame_bytes={u64} equal_reference=1\n"), mode,
+                     candidate_elapsed, candidate_instructions, candidate_lines, candidate_savegame_bytes);
+    }
+
+    string_print(S8("DOOM_RESULT commit={S8} units={u64} allocators={u64} transcript_lines={u64} status=pass\n"), S8(DOOM_COMPATIBILITY_COMMIT),
+                 upstream_count + 1, BUSTER_ARRAY_LENGTH(allocator_modes), reference_lines);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestDoomOptions* options_copy = arena_allocate(arena, TestDoomOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_doom_action, .callback_data = options_copy};
+}
+
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
 struct X86CompletionCensusPlan
 {
@@ -27341,6 +28011,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_LZ4] = S8_INITIALIZER("test_lz4"),
         [BUILD_COMMAND_TEST_SQLITE] = S8_INITIALIZER("test_sqlite"),
         [BUILD_COMMAND_TEST_SBASE] = S8_INITIALIZER("test_sbase"),
+        [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -27418,6 +28089,7 @@ ProcessResult process_arguments(void)
     TestLz4Options test_lz4_options = {0};
     TestSqliteOptions test_sqlite_options = {0};
     TestSbaseOptions test_sbase_options = {0};
+    TestDoomOptions test_doom_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -27570,6 +28242,16 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TEST_SBASE && !test_sbase_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
             {
                 test_sbase_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_DOOM && !test_doom_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_doom_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_DOOM && !test_doom_options.iwad_path.length && !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_doom_options.iwad_path = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -27847,6 +28529,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_SBASE)
                 {
                     test_sbase_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_DOOM)
+                {
+                    test_doom_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -28417,6 +29103,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_SBASE:
         {
             test_sbase_action_add(arena, test_sbase_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_DOOM:
+        {
+            test_doom_action_add(arena, test_doom_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

@@ -34714,6 +34714,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             {
                 continue;
             }
+            // A member name or a designator is not a reference to anything at
+            // file scope, and taking it for one would put an undefined symbol
+            // in the object file whenever a member and a declared-only object
+            // share a name.
+            if (token_index > initializer_start && (c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) ||
+                                                    c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW)))
+            {
+                continue;
+            }
             CEntityId entity = C_ENTITY_ID_INVALID;
             u32 use_index = c_parse_identifier_use_index(&parse, token_index);
             if (use_index != C_ID_UNDERLYING_INVALID)
