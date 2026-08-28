@@ -5400,8 +5400,39 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     }
     else if (string_equal(name, S8("limits.h")))
     {
+        // The ISO constants below are ours, but <limits.h> is also where a
+        // hosted platform publishes its POSIX limits (PATH_MAX, NAME_MAX,
+        // _POSIX_ARG_MAX, ...). Pull the system header in first, exactly as
+        // Clang and GCC do, then restate the ISO names so this frontend's
+        // model of the target wins. _GCC_LIMITS_H_ is what glibc tests before
+        // it reaches back for the compiler's header, so defining it here stops
+        // that round trip.
         source = S8("#ifndef __LIMITS_H\n"
                     "#define __LIMITS_H\n"
+                    "#if !defined(_GCC_LIMITS_H_)\n"
+                    "#define _GCC_LIMITS_H_\n"
+                    "#endif\n"
+                    "#if __STDC_HOSTED__ && __has_include_next(<limits.h>)\n"
+                    "#include_next <limits.h>\n"
+                    "#endif\n"
+                    "#undef CHAR_BIT\n"
+                    "#undef SCHAR_MIN\n"
+                    "#undef SCHAR_MAX\n"
+                    "#undef UCHAR_MAX\n"
+                    "#undef CHAR_MIN\n"
+                    "#undef CHAR_MAX\n"
+                    "#undef SHRT_MIN\n"
+                    "#undef SHRT_MAX\n"
+                    "#undef USHRT_MAX\n"
+                    "#undef INT_MIN\n"
+                    "#undef INT_MAX\n"
+                    "#undef UINT_MAX\n"
+                    "#undef LONG_MIN\n"
+                    "#undef LONG_MAX\n"
+                    "#undef ULONG_MAX\n"
+                    "#undef LLONG_MIN\n"
+                    "#undef LLONG_MAX\n"
+                    "#undef ULLONG_MAX\n"
                     "#define CHAR_BIT 8\n"
                     "#define SCHAR_MIN (-128)\n"
                     "#define SCHAR_MAX 127\n"
@@ -5427,7 +5458,9 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "(-9223372036854775807LL - 1)\n"
                     "#define LLONG_MAX 9223372036854775807LL\n"
                     "#define ULLONG_MAX 18446744073709551615ULL\n"
+                    "#ifndef MB_LEN_MAX\n"
                     "#define MB_LEN_MAX 16\n"
+                    "#endif\n"
                     "#endif\n");
     }
     else if (string_equal(name, S8("buster_test_builtin_include_next.h")))
