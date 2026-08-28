@@ -601,6 +601,47 @@ compilation is explicitly enabled.
   the build commands the superbuild echoes ahead of each test block; timing
   rows with no command line in front of them are attributed to numbered
   `unknown:<n>` series rather than merged.
+- **`tools/ci_time.py`** answers *what CI actually costs*, over a window rather
+  than for one push. It reads the Forgejo Actions API and prints runner hours
+  per runner (or per day, week, or branch) beside push latency — the two
+  numbers that matter separately, since machine time is what the matrix burns
+  and latency is what a push waits for:
+
+  ```sh
+  tools/ci_time.py --days 30
+  tools/ci_time.py --days 30 --by week
+  ```
+
+  The 30 days to 2026-08-28 measured **403 runner-hours over 5,877 jobs** —
+  `x86_64-windows-znver5` 131.0 h (median 5.7 min/job), `aarch64-macos-mini`
+  113.9 h, `x86_64-linux` 102.1 h, `x86_64-linux-dedicated` 52.7 h, the gate
+  3.3 h — and push latency over 1,435 runs of median 6.1 min, mean 8.1, p90
+  17.0. Authentication reuses the git credential for the forge, so there is
+  nothing to set up.
+
+  The arithmetic is trivial and every trap is in the data, which is why this is
+  a script and not a one-liner. **`task.updated_at` is not the end of the
+  job**: Forgejo's log-retention sweep re-touches the row long afterwards in
+  batches that share one end second (a whole day stamped `23:45:3x`), which
+  makes a raw sum overstate a month by ~30x — a five-minute Windows job
+  appearing to run for 33 hours. Two physical ceilings repair it: a job cannot
+  outlive its run (clamp to the run's `stopped`, joined on `run_number ==
+  index_in_repo`) and cannot outlive `ci.yml`'s `timeout-minutes`, which is why
+  exact 7201-second rows are real timeout kills; the ~0.3% that survive both
+  are imputed from the runner's median and counted in an `imputed` column
+  rather than hidden. `actions/tasks` is the only per-job timing source —
+  `actions/runs/{id}/jobs` returns `started_at` and `completed_at` as null
+  here. And a paged walk must test the **head** of each id-descending page
+  against the cutoff, never the tail: runs that never dispatched carry
+  `0001-01-01`, which ends the walk hundreds of runs early and silently
+  inflates every job whose run can no longer be found. `--self-test` covers the
+  repair without touching the network.
+
+  `limit` caps at 50 and the server ignores `Accept-Encoding: gzip`, so a cold
+  month is 154 requests and 23 MB (~18 s); terminal rows are cached under
+  `build/ci-time-cache.json`, which takes a repeat window to 2 requests and
+  ~1 s. Do not raise `--jobs` past its default of 8 to go faster — 16 measured
+  slower, the forge being the bottleneck while it is also serving runners.
 - **`tools/cache_miss_survey.py`** answers *where the cache misses are*, the
   data-side counterpart to `tools/branch_miss_survey.py` below. It runs the
   stage-1 workload under `perf stat` for the hierarchy budget (L1d accesses
