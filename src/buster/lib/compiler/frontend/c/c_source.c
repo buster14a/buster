@@ -2321,6 +2321,14 @@ typedef struct CMacroDefinition CMacroDefinition;
 struct CMacroDefinition
 {
     CToken* replacement;
+    // One byte per replacement token: was it written after white space? A
+    // macro is expanded far more often than it is defined, and `#` needs
+    // this for every argument substituted into the list, so it is derived
+    // once here (c_macro_replacement_spaces) instead of on every expansion.
+    // Null on the builtin marker definitions, whose spellings are
+    // synthesized one at a time and read as spaced; index 0 is unused,
+    // because the first replacement token takes the invocation's spacing.
+    u8* replacement_space;
     String8* parameters;
     u32 replacement_count;
     u32 parameter_count;
@@ -2843,13 +2851,41 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
 // every replacement token); output materialization copies their spellings
 // into the spelling space under an expansion source-map entry so on-demand
 // recovery reproduces the stamped location exactly.
+// `preceded_by_space` answers what only `#` asks: did white space stand
+// before this token where it was written? C11 6.10.3.2p2 makes a
+// stringified argument reproduce its own spacing — every run of white space
+// becomes one space and tokens that were adjacent stay adjacent. It is
+// meaningful on a `foreign` token only: a token still spelled where it was
+// written has its answer in its spelling offset, and recovering it at the
+// two places that ask (argument collection and replacement materialization)
+// keeps the per-token cost off the line staging path, which every token of
+// every expanded line passes through. Substitution is what makes the offset
+// stop answering — a replacement token stands where the invocation was, not
+// where it was spelled — so from there the flag carries it. The field rides
+// in the padding the `foreign` byte already left, so it costs no memory.
 typedef struct CPpToken CPpToken;
 struct CPpToken
 {
     CToken token;
     CSourceLocation location;
     bool foreign;
+    bool preceded_by_space;
 };
+
+BUSTER_CT_CHECK(sizeof(CPpToken) == 36);
+
+// White space between two tokens of one lexed run. The lexer keeps no white
+// space, and does not have to: spellings are contiguous in translated
+// source, so a gap between one token's end and the next token's offset is
+// exactly where white space or a comment stood. The one gap that is not
+// visible that way is a newline token, whose single byte abuts a token that
+// starts in column one. Two tokens from different runs — one spelled in a
+// `#define` line and one in the file that invokes it, say — are never
+// contiguous, so they read as separated, which is what they are.
+BUSTER_C_INTERNAL bool c_token_preceded_by_space(char8 const* spelling_base, CToken previous, CToken token)
+{
+    return previous.kind == C_TOKEN_NEWLINE || previous.offset + c_token_length(spelling_base, previous) != token.offset;
+}
 
 typedef struct CPreprocessTokenNode CPreprocessTokenNode;
 struct CPreprocessTokenNode
@@ -3007,6 +3043,23 @@ BUSTER_C_INTERNAL CMacro* c_macro_find_token(CMacro* first, CSymbolTable* symbol
     return c_macro_find(first, symbol);
 }
 
+// The white space a `#define` line was written with, recorded for the
+// definition it produced. Only a list of two or more tokens has any interior
+// spacing to record.
+BUSTER_C_INTERNAL u8* c_macro_replacement_spaces(Arena* arena, char8 const* spelling_base, CToken* replacement, u32 replacement_count)
+{
+    u8* result = 0;
+    if (replacement_count > 1)
+    {
+        result = arena_allocate(arena, u8, replacement_count);
+        for (u32 index = 1; index < replacement_count; index += 1)
+        {
+            result[index] = c_token_preceded_by_space(spelling_base, replacement[index - 1], replacement[index]) ? 1 : 0;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, CSymbolTable* symbols, CMacro** first, CMacro** last, String8 name, CToken* replacement,
                                            u32 replacement_count, String8* parameters, u32 parameter_count, bool function_like, bool variadic)
 {
@@ -3067,7 +3120,8 @@ BUSTER_C_INTERNAL void c_macro_define_object_text(Arena* arena, CSpellingSpace* 
     {
         replacement_count += 1;
     }
-    c_macro_define(arena, symbols, first, last, name, lex.tokens, replacement_count, 0, 0, false, false);
+    CMacro* macro = c_macro_define(arena, symbols, first, last, name, lex.tokens, replacement_count, 0, 0, false, false);
+    macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, lex.tokens, replacement_count);
 }
 
 BUSTER_C_INTERNAL void c_preprocess_diagnostic_reserve(Arena* arena, CPreprocessResult* result)
@@ -3170,8 +3224,15 @@ BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
     return -1;
 }
 
-BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansionTask** top, CMacro* macro, CSourceLocation location,
-                                                      CMacroArgument** arguments_out, u32* argument_count_out, CPreprocessResult* result)
+// Collecting an invocation's arguments is also where an argument recovers the
+// white space `#` has to reproduce: its tokens are the contiguous run the
+// invocation was written with, so the answer is in their spelling offsets and
+// nothing earlier has to carry it. Only tokens the expansion machinery
+// synthesized or substituted arrive with an answer of their own, and those
+// are already marked foreign.
+BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* spelling_base, CMacroExpansionTask** top, CMacro* macro,
+                                                      CSourceLocation location, CMacroArgument** arguments_out, u32* argument_count_out,
+                                                      CPreprocessResult* result)
 {
     CMacroExpansionTask* open = *top;
     while (open && open->kind == C_MACRO_EXPANSION_ENABLE)
@@ -3261,7 +3322,13 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansio
         u64 token_index = 0;
         for (CPreprocessTokenNode* node = argument->first; node; node = node->next)
         {
-            argument->tokens[token_index++] = node->token;
+            argument->tokens[token_index] = node->token;
+            if (token_index && !node->token.foreign)
+            {
+                argument->tokens[token_index].preceded_by_space =
+                    c_token_preceded_by_space(spelling_base, argument->tokens[token_index - 1].token, node->token.token);
+            }
+            token_index += 1;
         }
     }
     *arguments_out = arguments;
@@ -3277,7 +3344,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
     {
         String8 spelling = c_token_spelling(base, argument.tokens[token_index].token);
         length += spelling.length;
-        length += token_index != 0;
+        length += token_index != 0 && argument.tokens[token_index].preceded_by_space;
         for (u64 character_index = 0; character_index < spelling.length; character_index += 1)
         {
             char8 character = spelling.pointer[character_index];
@@ -3290,7 +3357,10 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
     for (u64 token_index = 0; token_index < argument.token_count; token_index += 1)
     {
         String8 token_spelling = c_token_spelling(base, argument.tokens[token_index].token);
-        if (token_index)
+        // One space for every run of white space the argument was written
+        // with, and none at all between tokens that were written adjacent:
+        // `#V` on `A.B.C` is "A.B.C", not "A . B . C".
+        if (token_index && argument.tokens[token_index].preceded_by_space)
         {
             spelling[output++] = ' ';
         }
@@ -3382,18 +3452,29 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
     };
 }
 
+// The invocation token is what a replacement token replaces, so it is what
+// the replacement list's first token inherits its spacing from: `A+B` where
+// `A` expands to `1` must stringify as "1+10", not "1 + 10". Every later
+// replacement token was written in the `#define` line, whose tokens are
+// contiguous in source like any other lexed run. The exception is the
+// builtin `__has_*` marker lists below, whose spellings are synthesized one
+// allocation at a time and so read as spaced — which is what stringifying
+// one has always produced.
 BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* space, CMacro* first, CMacro* macro, CMacroArgument* arguments,
-                                                    CSourceLocation location, CPreprocessResult* result, CPpToken** tokens_out, u32* token_count_out)
+                                                    CPpToken invocation, CPreprocessResult* result, CPpToken** tokens_out, u32* token_count_out)
 {
     char8 const* base = space->base;
+    CSourceLocation location = invocation.location;
     if (macro->builtin)
     {
         CPpToken* builtin_token = arena_allocate(arena, CPpToken, 1);
         builtin_token[0] = c_macro_builtin_token(space, first, macro->builtin, location);
+        builtin_token[0].preceded_by_space = invocation.preceded_by_space;
         *tokens_out = builtin_token;
         *token_count_out = 1;
         return true;
     }
+    u8 const* definition_spaces = macro->definition.replacement_space;
     u64 capacity = macro->definition.replacement_count + 1;
     for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
     {
@@ -3411,6 +3492,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
     for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
     {
         CToken replacement = macro->definition.replacement[replacement_index];
+        bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
         if (macro->definition.function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
             replacement_index + 1 < macro->definition.replacement_count)
         {
@@ -3418,8 +3500,10 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             s32 parameter_index = parameter.kind == C_TOKEN_IDENTIFIER ? c_macro_parameter_index(macro, c_token_spelling(base, parameter)) : -1;
             if (parameter_index >= 0)
             {
+                CPpToken stringified = c_macro_stringify(space, arguments[(u32)parameter_index], location);
+                stringified.preceded_by_space = replacement_space;
                 materialized[materialized_count++] = (CMacroReplacementToken){
-                    .token = c_macro_stringify(space, arguments[(u32)parameter_index], location),
+                    .token = stringified,
                 };
                 replacement_index += 1;
                 continue;
@@ -3430,7 +3514,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         if (parameter_index < 0)
         {
             materialized[materialized_count++] = (CMacroReplacementToken){
-                .token = {.token = replacement, .location = location, .foreign = true},
+                .token = {.token = replacement, .location = location, .foreign = true, .preceded_by_space = replacement_space},
             };
             continue;
         }
@@ -3442,7 +3526,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         if (!argument_token_count)
         {
             materialized[materialized_count++] = (CMacroReplacementToken){
-                .token = {.token = replacement, .location = location, .foreign = true},
+                .token = {.token = replacement, .location = location, .foreign = true, .preceded_by_space = replacement_space},
                 .placemarker = true,
             };
             continue;
@@ -3452,6 +3536,13 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             CPpToken argument_token = argument_tokens[argument_index];
             argument_token.location = location;
             argument_token.foreign = true;
+            // The argument stands where the parameter was written, so its
+            // first token takes the parameter's spacing; the rest keep the
+            // spacing they were written or expanded with.
+            if (!argument_index)
+            {
+                argument_token.preceded_by_space = replacement_space;
+            }
             materialized[materialized_count++] = (CMacroReplacementToken){
                 .token = argument_token,
             };
@@ -3526,6 +3617,10 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 },
             .location = location,
             .foreign = true,
+            // The joined token starts where its left operand started, so it
+            // inherits that operand's spacing; the pasted spelling itself
+            // carries none.
+            .preceded_by_space = left.preceded_by_space,
         };
     }
     *tokens_out = output;
@@ -3656,7 +3751,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             CPpToken invocation = continuation->invocation;
             CPpToken* replacement_tokens = 0;
             u32 replacement_count = 0;
-            if (!c_macro_replacement_tokens(arena, space, first_macro, macro, continuation->arguments, invocation.location, result, &replacement_tokens,
+            if (!c_macro_replacement_tokens(arena, space, first_macro, macro, continuation->arguments, invocation, result, &replacement_tokens,
                                             &replacement_count))
             {
                 return false;
@@ -3698,7 +3793,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
         u32 argument_count = 0;
         if (macro->definition.function_like)
         {
-            bool invocation = c_macro_invocation_arguments(arena, &context->top, macro, token.location, &arguments, &argument_count, result);
+            bool invocation = c_macro_invocation_arguments(arena, space->base, &context->top, macro, token.location, &arguments, &argument_count, result);
             if (!invocation)
             {
                 c_preprocess_output_push(arena, &context->first_output, &context->last_output, token, &context->output_count);
@@ -3741,7 +3836,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
         }
         CPpToken* replacement_tokens = 0;
         u32 replacement_count = 0;
-        if (!c_macro_replacement_tokens(arena, space, first_macro, macro, arguments, token.location, result, &replacement_tokens, &replacement_count))
+        if (!c_macro_replacement_tokens(arena, space, first_macro, macro, arguments, token, result, &replacement_tokens, &replacement_count))
         {
             return false;
         }
@@ -4724,6 +4819,12 @@ BUSTER_C_INTERNAL void c_macro_push_definition(CPreprocessPragmaContext context,
         entry->definition.replacement = arena_allocate(context.arena, CToken, macro->definition.replacement_count);
         memcpy(entry->definition.replacement, macro->definition.replacement,
                sizeof(*entry->definition.replacement) * macro->definition.replacement_count);
+        if (macro->definition.replacement_space)
+        {
+            entry->definition.replacement_space = arena_allocate(context.arena, u8, macro->definition.replacement_count);
+            memcpy(entry->definition.replacement_space, macro->definition.replacement_space,
+                   sizeof(*entry->definition.replacement_space) * macro->definition.replacement_count);
+        }
     }
     if (macro && macro->definition.parameter_count)
     {
@@ -5666,8 +5767,9 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
     {
         replacement[index] = lex.tokens[replacement_start + index];
     }
-    c_macro_define(arena, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement, (u32)replacement_count, parameters,
-                   parameter_count, function_like, variadic);
+    CMacro* macro = c_macro_define(arena, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement, (u32)replacement_count,
+                                   parameters, parameter_count, function_like, variadic);
+    macro->definition.replacement_space = c_macro_replacement_spaces(arena, lex.spelling_base, replacement, (u32)replacement_count);
 }
 
 bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect)

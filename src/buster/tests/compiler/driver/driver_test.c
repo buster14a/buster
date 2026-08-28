@@ -3029,6 +3029,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, string_concat_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // Stringification reproduces the argument's own white space, so the
+    // fixture's expectations are byte comparisons against what Clang and GCC
+    // produce for the same source; it returns the number of the case that
+    // disagreed.
+    String8 stringify_spacing_path = buster_test_temporary_path(arguments->arena, S8("buster-c-stringify-spacing"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe"));
+#else
+                                                                S8(""));
+#endif
+    String8 stringify_spacing_command_line[] = {
+        S8("-o"),
+        stringify_spacing_path,
+        S8("tests/basic_c_stringify_spacing.c"),
+    };
+    CompilerDriverResult stringify_spacing_link = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stringify_spacing_command_line)));
+    BUSTER_TEST(arguments, stringify_spacing_link.error == COMPILER_DRIVER_ERROR_NONE);
+    if (stringify_spacing_link.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 stringify_spacing_run_arguments[] = {
+            stringify_spacing_path,
+        };
+        ProcessSpawnResult stringify_spacing_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stringify_spacing_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, stringify_spacing_spawn.handle != 0);
+        if (stringify_spacing_spawn.handle)
+        {
+            ProcessWaitResult stringify_spacing_wait = os_process_wait_sync(arguments->arena, stringify_spacing_spawn);
+            BUSTER_TEST(arguments, stringify_spacing_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 nullptr_path = buster_test_temporary_path(arguments->arena, S8("buster-c-nullptr"),
 #if BUSTER_WINDOWS
                                                       S8(".exe"));
