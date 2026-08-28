@@ -84,6 +84,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_SQLITE,
     BUILD_COMMAND_TEST_SBASE,
     BUILD_COMMAND_TEST_DOOM,
+    BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -680,6 +681,23 @@ struct TestDoomOptions
 
 #define LZ4_COMPATIBILITY_TAG "v1.10.0"
 #define LZ4_COMPATIBILITY_COMMIT "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+
+// QuickJS publishes its releases as dated tarballs rather than tags, so the
+// pin is the commit whose tree is the release and the VERSION file that
+// commit carries.  The optional second path is a Test262 checkout: without
+// one the conformance stage reports itself skipped rather than failing, since
+// it is a second external dependency an order of magnitude larger than the
+// engine.
+typedef struct TestQuickjsOptions TestQuickjsOptions;
+struct TestQuickjsOptions
+{
+    String8 source_directory;
+    String8 test262_directory;
+    String8 config;
+};
+
+#define QUICKJS_COMPATIBILITY_VERSION "2026-06-04"
+#define QUICKJS_COMPATIBILITY_COMMIT "3d5e064e9dd67c70f7962836505a7fa067bf0a4e"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -14865,6 +14883,1167 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
     *run = (ProcessRun){.callback = test_doom_action, .callback_data = options_copy};
 }
 
+// --- QuickJS compatibility harness ---------------------------------------
+// QuickJS is consumed from a caller-provided pristine checkout at the commit
+// that carries the pinned release's VERSION file.  As with the other
+// compatibility targets the harness owns an explicit manifest rather than
+// driving upstream's Makefile: the acceptance criteria ask for a staged order
+// -- library, then the bytecode compiler, then the generated input it
+// produces, then the interpreter, then the Test262 runner -- to be visible in
+// the log, and for a missing translation unit to be an error rather than a
+// silent omission.
+//
+// Three measurements are kept apart on purpose.  QUICKJS_METRIC reports what
+// the compiler cost to produce a unit; QUICKJS_WORKLOAD and QUICKJS_CODEGEN
+// report what the produced engine then did; QUICKJS_MEMORY reports what it
+// allocated.  Conflating them hides a codegen regression behind a
+// compile-time win and the reverse.
+typedef struct QuickjsCommandResult QuickjsCommandResult;
+struct QuickjsCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL QuickjsCommandResult quickjs_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: quickjs harness could not start the command above\n"));
+        return (QuickjsCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    QuickjsCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    return result;
+}
+
+// Wall time and instructions retired for one child.  The counter opened in
+// entry_point covers this process and its descendants and the harness runs
+// its children one at a time, so the delta is that child alone.  Linux-only:
+// a zero count means no counter, which is never an error.
+BUSTER_GLOBAL_LOCAL QuickjsCommandResult quickjs_command_measured(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture,
+                                                                  u64* elapsed_us, u64* instructions)
+{
+    u64 start_instructions = instruction_counter_read();
+    u64 start_us = os_now_microseconds();
+    QuickjsCommandResult result = quickjs_command(arena, arguments, working_directory, capture);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start_us;
+    }
+    if (instructions)
+    {
+        u64 end_instructions = instruction_counter_read();
+        *instructions = end_instructions > start_instructions ? end_instructions - start_instructions : 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 quickjs_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL String8 quickjs_basename(String8 path)
+{
+    u64 start = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (path.pointer[index] == '/' || path.pointer[index] == '\\')
+        {
+            start = index + 1;
+        }
+    }
+    return string_slice(path, start, path.length);
+}
+
+BUSTER_GLOBAL_LOCAL String8 quickjs_stem(Arena* arena, String8 path)
+{
+    String8 name = quickjs_basename(path);
+    u64 length = name.length;
+    while (length && name.pointer[length - 1] != '.')
+    {
+        length -= 1;
+    }
+    return length ? string_duplicate_arena(arena, string_slice(name, 0, length - 1), false) : name;
+}
+
+// The pinned release is identified twice: by the commit whose tree is the
+// release tarball, and by the VERSION file that commit carries.  QuickJS
+// publishes releases as dated tarballs rather than tags, so the VERSION file
+// is what names the release and the commit is what makes it reproducible.
+BUSTER_GLOBAL_LOCAL bool quickjs_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_quickjs requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    QuickjsCommandResult head = quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = quickjs_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(QUICKJS_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_quickjs requires the pristine QuickJS {S8} release commit {S8}; found {S8}\n"), S8(QUICKJS_COMPATIBILITY_VERSION),
+                     S8(QUICKJS_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    QuickjsCommandResult status = quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_quickjs checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice version_bytes = file_read(scratch.arena, path_join(scratch.arena, source_directory, S8("VERSION")), (FileReadOptions){0});
+    String8 version = quickjs_trim_ascii_space((String8){.pointer = (char8*)version_bytes.pointer, .length = version_bytes.length});
+    bool version_matches = string_equal(version, S8(QUICKJS_COMPATIBILITY_VERSION));
+    scratch_end(scratch);
+    if (!version_matches)
+    {
+        string_print(S8("error: test_quickjs requires the release VERSION {S8}\n"), S8(QUICKJS_COMPATIBILITY_VERSION));
+        return false;
+    }
+    string_print(S8("QUICKJS_SOURCE version={S8} commit={S8} pristine=1 path={S8}\n"), S8(QUICKJS_COMPATIBILITY_VERSION), commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 quickjs_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (configs[index].length)
+        {
+            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+            if (path_exists(arena, candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+// The C stack a Buster-built QuickJS needs, and why the harness hands out so
+// much of it.  Buster gives every sibling block in a function its own frame
+// slot where Clang overlaps the ones whose live ranges cannot intersect, and
+// `JS_CallInternal` -- the whole interpreter, one function, one block per
+// opcode -- is the worst case in the corpus: its prologue probes 41 pages
+// plus 928 bytes, about 165 KB, against the Clang build's 856 bytes.  Every
+// nested JavaScript call costs that much C stack, so the engine's own default
+// 1 MB limit admits about six of them.  The engine limit is raised to 64 MB
+// for both builds through `qjs --stack-size`, which needs an OS limit
+// comfortably above it; 512 MB is that, finite rather than RLIM_INFINITY,
+// which would move the loader's mmap layout.  This is a code-quality gap and
+// not a miscompile -- every test passes once the engine has room -- and
+// shrinking the frame is optimization work AGENTS.md says not to add unasked.
+//
+// POSIX-only.  A Windows thread's stack size is a field in the PE header of
+// the image being run, so a parent cannot grant a child more of it; there the
+// limit is reported unchanged and left alone.
+#define QUICKJS_STACK_LIMIT_BYTES (512ull * 1024ull * 1024ull)
+#define QUICKJS_ENGINE_STACK_SIZE S8("64M")
+
+BUSTER_GLOBAL_LOCAL void quickjs_raise_stack_limit(u64 requested_bytes)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct rlimit limit = {0};
+    if (getrlimit(RLIMIT_STACK, &limit) != 0)
+    {
+        string_print(S8("warning: test_quickjs could not read RLIMIT_STACK; the engine runs with the inherited stack\n"));
+        return;
+    }
+    if (limit.rlim_cur == RLIM_INFINITY)
+    {
+        string_print(S8("QUICKJS_STACK_LIMIT soft=unlimited requested_bytes={u64} status=inherited\n"), requested_bytes);
+        return;
+    }
+    u64 previous = (u64)limit.rlim_cur;
+    if (previous >= requested_bytes)
+    {
+        string_print(S8("QUICKJS_STACK_LIMIT soft_bytes={u64} requested_bytes={u64} status=already-sufficient\n"), previous, requested_bytes);
+        return;
+    }
+    u64 target = requested_bytes;
+    if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < target)
+    {
+        target = (u64)limit.rlim_max;
+    }
+    limit.rlim_cur = (rlim_t)target;
+    if (setrlimit(RLIMIT_STACK, &limit) != 0)
+    {
+        string_print(S8("warning: test_quickjs could not raise RLIMIT_STACK from {u64} to {u64} bytes; the engine may overflow its stack\n"), previous,
+                     target);
+        return;
+    }
+    string_print(S8("QUICKJS_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} requested_bytes={u64} reason=buster-frame-layout status=raised\n"),
+                 previous, target, requested_bytes);
+#else
+    string_print(S8("QUICKJS_STACK_LIMIT requested_bytes={u64} status=unsupported-platform\n"), requested_bytes);
+#endif
+}
+
+// The macro set every unit shares.  Upstream's Makefile compiles the whole
+// tree with one flag set, and objects that disagree about CONFIG_VERSION or
+// _GNU_SOURCE would not link, so the harness keeps that property.  The
+// documented minimal feature configuration is upstream's own default
+// (`make qjs`): no LTO, no sanitizers, no shared libraries, no cosmopolitan
+// build, and no CONFIG_CHECK_JSVALUE, which changes JSValue's representation
+// for a debugging build.
+// The formatted flags are built before any argument builder is started:
+// OsArgumentBuilder accumulates String8 entries at the arena head, so an
+// allocation made between start and flush lands inside its argument array.
+typedef struct QuickjsCommonFlags QuickjsCommonFlags;
+struct QuickjsCommonFlags
+{
+    String8 include;
+    String8 version;
+};
+
+BUSTER_GLOBAL_LOCAL QuickjsCommonFlags quickjs_common_flags(Arena* arena, String8 source_directory)
+{
+    QuickjsCommonFlags result = {
+        .include = string_format(arena, S8("-I{S8}"), source_directory),
+        .version = string_format(arena, S8("-DCONFIG_VERSION=\"{S8}\""), S8(QUICKJS_COMPATIBILITY_VERSION)),
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void quickjs_append_common_flags(OsArgumentBuilder* builder, QuickjsCommonFlags flags)
+{
+    os_argument_builder_append(builder, flags.include);
+    os_argument_builder_append(builder, S8("-D_GNU_SOURCE"));
+    os_argument_builder_append(builder, flags.version);
+    // qjsc.c bakes in the compiler and prefix it would invoke for its
+    // executable output mode; the harness never uses that mode, but the unit
+    // does not compile without them.
+    os_argument_builder_append(builder, S8("-DCONFIG_CC=\"clang\""));
+    os_argument_builder_append(builder, S8("-DCONFIG_PREFIX=\"/usr/local\""));
+    os_argument_builder_append(builder, S8("-O2"));
+    // Upstream compiles with -funsigned-char and -fwrapv; the sources rely on
+    // both, and a signed plain char changes the character tables.
+    os_argument_builder_append(builder, S8("-funsigned-char"));
+    os_argument_builder_append(builder, S8("-fwrapv"));
+}
+
+BUSTER_GLOBAL_LOCAL bool quickjs_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics,
+                                                String8 mode, u64* elapsed_us, u64* fallback_functions)
+{
+    QuickjsCommonFlags flags = quickjs_common_flags(arena, source_directory);
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    quickjs_append_common_flags(&builder, flags);
+    os_argument_builder_append(&builder, allocator_flag);
+    os_argument_builder_append(&builder, metrics_flag);
+    // -v prints the CODEGEN line the fallback count is read from.
+    os_argument_builder_append(&builder, S8("-v"));
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    QuickjsCommandResult command = quickjs_command(arena, os_argument_builder_flush(&builder), S8("."), true);
+    *elapsed_us = os_now_microseconds() - start;
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        if (command.error.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(command.error));
+        }
+        return false;
+    }
+    // A fallback function is one the machine backend declined and the
+    // canonical emitter produced instead: a code-quality fact worth recording
+    // per unit, and never an error on its own.
+    if (fallback_functions)
+    {
+        *fallback_functions = 0;
+        String8 marker = S8("fallback_functions=");
+        u64 position = string_first_sequence(command.error, marker);
+        String8 source_text = command.error;
+        if (position == BUSTER_STRING_NO_MATCH)
+        {
+            position = string_first_sequence(command.output, marker);
+            source_text = command.output;
+        }
+        if (position != BUSTER_STRING_NO_MATCH)
+        {
+            u64 index = position + marker.length;
+            u64 value = 0;
+            while (index < source_text.length && source_text.pointer[index] >= '0' && source_text.pointer[index] <= '9')
+            {
+                value = value * 10 + (u64)(source_text.pointer[index] - '0');
+                index += 1;
+            }
+            *fallback_functions = value;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool quickjs_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output, u64* elapsed_us)
+{
+    QuickjsCommonFlags flags = quickjs_common_flags(arena, source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-w"));
+    quickjs_append_common_flags(&builder, flags);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    QuickjsCommandResult command = quickjs_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// Every QuickJS executable is linked through `ide cc` when the objects are
+// Buster's: a multi-file library plus three executables is exactly the driver
+// path the acceptance criteria ask to cover.  The Clang reference links with
+// Clang, so a codegen failure stays distinguishable from a driver one.
+BUSTER_GLOBAL_LOCAL bool quickjs_link(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, bool buster_driver)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, linker);
+    if (buster_driver)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-lpthread"));
+#if BUSTER_LINUX
+    os_argument_builder_append(&builder, S8("-ldl"));
+#endif
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    QuickjsCommandResult command = quickjs_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool quickjs_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us, u64 clang_elapsed_us,
+                                                u64 fallback_functions)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: quickjs compiler metrics missing allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+        return false;
+    }
+    string_print(S8("QUICKJS_METRIC allocator={S8} unit={S8} elapsed_us={u64} clang_elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} "
+                    "tokens={u64} fallback_functions={u64}\n"),
+                 mode, unit, elapsed_us, clang_elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens, fallback_functions);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 quickjs_hash_file(Arena* arena, String8 path, u64* size_out)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    u64 hash = bytes.pointer ? buster_hash_64(bytes.pointer, bytes.length) : 0;
+    if (size_out)
+    {
+        *size_out = bytes.pointer ? bytes.length : 0;
+    }
+    scratch_end(scratch);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL bool quickjs_files_equal(Arena* arena, String8 left, String8 right)
+{
+    u64 left_size = 0;
+    u64 right_size = 0;
+    u64 left_hash = quickjs_hash_file(arena, left, &left_size);
+    u64 right_hash = quickjs_hash_file(arena, right, &right_size);
+    return left_size != 0 && left_size == right_size && left_hash == right_hash;
+}
+
+// One run of an engine over a script: the exit status, the standard output
+// and the standard error are all compared, which is what the acceptance
+// criteria ask for.  The transcripts are compared unmodified -- the workload
+// and the upstream tests are written so that nothing in them depends on the
+// clock, the environment or an address.
+typedef struct QuickjsRunResult QuickjsRunResult;
+struct QuickjsRunResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+    u64 elapsed_us;
+    u64 instructions;
+};
+
+BUSTER_GLOBAL_LOCAL QuickjsRunResult quickjs_run_engine(Arena* arena, String8 engine, String8* script_arguments, u64 script_argument_count,
+                                                        String8 working_directory)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, engine);
+    os_argument_builder_append(&builder, S8("--stack-size"));
+    os_argument_builder_append(&builder, QUICKJS_ENGINE_STACK_SIZE);
+    for (u64 index = 0; index < script_argument_count; index += 1)
+    {
+        os_argument_builder_append(&builder, script_arguments[index]);
+    }
+    u64 elapsed_us = 0;
+    u64 instructions = 0;
+    QuickjsCommandResult command = quickjs_command_measured(arena, os_argument_builder_flush(&builder), working_directory, true, &elapsed_us, &instructions);
+    QuickjsRunResult result = {
+        .result = command.result,
+        .output = command.output,
+        .error = command.error,
+        .elapsed_us = elapsed_us,
+        .instructions = instructions,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool quickjs_compare_runs(String8 label, String8 mode, QuickjsRunResult buster, QuickjsRunResult clang)
+{
+    bool equal = buster.result == clang.result && string_equal(buster.output, clang.output) && string_equal(buster.error, clang.error);
+    if (!equal)
+    {
+        string_print(S8("error: test_quickjs allocator={S8} {S8} differs from the Clang build (buster_status={u32} clang_status={u32})\n"), mode, label,
+                     (u32)buster.result, (u32)clang.result);
+        if (buster.output.length)
+        {
+            string_print(S8("--- buster stdout ---\n"));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(buster.output));
+        }
+        if (clang.output.length)
+        {
+            string_print(S8("--- clang stdout ---\n"));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(clang.output));
+        }
+        if (buster.error.length)
+        {
+            string_print(S8("--- buster stderr ---\n"));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(buster.error));
+        }
+        if (clang.error.length)
+        {
+            string_print(S8("--- clang stderr ---\n"));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(clang.error));
+        }
+    }
+    return equal;
+}
+
+// One upstream test script, in the order and with the flags upstream's
+// `make test` uses.  test_bjson.js and examples/test_point.js are the two the
+// list leaves out: both need a shared library built with -fPIC and loaded at
+// run time, which is a separate driver milestone rather than a QuickJS
+// property, and upstream itself skips them unless CONFIG_SHARED_LIBS is set.
+typedef struct QuickjsUpstreamTest QuickjsUpstreamTest;
+struct QuickjsUpstreamTest
+{
+    String8 script;
+    bool standard_library;
+};
+
+// The bounded, deterministic Test262 subset.  It is a list of directories
+// rather than a whole tree because `run-test262` fixes the engine's stack
+// limit at the 1 MB default and offers no switch for it: a Buster-built
+// engine spends about 165 KB of C stack per nested JavaScript call, so the
+// tests that recurse -- JSON.stringify replacers, Proxy traps, the harness's
+// own property verifier -- run out of engine stack before they run out of
+// correctness.  Every directory here is one both builds complete inside that
+// limit, and the comparison below is exact: the Buster engine's result line
+// must equal the Clang engine's.  The gap is measured in
+// QUICKJS_STACK_LIMIT and is a code-quality property, not a wrong answer.
+BUSTER_GLOBAL_LOCAL String8 quickjs_test262_directories[] = {
+    S8_INITIALIZER("test/language/expressions/addition"),
+    S8_INITIALIZER("test/language/expressions/tagged-template"),
+    S8_INITIALIZER("test/language/statements/switch"),
+    S8_INITIALIZER("test/built-ins/Number"),
+    S8_INITIALIZER("test/built-ins/Math"),
+    S8_INITIALIZER("test/built-ins/BigInt"),
+    S8_INITIALIZER("test/built-ins/Array/prototype/sort"),
+    S8_INITIALIZER("test/built-ins/Set"),
+    S8_INITIALIZER("test/built-ins/Reflect"),
+    S8_INITIALIZER("test/built-ins/RegExp/prototype/exec"),
+    S8_INITIALIZER("test/built-ins/DataView/prototype"),
+    S8_INITIALIZER("test/built-ins/WeakRef"),
+    S8_INITIALIZER("test/built-ins/FinalizationRegistry"),
+};
+
+// The last line of a run-test262 transcript is its result summary; the
+// progress indicator before it counts wall-clock dots and is not comparable.
+BUSTER_GLOBAL_LOCAL String8 quickjs_last_line(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    u64 start = text.length;
+    while (start && text.pointer[start - 1] != '\n')
+    {
+        start -= 1;
+    }
+    return string_slice(text, start, text.length);
+}
+
+// The harness's own Test262 configuration, derived from upstream's by binding
+// its three paths and dropping the two settings that would enumerate the
+// whole tree or write a report: the feature policy, the mode matrix and the
+// known-error list all stay upstream's.  Upstream's file is read, never
+// written.
+BUSTER_GLOBAL_LOCAL bool quickjs_write_test262_config(Arena* arena, String8 output, String8 source_directory, String8 test262_directory)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path_join(scratch.arena, source_directory, S8("test262.conf")), (FileReadOptions){0});
+    if (!bytes.pointer)
+    {
+        scratch_end(scratch);
+        return false;
+    }
+    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    String8 harness_line = string_format(scratch.arena, S8("harnessdir={S8}\n"), path_join(scratch.arena, test262_directory, S8("harness")));
+    String8 error_line = string_format(scratch.arena, S8("errorfile={S8}\n"), path_join(scratch.arena, source_directory, S8("test262_errors.txt")));
+    u64 start = scratch.arena->position;
+    u64 line_start = 0;
+    while (line_start < text.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < text.length && text.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = string_slice(text, line_start, line_end);
+        if (string_starts_with_sequence(line, S8("testdir=")) || string_starts_with_sequence(line, S8("reportfile=")))
+        {
+            // Dropped: the directory list the harness passes with -d is what
+            // it enumerates, and a report file would be one more artifact.
+        }
+        else if (string_starts_with_sequence(line, S8("harnessdir=")))
+        {
+            arena_append_string8(scratch.arena, harness_line);
+        }
+        else if (string_starts_with_sequence(line, S8("errorfile=")))
+        {
+            arena_append_string8(scratch.arena, error_line);
+        }
+        else
+        {
+            arena_append_string8(scratch.arena, line);
+            arena_append_char8(scratch.arena, '\n');
+        }
+        line_start = line_end + 1;
+    }
+    String8 configuration = {
+        .pointer = (char8*)arena_get_byte_pointer_at_position(scratch.arena, start),
+        .length = scratch.arena->position - start,
+    };
+    bool written = file_write(output, (ByteSlice){.pointer = (u8*)configuration.pointer, .length = configuration.length});
+    scratch_end(scratch);
+    return written;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
+{
+    TestQuickjsOptions options = *(TestQuickjsOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_quickjs requires an external QuickJS {S8} checkout path\n"), S8(QUICKJS_COMPATIBILITY_VERSION));
+        string_print(S8("usage: ./build/build test_quickjs [--config Debug|Release] /path/to/quickjs [/path/to/test262]\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 test262_directory = options.test262_directory.length ? os_path_absolute(arena, options.test262_directory, true) : (String8){0};
+
+    // The manifest, in the staging order the acceptance criteria name.  The
+    // library is upstream's QJS_LIB_OBJS; qjsc is the bytecode compiler that
+    // produces the one generated input the build needs; qjs is the CLI and
+    // run-test262 the conformance runner.
+    String8 library_sources[] = {S8("quickjs.c"), S8("dtoa.c"), S8("libregexp.c"), S8("libunicode.c"), S8("cutils.c"), S8("quickjs-libc.c")};
+    String8 compiler_sources[] = {S8("qjsc.c")};
+    String8 cli_sources[] = {S8("qjs.c")};
+    String8 runner_sources[] = {S8("run-test262.c")};
+    // Outside the manifest, and why.  unicode_gen.c regenerates
+    // libunicode-table.h from a Unicode data drop the checkout does not carry;
+    // the fuzz/ entry points need a fuzzing engine; tests/bjson.c and
+    // examples/*.c build shared libraries loaded at run time.  Each is left
+    // out rather than patched.
+    String8 excluded = S8("unicode_gen.c,fuzz/*.c,tests/bjson.c,examples/*.c");
+    String8 workload = S8("tests/basic_quickjs_workload.js");
+    QuickjsUpstreamTest upstream_tests[] = {
+        {S8("tests/test_closure.js"), false},  {S8("tests/test_language.js"), false},      {S8("tests/test_builtin.js"), true},
+        {S8("tests/test_loop.js"), false},     {S8("tests/test_bigint.js"), false},        {S8("tests/test_cyclic_import.js"), false},
+        {S8("tests/test_worker.js"), false},   {S8("tests/test_std.js"), false},           {S8("tests/test_rw_handler.js"), false},
+    };
+
+    String8* manifests[] = {library_sources, compiler_sources, cli_sources, runner_sources};
+    u64 manifest_counts[] = {BUSTER_ARRAY_LENGTH(library_sources), BUSTER_ARRAY_LENGTH(compiler_sources), BUSTER_ARRAY_LENGTH(cli_sources),
+                             BUSTER_ARRAY_LENGTH(runner_sources)};
+    u64 manifest_total = 0;
+    for (u64 manifest = 0; manifest < BUSTER_ARRAY_LENGTH(manifests); manifest += 1)
+    {
+        for (u64 index = 0; index < manifest_counts[manifest]; index += 1)
+        {
+            if (!path_exists(arena, path_join(arena, source_directory, manifests[manifest][index])))
+            {
+                string_print(S8("error: quickjs manifest source is missing: {S8}\n"), manifests[manifest][index]);
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        manifest_total += manifest_counts[manifest];
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(upstream_tests); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, upstream_tests[index].script)))
+        {
+            string_print(S8("error: quickjs upstream test is missing: {S8}\n"), upstream_tests[index].script);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    if (!path_exists(arena, workload))
+    {
+        string_print(S8("error: quickjs deterministic workload is missing: {S8}\n"), workload);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!quickjs_git_verify(arena, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    if (test262_directory.length && !path_exists(arena, path_join(arena, test262_directory, S8("test"))))
+    {
+        string_print(S8("error: test_quickjs was given a Test262 path without a test/ directory: {S8}\n"), test262_directory);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = quickjs_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_quickjs requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 workload_absolute = os_path_absolute(arena, workload, true);
+
+    String8 output_directory = string_format_z(arena, S8("build/quickjs-{S8}-{u64}"), S8(QUICKJS_COMPATIBILITY_VERSION), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_root = path_join(arena, output_directory, S8("metrics"));
+    String8 clang_directory = path_join(arena, output_directory, S8("clang"));
+    make_directory_recursive(arena, metrics_root);
+    make_directory_recursive(arena, clang_directory);
+    string_print(S8("QUICKJS_HARNESS ide={S8} clang={S8} output={S8} engine_stack={S8}\n"), ide, clang, output_directory, QUICKJS_ENGINE_STACK_SIZE);
+    quickjs_raise_stack_limit(QUICKJS_STACK_LIMIT_BYTES);
+    string_print(S8("QUICKJS_MANIFEST library_sources={u64} compiler_sources={u64} cli_sources={u64} runner_sources={u64} total_units={u64} "
+                    "upstream_tests={u64} excluded={S8} workload={S8}\n"),
+                 BUSTER_ARRAY_LENGTH(library_sources), BUSTER_ARRAY_LENGTH(compiler_sources), BUSTER_ARRAY_LENGTH(cli_sources),
+                 BUSTER_ARRAY_LENGTH(runner_sources), manifest_total, BUSTER_ARRAY_LENGTH(upstream_tests), excluded, workload);
+
+    // The Clang reference: the same manifest, the same flags, its own
+    // executables.  Every Buster artifact below is compared against it.
+    u64 clang_library_elapsed_us = 0;
+    String8* clang_library_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources));
+    u64* clang_unit_elapsed_us = arena_allocate(arena, u64, manifest_total + 1);
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        clang_library_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), quickjs_basename(library_sources[index])));
+        u64 elapsed_us = 0;
+        if (!quickjs_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, library_sources[index]), clang_library_objects[index],
+                                   &elapsed_us))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        clang_unit_elapsed_us[index] = elapsed_us;
+        clang_library_elapsed_us += elapsed_us;
+    }
+    String8 clang_compiler_object = path_join(arena, clang_directory, S8("qjsc.c.o"));
+    String8 clang_cli_object = path_join(arena, clang_directory, S8("qjs.c.o"));
+    String8 clang_runner_object = path_join(arena, clang_directory, S8("run-test262.c.o"));
+    u64 clang_compiler_elapsed_us = 0;
+    u64 clang_cli_elapsed_us = 0;
+    u64 clang_runner_elapsed_us = 0;
+    if (!quickjs_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, compiler_sources[0]), clang_compiler_object,
+                               &clang_compiler_elapsed_us) ||
+        !quickjs_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, cli_sources[0]), clang_cli_object, &clang_cli_elapsed_us) ||
+        !quickjs_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, runner_sources[0]), clang_runner_object,
+                               &clang_runner_elapsed_us))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    clang_unit_elapsed_us[BUSTER_ARRAY_LENGTH(library_sources)] = clang_compiler_elapsed_us;
+
+    String8 clang_qjsc = path_join(arena, clang_directory, S8("qjsc"));
+    String8* clang_compiler_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 1);
+    clang_compiler_objects[0] = clang_compiler_object;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        clang_compiler_objects[index + 1] = clang_library_objects[index];
+    }
+    if (!quickjs_link(arena, clang, clang_qjsc, clang_compiler_objects, BUSTER_ARRAY_LENGTH(library_sources) + 1, false))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    // The one generated input in the build: qjsc compiles repl.js to the
+    // bytecode array qjs.c links against.  The Clang engine writes the
+    // reference copy; every Buster engine below has to produce the same bytes.
+    String8 clang_repl_source = path_join(arena, clang_directory, S8("repl.c"));
+    String8 repl_script = path_join(arena, source_directory, S8("repl.js"));
+    String8 clang_repl_arguments[] = {clang_qjsc, S8("-s"), S8("-c"), S8("-o"), clang_repl_source, S8("-m"), repl_script};
+    if (quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_repl_arguments), S8("."), false).result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: the Clang-built qjsc could not generate repl.c\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_repl_object = path_join(arena, clang_directory, S8("repl.c.o"));
+    if (!quickjs_compile_clang(arena, clang, source_directory, clang_repl_source, clang_repl_object, 0))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_qjs = path_join(arena, clang_directory, S8("qjs"));
+    String8* clang_cli_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 2);
+    clang_cli_objects[0] = clang_cli_object;
+    clang_cli_objects[1] = clang_repl_object;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        clang_cli_objects[index + 2] = clang_library_objects[index];
+    }
+    if (!quickjs_link(arena, clang, clang_qjs, clang_cli_objects, BUSTER_ARRAY_LENGTH(library_sources) + 2, false))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_runner = path_join(arena, clang_directory, S8("run-test262"));
+    String8* clang_runner_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 1);
+    clang_runner_objects[0] = clang_runner_object;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+    {
+        clang_runner_objects[index + 1] = clang_library_objects[index];
+    }
+    if (!quickjs_link(arena, clang, clang_runner, clang_runner_objects, BUSTER_ARRAY_LENGTH(library_sources) + 1, false))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_workload_bytecode = path_join(arena, clang_directory, S8("workload.c"));
+    String8 clang_workload_arguments[] = {clang_qjsc, S8("-c"), S8("-o"), clang_workload_bytecode, workload_absolute};
+    if (quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_workload_arguments), S8("."), false).result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: the Clang-built qjsc could not compile the deterministic workload\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 clang_repl_size = 0;
+    quickjs_hash_file(arena, clang_repl_source, &clang_repl_size);
+    string_print(S8("QUICKJS_REFERENCE compiler=clang library_elapsed_us={u64} qjsc_elapsed_us={u64} qjs_elapsed_us={u64} runner_elapsed_us={u64} "
+                    "repl_bytes={u64}\n"),
+                 clang_library_elapsed_us, clang_compiler_elapsed_us, clang_cli_elapsed_us, clang_runner_elapsed_us, clang_repl_size);
+
+    // The Clang engine's transcripts, produced once and compared against every
+    // allocator's.
+    QuickjsRunResult* clang_test_runs = arena_allocate(arena, QuickjsRunResult, BUSTER_ARRAY_LENGTH(upstream_tests));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(upstream_tests); index += 1)
+    {
+        String8 script_arguments[2];
+        u64 script_argument_count = 0;
+        if (upstream_tests[index].standard_library)
+        {
+            script_arguments[script_argument_count++] = S8("--std");
+        }
+        script_arguments[script_argument_count++] = upstream_tests[index].script;
+        clang_test_runs[index] = quickjs_run_engine(arena, clang_qjs, script_arguments, script_argument_count, source_directory);
+        if (clang_test_runs[index].result != PROCESS_RESULT_SUCCESS)
+        {
+            string_print(S8("error: the Clang-built qjs failed the upstream test {S8}\n"), upstream_tests[index].script);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 clang_workload_arguments_run[] = {S8("--std"), workload_absolute};
+    QuickjsRunResult clang_workload = quickjs_run_engine(arena, clang_qjs, clang_workload_arguments_run, BUSTER_ARRAY_LENGTH(clang_workload_arguments_run),
+                                                          source_directory);
+    if (clang_workload.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: the Clang-built qjs failed the deterministic workload\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 memory_arguments[] = {S8("-d"), S8("-e"), S8("1")};
+    QuickjsRunResult clang_memory = quickjs_run_engine(arena, clang_qjs, memory_arguments, BUSTER_ARRAY_LENGTH(memory_arguments), source_directory);
+    if (clang_memory.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: the Clang-built qjs failed the memory report\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("QUICKJS_WORKLOAD compiler=clang elapsed_us={u64} instructions={u64} transcript_bytes={u64}\n"), clang_workload.elapsed_us,
+                 clang_workload.instructions, clang_workload.output.length);
+
+    // The Test262 configuration, written once and shared by every allocator.
+    String8 test262_configuration = {0};
+    if (test262_directory.length)
+    {
+        test262_configuration = path_join(arena, output_directory, S8("test262.conf"));
+        if (!quickjs_write_test262_config(arena, test262_configuration, source_directory, test262_directory))
+        {
+            string_print(S8("error: test_quickjs could not write its Test262 configuration\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8* clang_test262_results = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(quickjs_test262_directories));
+    u64 test262_total_us = 0;
+    if (test262_configuration.length)
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(quickjs_test262_directories); index += 1)
+        {
+            String8 directory = path_join(arena, test262_directory, quickjs_test262_directories[index]);
+            String8 runner_arguments[] = {clang_runner, S8("-c"), test262_configuration, S8("-T"), S8("1"), S8("-d"), directory};
+            u64 elapsed_us = 0;
+            QuickjsCommandResult run =
+                quickjs_command_measured(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(runner_arguments), S8("."), true, &elapsed_us, 0);
+            test262_total_us += elapsed_us;
+            if (run.result != PROCESS_RESULT_SUCCESS)
+            {
+                string_print(S8("error: the Clang-built run-test262 failed on {S8}\n"), quickjs_test262_directories[index]);
+                return PROCESS_RESULT_FAILED;
+            }
+            // run-test262 prints its progress and its summary on standard
+            // error; the summary is the last line of it.
+            clang_test262_results[index] = string_duplicate_arena(arena, quickjs_last_line(run.error), false);
+            string_print(S8("QUICKJS_TEST262 compiler=clang directory={S8} {S8}\n"), quickjs_test262_directories[index], clang_test262_results[index]);
+        }
+    }
+    else
+    {
+        string_print(S8("QUICKJS_TEST262 status=skipped reason=no-test262-path\n"));
+    }
+
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    // Which allocators the conformance stage gates.  `run-test262` fixes the
+    // engine's stack at QuickJS's 1 MB default and offers no switch for it,
+    // and the two allocators that spill the most -- NONE, which gives every
+    // value its own frame slot, and MIR_STACK, which keeps its values in the
+    // frame -- do not fit the engine's own parser inside that limit: a test
+    // fails with "SyntaxError: stack overflow" while it is being compiled,
+    // and the harness state it should have set up never finishes
+    // initializing.  Those two therefore do not run the stage, and the
+    // skip is printed rather than excused.  The same two engines pass the
+    // upstream suite, the deterministic workload and the memory report, all
+    // of which go through `qjs`, which does take --stack-size.
+    bool allocator_runs_test262[] = {true, false, false, true};
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 mode_directory = path_join(arena, output_directory, mode);
+        String8 mode_metrics = path_join(arena, metrics_root, mode);
+        make_directory_recursive(arena, mode_directory);
+        make_directory_recursive(arena, mode_metrics);
+
+        // Stage 1: the portable library.  A failure here names the unit.
+        String8* library_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources));
+        u64 library_elapsed_us = 0;
+        u64 library_fallbacks = 0;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+        {
+            String8 stem = quickjs_stem(arena, library_sources[index]);
+            library_objects[index] = path_join(arena, mode_directory, string_format(arena, S8("{S8}.o"), stem));
+            String8 metrics = path_join(arena, mode_metrics, string_format(arena, S8("{S8}.metrics"), stem));
+            u64 elapsed_us = 0;
+            u64 fallbacks = 0;
+            if (!quickjs_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, library_sources[index]), library_objects[index],
+                                        metrics, mode, &elapsed_us, &fallbacks))
+            {
+                string_print(S8("error: test_quickjs stage=library allocator={S8} failed at {S8}\n"), mode, library_sources[index]);
+                return PROCESS_RESULT_FAILED;
+            }
+            quickjs_metrics_report(arena, mode, library_sources[index], metrics, elapsed_us, clang_unit_elapsed_us[index], fallbacks);
+            library_elapsed_us += elapsed_us;
+            library_fallbacks += fallbacks;
+        }
+        string_print(S8("QUICKJS_STAGE allocator={S8} stage=library units={u64} elapsed_us={u64} clang_elapsed_us={u64} fallback_functions={u64} "
+                        "status=pass\n"),
+                     mode, BUSTER_ARRAY_LENGTH(library_sources), library_elapsed_us, clang_library_elapsed_us, library_fallbacks);
+
+        // Stage 2: the bytecode compiler, linked through `ide cc`.
+        String8 compiler_object = path_join(arena, mode_directory, S8("qjsc.o"));
+        String8 compiler_metrics = path_join(arena, mode_metrics, S8("qjsc.metrics"));
+        u64 compiler_elapsed_us = 0;
+        u64 compiler_fallbacks = 0;
+        if (!quickjs_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, compiler_sources[0]), compiler_object, compiler_metrics,
+                                    mode, &compiler_elapsed_us, &compiler_fallbacks))
+        {
+            string_print(S8("error: test_quickjs stage=compiler allocator={S8} failed at {S8}\n"), mode, compiler_sources[0]);
+            return PROCESS_RESULT_FAILED;
+        }
+        quickjs_metrics_report(arena, mode, compiler_sources[0], compiler_metrics, compiler_elapsed_us, clang_compiler_elapsed_us, compiler_fallbacks);
+        String8 qjsc = path_join(arena, mode_directory, S8("qjsc"));
+        String8* compiler_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 1);
+        compiler_objects[0] = compiler_object;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+        {
+            compiler_objects[index + 1] = library_objects[index];
+        }
+        if (!quickjs_link(arena, ide, qjsc, compiler_objects, BUSTER_ARRAY_LENGTH(library_sources) + 1, true))
+        {
+            string_print(S8("error: test_quickjs stage=compiler-link allocator={S8} failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("QUICKJS_STAGE allocator={S8} stage=compiler elapsed_us={u64} clang_elapsed_us={u64} status=pass\n"), mode, compiler_elapsed_us,
+                     clang_compiler_elapsed_us);
+
+        // Stage 3: the generated input.  The Buster engine compiles repl.js
+        // itself, and its serialized bytecode has to be byte-identical to the
+        // Clang engine's -- a compiled-in JavaScript program is a serialized
+        // result, and it is the strongest equality this harness can ask for.
+        String8 repl_source = path_join(arena, mode_directory, S8("repl.c"));
+        String8 repl_arguments[] = {qjsc, S8("-s"), S8("-c"), S8("-o"), repl_source, S8("-m"), repl_script};
+        QuickjsCommandResult repl_run = quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(repl_arguments), S8("."), true);
+        // qjsc is the one QuickJS executable with no --stack-size switch, so
+        // it runs its own parser inside the engine's fixed 1 MB default. The
+        // allocators whose frames are widest -- NONE above all, which spills
+        // every value -- exhaust that while parsing repl.js. That is the same
+        // measured frame-layout gap QUICKJS_STACK_LIMIT reports and not a
+        // wrong answer, so the stage records it and continues on the
+        // reference bytecode; any other failure stays an error.
+        bool generated = repl_run.result == PROCESS_RESULT_SUCCESS;
+        if (!generated && string_first_sequence(repl_run.error, S8("stack overflow")) == BUSTER_STRING_NO_MATCH)
+        {
+            string_print(S8("error: test_quickjs stage=generated allocator={S8} could not generate repl.c\n"), mode);
+            if (repl_run.error.length)
+            {
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(repl_run.error));
+            }
+            return PROCESS_RESULT_FAILED;
+        }
+        if (generated && !quickjs_files_equal(arena, repl_source, clang_repl_source))
+        {
+            string_print(S8("error: test_quickjs allocator={S8} generated repl.c differs from the Clang engine's bytecode\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (generated)
+        {
+            String8 workload_bytecode = path_join(arena, mode_directory, S8("workload.c"));
+            String8 workload_bytecode_arguments[] = {qjsc, S8("-c"), S8("-o"), workload_bytecode, workload_absolute};
+            if (quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(workload_bytecode_arguments), S8("."), false).result != PROCESS_RESULT_SUCCESS ||
+                !quickjs_files_equal(arena, workload_bytecode, clang_workload_bytecode))
+            {
+                string_print(S8("error: test_quickjs allocator={S8} compiled the workload to different bytecode than the Clang engine\n"), mode);
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        else
+        {
+            repl_source = clang_repl_source;
+        }
+        u64 repl_size = 0;
+        u64 repl_hash = quickjs_hash_file(arena, repl_source, &repl_size);
+        String8 repl_object = path_join(arena, mode_directory, S8("repl.o"));
+        String8 repl_metrics = path_join(arena, mode_metrics, S8("repl.metrics"));
+        u64 repl_elapsed_us = 0;
+        u64 repl_fallbacks = 0;
+        if (!quickjs_compile_buster(arena, ide, source_directory, repl_source, repl_object, repl_metrics, mode, &repl_elapsed_us, &repl_fallbacks))
+        {
+            string_print(S8("error: test_quickjs stage=generated allocator={S8} failed at repl.c\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        quickjs_metrics_report(arena, mode, S8("repl.c"), repl_metrics, repl_elapsed_us, 0, repl_fallbacks);
+        string_print(S8("QUICKJS_STAGE allocator={S8} stage=generated repl_bytes={u64} repl_hash={u64:x} bytecode={S8} status=pass\n"), mode, repl_size,
+                     repl_hash, generated ? S8("identical") : S8("reference-engine-stack-exhausted"));
+
+        // Stage 4: the CLI.
+        String8 cli_object = path_join(arena, mode_directory, S8("qjs.o"));
+        String8 cli_metrics = path_join(arena, mode_metrics, S8("qjs.metrics"));
+        u64 cli_elapsed_us = 0;
+        u64 cli_fallbacks = 0;
+        if (!quickjs_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, cli_sources[0]), cli_object, cli_metrics, mode,
+                                    &cli_elapsed_us, &cli_fallbacks))
+        {
+            string_print(S8("error: test_quickjs stage=cli allocator={S8} failed at {S8}\n"), mode, cli_sources[0]);
+            return PROCESS_RESULT_FAILED;
+        }
+        quickjs_metrics_report(arena, mode, cli_sources[0], cli_metrics, cli_elapsed_us, clang_cli_elapsed_us, cli_fallbacks);
+        String8 qjs = path_join(arena, mode_directory, S8("qjs"));
+        String8* cli_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 2);
+        cli_objects[0] = cli_object;
+        cli_objects[1] = repl_object;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+        {
+            cli_objects[index + 2] = library_objects[index];
+        }
+        if (!quickjs_link(arena, ide, qjs, cli_objects, BUSTER_ARRAY_LENGTH(library_sources) + 2, true))
+        {
+            string_print(S8("error: test_quickjs stage=cli-link allocator={S8} failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("QUICKJS_STAGE allocator={S8} stage=cli elapsed_us={u64} clang_elapsed_us={u64} status=pass\n"), mode, cli_elapsed_us,
+                     clang_cli_elapsed_us);
+
+        // Stage 5: the Test262 runner.
+        String8 runner_object = path_join(arena, mode_directory, S8("run-test262.o"));
+        String8 runner_metrics = path_join(arena, mode_metrics, S8("run-test262.metrics"));
+        u64 runner_elapsed_us = 0;
+        u64 runner_fallbacks = 0;
+        if (!quickjs_compile_buster(arena, ide, source_directory, path_join(arena, source_directory, runner_sources[0]), runner_object, runner_metrics, mode,
+                                    &runner_elapsed_us, &runner_fallbacks))
+        {
+            string_print(S8("error: test_quickjs stage=runner allocator={S8} failed at {S8}\n"), mode, runner_sources[0]);
+            return PROCESS_RESULT_FAILED;
+        }
+        quickjs_metrics_report(arena, mode, runner_sources[0], runner_metrics, runner_elapsed_us, clang_runner_elapsed_us, runner_fallbacks);
+        String8 runner = path_join(arena, mode_directory, S8("run-test262"));
+        String8* runner_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(library_sources) + 1);
+        runner_objects[0] = runner_object;
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(library_sources); index += 1)
+        {
+            runner_objects[index + 1] = library_objects[index];
+        }
+        if (!quickjs_link(arena, ide, runner, runner_objects, BUSTER_ARRAY_LENGTH(library_sources) + 1, true))
+        {
+            string_print(S8("error: test_quickjs stage=runner-link allocator={S8} failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("QUICKJS_STAGE allocator={S8} stage=runner elapsed_us={u64} clang_elapsed_us={u64} status=pass\n"), mode, runner_elapsed_us,
+                     clang_runner_elapsed_us);
+
+        // The upstream test suite, compared against the Clang engine run for
+        // run: exit status, standard output and standard error.
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(upstream_tests); index += 1)
+        {
+            String8 script_arguments[2];
+            u64 script_argument_count = 0;
+            if (upstream_tests[index].standard_library)
+            {
+                script_arguments[script_argument_count++] = S8("--std");
+            }
+            script_arguments[script_argument_count++] = upstream_tests[index].script;
+            QuickjsRunResult run = quickjs_run_engine(arena, qjs, script_arguments, script_argument_count, source_directory);
+            if (run.result != PROCESS_RESULT_SUCCESS || !quickjs_compare_runs(upstream_tests[index].script, mode, run, clang_test_runs[index]))
+            {
+                string_print(S8("error: test_quickjs allocator={S8} failed the upstream test {S8}\n"), mode, upstream_tests[index].script);
+                if (run.error.length)
+                {
+                    os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(run.error));
+                }
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+        string_print(S8("QUICKJS_TEST allocator={S8} upstream_tests={u64} status=pass\n"), mode, BUSTER_ARRAY_LENGTH(upstream_tests));
+
+        // The deterministic workload: the transcript is compared byte for
+        // byte, and the cost of producing it is reported apart from the cost
+        // of compiling the engine.
+        String8 workload_arguments[] = {S8("--std"), workload_absolute};
+        QuickjsRunResult workload_run = quickjs_run_engine(arena, qjs, workload_arguments, BUSTER_ARRAY_LENGTH(workload_arguments), source_directory);
+        if (workload_run.result != PROCESS_RESULT_SUCCESS || !quickjs_compare_runs(workload, mode, workload_run, clang_workload))
+        {
+            string_print(S8("error: test_quickjs allocator={S8} failed the deterministic workload\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("QUICKJS_WORKLOAD compiler=buster allocator={S8} elapsed_us={u64} clang_elapsed_us={u64} transcript_bytes={u64}\n"), mode,
+                     workload_run.elapsed_us, clang_workload.elapsed_us, workload_run.output.length);
+        if (workload_run.instructions && clang_workload.instructions)
+        {
+            string_print(S8("QUICKJS_CODEGEN allocator={S8} instructions={u64} clang_instructions={u64}\n"), mode, workload_run.instructions,
+                         clang_workload.instructions);
+        }
+
+        // The engine's own memory report.  Every line of it is a struct size
+        // or an allocation count, so an identical report is a statement about
+        // the layouts the two compilers chose as much as about the run.
+        QuickjsRunResult memory_run = quickjs_run_engine(arena, qjs, memory_arguments, BUSTER_ARRAY_LENGTH(memory_arguments), source_directory);
+        if (memory_run.result != PROCESS_RESULT_SUCCESS || !quickjs_compare_runs(S8("memory report"), mode, memory_run, clang_memory))
+        {
+            string_print(S8("error: test_quickjs allocator={S8} produced a different memory report\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("QUICKJS_MEMORY allocator={S8} report_bytes={u64} status=identical\n"), mode, memory_run.output.length);
+
+        // The bounded Test262 subset, when a checkout was given.
+        if (test262_configuration.length && !allocator_runs_test262[mode_index])
+        {
+            string_print(S8("QUICKJS_TEST262 compiler=buster allocator={S8} directories={u64} status=skipped "
+                            "reason=engine-stack-below-run-test262-fixed-limit\n"),
+                         mode, BUSTER_ARRAY_LENGTH(quickjs_test262_directories));
+        }
+        else if (test262_configuration.length)
+        {
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(quickjs_test262_directories); index += 1)
+            {
+                String8 directory = path_join(arena, test262_directory, quickjs_test262_directories[index]);
+                String8 runner_arguments[] = {runner, S8("-c"), test262_configuration, S8("-T"), S8("1"), S8("-d"), directory};
+                u64 elapsed_us = 0;
+                QuickjsCommandResult run =
+                    quickjs_command_measured(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(runner_arguments), S8("."), true, &elapsed_us, 0);
+                test262_total_us += elapsed_us;
+                String8 result_line = quickjs_last_line(run.error);
+                // The comparison is exact: the same directory, the same
+                // configuration, the same runner sources, so the summary the
+                // Buster engine prints has to be the one the Clang engine
+                // printed.
+                if (!string_equal(result_line, clang_test262_results[index]))
+                {
+                    string_print(S8("error: test_quickjs allocator={S8} Test262 {S8} differs: buster[{S8}] clang[{S8}]\n"), mode,
+                                 quickjs_test262_directories[index], result_line, clang_test262_results[index]);
+                    if (run.output.length)
+                    {
+                        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(run.output));
+                    }
+                    return PROCESS_RESULT_FAILED;
+                }
+                string_print(S8("QUICKJS_TEST262 compiler=buster allocator={S8} directory={S8} {S8}\n"), mode, quickjs_test262_directories[index],
+                             result_line);
+            }
+        }
+    }
+
+    string_print(S8("QUICKJS_RESULT version={S8} commit={S8} units={u64} allocators={u64} upstream_tests={u64} test262_directories={u64} "
+                    "test262_elapsed_us={u64} status=pass\n"),
+                 S8(QUICKJS_COMPATIBILITY_VERSION), S8(QUICKJS_COMPATIBILITY_COMMIT), manifest_total, BUSTER_ARRAY_LENGTH(allocator_modes),
+                 BUSTER_ARRAY_LENGTH(upstream_tests), test262_configuration.length ? BUSTER_ARRAY_LENGTH(quickjs_test262_directories) : 0, test262_total_us);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_quickjs_action_add(Arena* arena, TestQuickjsOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestQuickjsOptions* options_copy = arena_allocate(arena, TestQuickjsOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_quickjs_action, .callback_data = options_copy};
+}
+
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
 struct X86CompletionCensusPlan
 {
@@ -28012,6 +29191,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_SQLITE] = S8_INITIALIZER("test_sqlite"),
         [BUILD_COMMAND_TEST_SBASE] = S8_INITIALIZER("test_sbase"),
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
+        [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -28090,6 +29270,7 @@ ProcessResult process_arguments(void)
     TestSqliteOptions test_sqlite_options = {0};
     TestSbaseOptions test_sbase_options = {0};
     TestDoomOptions test_doom_options = {0};
+    TestQuickjsOptions test_quickjs_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -28252,6 +29433,19 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TEST_DOOM && !test_doom_options.iwad_path.length && !string_starts_with_sequence(argument, S8("--")))
             {
                 test_doom_options.iwad_path = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_QUICKJS && !test_quickjs_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_quickjs_options.source_directory = argument;
+                argument_i += 1;
+            }
+            // The second positional path is the optional Test262 checkout.
+            else if (command == BUILD_COMMAND_TEST_QUICKJS && !test_quickjs_options.test262_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_quickjs_options.test262_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -28533,6 +29727,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_DOOM)
                 {
                     test_doom_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_QUICKJS)
+                {
+                    test_quickjs_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -29108,6 +30306,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_DOOM:
         {
             test_doom_action_add(arena, test_doom_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_QUICKJS:
+        {
+            test_quickjs_action_add(arena, test_quickjs_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

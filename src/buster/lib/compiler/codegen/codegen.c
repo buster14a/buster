@@ -9534,6 +9534,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 continue;
                             }
                             u8 reg = registers[register_index++];
+                            // Both ABIs leave the bits above a narrow integer
+                            // argument's declared width unspecified in its
+                            // register, and every canonical value lives
+                            // zero-extended in its eightbyte slot, so the
+                            // incoming register is normalized to its width
+                            // before it is stored. Without this a `uint32_t`
+                            // parameter carries the caller's leftover high
+                            // half into every 64-bit use of the slot -- an
+                            // index, a pointer offset, a comparison.
+                            u16 argument_bits = part_count == 1 && argument_type &&
+                                                        (argument_type->kind == IR_TYPE_INTEGER || argument_type->kind == IR_TYPE_BOOLEAN)
+                                                    ? (u16)(argument_type->layout.size * 8)
+                                                    : (u16)64;
+                            if (argument_bits && argument_bits < 64)
+                            {
+                                BusterX86MetadataPhysicalOperand normalize_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr((X64Register)reg, argument_bits <= 16 ? 32 : argument_bits),
+                                    codegen_canonical_x64_metadata_gpr((X64Register)reg, argument_bits),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, argument_bits <= 16 ? S8("MOVZX") : S8("MOV"), normalize_operands,
+                                                                           BUSTER_ARRAY_LENGTH(normalize_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                            }
                             BusterX86MetadataPhysicalOperand register_store_operands[2] = {
                                 codegen_canonical_x64_metadata_memory(
                                     X64_REGISTER_RBP, 64,
@@ -15485,6 +15511,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             instruction_id = instruction->next;
                             continue;
+                        }
+                        // AAPCS64 leaves the bits above a narrow integer
+                        // argument's declared width unspecified in its
+                        // register, and every canonical value lives
+                        // zero-extended in its eightbyte slot, so the incoming
+                        // register is normalized to its width before it is
+                        // stored.  `mov w<n>, w<n>` clears the top half;
+                        // `uxtb`/`uxth` clear all but the declared bits.
+                        u16 argument_bits = abi_part_count == 1 && argument_type &&
+                                                    (argument_type->kind == IR_TYPE_INTEGER || argument_type->kind == IR_TYPE_BOOLEAN)
+                                                ? (u16)(argument_type->layout.size * 8)
+                                                : (u16)64;
+                        if (argument_bits && argument_bits < 64)
+                        {
+                            u32 narrow_register = register_index;
+                            u32 encoding = argument_bits == 8    ? (0x53001c00u | (narrow_register << 5) | narrow_register)
+                                           : argument_bits == 16 ? (0x53003c00u | (narrow_register << 5) | narrow_register)
+                                                                 : (0x2a0003e0u | (narrow_register << 16) | narrow_register);
+                            codegen_emit_u32(&buffer, encoding);
                         }
                         for (u32 part_index = 0; part_index < abi_part_count; part_index += 1)
                         {

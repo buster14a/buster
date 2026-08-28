@@ -52,7 +52,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[68];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[69];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
@@ -224,6 +224,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
     C_SYMBOL_BUILTIN_SIMD,
+    C_SYMBOL_BUILTIN_FRAME_ADDRESS,
+    C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);

@@ -1320,6 +1320,8 @@ struct CIrPreparedCall
     bool builtin_assume_aligned;
     bool builtin_debugtrap;
     bool builtin_unreachable;
+    bool builtin_frame_address;
+    bool builtin_alloca;
     bool builtin_strlen;
     bool builtin_clear_cache;
     bool builtin_prefetch;
@@ -1390,6 +1392,8 @@ BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
         {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_signbit"), S8("signbit")}, {S8("__builtin_signbitf"), S8("signbitf")},
+        {S8("__builtin_signbitl"), S8("signbitl")},
         {S8("__builtin_inff"), S8("inff")},
         {S8("__builtin_huge_val"), S8("huge_val")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
@@ -3611,6 +3615,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
 {
@@ -3630,17 +3635,38 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
     if (field && value_type && value_type->kind == IR_TYPE_INTEGER && field->bit_width && field->bit_width <= value_type->bit_width)
     {
         CToken token = {0};
-        IrValueId shift = c_ir_emit_integer_value_typed(builder, field->bit_offset, false, token, type);
-        value = c_ir_emit_binary_value(builder, value, shift, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
-        u64 mask = field->bit_width == 64 ? UINT64_MAX : ((u64)1 << field->bit_width) - 1;
-        IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, type);
-        value = c_ir_emit_binary_value(builder, value, mask_value, type, IR_BINARY_INTEGER_BITWISE_AND, source);
-        if (value_type->is_signed && field->bit_width < value_type->bit_width)
+        // The extraction runs in the promoted type, never in a narrower one:
+        // the machine backends model shifts at 32 and 64 bits only, so a
+        // 16-bit `shl`/`sar` pair executes at 32 bits and the sign bit of a
+        // `short a : 9` never reaches the top. Promoting here is also what C
+        // does with the value, and the result narrows back on the way out.
+        IrTypeId extract_type = type;
+        IrType* extract_type_value = value_type;
+        if (value_type->bit_width < 32)
         {
-            u32 sign_shift = value_type->bit_width - field->bit_width;
-            IrValueId sign_shift_value = c_ir_emit_integer_value_typed(builder, sign_shift, false, token, type);
-            value = c_ir_emit_binary_value(builder, value, sign_shift_value, type, IR_BINARY_SHIFT_LEFT, source);
-            value = c_ir_emit_binary_value(builder, value, sign_shift_value, type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+            extract_type = value_type->is_signed ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+            extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
+            value = extract_type_value ? c_ir_emit_cast(builder, value, extract_type, source) : IR_VALUE_ID_INVALID;
+        }
+        if (!extract_type_value || value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, field->bit_offset, false, token, extract_type);
+        value = c_ir_emit_binary_value(builder, value, shift, extract_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        u64 mask = field->bit_width == 64 ? UINT64_MAX : ((u64)1 << field->bit_width) - 1;
+        IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, extract_type);
+        value = c_ir_emit_binary_value(builder, value, mask_value, extract_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        if (value_type->is_signed && field->bit_width < extract_type_value->bit_width)
+        {
+            u32 sign_shift = extract_type_value->bit_width - field->bit_width;
+            IrValueId sign_shift_value = c_ir_emit_integer_value_typed(builder, sign_shift, false, token, extract_type);
+            value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SHIFT_LEFT, source);
+            value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+        }
+        if (extract_type.value != type.value)
+        {
+            value = c_ir_emit_cast(builder, value, type, source);
         }
     }
 
@@ -7387,6 +7413,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED,
     C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_VALUE,
     C_IR_PREPARED_CALL_CONTINUATION_UNARY,
+    C_IR_PREPARED_CALL_CONTINUATION_ALLOCA,
     C_IR_PREPARED_CALL_CONTINUATION_STRLEN,
     C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST,
     C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND,
@@ -9329,6 +9356,44 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
     }
+    // `signbit` is the one float predicate that cannot be written as a
+    // comparison: it has to answer -0.0 and it has to answer it differently
+    // from +0.0, which compare equal.  The value therefore goes through a
+    // stack slot and comes back as its bits, which is what the backend would
+    // do for a union read anyway.
+    if (string_equal(link_name, S8("signbit")) || string_equal(link_name, S8("signbitf")) || string_equal(link_name, S8("signbitl")))
+    {
+        if (argument_count != 1)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrTypeId bits_type = builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
+        // A narrower float widens to binary64 first: the conversion is exact
+        // for f32 and keeps the sign of every f80 value it rounds, including
+        // the zeroes and NaNs whose sign is the whole question here.
+        IrValueId value = c_ir_emit_cast(builder, arguments[0], builder->f64_type, source);
+        IrValueId slot = builder->f64_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_temporary(builder, builder->f64_type, source) : IR_VALUE_ID_INVALID;
+        if (bits_type.value == IR_ID_UNDERLYING_INVALID || value.value == IR_ID_UNDERLYING_INVALID || slot.value == IR_ID_UNDERLYING_INVALID ||
+            !c_ir_emit_store_place(builder, slot, builder->f64_type, value, source))
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+        IrValueId address = c_ir_emit_address_of_place(builder, slot, builder->f64_type, source);
+        IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
+                                     : IR_VALUE_ID_INVALID;
+        IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
+        IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId sign_shift = c_ir_emit_integer_value_typed(builder, 63, false, token, bits_type);
+        if (bits.value == IR_ID_UNDERLYING_INVALID || sign_shift.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrValueId sign = c_ir_emit_binary_value(builder, bits, sign_shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        return sign.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, sign, builder->s32_type, source);
+    }
     bool isnan_builtin = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isnan"));
     bool isinf_builtin = string_equal(link_name, S8("isinf")) || string_equal(link_name, S8("isinff"));
     bool isinf_sign_builtin = string_equal(link_name, S8("isinf_sign"));
@@ -10823,6 +10888,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         bool builtin_assume_aligned = builtin_kind == C_SYMBOL_BUILTIN_ASSUME_ALIGNED;
         bool builtin_debugtrap = builtin_kind == C_SYMBOL_BUILTIN_DEBUGTRAP;
         bool builtin_unreachable = builtin_kind == C_SYMBOL_BUILTIN_UNREACHABLE;
+        bool builtin_frame_address = builtin_kind == C_SYMBOL_BUILTIN_FRAME_ADDRESS;
+        bool builtin_alloca = builtin_kind == C_SYMBOL_BUILTIN_ALLOCA;
         bool builtin_strlen = builtin_kind == C_SYMBOL_BUILTIN_STRLEN;
         // A prefetch is a hint: lower the address for its side effects and drop
         // the rest.  Claiming it keeps <intrin.h> (and the whole <immintrin.h>
@@ -11024,7 +11091,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
-             !builtin_assume_aligned && !builtin_debugtrap && !builtin_unreachable && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
+             !builtin_assume_aligned && !builtin_debugtrap && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
              builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
@@ -11065,6 +11132,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_assume_aligned = builtin_assume_aligned,
             .builtin_debugtrap = builtin_debugtrap,
             .builtin_unreachable = builtin_unreachable,
+            .builtin_frame_address = builtin_frame_address,
+            .builtin_alloca = builtin_alloca,
             .builtin_strlen = builtin_strlen,
             .builtin_clear_cache = builtin_clear_cache,
             .builtin_prefetch = builtin_prefetch,
@@ -12085,6 +12154,88 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 continue;
             }
             selected->result = c_ir_emit_integer_value_typed(builder, length, false, token, builder->size_type);
+            selected->argument_count = 1;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        // `__builtin_alloca(n)` is the same stack allocation a variable-length
+        // array makes, minus the array: the storage lives until the function
+        // returns, so nothing releases it at the end of the enclosing block.
+        if (selected->builtin_alloca)
+        {
+            u32 size_start = selected->open_index + 1;
+            u32 size_end = selected->close_index;
+            IrValueId size = IR_VALUE_ID_INVALID;
+            if (size_start >= size_end)
+            {
+                return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ALLOCA)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                size = child_value;
+            }
+            else
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ALLOCA, size_start, size_end, false);
+            }
+            size = c_ir_emit_cast(builder, size, builder->size_type, c_ir_token_source_range(builder, token));
+            IrTypeId storage_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+            IrValueId storage = storage_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_add_result(builder, storage_type) : IR_VALUE_ID_INVALID;
+            if (size.value == IR_ID_UNDERLYING_INVALID || storage.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            IrSourceRange allocation_source = c_ir_token_source_range(builder, token);
+            IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, storage_type);
+            allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
+            allocation.operands[0] = size;
+            allocation.operand_count = 1;
+            allocation.immediates = arena_allocate(builder->arena, u64, 1);
+            // GNU promises alloca storage suitably aligned for any object.
+            allocation.immediates[0] = 16;
+            allocation.immediate_count = 1;
+            allocation.result = storage;
+            builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, allocation_source);
+            selected->result = storage;
+            selected->argument_count = 1;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        // `__builtin_frame_address(0)` answers the current frame's stack
+        // pointer. That is an address inside the frame rather than the frame
+        // base GCC documents, which is what its callers actually use it for:
+        // QuickJS compares one against another to measure recursion depth.
+        // A non-zero level asks for a caller's frame, which needs a frame
+        // pointer chain this backend does not promise, so it is refused
+        // instead of answered approximately.
+        if (selected->builtin_frame_address)
+        {
+            CIrConstantValue frame_level = {0};
+            if (selected->close_index <= selected->open_index + 1 ||
+                !c_ir_constant_evaluate(builder, selected->open_index + 1, selected->close_index, &frame_level) || frame_level.kind != C_IR_CONSTANT_INTEGER)
+            {
+                builder->failure_message = S8("__builtin_frame_address requires an integer constant level");
+                builder->failure_token_index = selected->token_index;
+                return false;
+            }
+            if (frame_level.integer)
+            {
+                builder->failure_message = S8("__builtin_frame_address is supported only for the current frame (level 0)");
+                builder->failure_token_index = selected->token_index;
+                return false;
+            }
+            IrValueId frame_address = c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, token));
+            if (frame_address.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            selected->result = frame_address;
             selected->argument_count = 1;
             selected->emitted = true;
             remaining -= 1;
@@ -14031,7 +14182,13 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 operation_type_value = right_type_value;
             }
         }
-        else if (right_type.value != operation_type.value)
+        // A shift takes no common type: C promotes each operand on its own
+        // and the result has the promoted left operand's type (C11 6.5.7p3).
+        // Merging the two turned `(int)v1 >> (uint32_t)v2` -- how QuickJS
+        // spells OP_sar -- into an unsigned shift, so `-4 >> 1` answered
+        // 2147483646.
+        else if (right_type.value != operation_type.value && binary != IR_BINARY_SHIFT_LEFT && binary != IR_BINARY_SIGNED_SHIFT_RIGHT &&
+                 binary != IR_BINARY_UNSIGNED_SHIFT_RIGHT)
         {
             if (right_type_value->is_signed == operation_type_value->is_signed)
             {
@@ -14378,6 +14535,19 @@ BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token)
 // than the identifier-only chain handled by the fast path below.
 BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
 
+// `_Atomic ( type-name )` is the C11 atomic type specifier, which spells the
+// type it applies to inside parentheses; `_Atomic` standing alone is the
+// qualifier of the same name. Only the parenthesized form has to be told
+// apart, and only here: the declaration path parses it through the type
+// machine, but a cast reaches this type-name reader, where an unrecognized
+// specifier left `(_Atomic(uint32_t) *)ptr` to be lowered as an expression.
+BUSTER_C_INTERNAL bool c_ir_atomic_type_specifier_at(CIntegerIrBuilder* builder, u32 index, u32 end)
+{
+    return index + 2 < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+           string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), S8("_Atomic")) &&
+           c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32 start, u32 end, u32* index_out, CType* qualifiers_out)
 {
     if (start >= end)
@@ -14392,6 +14562,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         .array_bound = C_ARRAY_BOUND_INVALID,
     };
     while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+           !c_ir_atomic_type_specifier_at(builder, index, end) &&
            c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
     {
         index += 1;
@@ -14412,7 +14583,24 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             entity = c_parse_lookup_typedef_name(&builder->parse, c_token_spelling(builder->preprocess.spelling_base, first), false);
         }
     }
-    if (first.kind == C_TOKEN_IDENTIFIER &&
+    if (c_ir_atomic_type_specifier_at(builder, index, end))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        IrTypeId atomic_type = close < end && index + 2 < close ? c_ir_type_name(builder, index + 2, close) : IR_TYPE_ID_INVALID;
+        // The atomicity has to reach the IR type, not just the C qualifier
+        // record: an atomic builtin reads it off the place its pointer
+        // argument dereferences to.
+        IrTypeId qualified_type = atomic_type.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_add_qualified_type(builder->program, atomic_type, true, false)
+                                      : IR_TYPE_ID_INVALID;
+        if (qualified_type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            qualifiers.is_atomic = true;
+            type = qualified_type;
+            index = close + 1;
+        }
+    }
+    else if (first.kind == C_TOKEN_IDENTIFIER &&
         (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__typeof__")) ||
          ((c_preprocess_dialect_is_gnu(builder->preprocess.dialect) || c_preprocess_dialect_is_c23(builder->preprocess.dialect)) &&
           string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typeof"))) ||
@@ -32130,6 +32318,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     IrType* type = ir_type_from_id(&builder->program->types, common);
     if (type && type->kind == IR_TYPE_FLOAT)
     {
+        // Whether an operation created a NaN, rather than propagating one it
+        // was handed: IEEE leaves the created NaN's sign unspecified, and the
+        // host's own divide answers 0.0/0.0 with the negative indefinite on
+        // x86 where Clang folds the positive quiet NaN. The result is
+        // canonicalized below so a folded constant matches the reference
+        // compiler's bytes.
+        bool operand_is_nan = left.floating != left.floating || right.floating != right.floating;
         if (operation == C_CONDITIONAL_ADD)
             left.floating += right.floating;
         else if (operation == C_CONDITIONAL_SUBTRACT)
@@ -32138,11 +32333,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
             left.floating *= right.floating;
         else if (operation == C_CONDITIONAL_DIVIDE)
         {
-            if (right.floating == 0.0)
-            {
-                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
-                return true;
-            }
+            // A floating divide by zero is defined by IEEE 754 -- it is the
+            // infinity or NaN the hardware would produce -- so it folds here
+            // rather than answering "unknown" the way an integer divide by
+            // zero has to.  Static initializers spell it: QuickJS writes
+            // `JS_PROP_DOUBLE_DEF("Infinity", 1.0 / 0.0, 0)`, and an unknown
+            // value there is not an initializer at all.
             left.floating /= right.floating;
         }
         else if (operation == C_CONDITIONAL_EQUAL || operation == C_CONDITIONAL_NOT_EQUAL || operation == C_CONDITIONAL_LESS ||
@@ -32159,6 +32355,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         }
         else
             return false;
+        if (!operand_is_nan && left.floating != left.floating)
+        {
+            u64 quiet_nan = UINT64_C(0x7ff8000000000000);
+            memcpy(&left.floating, &quiet_nan, sizeof(left.floating));
+        }
         *result = left;
         return true;
     }
@@ -32621,6 +32822,63 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 expect_operand = false;
                 index = close;
                 continue;
+            }
+            // The constant-valued math intrinsics fold here as well as in the
+            // runtime path: hosted <math.h> spells NAN as `(__builtin_nanf(""))`
+            // and INFINITY as `(__builtin_inff())`, so a static initializer
+            // holding either -- `{ name, JS_DEF_PROP_DOUBLE, .u = { .f64 = NAN } }`
+            // -- is a constant expression that reaches this evaluator and not
+            // the emitter that already knows the bits.
+            if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                String8 math_link_name = c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token));
+                bool quiet_nan = string_equal(math_link_name, S8("nan")) || string_equal(math_link_name, S8("nanf"));
+                bool infinity = string_equal(math_link_name, S8("inff")) || string_equal(math_link_name, S8("huge_val"));
+                if (quiet_nan || infinity)
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close >= end)
+                    {
+                        return false;
+                    }
+                    // Only the default payload folds: `__builtin_nan("")` is
+                    // the quiet NaN every hosted header spells, while a
+                    // non-empty payload string names a different value.
+                    String8 payload = close == index + 3 && builder->preprocess.tokens[index + 2].kind == C_TOKEN_STRING_LITERAL
+                                          ? c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2])
+                                          : (String8){0};
+                    bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
+                    if (quiet_nan ? !empty_payload : close != index + 2)
+                    {
+                        return false;
+                    }
+                    bool single = string_equal(math_link_name, S8("nanf")) || string_equal(math_link_name, S8("inff"));
+                    f64 floating = 0.0;
+                    if (single)
+                    {
+                        f32 narrowed = 0.0f;
+                        u32 bits = infinity ? UINT32_C(0x7f800000) : UINT32_C(0x7fc00000);
+                        memcpy(&narrowed, &bits, sizeof(narrowed));
+                        floating = (f64)narrowed;
+                    }
+                    else
+                    {
+                        u64 bits = infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7ff8000000000000);
+                        memcpy(&floating, &bits, sizeof(floating));
+                    }
+                    if (value_count >= capacity)
+                    {
+                        return false;
+                    }
+                    values[value_count++] = (CIrConstantValue){
+                        .type = single ? builder->f32_type : builder->f64_type,
+                        .floating = floating,
+                        .kind = C_IR_CONSTANT_FLOAT,
+                    };
+                    expect_operand = false;
+                    index = close;
+                    continue;
+                }
             }
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
@@ -34390,12 +34648,17 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 {
                     continue;
                 }
-                u64 size = 0;
+                // The layout runs in bits, which is what the System V rule for
+                // bit-fields is written in: a bit-field takes the next
+                // available bits and only moves on to the next storage unit of
+                // its declared type when it would otherwise straddle one. A
+                // per-declared-type unit model instead started a fresh unit
+                // whenever the declared type changed, so
+                // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
+                // where every other C compiler on the target measures 4.
+                u64 bit_position = 0;
                 u32 alignment = 1;
                 bool fields_resolved = true;
-                u64 bit_field_unit_bits = 0;
-                u64 bit_field_used_bits = 0;
-                u64 bit_field_unit_offset = 0;
                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
                 {
                     CMember* member = &parse.members[c_type->member_start + field_index];
@@ -34405,6 +34668,33 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         break;
                     }
                     IrTypeId field_type_id = c_type_ir_map[member->type.value];
+                    // A bit-field of enumerated type is read with the
+                    // signedness C leaves to the implementation, and the
+                    // choice GCC and Clang make is the enum's own underlying
+                    // type: unsigned when no enumerator is negative. Read as
+                    // a signed field instead, QuickJS's
+                    // `JSClosureTypeEnum closure_type : 3` answers -3 for the
+                    // enumerator 5 and its switch falls to `default: abort()`.
+                    if (member->is_bit_field)
+                    {
+                        CType const* enumeration = &parse.types[member->type.value];
+                        if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
+                        {
+                            enumeration = &parse.types[enumeration->unqualified_type.value];
+                        }
+                        if (enumeration->kind == C_TYPE_ENUM && enumeration->element_type.value >= parse.type_count)
+                        {
+                            bool negative_enumerator = false;
+                            for (u32 enum_index = 0; enum_index < enumeration->enum_member_count; enum_index += 1)
+                            {
+                                negative_enumerator |= parse.enum_members[enumeration->enum_member_start + enum_index].is_negative;
+                            }
+                            if (!negative_enumerator)
+                            {
+                                field_type_id = constant_builder.scalar_types[C_TYPE_UNSIGNED_INT];
+                            }
+                        }
+                    }
                     IrType* field_type = ir_type_from_id(&program->types, field_type_id);
                     if (!field_type || !field_type->layout.resolved || !field_type->layout.alignment)
                     {
@@ -34433,71 +34723,76 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         }
                         member_bit_width = (u32)evaluated_width;
                     }
-                    alignment = BUSTER_MAX(alignment, field_alignment);
                     u64 offset = 0;
                     u32 bit_offset = 0;
                     if (member->is_bit_field)
                     {
                         u64 unit_bits = field_type->layout.size * 8;
+                        u64 alignment_bits = (u64)field_alignment * 8;
                         if (!unit_bits || member_bit_width > unit_bits)
                         {
                             fields_resolved = false;
                             break;
                         }
+                        // An unnamed bit-field's declared type does not raise
+                        // the aggregate's alignment; a named one's does.
+                        if (member->name.length)
+                        {
+                            alignment = BUSTER_MAX(alignment, field_alignment);
+                        }
                         if (c_type->kind == C_TYPE_UNION)
                         {
                             if (member_bit_width)
                             {
-                                size = BUSTER_MAX(size, field_type->layout.size);
+                                bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
                             }
                         }
                         else if (!member_bit_width)
                         {
-                            bit_field_unit_bits = 0;
-                            bit_field_used_bits = 0;
-                            u64 remainder = size % field_alignment;
+                            // A zero-width bit-field places nothing and only
+                            // moves the next member to its type's boundary.
+                            u64 remainder = bit_position % alignment_bits;
                             if (remainder)
                             {
-                                size += field_alignment - remainder;
+                                bit_position += alignment_bits - remainder;
                             }
-                            offset = size;
+                            offset = bit_position / 8;
                         }
                         else
                         {
-                            if (bit_field_unit_bits != unit_bits || bit_field_used_bits + member_bit_width > unit_bits)
+                            if (bit_position % alignment_bits + member_bit_width > unit_bits)
                             {
-                                u64 remainder = size % field_alignment;
+                                u64 remainder = bit_position % alignment_bits;
                                 if (remainder)
                                 {
-                                    size += field_alignment - remainder;
+                                    bit_position += alignment_bits - remainder;
                                 }
-                                bit_field_unit_offset = size;
-                                size += field_type->layout.size;
-                                bit_field_unit_bits = unit_bits;
-                                bit_field_used_bits = 0;
                             }
-                            offset = bit_field_unit_offset;
-                            bit_offset = (u32)bit_field_used_bits;
-                            bit_field_used_bits += member_bit_width;
+                            // The field is read as a whole storage unit of its
+                            // declared type, so the offset names the unit that
+                            // contains it and bit_offset the position inside.
+                            offset = bit_position / unit_bits * field_type->layout.size;
+                            bit_offset = (u32)(bit_position - offset * 8);
+                            bit_position += member_bit_width;
                         }
                     }
                     else
                     {
-                        bit_field_unit_bits = 0;
-                        bit_field_used_bits = 0;
+                        alignment = BUSTER_MAX(alignment, field_alignment);
                         if (c_type->kind == C_TYPE_STRUCT)
                         {
-                            u64 remainder = size % field_alignment;
+                            u64 alignment_bits = (u64)field_alignment * 8;
+                            u64 remainder = bit_position % alignment_bits;
                             if (remainder)
                             {
-                                size += field_alignment - remainder;
+                                bit_position += alignment_bits - remainder;
                             }
-                            offset = size;
-                            size += field_type->layout.size;
+                            offset = bit_position / 8;
+                            bit_position += field_type->layout.size * 8;
                         }
                         else
                         {
-                            size = BUSTER_MAX(size, field_type->layout.size);
+                            bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
                         }
                     }
                     aggregate_type->fields[field_index] = (IrField){
@@ -34514,6 +34809,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 {
                     continue;
                 }
+                u64 size = (bit_position + 7) / 8;
                 u64 remainder = size % alignment;
                 if (remainder)
                 {

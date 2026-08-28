@@ -4155,6 +4155,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                           .opcode = MACHINE_A64_STORE_FRAME64,
                                                       });
                 }
+                u32 normalize_registers[MACHINE_A64_MAX_ARGUMENTS] = {0};
+                u32 normalize_values[MACHINE_A64_MAX_ARGUMENTS] = {0};
+                u16 normalize_opcodes[MACHINE_A64_MAX_ARGUMENTS] = {0};
+                u32 normalize_count = 0;
                 for (u32 capture_pass = 0; capture_pass < 3 && selector.supported; capture_pass += 1)
                 {
                     bool float_pass = capture_pass == 1;
@@ -4383,7 +4387,44 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                                     });
                         }
                         machine_a64_define(&selector, argument_register, row);
+                        // AAPCS64 leaves the bits above a narrow integer
+                        // argument's declared width unspecified in the
+                        // register it arrives in, exactly as System V does on
+                        // x86-64, so the captured value is normalized to that
+                        // width.  The rows are recorded here and emitted
+                        // after every capture pass: a row emitted between
+                        // captures may take a scratch register the incoming
+                        // arguments still occupy.
+                        if (!scalar_float && normalize_count < BUSTER_ARRAY_LENGTH(normalize_registers))
+                        {
+                            IrType* parameter_type = ir_type_from_id(&program->types, function_type->parameter_types[argument_index]);
+                            if (parameter_type && (parameter_type->kind == IR_TYPE_INTEGER || parameter_type->kind == IR_TYPE_BOOLEAN) &&
+                                parameter_type->layout.size < 8)
+                            {
+                                normalize_registers[normalize_count] = argument_register;
+                                normalize_values[normalize_count] = argument_value;
+                                normalize_opcodes[normalize_count] = parameter_type->layout.size == 1   ? MACHINE_A64_UXTB
+                                                                     : parameter_type->layout.size == 2 ? MACHINE_A64_UXTH
+                                                                                                        : MACHINE_A64_MOV32_RR;
+                                normalize_count += 1;
+                            }
+                        }
                     }
+                }
+                for (u32 normalize_index = 0; normalize_index < normalize_count && selector.supported; normalize_index += 1)
+                {
+                    // The normalized value takes a register of its own: a
+                    // virtual register is defined exactly once, and the
+                    // argument's is already defined by its capture row.
+                    u32 source_register = normalize_registers[normalize_index];
+                    u32 normalize_register = machine_a64_synthesize_register(&selector);
+                    u32 normalize_row = machine_a64_select_row(&selector, (MachineInstruction){
+                                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, normalize_register),
+                                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                                             .opcode = normalize_opcodes[normalize_index],
+                                                                         });
+                    machine_a64_define(&selector, normalize_register, normalize_row);
+                    selector.value_virtual_registers[normalize_values[normalize_index]] = normalize_register;
                 }
             }
             u32 block_row_count = row_layout.block_row_counts[block_index];

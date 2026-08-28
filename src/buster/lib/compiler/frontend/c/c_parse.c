@@ -1244,13 +1244,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             {
                 continue;
             }
-            u64 size = 0;
+            // Bits, not bytes: this mirrors the System V bit-field placement
+            // the IR layout in c_gen performs, and the two must agree or a
+            // sizeof folded during the parse contradicts the object it sizes.
+            u64 bit_position = 0;
             u32 alignment = 1;
             u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
             bool fields_resolved = true;
             bool aggregate_provisional = false;
-            u64 bit_field_unit_bits = 0;
-            u64 bit_field_used_bits = 0;
             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
@@ -1354,66 +1355,64 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                     fields_resolved = false;
                     break;
                 }
-                alignment = BUSTER_MAX(alignment, member_alignment);
                 if (member.is_bit_field)
                 {
                     u64 unit_bits = member_size * 8;
+                    u64 alignment_bits = (u64)member_alignment * 8;
                     if (member.bit_width > unit_bits || !unit_bits)
                     {
                         fields_resolved = false;
                         break;
                     }
+                    // An unnamed bit-field's declared type does not raise the
+                    // aggregate's alignment; a named one's does.
+                    if (member.name.length)
+                    {
+                        alignment = BUSTER_MAX(alignment, member_alignment);
+                    }
                     if (type.kind == C_TYPE_UNION)
                     {
                         if (member.bit_width)
                         {
-                            size = BUSTER_MAX(size, member_size);
+                            bit_position = BUSTER_MAX(bit_position, member_size * 8);
                         }
                         continue;
                     }
+                    u64 bit_remainder = bit_position % alignment_bits;
                     if (!member.bit_width)
                     {
-                        bit_field_unit_bits = 0;
-                        bit_field_used_bits = 0;
-                        u64 bit_remainder = size % member_alignment;
                         if (bit_remainder)
                         {
-                            size += member_alignment - bit_remainder;
+                            bit_position += alignment_bits - bit_remainder;
                         }
                         continue;
                     }
-                    if (bit_field_unit_bits != unit_bits || bit_field_used_bits + member.bit_width > unit_bits)
+                    if (bit_remainder + member.bit_width > unit_bits)
                     {
-                        u64 bit_remainder = size % member_alignment;
-                        if (bit_remainder)
-                        {
-                            size += member_alignment - bit_remainder;
-                        }
-                        size += member_size;
-                        bit_field_unit_bits = unit_bits;
-                        bit_field_used_bits = 0;
+                        bit_position += alignment_bits - bit_remainder;
                     }
-                    bit_field_used_bits += member.bit_width;
+                    bit_position += member.bit_width;
                     continue;
                 }
-                bit_field_unit_bits = 0;
-                bit_field_used_bits = 0;
+                alignment = BUSTER_MAX(alignment, member_alignment);
                 if (type.kind == C_TYPE_UNION)
                 {
-                    size = BUSTER_MAX(size, member_size);
+                    bit_position = BUSTER_MAX(bit_position, member_size * 8);
                     continue;
                 }
-                u64 remainder = size % member_alignment;
+                u64 alignment_bits = (u64)member_alignment * 8;
+                u64 remainder = bit_position % alignment_bits;
                 if (remainder)
                 {
-                    size += member_alignment - remainder;
+                    bit_position += alignment_bits - remainder;
                 }
-                size += member_size;
+                bit_position += member_size * 8;
             }
             if (!fields_resolved)
             {
                 continue;
             }
+            u64 size = (bit_position + 7) / 8;
             u64 remainder = size % alignment;
             if (remainder)
             {
@@ -5868,6 +5867,28 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     c_type_parse_frame_complete(machine, type, suffix, true);
 }
 
+// A type qualifier is allowed between a struct/union/enum specifier and the
+// declarator -- `struct S const x;`, `struct { const char *tag; } const
+// defs[]` -- the same way it is allowed after a primitive one. The aggregate
+// paths used to stop at the closing brace or the tag, so the qualifier stood
+// where the declarator was expected and the declaration bound no name at all.
+BUSTER_C_INTERNAL CTypeId c_parse_apply_trailing_qualifiers(CParseResult* result, CPreprocessResult preprocess, CTypeId type, u32* index, u32 end)
+{
+    if (type.value >= result->type_count)
+    {
+        return type;
+    }
+    CType qualified = result->types[type.value];
+    bool has_qualifier = false;
+    while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER &&
+           c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[*index], &qualified))
+    {
+        has_qualifier = true;
+        *index += 1;
+    }
+    return has_qualifier ? c_parse_add_qualified_type(result, type, qualified) : type;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -5892,6 +5913,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         }
         if (nested_aggregate)
         {
+            type = c_parse_apply_trailing_qualifiers(result, frame->preprocess, type, &declarator_start, frame->end);
             c_type_parse_frame_complete(machine, type, declarator_start, true);
             return;
         }
@@ -5974,7 +5996,9 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         }
         return;
     }
-    c_type_parse_frame_complete(machine, frame->type, frame->close + 1, true);
+    u32 completion_index = frame->close + 1;
+    CTypeId completion_type = c_parse_apply_trailing_qualifiers(result, frame->preprocess, frame->type, &completion_index, frame->end);
+    c_type_parse_frame_complete(machine, completion_type, completion_index, true);
 }
 
 BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
@@ -7199,6 +7223,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                                 .kind = kind,
                                             });
         }
+        type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &index, end);
         *declarator_start = index;
         return type;
     }
@@ -7488,7 +7513,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     aggregate->enum_member_count = result->enum_member_count - aggregate->enum_member_start;
     aggregate->is_complete = true;
     c_parse_validate_flexible_array_members(result, aggregate);
-    *declarator_start = close + 1;
+    u32 enum_declarator_start = close + 1;
+    type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &enum_declarator_start, end);
+    *declarator_start = enum_declarator_start;
     return type;
 }
 

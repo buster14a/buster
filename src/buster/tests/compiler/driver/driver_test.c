@@ -5372,6 +5372,70 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, stack_pointer_reads == 1);
     }
+    // QuickJS compatibility reduced eight more independent failures to these
+    // fixtures: an aggregate whose attribute sits between the keyword and the
+    // tag, a block-scope enum declarator whose body carries an '=', the short
+    // `__attribute` spelling on a function, `_Atomic(T)` as a cast type name,
+    // a static initializer naming the object it initializes, the constant
+    // float builtins hosted <math.h> hides behind NAN and INFINITY, the
+    // frame-address/alloca/signbit builtins, System V bit-field placement
+    // with an enum-typed field among narrower ones, a shift whose count is
+    // unsigned, and a narrow integer parameter whose register arrives with
+    // the caller's leftover high half.  Each source stays separate so a future regression names
+    // the exact contract it broke, and each runs under every register
+    // allocator because five of the ten are lowering rather than parsing
+    // defects.
+    String8 c_quickjs_regression_paths[] = {
+        S8("tests/basic_c_aggregate_attribute.c"),
+        S8("tests/basic_c_local_enum_declarator.c"),
+        S8("tests/basic_c_attribute_short_spelling.c"),
+        S8("tests/basic_c_atomic_specifier.c"),
+        S8("tests/basic_c_self_referential_initializer.c"),
+        S8("tests/basic_c_constant_float_builtins.c"),
+        S8("tests/basic_c_frame_alloca_signbit.c"),
+        S8("tests/basic_c_bit_field_layout.c"),
+        S8("tests/basic_c_shift_operand_types.c"),
+        S8("tests/basic_c_narrow_argument_abi.c"),
+    };
+    String8 c_quickjs_regression_names[] = {
+        S8("buster-c-aggregate-attribute"),
+        S8("buster-c-local-enum-declarator"),
+        S8("buster-c-attribute-short-spelling"),
+        S8("buster-c-atomic-specifier"),
+        S8("buster-c-self-referential-initializer"),
+        S8("buster-c-constant-float-builtins"),
+        S8("buster-c-frame-alloca-signbit"),
+        S8("buster-c-bit-field-layout"),
+        S8("buster-c-shift-operand-types"),
+        S8("buster-c-narrow-argument-abi"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena quickjs_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(quickjs_temporary.arena, c_quickjs_regression_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_quickjs_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                quickjs_temporary.arena,
+                compiler_driver_parse_arguments(quickjs_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(quickjs_temporary);
+        }
+    }
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.
