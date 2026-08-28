@@ -82,6 +82,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_STB,
     BUILD_COMMAND_TEST_LZ4,
     BUILD_COMMAND_TEST_SQLITE,
+    BUILD_COMMAND_TEST_SBASE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -639,6 +640,23 @@ struct TestLz4Options
     String8 source_directory;
     String8 config;
 };
+
+// sbase is consumed from a caller-provided pristine checkout. It is the
+// breadth target of the compatibility set: about a hundred small POSIX
+// programs over one shared static library, pinned to one upstream commit so a
+// per-utility status means the same thing from run to run.
+typedef struct TestSbaseOptions TestSbaseOptions;
+struct TestSbaseOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define SBASE_COMPATIBILITY_COMMIT "c546c3a5724c81cee9a11d816a38ccdf17472129"
+// No child of this harness is allowed to run forever. A miscompiled utility
+// does not always crash: the first symptom of the dc defect this harness
+// found was an upstream test that never finished.
+#define SBASE_PROCESS_TIMEOUT_US (120ull * 1000ull * 1000ull)
 
 #define STB_COMPATIBILITY_COMMIT "2c980bb59875b0d32144a71867fbdebb2f77cd20"
 
@@ -12968,6 +12986,1213 @@ BUSTER_GLOBAL_LOCAL void test_sqlite_action_add(Arena* arena, TestSqliteOptions 
     TestSqliteOptions* options_copy = arena_allocate(arena, TestSqliteOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_sqlite_action, .callback_data = options_copy};
+}
+
+// sbase is a breadth test rather than a depth test: about a hundred small
+// POSIX programs over one shared static library, which is what makes it worth
+// running. The failures it finds are declaration and system-header failures
+// spread thin across many translation units, not one deep code path, so the
+// harness reports a status for every utility rather than one aggregate
+// verdict, and keeps compile, link and runtime separable.
+// The shared CompatCommandResult plus the one fact this harness needs that the
+// others do not: whether the child was killed at its deadline. A miscompiled
+// utility does not always crash -- the first symptom of the dc defect this
+// harness found was an upstream test that never finished -- so every child
+// here runs under a deadline and a timeout is a result, not a hang.
+typedef struct SbaseCommandResult SbaseCommandResult;
+struct SbaseCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+    bool timed_out;
+    u8 reserved[7];
+};
+
+// One allocator row. `complete` rows build and run every utility; the sampled
+// rows build the library and a fixed subset, which is what the milestone asks
+// for: FAST and NONE across the complete set, MIR_STACK and QUALITY sampled
+// once the complete rows are stable.
+typedef struct SbaseMode SbaseMode;
+struct SbaseMode
+{
+    String8 name;
+    bool complete;
+    u8 reserved[7];
+};
+
+// One utility: the name of its program and the deterministic probe that
+// exercises it. The probe is a shell command run from the build's own
+// directory, so `./cat` is that build's cat and `data/` is its own copy of
+// the corpus; the Buster and Clang builds run the identical text and their
+// output must match byte for byte.
+typedef struct SbaseUtility SbaseUtility;
+struct SbaseUtility
+{
+    String8 name;
+    String8 probe;
+};
+
+typedef struct SbaseUtilityStatus SbaseUtilityStatus;
+struct SbaseUtilityStatus
+{
+    bool compiled;
+    bool linked;
+    bool probed;
+    bool matched;
+    u8 reserved[4];
+};
+
+// `env` and `find` are the two utilities whose Buster build does not behave
+// like the Clang build, and both fail for one linker reason rather than a
+// codegen one: they read `extern char **environ`. Imported data reaches a
+// non-PIE executable through a copy relocation, and the copy is taken by the
+// dynamic loader before glibc's startup code stores the environment pointer,
+// so the program reads a null environment and dereferences it. GNU ld avoids
+// this by defining the whole alias set (`environ`, `_environ`, `__environ`)
+// at the copy slot: glibc writes through `__environ`, that write lands in the
+// executable's copy, and the program sees it. Buster's linker does not read
+// the shared library's symbol table, so it cannot know which names alias the
+// one it was asked for. Recorded here rather than hidden: the harness expects
+// exactly these two to differ, and reports a stale expectation if one starts
+// matching.
+BUSTER_GLOBAL_LOCAL String8 sbase_copy_relocation_gaps[] = {
+    S8_INITIALIZER("env"),
+    S8_INITIALIZER("find"),
+};
+
+BUSTER_GLOBAL_LOCAL bool sbase_is_copy_relocation_gap(String8 name)
+{
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_copy_relocation_gaps); index += 1)
+    {
+        if (string_equal(name, sbase_copy_relocation_gaps[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL SbaseCommandResult sbase_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    if (print)
+    {
+        command_print(arguments);
+    }
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: sbase harness could not start the command above\n"));
+        return (SbaseCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    // Every child is given a deadline. A miscompiled utility does not always
+    // crash: sbase's bc drives dc as a child process, and a wrong answer there
+    // showed up first as a test that never finished.
+    ProcessWaitResult wait = os_process_wait_deadline(arena, run.spawn, SBASE_PROCESS_TIMEOUT_US);
+    SbaseCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+        .timed_out = wait.timed_out != 0,
+    };
+    if (result.result != PROCESS_RESULT_SUCCESS && !capture && result.error.length)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_git_verify(Arena* arena, String8 git, String8 source_directory)
+{
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    SbaseCommandResult head = sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true, true);
+    String8 commit = compat_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(SBASE_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_sbase requires pristine sbase commit {S8}; found {S8}\n"), S8(SBASE_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    // Ignored build products of an earlier `make` in the same checkout are
+    // not a modification of upstream's sources, so the status check keeps its
+    // default and only rejects tracked changes and untracked files.
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    SbaseCommandResult status = sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true, true);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_sbase checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("SBASE_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+// The flag set every unit is compiled with. It is upstream's own CPPFLAGS
+// plus the two include directories an out-of-tree build needs: the checkout
+// itself, for its headers, and the directory holding the two sources upstream
+// generates (getconf.h and bc.c). Upstream leaves CFLAGS empty, so -O2 is the
+// harness's choice and both compilers get it.
+BUSTER_GLOBAL_LOCAL void sbase_append_common_flags(OsArgumentBuilder* builder, String8 source_include, String8 generated_include)
+{
+    os_argument_builder_append(builder, source_include);
+    os_argument_builder_append(builder, generated_include);
+    os_argument_builder_append(builder, S8("-DPREFIX=\"/usr/local\""));
+    os_argument_builder_append(builder, S8("-D_DEFAULT_SOURCE"));
+    os_argument_builder_append(builder, S8("-D_NETBSD_SOURCE"));
+    os_argument_builder_append(builder, S8("-D_BSD_SOURCE"));
+    os_argument_builder_append(builder, S8("-D_XOPEN_SOURCE=700"));
+    os_argument_builder_append(builder, S8("-D_FILE_OFFSET_BITS=64"));
+    os_argument_builder_append(builder, S8("-g0"));
+    os_argument_builder_append(builder, S8("-O2"));
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_compile(Arena* arena, String8 compiler, bool buster, String8 source_include, String8 generated_include, String8 source,
+                                       String8 output, String8 mode, String8 metrics, bool verbose, u64* elapsed_us)
+{
+    String8 allocator_flag = buster ? string_format(arena, S8("-fregister-allocator={S8}"), mode) : (String8){0};
+    String8 metrics_flag = buster && metrics.length ? string_format(arena, S8("-fsource-metrics={S8}"), metrics) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    else
+    {
+        // Upstream compiles cleanly under its own warning set; the reference
+        // build is a reference, not a lint run.
+        os_argument_builder_append(&builder, S8("-w"));
+    }
+    sbase_append_common_flags(&builder, source_include, generated_include);
+    if (allocator_flag.length)
+    {
+        os_argument_builder_append(&builder, allocator_flag);
+    }
+    if (metrics_flag.length)
+    {
+        os_argument_builder_append(&builder, metrics_flag);
+    }
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    SbaseCommandResult command = sbase_command(arena, os_argument_builder_flush(&builder), S8("."), false, true);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// Compiler cost per unit, reported only where a metrics file was asked for:
+// the first complete allocator row. Source size and token count come from the
+// compiler's own -fsource-metrics output, so the line describes the work the
+// front end did rather than the size of the file on disk.
+BUSTER_GLOBAL_LOCAL void sbase_report_metric(Arena* arena, String8 mode, String8 unit, String8 metrics_path, u64 elapsed_us)
+{
+    if (!metrics_path.length)
+    {
+        return;
+    }
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, metrics_path, &metrics))
+    {
+        string_print(S8("warning: sbase compiler metrics missing allocator={S8} unit={S8}: {S8}\n"), mode, unit, metrics_path);
+        return;
+    }
+    string_print(S8("SBASE_METRIC allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"), mode, unit,
+                 elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_archive(Arena* arena, String8 ar, String8 archive, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ar);
+    os_argument_builder_append(&builder, S8("rcs"));
+    os_argument_builder_append(&builder, archive);
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    SbaseCommandResult command = sbase_command(arena, os_argument_builder_flush(&builder), S8("."), false, true);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// Every utility is linked through its own compiler driver: `ide cc` for the
+// Buster build and Clang for the reference. Linking a hundred small programs
+// against one static library is the driver path this milestone is about, and
+// keeping the two sides symmetric is what makes a runtime difference mean
+// codegen rather than link order.
+BUSTER_GLOBAL_LOCAL bool sbase_link(Arena* arena, String8 driver, bool buster, String8 output, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, driver);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    os_argument_builder_append(&builder, buster ? S8("-fno-pie") : S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    SbaseCommandResult command = sbase_command(arena, os_argument_builder_flush(&builder), S8("."), false, true);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_write_bytes(String8 path, String8 content)
+{
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_copy_file(Arena* arena, String8 from, String8 to)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, from, (FileReadOptions){0});
+    bool ok = bytes.pointer != 0 && file_write(to, bytes);
+    scratch_end(scratch);
+    return ok;
+}
+
+// A copy that stays runnable: the corpus goes through file_write, but a
+// program has to keep its execute bit, and the sampled allocator rows borrow
+// the reference build's other utilities so their probes have the helpers they
+// pipe through.
+BUSTER_GLOBAL_LOCAL bool sbase_copy_program(Arena* arena, String8 from, String8 to)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, from, (FileReadOptions){0});
+    bool ok = bytes.pointer != 0;
+    if (ok)
+    {
+        OsFileDescriptor* fd =
+            os_file_open(to, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+        ok = fd != 0;
+        if (ok)
+        {
+            os_file_write(fd, bytes);
+            os_file_close(fd);
+        }
+    }
+    scratch_end(scratch);
+    return ok;
+}
+
+// The differential corpus. It is written by the build driver rather than
+// generated by a child so that a mismatch can only come from the compared
+// programs, and it covers what the milestone asks the utilities to be run
+// over: text with repeated structure, delimited records, numbers out of
+// order, UTF-8, and a binary file that contains every byte value including
+// NUL.
+BUSTER_GLOBAL_LOCAL bool sbase_write_corpus(Arena* arena, String8 directory)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    bool ok = true;
+    {
+        String8List lines = {0};
+        for (u32 index = 0; index < 400; index += 1)
+        {
+            string8_list_push(scratch.arena, &lines,
+                              string_format(scratch.arena, S8("the quick brown fox {u32} jumps over the lazy dog\nsecond line {u32} with WORDS and words\n"),
+                                            index, (index * 7) % 13));
+        }
+        ok = ok && sbase_write_bytes(path_join(arena, directory, S8("text.txt")), string_join_arena(scratch.arena, string8_list_to_slice(scratch.arena, lines), false));
+    }
+    {
+        String8List lines = {0};
+        for (u32 index = 0; index < 2000; index += 1)
+        {
+            string8_list_push(scratch.arena, &lines, string_format(scratch.arena, S8("{u32}\n"), (index * 7919) % 2003));
+        }
+        ok = ok && sbase_write_bytes(path_join(arena, directory, S8("numbers.txt")), string_join_arena(scratch.arena, string8_list_to_slice(scratch.arena, lines), false));
+    }
+    {
+        String8List lines = {0};
+        for (u32 index = 0; index < 200; index += 1)
+        {
+            string8_list_push(scratch.arena, &lines,
+                              string_format(scratch.arena, S8("user{u32}:x:{u32}:{u32}:Name {u32}:/home/u{u32}:/bin/sh\n"), index, index + 1000,
+                                            index + 1000, index, index));
+        }
+        ok = ok && sbase_write_bytes(path_join(arena, directory, S8("fields.txt")), string_join_arena(scratch.arena, string8_list_to_slice(scratch.arena, lines), false));
+    }
+    {
+        String8List left = {0};
+        String8List right = {0};
+        // Three-digit keys throughout, so a plain decimal format sorts and
+        // joins the way the fixed-width text these utilities expect does.
+        for (u32 index = 100; index < 175; index += 1)
+        {
+            String8 line = string_format(scratch.arena, S8("{u32} common\n"), index);
+            if (index < 150)
+            {
+                string8_list_push(scratch.arena, &left, line);
+            }
+            if (index >= 125)
+            {
+                string8_list_push(scratch.arena, &right, line);
+            }
+        }
+        ok = ok && sbase_write_bytes(path_join(arena, directory, S8("left.txt")), string_join_arena(scratch.arena, string8_list_to_slice(scratch.arena, left), false));
+        ok = ok && sbase_write_bytes(path_join(arena, directory, S8("right.txt")), string_join_arena(scratch.arena, string8_list_to_slice(scratch.arena, right), false));
+    }
+    // Multi-byte text for the rune-aware utilities: fold, rev, expand and the
+    // libutf routines behind them count runes rather than bytes.
+    ok = ok && sbase_write_bytes(path_join(arena, directory, S8("unicode.txt")),
+                                 S8("caf\xc3\xa9 na\xc3\xafve \xcf\x80\xcf\x81\xce\xbf\xce\xb3\xcf\x81\xce\xac\xce\xbc\xce\xbc\xce\xb1 "
+                                    "\xe4\xbd\xa0\xe5\xa5\xbd\nsecond \xc3\xa9\xc3\xa8\xc3\xaa line\n"));
+    {
+        u64 size = 256ull * 64ull;
+        u8* bytes = arena_allocate(scratch.arena, u8, size);
+        for (u64 index = 0; index < size; index += 1)
+        {
+            bytes[index] = (u8)(index & 0xffu);
+        }
+        ok = ok && file_write(path_join(arena, directory, S8("binary.bin")), (ByteSlice){.pointer = bytes, .length = size});
+    }
+    scratch_end(scratch);
+    return ok;
+}
+
+// One probe, run through the shell from a build's own directory. The status
+// line is appended so the exit code is compared along with the bytes: several
+// of these utilities report by exiting rather than by printing.
+BUSTER_GLOBAL_LOCAL SbaseCommandResult sbase_run_script(Arena* arena, String8 shell, String8 script, String8 working_directory)
+{
+    String8 wrapped = string_format(arena, S8("{S8}\nprintf '\\nsbase_status=%d\\n' \"$?\"\n"), script);
+    String8 arguments[] = {shell, S8("-c"), wrapped};
+    return sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true, false);
+}
+
+BUSTER_GLOBAL_LOCAL bool sbase_results_match(SbaseCommandResult left, SbaseCommandResult right)
+{
+    return !left.timed_out && !right.timed_out && left.result == right.result && string_equal(left.output, right.output) &&
+           string_equal(left.error, right.error);
+}
+
+BUSTER_GLOBAL_LOCAL void sbase_report_mismatch(String8 label, String8 name, SbaseCommandResult reference, SbaseCommandResult candidate)
+{
+    string_print(S8("error: sbase {S8} '{S8}' differs from the Clang reference\n"), label, name);
+    string_print(S8("  clang  status={u32} timed_out={u32} stdout_bytes={u64} stderr_bytes={u64}\n"), (u32)reference.result, (u32)reference.timed_out,
+                 reference.output.length, reference.error.length);
+    string_print(S8("  buster status={u32} timed_out={u32} stdout_bytes={u64} stderr_bytes={u64}\n"), (u32)candidate.result, (u32)candidate.timed_out,
+                 candidate.output.length, candidate.error.length);
+    String8 streams[] = {reference.output, reference.error, candidate.output, candidate.error};
+    String8 names[] = {S8("clang stdout"), S8("clang stderr"), S8("buster stdout"), S8("buster stderr")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(streams); index += 1)
+    {
+        String8 text = streams[index];
+        if (text.length > 512)
+        {
+            text.length = 512;
+        }
+        string_print(S8("  {S8}: {S8}\n"), names[index], text);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
+    {S8_INITIALIZER("basename"), S8_INITIALIZER("./basename /a/b/c.txt .txt")},
+    {S8_INITIALIZER("bc"), S8_INITIALIZER("./printf '2+3\\nquit\\n' | ./bc")},
+    {S8_INITIALIZER("cal"), S8_INITIALIZER("./cal 3 2001")},
+    {S8_INITIALIZER("cat"), S8_INITIALIZER("./cat data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("chgrp"), S8_INITIALIZER("./chgrp 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("chmod"), S8_INITIALIZER("./mkdir -p t && ./touch t/f && ./chmod 640 t/f && ./ls -l t/f | ./cut -c1-10; ./rm -rf t")},
+    {S8_INITIALIZER("chown"), S8_INITIALIZER("./chown 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("chroot"), S8_INITIALIZER("./chroot 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("cksum"), S8_INITIALIZER("./cksum data/binary.bin")},
+    {S8_INITIALIZER("cmp"), S8_INITIALIZER("./cmp data/text.txt data/text.txt; printf '%d ' $?; ./cmp data/text.txt data/numbers.txt; printf '%d' $?")},
+    {S8_INITIALIZER("cols"), S8_INITIALIZER("./seq 1 20 | ./cols -c 40")},
+    {S8_INITIALIZER("comm"), S8_INITIALIZER("./comm data/left.txt data/right.txt | ./md5sum")},
+    {S8_INITIALIZER("cp"), S8_INITIALIZER("./mkdir -p t && ./cp data/unicode.txt t/ && ./cksum t/unicode.txt; ./rm -rf t")},
+    {S8_INITIALIZER("cron"), S8_INITIALIZER("./cron -Z 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("cut"), S8_INITIALIZER("./cut -d: -f1 data/fields.txt | ./md5sum")},
+    {S8_INITIALIZER("date"), S8_INITIALIZER("./date -u -d 1000000000 '+%Y-%m-%dT%H:%M:%SZ'; ./date -u -d 0 '+%j %U %w'")},
+    {S8_INITIALIZER("dc"), S8_INITIALIZER("./printf '2 3 + p\\nq\\n' | ./dc")},
+    {S8_INITIALIZER("dd"), S8_INITIALIZER("./dd if=data/binary.bin bs=1024 count=2 2>/dev/null | ./cksum")},
+    {S8_INITIALIZER("dirname"), S8_INITIALIZER("./dirname /a/b/c")},
+    {S8_INITIALIZER("du"), S8_INITIALIZER("./du -a data | ./sort | ./md5sum")},
+    {S8_INITIALIZER("echo"), S8_INITIALIZER("./echo -n a b; ./echo")},
+    {S8_INITIALIZER("ed"), S8_INITIALIZER("./printf '1p\\nq\\n' | ./ed data/unicode.txt")},
+    {S8_INITIALIZER("env"), S8_INITIALIZER("./env -i ./printenv 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("expand"), S8_INITIALIZER("./expand -t 4 data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("expr"), S8_INITIALIZER("./expr 6 \\* 7")},
+    {S8_INITIALIZER("false"), S8_INITIALIZER("./false; printf '%d' $?")},
+    {S8_INITIALIZER("find"), S8_INITIALIZER("./find data -name unicode.txt")},
+    {S8_INITIALIZER("flock"), S8_INITIALIZER("./flock -n f.lock ./true; printf '%d' $?; ./rm -f f.lock")},
+    {S8_INITIALIZER("fold"), S8_INITIALIZER("./fold -w 10 data/unicode.txt | ./md5sum")},
+    {S8_INITIALIZER("getconf"), S8_INITIALIZER("./getconf PATH_MAX /; ./getconf _POSIX_VERSION")},
+    {S8_INITIALIZER("grep"), S8_INITIALIZER("./grep -c lazy data/text.txt")},
+    {S8_INITIALIZER("head"), S8_INITIALIZER("./head -n 3 data/text.txt")},
+    {S8_INITIALIZER("hostname"), S8_INITIALIZER("./hostname | ./wc -c")},
+    {S8_INITIALIZER("join"), S8_INITIALIZER("./join data/left.txt data/right.txt | ./md5sum")},
+    {S8_INITIALIZER("kill"), S8_INITIALIZER("./kill -l")},
+    {S8_INITIALIZER("link"), S8_INITIALIZER("./touch a.tmp && ./link a.tmp b.tmp && ./ls b.tmp; ./rm -f a.tmp b.tmp")},
+    {S8_INITIALIZER("ln"), S8_INITIALIZER("./touch a.tmp && ./ln -s a.tmp c.tmp && ./readlink c.tmp; ./rm -f a.tmp c.tmp")},
+    {S8_INITIALIZER("logger"), S8_INITIALIZER("./logger -Z 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("logname"), S8_INITIALIZER("./logname 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("ls"), S8_INITIALIZER("./ls data")},
+    {S8_INITIALIZER("make"), S8_INITIALIZER("./make -Z 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("md5sum"), S8_INITIALIZER("./md5sum data/binary.bin")},
+    {S8_INITIALIZER("mkdir"), S8_INITIALIZER("./mkdir -p t/x/y && ./ls t/x; ./rm -rf t")},
+    {S8_INITIALIZER("mkfifo"), S8_INITIALIZER("./mkfifo p.fifo && ./ls p.fifo; ./rm -f p.fifo")},
+    {S8_INITIALIZER("mknod"), S8_INITIALIZER("./mknod p.node p && ./ls p.node; ./rm -f p.node")},
+    {S8_INITIALIZER("mktemp"), S8_INITIALIZER("./mktemp -u -p . tmpXXXXXX | ./wc -c")},
+    {S8_INITIALIZER("mv"), S8_INITIALIZER("./touch a.tmp && ./mv a.tmp b.tmp && ./ls b.tmp; ./rm -f b.tmp")},
+    {S8_INITIALIZER("nice"), S8_INITIALIZER("./nice ./echo hi")},
+    {S8_INITIALIZER("nl"), S8_INITIALIZER("./nl data/unicode.txt")},
+    {S8_INITIALIZER("nohup"), S8_INITIALIZER("./nohup ./echo hi 2>/dev/null; ./rm -f nohup.out")},
+    {S8_INITIALIZER("od"), S8_INITIALIZER("./od -A d -t x1 data/binary.bin | ./md5sum")},
+    {S8_INITIALIZER("paste"), S8_INITIALIZER("./paste data/left.txt data/right.txt | ./md5sum")},
+    {S8_INITIALIZER("pathchk"), S8_INITIALIZER("./pathchk /a/b/c; printf '%d' $?")},
+    {S8_INITIALIZER("printenv"), S8_INITIALIZER("./printenv PATH | ./wc -c")},
+    {S8_INITIALIZER("printf"), S8_INITIALIZER("./printf '%s|%d|%x\\n' a 1 255")},
+    {S8_INITIALIZER("pwd"), S8_INITIALIZER("./pwd | ./sed 's#.*/##'")},
+    {S8_INITIALIZER("readlink"), S8_INITIALIZER("./ln -s data d.link && ./readlink d.link; ./rm -f d.link")},
+    {S8_INITIALIZER("renice"), S8_INITIALIZER("./renice -Z 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("rev"), S8_INITIALIZER("./rev data/unicode.txt")},
+    {S8_INITIALIZER("rm"), S8_INITIALIZER("./touch a.tmp && ./rm a.tmp && ./ls a.tmp 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("rmdir"), S8_INITIALIZER("./mkdir t.dir && ./rmdir t.dir && ./ls t.dir 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("sed"), S8_INITIALIZER("./sed 's/fox/cat/' data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("seq"), S8_INITIALIZER("./seq -w 1 3 20")},
+    {S8_INITIALIZER("setsid"), S8_INITIALIZER("./setsid ./echo hi")},
+    {S8_INITIALIZER("sha1sum"), S8_INITIALIZER("./sha1sum data/binary.bin")},
+    {S8_INITIALIZER("sha224sum"), S8_INITIALIZER("./sha224sum data/binary.bin")},
+    {S8_INITIALIZER("sha256sum"), S8_INITIALIZER("./sha256sum data/binary.bin")},
+    {S8_INITIALIZER("sha384sum"), S8_INITIALIZER("./sha384sum data/binary.bin")},
+    {S8_INITIALIZER("sha512sum"), S8_INITIALIZER("./sha512sum data/binary.bin")},
+    {S8_INITIALIZER("sha512-224sum"), S8_INITIALIZER("./sha512-224sum data/binary.bin")},
+    {S8_INITIALIZER("sha512-256sum"), S8_INITIALIZER("./sha512-256sum data/binary.bin")},
+    {S8_INITIALIZER("sleep"), S8_INITIALIZER("./sleep 0; printf '%d' $?")},
+    {S8_INITIALIZER("sort"), S8_INITIALIZER("./sort data/numbers.txt | ./md5sum")},
+    {S8_INITIALIZER("split"), S8_INITIALIZER("./split -b 4096 data/binary.bin sp- && ./cksum sp-* | ./md5sum; ./rm -f sp-*")},
+    {S8_INITIALIZER("sponge"), S8_INITIALIZER("./cat data/text.txt | ./sponge s.tmp && ./cksum s.tmp; ./rm -f s.tmp")},
+    {S8_INITIALIZER("strings"), S8_INITIALIZER("./strings data/binary.bin | ./md5sum")},
+    {S8_INITIALIZER("sync"), S8_INITIALIZER("./sync; printf '%d' $?")},
+    {S8_INITIALIZER("tail"), S8_INITIALIZER("./tail -n 3 data/text.txt")},
+    {S8_INITIALIZER("tar"), S8_INITIALIZER("./mkdir -p tin && ./cp data/unicode.txt tin/u.txt && ./touch -t 200001010000.00 tin/u.txt tin && ./tar -c -f o.tar tin && ./tar -t -f o.tar && ./cksum o.tar; ./rm -rf tin o.tar")},
+    {S8_INITIALIZER("tee"), S8_INITIALIZER("./echo hi | ./tee t.tmp | ./cat; ./cat t.tmp; ./rm -f t.tmp")},
+    {S8_INITIALIZER("test"), S8_INITIALIZER("./test 1 -eq 1; printf '%d ' $?; ./test 1 -eq 2; printf '%d' $?")},
+    {S8_INITIALIZER("tftp"), S8_INITIALIZER("./tftp -Z 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("time"), S8_INITIALIZER("./time ./true 2>&1 | ./wc -l")},
+    {S8_INITIALIZER("touch"), S8_INITIALIZER("./touch -t 200001010000.00 t.tmp && ./ls t.tmp; ./rm -f t.tmp")},
+    {S8_INITIALIZER("tr"), S8_INITIALIZER("./tr a-z A-Z < data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("true"), S8_INITIALIZER("./true; printf '%d' $?")},
+    {S8_INITIALIZER("tsort"), S8_INITIALIZER("./printf 'a b\\nb c\\n' | ./tsort")},
+    {S8_INITIALIZER("tty"), S8_INITIALIZER("./tty; printf '%d' $?")},
+    {S8_INITIALIZER("uname"), S8_INITIALIZER("./uname -s")},
+    {S8_INITIALIZER("unexpand"), S8_INITIALIZER("./unexpand data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("uniq"), S8_INITIALIZER("./sort data/numbers.txt | ./uniq -c | ./md5sum")},
+    {S8_INITIALIZER("unlink"), S8_INITIALIZER("./touch u.tmp && ./unlink u.tmp && ./ls u.tmp 2>&1; printf '%d' $?")},
+    {S8_INITIALIZER("uudecode"), S8_INITIALIZER("./uuencode -m data/binary.bin p | ./uudecode -o - | ./cksum")},
+    {S8_INITIALIZER("uuencode"), S8_INITIALIZER("./uuencode data/unicode.txt payload | ./md5sum")},
+    {S8_INITIALIZER("wc"), S8_INITIALIZER("./wc -l -w -c data/text.txt")},
+    {S8_INITIALIZER("which"), S8_INITIALIZER("./which sh | ./wc -c")},
+    {S8_INITIALIZER("whoami"), S8_INITIALIZER("./whoami")},
+    {S8_INITIALIZER("xargs"), S8_INITIALIZER("./seq 1 50 | ./xargs ./echo | ./md5sum")},
+    {S8_INITIALIZER("xinstall"), S8_INITIALIZER("./touch a.tmp && ./xinstall -m 644 a.tmp b.tmp && ./ls b.tmp; ./rm -f a.tmp b.tmp")},
+    {S8_INITIALIZER("yes"), S8_INITIALIZER("./yes hi | ./head -n 3")},
+};
+
+// The cross-cutting cases: pipelines, redirected standard input, binary
+// data, error exits, large argument lists and locale-sensitive text. Each one
+// runs the identical shell text against both builds and their bytes must
+// match. They are separate from the per-utility probes because what they
+// exercise is the composition — a pipeline's SIGPIPE handling, an exit status
+// carried through a pipe — rather than one program.
+BUSTER_GLOBAL_LOCAL SbaseUtility sbase_cases[] = {
+    {S8_INITIALIZER("pipeline-wc"), S8_INITIALIZER("./cat data/text.txt | ./wc -l -w -c")},
+    {S8_INITIALIZER("sort-uniq"), S8_INITIALIZER("./sort data/numbers.txt | ./uniq -c | ./tail -n 5")},
+    {S8_INITIALIZER("stdin-rev"), S8_INITIALIZER("./rev < data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("binary-od"), S8_INITIALIZER("./od -A d -t x1 data/binary.bin | ./tail -n 4")},
+    {S8_INITIALIZER("digests"), S8_INITIALIZER("./cksum data/binary.bin; ./md5sum data/binary.bin; ./sha1sum data/binary.bin; ./sha256sum data/binary.bin; ./sha512sum data/binary.bin")},
+    {S8_INITIALIZER("error-exit"), S8_INITIALIZER("./cat data/missing.txt; printf 'status=%d\\n' $?; ./cmp data/text.txt data/numbers.txt; printf 'status=%d\\n' $?")},
+    {S8_INITIALIZER("large-arguments"), S8_INITIALIZER("./seq 1 5000 | ./xargs ./echo | ./wc -c")},
+    {S8_INITIALIZER("tr-binary"), S8_INITIALIZER("./tr -d '\\000' < data/binary.bin | ./wc -c; ./tr 'a-z' 'A-Z' < data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("cut-paste"), S8_INITIALIZER("./cut -d: -f1,3 data/fields.txt | ./sort | ./head -n 5; ./cut -c1-8 data/text.txt | ./uniq | ./wc -l")},
+    {S8_INITIALIZER("expr-test"), S8_INITIALIZER("./expr 6 \\* 7; ./test 1 -eq 1; printf '%d ' $?; ./false; printf '%d ' $?; ./true; printf '%d\\n' $?")},
+    {S8_INITIALIZER("grep-sed"), S8_INITIALIZER("./grep -c lazy data/text.txt; ./grep -n WORDS data/text.txt | ./head -n 2; ./sed -n '1,3p' data/text.txt; ./sed 's/fox/cat/g' data/text.txt | ./md5sum")},
+    {S8_INITIALIZER("utf8-fold"), S8_INITIALIZER("./fold -w 12 data/unicode.txt; ./rev data/unicode.txt; ./expand -t 4 data/unicode.txt | ./unexpand | ./md5sum")},
+    {S8_INITIALIZER("locale-sort"), S8_INITIALIZER("LC_ALL=C ./sort data/unicode.txt | ./md5sum; LC_ALL=C.UTF-8 ./sort data/unicode.txt | ./md5sum")},
+    {S8_INITIALIZER("join-comm"), S8_INITIALIZER("./comm data/left.txt data/right.txt | ./md5sum; ./join data/left.txt data/right.txt | ./head -n 3")},
+    {S8_INITIALIZER("strings-nl"), S8_INITIALIZER("./strings data/binary.bin | ./head -n 3; ./nl data/unicode.txt")},
+    {S8_INITIALIZER("uuencode"), S8_INITIALIZER("./uuencode -m data/binary.bin payload | ./uudecode -o - | ./cksum")},
+    {S8_INITIALIZER("split-dd"), S8_INITIALIZER("./dd if=data/binary.bin of=piece.bin bs=512 count=4 2>/dev/null; ./cksum piece.bin; ./split -b 4096 data/binary.bin part-; ./cksum part-* | ./head -n 3; ./rm -f piece.bin part-*")},
+    // find is left out of this case on purpose: it is one of the two
+    // utilities whose Buster build is known to differ, and a case is meant to
+    // fail for what it composes rather than for a gap already tracked.
+    {S8_INITIALIZER("files"),
+     S8_INITIALIZER("./mkdir -p tmp/a/b; ./touch -t 200001010000.00 tmp/a/b/f; ./ls tmp/a; ./ls tmp/a/b; ./du -a tmp | ./sort | ./md5sum; ./rm -rf tmp")},
+    {S8_INITIALIZER("tar-roundtrip"), S8_INITIALIZER("./mkdir -p tin; ./cp data/unicode.txt tin/u.txt; ./touch -t 200001010000.00 tin/u.txt tin; ./tar -c -f out.tar tin; ./tar -t -f out.tar; ./cksum out.tar; ./rm -rf tin out.tar")},
+    {S8_INITIALIZER("printf-echo"), S8_INITIALIZER("./printf '%s|%d|%x|%c\\n' abc 42 255 Z; ./echo -n a b c; ./echo; ./basename /a/b/c.txt .txt; ./dirname /a/b/c.txt")},
+    {S8_INITIALIZER("seq-head"), S8_INITIALIZER("./seq -w 1 3 100 | ./head -n 4; ./seq 5 -1 1; ./head -c 32 data/binary.bin | ./cksum")},
+    {S8_INITIALIZER("sponge-tee"), S8_INITIALIZER("./cat data/text.txt | ./tee copy.txt | ./wc -l; ./cksum copy.txt; ./rm -f copy.txt")},
+    {S8_INITIALIZER("tsort-sponge"), S8_INITIALIZER("./printf 'a b\\nb c\\nc d\\n' | ./tsort")},
+    {S8_INITIALIZER("bc-dc"), S8_INITIALIZER("./printf '10k 2v p\\n2 10 ^ p\\nq\\n' | ./dc; ./printf 'scale=10\\n2/3\\nquit\\n' | ./bc")},
+};
+
+// The upstream suite as it stands at the pinned commit: 54 scripts, listed
+// rather than discovered so that a script upstream adds shows up here as a
+// missing file instead of quietly not running. Each one is copied beside
+// the build under test and run from there.
+BUSTER_GLOBAL_LOCAL String8 sbase_upstream_tests[] = {
+    S8_INITIALIZER("0001-echo.sh"), S8_INITIALIZER("0002-printf.sh"), S8_INITIALIZER("0003-ed.sh"), S8_INITIALIZER("0004-ed.sh"),
+    S8_INITIALIZER("0005-ed.sh"), S8_INITIALIZER("0006-ed.sh"), S8_INITIALIZER("0007-ed.sh"), S8_INITIALIZER("0008-ed.sh"),
+    S8_INITIALIZER("0009-ed.sh"), S8_INITIALIZER("0010-bc.sh"), S8_INITIALIZER("0011-ed.sh"), S8_INITIALIZER("0012-ed.sh"),
+    S8_INITIALIZER("0013-ed.sh"), S8_INITIALIZER("0014-ed.sh"), S8_INITIALIZER("0015-ed.sh"), S8_INITIALIZER("0016-ed.sh"),
+    S8_INITIALIZER("0017-ed.sh"), S8_INITIALIZER("0018-ed.sh"), S8_INITIALIZER("0019-ed.sh"), S8_INITIALIZER("0020-ed.sh"),
+    S8_INITIALIZER("0021-ed.sh"), S8_INITIALIZER("0022-ed.sh"), S8_INITIALIZER("0023-ed.sh"), S8_INITIALIZER("0024-ed.sh"),
+    S8_INITIALIZER("0025-ed.sh"), S8_INITIALIZER("0026-dc.sh"), S8_INITIALIZER("0027-dc.sh"), S8_INITIALIZER("0027-tr.sh"),
+    S8_INITIALIZER("0028-dc.sh"), S8_INITIALIZER("0029-dc.sh"), S8_INITIALIZER("0030-dc.sh"), S8_INITIALIZER("0031-dc.sh"),
+    S8_INITIALIZER("0032-dc.sh"), S8_INITIALIZER("0033-dc.sh"), S8_INITIALIZER("0034-dc.sh"), S8_INITIALIZER("0035-dc.sh"),
+    S8_INITIALIZER("0036-dc.sh"), S8_INITIALIZER("0037-dc.sh"), S8_INITIALIZER("0038-dc.sh"), S8_INITIALIZER("0039-dc.sh"),
+    S8_INITIALIZER("0040-dc.sh"), S8_INITIALIZER("0041-dc.sh"), S8_INITIALIZER("0042-dc.sh"), S8_INITIALIZER("0043-dc.sh"),
+    S8_INITIALIZER("0044-dc.sh"), S8_INITIALIZER("0045-dc.sh"), S8_INITIALIZER("0046-bc.sh"), S8_INITIALIZER("0047-ed.sh"),
+    S8_INITIALIZER("0047-tr.sh"), S8_INITIALIZER("0048-dc.sh"), S8_INITIALIZER("0049-dc.sh"), S8_INITIALIZER("0050-bc.sh"),
+    S8_INITIALIZER("0051-grep.sh"), S8_INITIALIZER("0052-touch.sh"),
+};
+
+// The library manifest, taken from upstream's Makefile. It is written out
+// here rather than discovered so that a unit upstream adds is a build failure
+// in this harness instead of a silent omission.
+BUSTER_GLOBAL_LOCAL String8 sbase_libutf_sources[] = {
+    S8_INITIALIZER("libutf/fgetrune.c"),   S8_INITIALIZER("libutf/fputrune.c"),   S8_INITIALIZER("libutf/isalnumrune.c"),
+    S8_INITIALIZER("libutf/isalpharune.c"), S8_INITIALIZER("libutf/isblankrune.c"), S8_INITIALIZER("libutf/iscntrlrune.c"),
+    S8_INITIALIZER("libutf/isdigitrune.c"), S8_INITIALIZER("libutf/isgraphrune.c"), S8_INITIALIZER("libutf/isprintrune.c"),
+    S8_INITIALIZER("libutf/ispunctrune.c"), S8_INITIALIZER("libutf/isspacerune.c"), S8_INITIALIZER("libutf/istitlerune.c"),
+    S8_INITIALIZER("libutf/isxdigitrune.c"), S8_INITIALIZER("libutf/lowerrune.c"),  S8_INITIALIZER("libutf/rune.c"),
+    S8_INITIALIZER("libutf/runetype.c"),   S8_INITIALIZER("libutf/upperrune.c"),  S8_INITIALIZER("libutf/utf.c"),
+    S8_INITIALIZER("libutf/utftorunestr.c"),
+};
+
+BUSTER_GLOBAL_LOCAL String8 sbase_libutil_sources[] = {
+    S8_INITIALIZER("libutil/concat.c"),    S8_INITIALIZER("libutil/cp.c"),        S8_INITIALIZER("libutil/crypt.c"),
+    S8_INITIALIZER("libutil/confirm.c"),   S8_INITIALIZER("libutil/ealloc.c"),    S8_INITIALIZER("libutil/enmasse.c"),
+    S8_INITIALIZER("libutil/eprintf.c"),   S8_INITIALIZER("libutil/eregcomp.c"),  S8_INITIALIZER("libutil/estrtod.c"),
+    S8_INITIALIZER("libutil/fnck.c"),      S8_INITIALIZER("libutil/fshut.c"),     S8_INITIALIZER("libutil/getlines.c"),
+    S8_INITIALIZER("libutil/human.c"),     S8_INITIALIZER("libutil/linecmp.c"),   S8_INITIALIZER("libutil/md5.c"),
+    S8_INITIALIZER("libutil/memmem.c"),    S8_INITIALIZER("libutil/mkdirp.c"),    S8_INITIALIZER("libutil/mode.c"),
+    S8_INITIALIZER("libutil/parseoffset.c"), S8_INITIALIZER("libutil/putword.c"), S8_INITIALIZER("libutil/reallocarray.c"),
+    S8_INITIALIZER("libutil/recurse.c"),   S8_INITIALIZER("libutil/rm.c"),        S8_INITIALIZER("libutil/sha1.c"),
+    S8_INITIALIZER("libutil/sha224.c"),    S8_INITIALIZER("libutil/sha256.c"),    S8_INITIALIZER("libutil/sha384.c"),
+    S8_INITIALIZER("libutil/sha512.c"),    S8_INITIALIZER("libutil/sha512-224.c"), S8_INITIALIZER("libutil/sha512-256.c"),
+    S8_INITIALIZER("libutil/strcasestr.c"), S8_INITIALIZER("libutil/strlcat.c"),  S8_INITIALIZER("libutil/strlcpy.c"),
+    S8_INITIALIZER("libutil/strsep.c"),    S8_INITIALIZER("libutil/strnsubst.c"), S8_INITIALIZER("libutil/strtonum.c"),
+    S8_INITIALIZER("libutil/unescape.c"),  S8_INITIALIZER("libutil/writeall.c"),
+};
+
+// make is upstream's one multi-unit program; every other utility is a single
+// translation unit linked against the two libraries.
+BUSTER_GLOBAL_LOCAL String8 sbase_make_sources[] = {
+    S8_INITIALIZER("make/defaults.c"), S8_INITIALIZER("make/main.c"), S8_INITIALIZER("make/parser.c"),
+    S8_INITIALIZER("make/posix.c"),    S8_INITIALIZER("make/rules.c"),
+};
+
+// The sampled allocator rows build the library and these utilities: the ones
+// with the largest and most varied bodies, so a sample is a real exercise of
+// the allocator rather than a formality.
+BUSTER_GLOBAL_LOCAL String8 sbase_sampled_utilities[] = {
+    S8_INITIALIZER("bc"),  S8_INITIALIZER("cat"), S8_INITIALIZER("dc"),   S8_INITIALIZER("ed"),   S8_INITIALIZER("grep"),
+    S8_INITIALIZER("ls"),  S8_INITIALIZER("od"),  S8_INITIALIZER("printf"), S8_INITIALIZER("sed"), S8_INITIALIZER("sort"),
+    S8_INITIALIZER("tar"), S8_INITIALIZER("tr"),  S8_INITIALIZER("wc"),
+};
+
+BUSTER_GLOBAL_LOCAL bool sbase_is_sampled(String8 name)
+{
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_sampled_utilities); index += 1)
+    {
+        if (string_equal(name, sbase_sampled_utilities[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// One build of the whole tree with one compiler: objects, the two archives,
+// and one executable per utility. The per-utility status is filled in as it
+// goes, so a unit that fails to compile is reported as that and its link is
+// reported as skipped rather than as a second failure.
+typedef struct SbaseBuild SbaseBuild;
+struct SbaseBuild
+{
+    String8 directory;
+    String8 archive_utf;
+    String8 archive_util;
+    u32 compiled_units;
+    u32 failed_units;
+    u32 linked_utilities;
+    u32 failed_links;
+};
+
+BUSTER_GLOBAL_LOCAL bool sbase_build_side(Arena* arena, String8 compiler, bool buster, String8 ar, String8 source_directory, String8 source_include,
+                                          String8 generated_include, String8 generated_directory, String8 directory, String8 metrics_directory,
+                                          String8 mode, bool complete, SbaseUtilityStatus* statuses, SbaseBuild* build, bool verbose)
+{
+    make_directory_recursive(arena, directory);
+    make_directory_recursive(arena, path_join(arena, directory, S8("libutf")));
+    make_directory_recursive(arena, path_join(arena, directory, S8("libutil")));
+    make_directory_recursive(arena, path_join(arena, directory, S8("make")));
+    String8 bin = path_join(arena, directory, S8("bin"));
+    make_directory_recursive(arena, bin);
+    if (metrics_directory.length)
+    {
+        make_directory_recursive(arena, metrics_directory);
+    }
+    build->directory = directory;
+
+    u64 library_count = BUSTER_ARRAY_LENGTH(sbase_libutf_sources) + BUSTER_ARRAY_LENGTH(sbase_libutil_sources);
+    String8* utf_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(sbase_libutf_sources));
+    String8* util_objects = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(sbase_libutil_sources));
+    for (u64 index = 0; index < library_count; index += 1)
+    {
+        bool is_utf = index < BUSTER_ARRAY_LENGTH(sbase_libutf_sources);
+        String8 relative = is_utf ? sbase_libutf_sources[index] : sbase_libutil_sources[index - BUSTER_ARRAY_LENGTH(sbase_libutf_sources)];
+        String8 stem = string_slice(relative, 0, relative.length - 2);
+        String8 object = path_join(arena, directory, string_format(arena, S8("{S8}.o"), stem));
+        String8 metrics = metrics_directory.length ? path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), compat_basename(stem)))
+                                                   : (String8){0};
+        u64 elapsed = 0;
+        if (!sbase_compile(arena, compiler, buster, source_include, generated_include, path_join(arena, source_directory, relative), object, mode, metrics,
+                           verbose && index == 0, &elapsed))
+        {
+            string_print(S8("error: sbase library unit failed to compile: {S8} (allocator={S8})\n"), relative, mode);
+            build->failed_units += 1;
+            return false;
+        }
+        sbase_report_metric(arena, mode, relative, metrics, elapsed);
+        build->compiled_units += 1;
+        if (is_utf)
+        {
+            utf_objects[index] = object;
+        }
+        else
+        {
+            util_objects[index - BUSTER_ARRAY_LENGTH(sbase_libutf_sources)] = object;
+        }
+    }
+    build->archive_utf = path_join(arena, directory, S8("libutf.a"));
+    build->archive_util = path_join(arena, directory, S8("libutil.a"));
+    if (!sbase_archive(arena, ar, build->archive_utf, utf_objects, BUSTER_ARRAY_LENGTH(sbase_libutf_sources)) ||
+        !sbase_archive(arena, ar, build->archive_util, util_objects, BUSTER_ARRAY_LENGTH(sbase_libutil_sources)))
+    {
+        string_print(S8("error: sbase could not archive libutf.a/libutil.a (allocator={S8})\n"), mode);
+        return false;
+    }
+
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+    {
+        String8 name = sbase_utilities[index].name;
+        bool is_make = string_equal(name, S8("make"));
+        if (!complete && !sbase_is_sampled(name))
+        {
+            continue;
+        }
+        u64 object_count = is_make ? BUSTER_ARRAY_LENGTH(sbase_make_sources) : 1;
+        String8* objects = arena_allocate(arena, String8, object_count + 2);
+        bool compiled = true;
+        for (u64 unit = 0; unit < object_count && compiled; unit += 1)
+        {
+            String8 relative = is_make ? sbase_make_sources[unit] : string_format(arena, S8("{S8}.c"), name);
+            // bc's parser is generated from bc.y, so its only source is the
+            // one the harness produced next to getconf.h.
+            String8 source = string_equal(name, S8("bc")) ? path_join(arena, generated_directory, S8("bc.c")) : path_join(arena, source_directory, relative);
+            String8 stem = string_slice(relative, 0, relative.length - 2);
+            objects[unit] = path_join(arena, directory, string_format(arena, S8("{S8}.o"), stem));
+            String8 metrics = metrics_directory.length
+                                  ? path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), compat_basename(stem)))
+                                  : (String8){0};
+            u64 elapsed = 0;
+            compiled = sbase_compile(arena, compiler, buster, source_include, generated_include, source, objects[unit], mode, metrics, false, &elapsed);
+            if (compiled)
+            {
+                sbase_report_metric(arena, mode, relative, metrics, elapsed);
+            }
+        }
+        statuses[index].compiled = compiled;
+        if (!compiled)
+        {
+            build->failed_units += 1;
+            string_print(S8("error: sbase utility failed to compile: {S8} (allocator={S8})\n"), name, mode);
+            continue;
+        }
+        build->compiled_units += (u32)object_count;
+        objects[object_count] = build->archive_utf;
+        objects[object_count + 1] = build->archive_util;
+        statuses[index].linked = sbase_link(arena, compiler, buster, path_join(arena, bin, name), objects, object_count + 2);
+        if (!statuses[index].linked)
+        {
+            build->failed_links += 1;
+            string_print(S8("error: sbase utility failed to link: {S8} (allocator={S8})\n"), name, mode);
+            continue;
+        }
+        build->linked_utilities += 1;
+    }
+    return build->failed_units == 0 && build->failed_links == 0;
+}
+
+
+// Both builds run from a directory that holds their own binaries and their
+// own copy of the corpus, so every probe names `./cat` and `data/text.txt`
+// and the two sides see identical text. Running from the build's own
+// directory is also what keeps the diagnostics comparable: these utilities
+// prefix their errors with argv[0].
+BUSTER_GLOBAL_LOCAL bool sbase_prepare_run_directory(Arena* arena, String8 directory, String8 corpus_directory)
+{
+    String8 data = path_join(arena, directory, S8("data"));
+    make_directory_recursive(arena, data);
+    String8 names[] = {S8("text.txt"), S8("numbers.txt"), S8("fields.txt"), S8("left.txt"), S8("right.txt"), S8("unicode.txt"), S8("binary.bin")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (!sbase_copy_file(arena, path_join(arena, corpus_directory, names[index]), path_join(arena, data, names[index])))
+        {
+            string_print(S8("error: sbase could not stage the corpus file {S8} into {S8}\n"), names[index], data);
+            return false;
+        }
+    }
+    return true;
+}
+
+// The upstream suite, run from a copy of `tests/` placed beside the binaries:
+// the scripts invoke `../echo` and read `../bc.library`, so the layout has to
+// match upstream's, and copying rather than running in the checkout is what
+// keeps the checkout pristine. Verdicts are compared with the Clang build's
+// rather than required to be passes: 0051-grep.sh depends on the host locale
+// and fails for both compilers here, and a harness that demanded a pass would
+// be reporting the host rather than the compiler.
+BUSTER_GLOBAL_LOCAL bool sbase_prepare_upstream_tests(Arena* arena, String8 source_directory, String8 run_directory, String8* test_names, u64 test_count)
+{
+    String8 tests = path_join(arena, run_directory, S8("tests"));
+    make_directory_recursive(arena, tests);
+    if (!sbase_copy_file(arena, path_join(arena, source_directory, S8("bc.library")), path_join(arena, run_directory, S8("bc.library"))))
+    {
+        return false;
+    }
+    for (u64 index = 0; index < test_count; index += 1)
+    {
+        if (!sbase_copy_file(arena, path_join(arena, path_join(arena, source_directory, S8("tests")), test_names[index]),
+                             path_join(arena, tests, test_names[index])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The upstream makefile, driven with CC set to the Buster driver. It runs
+// against a clean export of the pinned commit rather than the caller's
+// checkout, so the gate cannot leave build products behind in it. This is the
+// driver-compatibility half of the milestone: an implicit-rule build, a
+// generated header, a yacc source and a recursive sub-make, all reaching the
+// driver through make's own command lines rather than the harness's.
+BUSTER_GLOBAL_LOCAL bool sbase_upstream_make_gate(Arena* arena, String8 git, String8 tar, String8 make, String8 ar, String8 ide, String8 source_directory,
+                                                  String8 output_directory)
+{
+    String8 archive = path_join(arena, output_directory, S8("upstream.tar"));
+    String8 tree = path_join(arena, output_directory, S8("upstream"));
+    make_directory_recursive(arena, tree);
+    String8 archive_arguments[] = {git, S8("archive"), S8("--format=tar"), string_format(arena, S8("--output={S8}"), archive), S8("HEAD")};
+    if (sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(archive_arguments), source_directory, false, true).result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: sbase could not export the pinned commit for the upstream make gate\n"));
+        return false;
+    }
+    String8 extract_arguments[] = {tar, S8("-xf"), archive, S8("-C"), tree};
+    if (sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(extract_arguments), S8("."), false, true).result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: sbase could not extract the exported tree for the upstream make gate\n"));
+        return false;
+    }
+    String8 make_arguments[] = {
+        make,
+        S8("-j4"),
+        string_format(arena, S8("CC={S8} cc"), ide),
+        string_format(arena, S8("AR={S8}"), ar),
+        S8("CFLAGS=-O2 -g0"),
+    };
+    u64 start = os_now_microseconds();
+    SbaseCommandResult result = sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_arguments), tree, false, true);
+    u64 elapsed = os_now_microseconds() - start;
+    if (result.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: the upstream sbase makefile failed with CC set to the Buster driver\n"));
+        return false;
+    }
+    // make reports success by exiting zero; the binaries are what prove it
+    // built them. Check the two shapes the makefile treats differently: an
+    // implicit-rule single-unit program and its explicit multi-unit one.
+    String8 produced[] = {S8("cat"), S8("bc"), S8("getconf"), S8("make/make"), S8("libutf.a"), S8("libutil.a")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(produced); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, tree, produced[index])))
+        {
+            string_print(S8("error: the upstream sbase makefile did not produce {S8}\n"), produced[index]);
+            return false;
+        }
+    }
+    string_print(S8("SBASE_UPSTREAM_MAKE cc=buster elapsed_us={u64} status=pass\n"), elapsed);
+    return true;
+}
+
+
+// The two sources upstream generates during its own build. They are produced
+// once, into the harness's own directory, and both compilers are given the
+// same bytes: getconf.h is a shell script's output, and bc.c is yacc's, so
+// generating them per side would compare two different programs.
+BUSTER_GLOBAL_LOCAL bool sbase_generate_sources(Arena* arena, String8 shell, String8 yacc, String8 source_directory, String8 generated_directory)
+{
+    String8 getconf_arguments[] = {shell, path_join(arena, source_directory, S8("scripts/getconf.sh"))};
+    SbaseCommandResult getconf = sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(getconf_arguments), source_directory, true, true);
+    if (getconf.result != PROCESS_RESULT_SUCCESS || !getconf.output.length)
+    {
+        string_print(S8("error: sbase could not generate getconf.h from scripts/getconf.sh\n"));
+        return false;
+    }
+    String8 getconf_header = path_join(arena, generated_directory, S8("getconf.h"));
+    if (!sbase_write_bytes(getconf_header, getconf.output))
+    {
+        string_print(S8("error: sbase could not write {S8}\n"), getconf_header);
+        return false;
+    }
+    String8 bc_source = path_join(arena, generated_directory, S8("bc.c"));
+    String8 yacc_arguments[] = {yacc, S8("-o"), bc_source, path_join(arena, source_directory, S8("bc.y"))};
+    if (sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(yacc_arguments), source_directory, false, true).result != PROCESS_RESULT_SUCCESS ||
+        !path_exists(arena, bc_source))
+    {
+        string_print(S8("error: sbase could not generate bc.c from bc.y with yacc\n"));
+        return false;
+    }
+    string_print(S8("SBASE_GENERATED getconf_bytes={u64} bc_source={S8}\n"), getconf.output.length, bc_source);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
+{
+    TestSbaseOptions options = *(TestSbaseOptions*)data;
+    String8 source_directory = options.source_directory;
+    if (!source_directory.length)
+    {
+        string_print(S8("error: test_sbase requires an external sbase checkout path\n"));
+        string_print(S8("usage: ./build/build test_sbase [--config Debug|Release] /path/to/sbase\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    source_directory = os_path_absolute(arena, source_directory, true);
+    String8 required[] = {S8("Makefile"), S8("util.h"), S8("bc.y"), S8("scripts/getconf.sh"), S8("tests/runtests.sh"), S8("bc.library")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(required); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, required[index])))
+        {
+            string_print(S8("error: test_sbase checkout is missing {S8}\n"), required[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    // The manifest is checked before anything is built: a source upstream
+    // moved or renamed is a manifest error, not a compile error.
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_libutf_sources) + BUSTER_ARRAY_LENGTH(sbase_libutil_sources) + BUSTER_ARRAY_LENGTH(sbase_make_sources);
+         index += 1)
+    {
+        String8 relative = index < BUSTER_ARRAY_LENGTH(sbase_libutf_sources) ? sbase_libutf_sources[index]
+                           : index < BUSTER_ARRAY_LENGTH(sbase_libutf_sources) + BUSTER_ARRAY_LENGTH(sbase_libutil_sources)
+                               ? sbase_libutil_sources[index - BUSTER_ARRAY_LENGTH(sbase_libutf_sources)]
+                               : sbase_make_sources[index - BUSTER_ARRAY_LENGTH(sbase_libutf_sources) - BUSTER_ARRAY_LENGTH(sbase_libutil_sources)];
+        if (!path_exists(arena, path_join(arena, source_directory, relative)))
+        {
+            string_print(S8("error: sbase manifest source is missing: {S8}\n"), relative);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+    {
+        String8 name = sbase_utilities[index].name;
+        if (string_equal(name, S8("make")) || string_equal(name, S8("bc")))
+        {
+            continue;
+        }
+        if (!path_exists(arena, path_join(arena, source_directory, string_format(arena, S8("{S8}.c"), name))))
+        {
+            string_print(S8("error: sbase manifest utility source is missing: {S8}.c\n"), name);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_upstream_tests); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, path_join(arena, source_directory, S8("tests")), sbase_upstream_tests[index])))
+        {
+            string_print(S8("error: sbase upstream test is missing: tests/{S8}\n"), sbase_upstream_tests[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    String8 shell = executable_resolve_in_path(arena, S8("sh"));
+    String8 yacc = executable_resolve_in_path(arena, S8("yacc"));
+    String8 tar = executable_resolve_in_path(arena, S8("tar"));
+    String8 make = executable_resolve_in_path(arena, S8("make"));
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    if (!ar.length)
+    {
+        ar = executable_resolve_in_path(arena, S8("llvm-ar"));
+    }
+    String8 ide = compat_ide_path(arena, options.config);
+    if (!git.length || !clang.length || !shell.length || !yacc.length || !tar.length || !make.length || !ar.length || !ide.length)
+    {
+        string_print(S8("error: test_sbase requires a built ide executable and git, clang, sh, yacc, tar, make and ar/llvm-ar in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    if (!sbase_git_verify(arena, git, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 output_directory = string_format_z(arena, S8("build/sbase-{u64}"), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 generated_directory = path_join(arena, output_directory, S8("generated"));
+    String8 corpus_directory = path_join(arena, output_directory, S8("corpus"));
+    String8 metrics_root = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, generated_directory);
+    make_directory_recursive(arena, corpus_directory);
+    make_directory_recursive(arena, metrics_root);
+    String8 source_include = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 generated_include = string_format(arena, S8("-I{S8}"), generated_directory);
+    string_print(S8("SBASE_HARNESS ide={S8} clang={S8} ar={S8} yacc={S8} output={S8}\n"), ide, clang, ar, yacc, output_directory);
+    string_print(S8("SBASE_MANIFEST libutf_units={u64} libutil_units={u64} make_units={u64} utilities={u64} upstream_tests={u64} cases={u64}\n"),
+                 BUSTER_ARRAY_LENGTH(sbase_libutf_sources), BUSTER_ARRAY_LENGTH(sbase_libutil_sources), BUSTER_ARRAY_LENGTH(sbase_make_sources),
+                 BUSTER_ARRAY_LENGTH(sbase_utilities), BUSTER_ARRAY_LENGTH(sbase_upstream_tests), BUSTER_ARRAY_LENGTH(sbase_cases));
+
+    if (!sbase_generate_sources(arena, shell, yacc, source_directory, generated_directory) || !sbase_write_corpus(arena, corpus_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // The Clang reference: the same manifest, the same flags, its own
+    // directory. Everything the Buster builds produce is compared against it.
+    SbaseUtilityStatus* reference_statuses = arena_allocate(arena, SbaseUtilityStatus, BUSTER_ARRAY_LENGTH(sbase_utilities));
+    memset(reference_statuses, 0, sizeof(*reference_statuses) * BUSTER_ARRAY_LENGTH(sbase_utilities));
+    SbaseBuild reference_build = {0};
+    String8 reference_directory = path_join(arena, output_directory, S8("clang"));
+    if (!sbase_build_side(arena, clang, false, ar, source_directory, source_include, generated_include, generated_directory, reference_directory,
+                          (String8){0}, S8("clang"), true, reference_statuses, &reference_build, false))
+    {
+        string_print(S8("error: the Clang reference build of sbase failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 reference_bin = path_join(arena, reference_directory, S8("bin"));
+    if (!sbase_prepare_run_directory(arena, reference_bin, corpus_directory) ||
+        !sbase_prepare_upstream_tests(arena, source_directory, reference_bin, sbase_upstream_tests, BUSTER_ARRAY_LENGTH(sbase_upstream_tests)))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("SBASE_REFERENCE compiler=clang units={u32} utilities={u32}\n"), reference_build.compiled_units, reference_build.linked_utilities);
+
+    // The reference results every Buster build is compared against, taken
+    // once: the corpus and the programs are fixed, so running them per
+    // allocator would only be measuring the machine.
+    SbaseCommandResult* reference_probes = arena_allocate(arena, SbaseCommandResult, BUSTER_ARRAY_LENGTH(sbase_utilities));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+    {
+        reference_probes[index] = sbase_run_script(arena, shell, sbase_utilities[index].probe, reference_bin);
+    }
+    SbaseCommandResult* reference_cases = arena_allocate(arena, SbaseCommandResult, BUSTER_ARRAY_LENGTH(sbase_cases));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_cases); index += 1)
+    {
+        reference_cases[index] = sbase_run_script(arena, shell, sbase_cases[index].probe, reference_bin);
+    }
+    SbaseCommandResult* reference_tests = arena_allocate(arena, SbaseCommandResult, BUSTER_ARRAY_LENGTH(sbase_upstream_tests));
+    u32 reference_test_passes = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_upstream_tests); index += 1)
+    {
+        String8 script = string_format(arena, S8("./{S8}"), sbase_upstream_tests[index]);
+        reference_tests[index] = sbase_run_script(arena, shell, script, path_join(arena, reference_bin, S8("tests")));
+        reference_test_passes += reference_tests[index].result == PROCESS_RESULT_SUCCESS;
+    }
+    string_print(S8("SBASE_REFERENCE_TESTS total={u64} passed={u32}\n"), BUSTER_ARRAY_LENGTH(sbase_upstream_tests), reference_test_passes);
+
+    SbaseMode modes[] = {
+        {S8_INITIALIZER("fast"), true},
+        {S8_INITIALIZER("none"), true},
+        {S8_INITIALIZER("mir-stack"), false},
+        {S8_INITIALIZER("quality"), false},
+    };
+    bool passed = true;
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes) && passed; mode_index += 1)
+    {
+        SbaseMode mode = modes[mode_index];
+        string_print(S8("SBASE_MODE allocator={S8} coverage={S8}\n"), mode.name, mode.complete ? S8("complete") : S8("sampled"));
+        SbaseUtilityStatus* statuses = arena_allocate(arena, SbaseUtilityStatus, BUSTER_ARRAY_LENGTH(sbase_utilities));
+        memset(statuses, 0, sizeof(*statuses) * BUSTER_ARRAY_LENGTH(sbase_utilities));
+        SbaseBuild build = {0};
+        String8 directory = path_join(arena, output_directory, mode.name);
+        // Only the first row writes metrics: the source is the same in every
+        // row, so repeating them would add three copies of the same numbers.
+        String8 metrics_directory = mode_index == 0 ? path_join(arena, metrics_root, mode.name) : (String8){0};
+        bool built = sbase_build_side(arena, ide, true, ar, source_directory, source_include, generated_include, generated_directory, directory,
+                                      metrics_directory, mode.name, mode.complete, statuses, &build, mode_index == 0);
+        String8 bin = path_join(arena, directory, S8("bin"));
+        if (built && !sbase_prepare_run_directory(arena, bin, corpus_directory))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        // A sampled row builds part of the set, but its probes pipe through
+        // the rest (`./cat data/text.txt | ./md5sum`). Fill the gaps from the
+        // reference build: the utility under test is then the only Buster
+        // program in its own probe, which is exactly the attribution a sample
+        // is for.
+        if (built && !mode.complete)
+        {
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+            {
+                String8 name = sbase_utilities[index].name;
+                if (statuses[index].linked)
+                {
+                    continue;
+                }
+                if (!sbase_copy_program(arena, path_join(arena, reference_bin, name), path_join(arena, bin, name)))
+                {
+                    string_print(S8("error: sbase could not stage the reference {S8} into the sampled run directory\n"), name);
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+        }
+        u32 gaps = 0;
+        u32 mismatches = 0;
+        u32 matched = 0;
+        if (built)
+        {
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+            {
+                if (!statuses[index].linked)
+                {
+                    continue;
+                }
+                String8 name = sbase_utilities[index].name;
+                SbaseCommandResult probe = sbase_run_script(arena, shell, sbase_utilities[index].probe, bin);
+                statuses[index].probed = true;
+                statuses[index].matched = sbase_results_match(reference_probes[index], probe);
+                bool known_gap = sbase_is_copy_relocation_gap(name);
+                if (statuses[index].matched == known_gap)
+                {
+                    // Either a utility differs that should not, or one of the
+                    // two documented copy-relocation gaps has started
+                    // matching and the expectation above is stale. Both are
+                    // reported; only the first is a mismatch to chase.
+                    if (known_gap)
+                    {
+                        string_print(S8("error: sbase utility '{S8}' now matches the Clang reference; the documented copy-relocation gap is stale\n"), name);
+                    }
+                    else
+                    {
+                        sbase_report_mismatch(S8("utility"), name, reference_probes[index], probe);
+                    }
+                    mismatches += 1;
+                }
+                gaps += known_gap;
+                matched += statuses[index].matched;
+            }
+        }
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_utilities); index += 1)
+        {
+            String8 name = sbase_utilities[index].name;
+            bool selected = mode.complete || sbase_is_sampled(name);
+            String8 compile_status = !selected ? S8("skipped") : statuses[index].compiled ? S8("ok") : S8("failed");
+            String8 link_status = !selected || !statuses[index].compiled ? S8("skipped") : statuses[index].linked ? S8("ok") : S8("failed");
+            String8 probe_status = !statuses[index].probed              ? S8("skipped")
+                                   : statuses[index].matched            ? S8("ok")
+                                   : sbase_is_copy_relocation_gap(name) ? S8("known-copy-relocation-gap")
+                                                                        : S8("differs");
+            string_print(S8("SBASE_UTILITY allocator={S8} name={S8} compile={S8} link={S8} probe={S8}\n"), mode.name, name, compile_status, link_status,
+                         probe_status);
+        }
+        u32 case_mismatches = 0;
+        if (built && mode.complete)
+        {
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_cases); index += 1)
+            {
+                SbaseCommandResult candidate = sbase_run_script(arena, shell, sbase_cases[index].probe, bin);
+                bool match = sbase_results_match(reference_cases[index], candidate);
+                if (!match)
+                {
+                    sbase_report_mismatch(S8("case"), sbase_cases[index].name, reference_cases[index], candidate);
+                    case_mismatches += 1;
+                }
+                string_print(S8("SBASE_CASE allocator={S8} name={S8} status={S8}\n"), mode.name, sbase_cases[index].name, match ? S8("ok") : S8("differs"));
+            }
+        }
+        u32 test_mismatches = 0;
+        u32 test_passes = 0;
+        if (built && mode.complete)
+        {
+            if (!sbase_prepare_upstream_tests(arena, source_directory, bin, sbase_upstream_tests, BUSTER_ARRAY_LENGTH(sbase_upstream_tests)))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            String8 tests_directory = path_join(arena, bin, S8("tests"));
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_upstream_tests); index += 1)
+            {
+                String8 script = string_format(arena, S8("./{S8}"), sbase_upstream_tests[index]);
+                SbaseCommandResult candidate = sbase_run_script(arena, shell, script, tests_directory);
+                bool reference_passed = reference_tests[index].result == PROCESS_RESULT_SUCCESS;
+                bool candidate_passed = candidate.result == PROCESS_RESULT_SUCCESS && !candidate.timed_out;
+                test_passes += candidate_passed;
+                if (reference_passed != candidate_passed)
+                {
+                    sbase_report_mismatch(S8("upstream test"), sbase_upstream_tests[index], reference_tests[index], candidate);
+                    test_mismatches += 1;
+                }
+                string_print(S8("SBASE_UPSTREAM_TEST allocator={S8} name={S8} clang={S8} buster={S8} status={S8}\n"), mode.name, sbase_upstream_tests[index],
+                             reference_passed ? S8("pass") : S8("fail"), candidate_passed ? S8("pass") : S8("fail"),
+                             reference_passed == candidate_passed ? S8("agree") : S8("differs"));
+            }
+        }
+        string_print(S8("SBASE_SUMMARY allocator={S8} coverage={S8} units={u32} unit_failures={u32} linked={u32} link_failures={u32} probes_matched={u32} "
+                        "known_gaps={u32} probe_mismatches={u32} case_mismatches={u32} upstream_passed={u32} upstream_mismatches={u32} status={S8}\n"),
+                     mode.name, mode.complete ? S8("complete") : S8("sampled"), build.compiled_units, build.failed_units, build.linked_utilities,
+                     build.failed_links, matched, gaps, mismatches, case_mismatches, test_passes, test_mismatches,
+                     built && !mismatches && !case_mismatches && !test_mismatches ? S8("pass") : S8("fail"));
+        passed = built && !mismatches && !case_mismatches && !test_mismatches;
+    }
+    if (!passed)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    // The driver gate runs last, once the explicit manifest has passed under
+    // every allocator: a make failure is then unambiguously about the driver
+    // rather than about compiling sbase.
+    if (!sbase_upstream_make_gate(arena, git, tar, make, ar, ide, source_directory, output_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("SBASE_RESULT status=pass output={S8}\n"), output_directory);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_sbase_action_add(Arena* arena, TestSbaseOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestSbaseOptions* options_copy = arena_allocate(arena, TestSbaseOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_sbase_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -26115,6 +27340,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_STB] = S8_INITIALIZER("test_stb"),
         [BUILD_COMMAND_TEST_LZ4] = S8_INITIALIZER("test_lz4"),
         [BUILD_COMMAND_TEST_SQLITE] = S8_INITIALIZER("test_sqlite"),
+        [BUILD_COMMAND_TEST_SBASE] = S8_INITIALIZER("test_sbase"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -26191,6 +27417,7 @@ ProcessResult process_arguments(void)
     TestStbOptions test_stb_options = {0};
     TestLz4Options test_lz4_options = {0};
     TestSqliteOptions test_sqlite_options = {0};
+    TestSbaseOptions test_sbase_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -26338,6 +27565,11 @@ ProcessResult process_arguments(void)
                 {
                     test_sqlite_options.source_directory = argument;
                 }
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_SBASE && !test_sbase_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_sbase_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -26611,6 +27843,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_SQLITE)
                 {
                     test_sqlite_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_SBASE)
+                {
+                    test_sbase_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -27176,6 +28412,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_SQLITE:
         {
             test_sqlite_action_add(arena, test_sqlite_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_SBASE:
+        {
+            test_sbase_action_add(arena, test_sbase_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
