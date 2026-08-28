@@ -2465,6 +2465,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_switch_case_label_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The DoomGeneric shapes. Each one is a construct that compiling upstream
+    // DoomGeneric unmodified rejected or lowered wrongly, and two of them --
+    // the unused block-scope `extern` object and the pointer table that
+    // relocates against another unit -- are checked by the link succeeding and
+    // by the run finding the pointers, so this fixture is compiled from two
+    // sources and executed rather than inspected.
+    String8 c_doom_shapes_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-doom-shapes"),
+#if BUSTER_WINDOWS
+                                                                        S8(".exe"));
+#else
+                                                                        S8(""));
+#endif
+    String8 c_doom_shapes_command_line[] = {
+        S8("-o"),
+        c_doom_shapes_executable_path,
+        S8("tests/basic_c_doom_shapes.c"),
+        S8("tests/basic_c_doom_shapes_import.c"),
+    };
+    CompilerDriverResult c_doom_shapes = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_doom_shapes_command_line)));
+    BUSTER_TEST(arguments, c_doom_shapes.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_doom_shapes.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_doom_shapes_run_arguments[] = {
+            c_doom_shapes_executable_path,
+        };
+        ProcessSpawnResult c_doom_shapes_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_doom_shapes_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_doom_shapes_spawn.handle != 0);
+        if (c_doom_shapes_spawn.handle)
+        {
+            ProcessWaitResult c_doom_shapes_wait = os_process_wait_sync(arguments->arena, c_doom_shapes_spawn);
+            BUSTER_TEST(arguments, c_doom_shapes_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // Compiling the wide-argument unit for every target only says the code
     // buffer held it. Running it on the host says the caller and the callee
     // agree on where each of those arguments went.

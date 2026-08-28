@@ -8782,6 +8782,31 @@ BUSTER_C_INTERNAL bool c_ir_lower_place_frame_push(CIntegerIrBuilder* builder, u
                                           });
 }
 
+// Whether a name declared inside a function body is mentioned anywhere else in
+// that body. A block-scope `extern` declaration that nothing uses declares no
+// storage and must not put an undefined symbol in the object file: DoomGeneric's
+// i_sound.c declares `use_libsamplerate` at the top of I_BindSoundVariables and
+// only binds it under #ifdef FEATURE_SOUND, so in a build without sound the
+// declaration stands alone -- and an undefined symbol emitted for it fails at
+// link or load time against a definition that only the SDL backend has.
+BUSTER_C_INTERNAL bool c_ir_body_mentions_name_outside(CIntegerIrBuilder* builder, String8 name, u32 declaration_start, u32 declaration_end)
+{
+    u32 body_end = builder->body_token_start + builder->body_token_count;
+    for (u32 index = builder->body_token_start; index < body_end; index += 1)
+    {
+        if (index >= declaration_start && index < declaration_end)
+        {
+            continue;
+        }
+        CToken token = builder->preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), name))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder* builder, IrTypeId type, u32 open, u32 close)
 {
     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
@@ -15910,6 +15935,43 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         IrSourceRange source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[index]);
         IrTypeId field_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[field_index].type;
+        // A string literal that initializes a character-array member or
+        // element fills that subobject, braces or not: `char name[23][8] =
+        // {"e2m1", ...}` -- which d_main.c writes for its shareware lump check
+        // -- gives each row its own string. The braced spelling is handled at
+        // the top of this machine; here the item is the bare literal, and
+        // lowering it as an expression would decay it to a pointer and then
+        // fail to convert that to the row's array type.
+        IrType* field_type_value = ir_type_from_id(&builder->program->types, field_type);
+        if (field_type_value && field_type_value->kind == IR_TYPE_ARRAY && c_ir_tokens_are_string_literals(builder->preprocess, index, end))
+        {
+            CIrDecodedString decoded = {0};
+            IrType* string_element = ir_type_from_id(&builder->program->types, field_type_value->element_type);
+            if (string_element && string_element->layout.resolved &&
+                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, end, &decoded) &&
+                c_ir_string_array_element_compatible(builder, field_type_value->element_type, decoded))
+            {
+                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, end, field_type);
+                if (string_value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    goto c_ir_compound_literal_failed;
+                }
+                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                {
+                    operands[field_index] = string_value;
+                }
+                else
+                {
+                    operands[operand_count] = string_value;
+                    fields[operand_count] = field_index;
+                }
+                initialized[field_index] = true;
+                operand_count += 1;
+                next_field = field_index + 1;
+                index = end + 1;
+                continue;
+            }
+        }
         frame->as.compound_literal_machine.index = index;
         frame->as.compound_literal_machine.item_end = end;
         frame->as.compound_literal_machine.field_index = field_index;
@@ -23949,6 +24011,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             builder->failure_message = S8("local extern declarations cannot allocate an initialized automatic object");
             return false;
         }
+        if (!c_ir_body_mentions_name_outside(builder, c_token_spelling(builder->preprocess.spelling_base, name), start, end))
+        {
+            return true;
+        }
         return c_ir_emit_global_place(builder, entity, c_ir_token_source_range(builder, builder->preprocess.tokens[name_index]))
                    .value != IR_ID_UNDERLYING_INVALID;
     }
@@ -27488,6 +27554,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     {
                         builder->failure_message = S8("local extern declarations cannot allocate an initialized automatic object");
                         return false;
+                    }
+                    if (!c_ir_body_mentions_name_outside(builder, c_token_spelling(builder->preprocess.spelling_base, name), index, end))
+                    {
+                        index = end == task.end ? task.end : end + 1;
+                        continue;
                     }
                     IrValueId place = c_ir_emit_global_place(builder, entity, c_ir_token_source_range(builder, name));
                     if (place.value == IR_ID_UNDERLYING_INVALID)
@@ -34618,6 +34689,49 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         if (entity.value < parse.entity_count && parse.entities[entity.value].kind == C_ENTITY_OBJECT)
         {
             object_referenced[entity.value] = true;
+        }
+    }
+    // A name that appears only in another object's static initializer is a
+    // reference too. DoomGeneric's g_game.c builds `static int* weapon_keys[]
+    // = { &key_weapon1, ... }` out of objects that m_controls.c defines and
+    // that g_game.c names nowhere else; the use table above is built from
+    // expression contexts, so without this pass those entities get no symbol,
+    // the initializer relocates nothing, and the array quietly ends up full of
+    // null pointers that the first weapon-key check dereferences.
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        u32 initializer_start = 0;
+        u32 initializer_end = 0;
+        if (declaration.kind != C_DECLARATION_OBJECT ||
+            !c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end))
+        {
+            continue;
+        }
+        for (u32 token_index = initializer_start; token_index < initializer_end; token_index += 1)
+        {
+            if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+            {
+                continue;
+            }
+            CEntityId entity = C_ENTITY_ID_INVALID;
+            u32 use_index = c_parse_identifier_use_index(&parse, token_index);
+            if (use_index != C_ID_UNDERLYING_INVALID)
+            {
+                entity = parse.identifier_uses[use_index].entity;
+            }
+            if (entity.value == C_ID_UNDERLYING_INVALID)
+            {
+                entity = c_parse_lookup_entity(&parse,
+                                               (CScopeId){
+                                                   .value = 0,
+                                               },
+                                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]));
+            }
+            if (entity.value < parse.entity_count && parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+            {
+                object_referenced[entity.value] = true;
+            }
         }
     }
     // The symbol and global passes below join declarations to their entity by

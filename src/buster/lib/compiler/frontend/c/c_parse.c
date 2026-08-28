@@ -8310,17 +8310,33 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
             CArrayBound right_bound = result->array_bounds[right_type.array_bound];
             if (left_bound.token_count && right_bound.token_count)
             {
-                if (left_bound.token_count != right_bound.token_count)
+                bool spelled_alike = left_bound.token_count == right_bound.token_count;
+                for (u32 token_index = 0; spelled_alike && token_index < left_bound.token_count; token_index += 1)
                 {
-                    compatible = false;
-                    break;
+                    spelled_alike = string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[left_bound.token_start + token_index]),
+                                                 c_token_spelling(preprocess.spelling_base, preprocess.tokens[right_bound.token_start + token_index]));
                 }
-                for (u32 token_index = 0; token_index < left_bound.token_count; token_index += 1)
+                // Two bounds that are spelled differently can still be the same
+                // length: DoomGeneric's tables.h declares `finetangent` with
+                // `[FINEANGLES/2]` and tables.c defines it with `[4096]`, which
+                // C requires to be one type. The spelling comparison above is
+                // the fast path; only when it disagrees is each bound
+                // evaluated, and a bound that does not evaluate to a constant
+                // (a variable-length array) keeps the spelling verdict.
+                if (!spelled_alike)
                 {
-                    if (!string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[left_bound.token_start + token_index]),
-                                      c_token_spelling(preprocess.spelling_base, preprocess.tokens[right_bound.token_start + token_index])))
+                    u64 left_value = 0;
+                    u64 right_value = 0;
+                    CScopeId file_scope = {
+                        .value = 0,
+                    };
+                    compatible = c_parse_integer_constant_range(0, temporary.arena, preprocess, result, file_scope, left_bound.token_start,
+                                                                left_bound.token_start + left_bound.token_count, &left_value) &&
+                                 c_parse_integer_constant_range(0, temporary.arena, preprocess, result, file_scope, right_bound.token_start,
+                                                                right_bound.token_start + right_bound.token_count, &right_value) &&
+                                 left_value == right_value;
+                    if (!compatible)
                     {
-                        compatible = false;
                         break;
                     }
                 }
@@ -10068,6 +10084,67 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                 .kind = C_TYPE_VA_LIST,
                                                 .is_complete = true,
                                             });
+        }
+        // A block-scope declarator with a parameter list declares a function
+        // with external linkage rather than an object -- DoomGeneric's
+        // i_video.c declares `extern void I_InitInput(void);` inside
+        // I_InitGraphics and then calls it. The local entity below is still
+        // created, so the body lowering recognizes the declaration statement,
+        // but the name has to reach the file-scope function index as well or
+        // the call resolves to nothing. Register it there the way a file-scope
+        // declaration of the same function would, unless one already is.
+        CType* declared_type = type.value < result->type_count ? &result->types[type.value] : 0;
+        if (!is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION &&
+            result->declaration_count < result->declaration_capacity && result->entity_count + 1 < result->entity_capacity)
+        {
+            String8 function_name = c_token_spelling(preprocess.spelling_base, name);
+            CEntityId file_scope = c_parse_lookup_entity(result,
+                                                         (CScopeId){
+                                                             .value = 0,
+                                                         },
+                                                         function_name);
+            if (file_scope.value == C_ID_UNDERLYING_INVALID || result->entities[file_scope.value].kind != C_ENTITY_FUNCTION)
+            {
+                CEntityId function_entity = {
+                    .value = result->entity_count,
+                };
+                u32 function_declaration_index = result->declaration_count;
+                result->declarations[result->declaration_count++] = (CDeclaration){
+                    .name = function_name,
+                    .location = c_preprocess_token_location(&preprocess, name),
+                    .token_start = segment_start,
+                    .token_count = suffix_end - segment_start,
+                    .parameter_start = declared_type->parameter_start,
+                    .parameter_count = declared_type->parameter_count,
+                    .type = type,
+                    .base_type = C_TYPE_ID_INVALID,
+                    .entity = function_entity,
+                    .scope =
+                        {
+                            .value = 0,
+                        },
+                    .kind = C_DECLARATION_FUNCTION,
+                    .is_variadic = declared_type->is_variadic,
+                };
+                result->entities[result->entity_count++] = (CEntity){
+                    .name = function_name,
+                    .location = c_preprocess_token_location(&preprocess, name),
+                    .type = type,
+                    .scope =
+                        {
+                            .value = 0,
+                        },
+                    .next_in_scope = C_ENTITY_ID_INVALID,
+                    .declaration_index = function_declaration_index,
+                    .declaration_token_plus_one = name_index + 1,
+                    .kind = C_ENTITY_FUNCTION,
+                };
+                c_parse_scope_add_entity(result,
+                                         (CScopeId){
+                                             .value = 0,
+                                         },
+                                         function_entity);
+            }
         }
         CEntityId duplicate = c_parse_lookup_entity(result, scope, c_token_spelling(preprocess.spelling_base, name));
         if (duplicate.value != C_ID_UNDERLYING_INVALID && result->entities[duplicate.value].scope.value == scope.value)
