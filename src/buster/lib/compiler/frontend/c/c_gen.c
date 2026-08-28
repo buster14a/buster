@@ -30708,13 +30708,25 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, CIrConstan
                     return false;
                 }
             }
+            // A constant carries only the bits its own type is wide, so a
+            // negative narrow source has to replay its sign bit before the
+            // target's mask is applied.  Masking alone widens `(long long)-1`
+            // into 4294967295, and the callers that ask whether the converted
+            // value is negative -- the global initializer image among them --
+            // then see a positive number.  Narrowing casts are unaffected: the
+            // target mask still discards the bits above its own width.
+            IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? ir_type_from_id(&builder->program->types, source.type) : 0;
+            if (source_integer_type && source_integer_type->is_signed)
+            {
+                integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
+            }
             *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
             if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
             {
-                IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
                 result->integer_high = source.integer_high;
-                if (source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width < 128 && source_type->is_signed &&
-                    source_type->bit_width && (source.integer & ((u64)1 << (source_type->bit_width - 1))))
+                if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
+                    source_integer_type->is_signed && source_integer_type->bit_width &&
+                    (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
                 {
                     result->integer_high = UINT64_MAX;
                 }

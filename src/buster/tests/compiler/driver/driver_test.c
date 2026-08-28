@@ -5135,6 +5135,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // A negative constant narrower than the global it initializes is folded
+    // and written into the data image without ever reaching code generation,
+    // so only running the program reads the bytes the object writer emitted.
+    // The fixture reads its images both directly and through pointers, which
+    // separates a wrong stored image from a wrong constant fold.
+    String8 c_negative_constant_widening_path = buster_test_temporary_path(arguments->arena, S8("buster-c-negative-constant-widening"), S8(""));
+    String8 c_negative_constant_widening_command_line[] = {
+        S8("-o"),
+        c_negative_constant_widening_path,
+        S8("tests/basic_c_negative_constant_widening.c"),
+    };
+    CompilerDriverResult c_negative_constant_widening =
+        compiler_driver_execute_invocation(arguments->arena, compiler_driver_parse_arguments(
+                                                                 arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_negative_constant_widening_command_line)));
+    BUSTER_TEST(arguments, c_negative_constant_widening.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_negative_constant_widening.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_negative_constant_widening_arguments[] = {
+            c_negative_constant_widening_path,
+        };
+        ProcessSpawnResult c_negative_constant_widening_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_negative_constant_widening_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_negative_constant_widening_spawn.handle != 0);
+        if (c_negative_constant_widening_spawn.handle)
+        {
+            ProcessWaitResult c_negative_constant_widening_wait = os_process_wait_sync(arguments->arena, c_negative_constant_widening_spawn);
+            BUSTER_TEST(arguments, c_negative_constant_widening_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // The calling-convention fixture runs natively, so the host's own ABI and
     // register allocator are executed rather than only inspected: on a
     // Windows runner that is the Win64 positional register assignment, the
