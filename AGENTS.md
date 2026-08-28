@@ -382,11 +382,21 @@ come from the same Linux hardware counter as `STEP_INSTRUCTIONS`, read either
 side of a child that runs alone, and the counter follows this process tree
 only, so they are contention-immune and are the number to trend. Where no
 counter is available the `LZ4_CODEGEN` line is simply absent, which is never an
-error. For scale, one recorded portable run put the Clang reference probe at
-713 MB/s and 13,8 instructions/byte against FAST's 162 MB/s and
-97,6 instructions/byte over the same 53,7 MB workload. Generated objects,
+error. For scale, a full matrix takes about seven minutes and one recorded run
+put the probe's cost at 13,819 instructions/byte for the Clang reference
+against 94,005 for QUALITY, 97,552 for FAST, 181,586 for MIR_STACK and 313,577
+for NONE over the same 53,7 MB workload — the allocator ordering the names
+promise, with NONE 3,3x QUALITY. Two properties of that run are worth keeping
+as expectations. Each allocator's instructions/byte was identical to three
+decimals across all three CPU configurations, the raw counts differing by about
+200 in 5,2 billion, which is what a working counter over a deterministic
+workload should look like; and that identity means `-march=baseline` and
+`-march=native` currently generate the same code as the default for LZ4, so a
+future run where they diverge is signal rather than noise. Generated objects,
 metrics, archives, corpora, and logs remain under
-`build/lz4-v1.10.0-<pid>/`.
+`build/lz4-v1.10.0-<pid>/`, which is about 1,4 GB for a full matrix — twelve
+copies of every object plus the corpora — and is not cleaned up on the way out,
+so delete the directories of runs you are done with.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
