@@ -148,10 +148,17 @@ typedef enum IrInlineAssemblyConstraint
     IR_INLINE_ASSEMBLY_CONSTRAINT_R10,
     IR_INLINE_ASSEMBLY_CONSTRAINT_R11,
     IR_INLINE_ASSEMBLY_CONSTRAINT_R,
+    // GNU's 'm': the operand is the storage rather than its value, so the
+    // register the emitter assigns holds the operand's address and the
+    // template reference expands to a memory reference through it. It sits
+    // above R because it is not a register class at all -- nothing may be
+    // pinned to it, and no clobber can name it.
+    IR_INLINE_ASSEMBLY_CONSTRAINT_M,
     IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT,
 } IrInlineAssemblyConstraint;
 
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(class) ((class) < (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(class) ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_M)
 
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER 0
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER 1

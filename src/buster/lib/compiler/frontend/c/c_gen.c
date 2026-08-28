@@ -14736,17 +14736,44 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
              index + 1 < end)
     {
         CTypeKind kind = string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) ? C_TYPE_STRUCT : string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) ? C_TYPE_UNION : C_TYPE_ENUM;
-        String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
-        for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+        // A type name may define the aggregate rather than name one:
+        // `(union{float _f; uint32_t _i;}){x}` is how a libc's math library
+        // punts a float through an integer. The parser registered the
+        // definition against the position of its opening brace, which is what
+        // identifies it -- the tag lookup below cannot, because an anonymous
+        // aggregate has no tag and two of them in one file would collide.
+        u32 body_open = index + 1;
+        if (body_open < end && builder->preprocess.tokens[body_open].kind == C_TOKEN_IDENTIFIER)
         {
-            CType* candidate = &builder->parse.types[type_index];
-            if (candidate->kind == kind && string_equal(candidate->tag, tag))
-            {
-                type = builder->c_type_ir_map[type_index];
-                break;
-            }
+            body_open += 1;
         }
-        index += 2;
+        if (body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+            {
+                if (builder->parse.types[type_index].definition_start == body_open + 1)
+                {
+                    type = builder->c_type_ir_map[type_index];
+                    break;
+                }
+            }
+            index = body_close < end ? body_close + 1 : end;
+        }
+        else
+        {
+            String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+            for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+            {
+                CType* candidate = &builder->parse.types[type_index];
+                if (candidate->kind == kind && string_equal(candidate->tag, tag))
+                {
+                    type = builder->c_type_ir_map[type_index];
+                    break;
+                }
+            }
+            index += 2;
+        }
     }
     else
     {
@@ -24560,6 +24587,10 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     {
         result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
     }
+    else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+    {
+        result = builder->target.cpu_arch == CPU_ARCH_X86_64;
+    }
     else
     {
         result = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
@@ -24700,6 +24731,24 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
     return false;
 }
 
+// True when a constraint string names GNU's 'm'. A memory operand is the
+// storage rather than its value, so the place has to be kept where an ordinary
+// input would keep the loaded value; the constraint therefore has to be read
+// before the lowered expression is consumed, which is earlier than the parser
+// below runs. The three spellings are matched exactly rather than by scanning
+// for the letter, because an operand name may contain one.
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_is_memory(CIntegerIrBuilder* builder, u32 constraint_index)
+{
+    ByteSlice bytes = {0};
+    if (constraint_index >= builder->preprocess.token_count ||
+        !c_ir_decode_quoted(builder->arena, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[constraint_index]), '"', &bytes))
+    {
+        return false;
+    }
+    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    return string_equal(text, S8("m")) || string_equal(text, S8("=m")) || string_equal(text, S8("+m"));
+}
+
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
                                                          u64* constraint_out)
 {
@@ -24743,6 +24792,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         case 'r':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
             break;
+        case 'm':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_M;
+            break;
         default:
             builder->failure_message = S8("unsupported asm output constraint");
             return false;
@@ -24772,6 +24824,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             break;
         case 'r':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+            break;
+        case 'm':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_M;
             break;
         default:
         {
@@ -25033,6 +25088,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 c
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R11:
         return string_equal(clobber, S8("r11"));
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_M:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
         break;
     }
@@ -25670,15 +25726,22 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
     {
         state->open = state->start + 1;
         while (state->open < state->end && builder->preprocess.tokens[state->open].kind == C_TOKEN_IDENTIFIER &&
+               // GNU spells the volatile qualifier three ways and the inline
+               // one three. The declaration-specifier scan already accepts all
+               // of them; the statement had been missing `__volatile`, which is
+               // what musl's 64-bit atomic bit operations happen to use.
                (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("volatile")) ||
+                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__volatile")) ||
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__volatile__")) ||
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("inline")) ||
+                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__inline")) ||
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__inline__")) ||
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("goto"))))
         {
             String8 qualifier = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]);
             state->goto_qualifier |= string_equal(qualifier, S8("goto"));
-            state->volatile_qualifier |= string_equal(qualifier, S8("volatile")) || string_equal(qualifier, S8("__volatile__"));
+            state->volatile_qualifier |= string_equal(qualifier, S8("volatile")) || string_equal(qualifier, S8("__volatile")) ||
+                                         string_equal(qualifier, S8("__volatile__"));
             state->open += 1;
         }
         if (state->open + 2 >= state->end || !c_token_is_punctuator(&builder->preprocess.tokens[state->open], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -25782,7 +25845,11 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (state->output)
+        // A memory operand takes the same path an output does: both need the
+        // place rather than the value, because the emitter puts the address in
+        // the operand's register and the template reads through it.
+        bool memory_operand = c_ir_inline_assembly_constraint_is_memory(builder, state->constraint_index);
+        if (state->output || memory_operand)
         {
             IrValue* output_value = builder->function->values + value.value;
             if (output_value->category == IR_VALUE_PLACE)

@@ -103,6 +103,28 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSl
     return false;
 }
 
+// The FS-prefixed load a thread-pointer read compiles to: the 0x64 segment
+// override, a REX.W byte, and the MOV opcode. The destination register is
+// whatever the emitter assigned, so it is not part of the pattern; the prefix
+// and the width are, and nothing else in a fixture without thread-local
+// storage emits them.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_segment_override_load(ObjectFile* object)
+{
+    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || !object->sections)
+    {
+        return false;
+    }
+    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+    for (u64 offset = 0; offset + 3 <= text.length; offset += 1)
+    {
+        if (text.pointer[offset] == 0x64 && (text.pointer[offset + 1] & 0xf8) == 0x48 && text.pointer[offset + 2] == 0x8b)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
 {
     if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
@@ -6098,6 +6120,72 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
 #endif
+    }
+    // The inline-assembly vocabulary a libc's atomics are written in, and the
+    // aggregate-defining type names its math library punts floats through.
+    // Both are run rather than only compiled: a memory operand that reaches
+    // the wrong address, and a compound literal that reads the wrong member,
+    // both assemble.
+    {
+        String8 libc_shape_fixtures[] = {S8("tests/basic_c_atomic_asm.c"), S8("tests/basic_c_compound_literal_type.c")};
+        String8 libc_shape_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(libc_shape_fixtures); fixture_index += 1)
+        {
+            for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(libc_shape_allocators); allocator_index += 1)
+            {
+                Arena* libc_shape_conflicts[] = {
+                    arguments->arena,
+                    c_asm_arena,
+                };
+                TemporalArena libc_shape_temporary = scratch_begin(libc_shape_conflicts, BUSTER_ARRAY_LENGTH(libc_shape_conflicts));
+                Arena* libc_shape_arena = libc_shape_temporary.arena;
+                String8 libc_shape_path =
+                    buster_test_temporary_path(libc_shape_arena, S8("buster-c-libc-shape"),
+                                               string_format(libc_shape_arena, S8("-{u32}-{u32}"), fixture_index, allocator_index));
+                String8 libc_shape_command_line[] = {
+                    string_format(libc_shape_arena, S8("-fregister-allocator={S8}"), libc_shape_allocators[allocator_index]),
+                    S8("-o"),
+                    libc_shape_path,
+                    libc_shape_fixtures[fixture_index],
+                };
+                CompilerDriverResult libc_shape = compiler_driver_execute_invocation(
+                    libc_shape_arena,
+                    compiler_driver_parse_arguments(libc_shape_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(libc_shape_command_line)));
+                BUSTER_TEST(arguments, libc_shape.error == COMPILER_DRIVER_ERROR_NONE);
+                if (libc_shape.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run_arguments[] = {libc_shape_path};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, spawn.handle != 0);
+                    if (spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(libc_shape_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(libc_shape_temporary);
+            }
+        }
+        // The thread-pointer read is in the atomics fixture but never called
+        // there, because a program this driver links has no thread area. Its
+        // encoding is what the fixture is carrying it for.
+        Arena* segment_conflicts[] = {
+            arguments->arena,
+            c_asm_arena,
+        };
+        TemporalArena segment_temporary = scratch_begin(segment_conflicts, BUSTER_ARRAY_LENGTH(segment_conflicts));
+        Arena* segment_arena = segment_temporary.arena;
+        String8 segment_path = buster_test_temporary_path(segment_arena, S8("buster-c-segment-override"), S8(".o"));
+        String8 segment_command_line[] = {S8("-c"), S8("-g0"), S8("-o"), segment_path, S8("tests/basic_c_atomic_asm.c")};
+        CompilerDriverResult segment = compiler_driver_execute_invocation(
+            segment_arena, compiler_driver_parse_arguments(segment_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(segment_command_line)));
+        BUSTER_TEST(arguments, segment.error == COMPILER_DRIVER_ERROR_NONE);
+        if (segment.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, segment.has_object);
+            BUSTER_TEST(arguments, compiler_driver_test_x64_segment_override_load(&segment.object));
+        }
+        scratch_end(segment_temporary);
     }
     // Local register variables under every allocator, with -std=c99 because
     // that is the dialect a libc's build actually asks for. The fixture proves

@@ -13439,6 +13439,88 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(bound_register_temporary);
         }
     }
+    // A memory constraint is not a register class: the operand it carries is
+    // the storage rather than the value, and the class it lowers to is what
+    // tells the emitter to put an address in the register it assigns.
+    {
+        String8 memory_constraint_sources[] = {
+            S8("void store(volatile int* p, int v) { __asm__ __volatile__(\"mov %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"),
+            S8("void bump(volatile int* p) { __asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\"); }\n"),
+        };
+        u32 memory_constraint_operands[] = {2, 2};
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(memory_constraint_sources); source_index += 1)
+        {
+            TemporalArena memory_temporary = scratch_begin(0, 0);
+            Target memory_target = target_native;
+            memory_target.cpu_arch = CPU_ARCH_X86_64;
+            CPreprocessResult memory_tokens = {0};
+            CParseResult memory_parse = {0};
+            CIRLowerResult memory_lowered = c_test_lower_source(memory_temporary.arena, memory_constraint_sources[source_index], S8("memory-constraint.c"),
+                                                               memory_target, &memory_tokens, &memory_parse);
+            BUSTER_TEST(arguments, memory_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, memory_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, memory_lowered.diagnostic_count == 0);
+            if (memory_lowered.program)
+            {
+                IrModule* module = memory_lowered.program->modules;
+                IrInstruction* assembly = 0;
+                for (u32 function_index = 0; module && function_index < module->function_count && !assembly; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                        {
+                            assembly = function->instructions + instruction_index;
+                            break;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, assembly && assembly->operand_count == memory_constraint_operands[source_index]);
+                if (assembly && assembly->operand_count == memory_constraint_operands[source_index])
+                {
+                    BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_M);
+                    BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(memory_lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(memory_temporary);
+        }
+    }
+    // What a template may not spell literally. A register the emitter can hand
+    // to an operand stays out however it is written, and the two it can never
+    // hand out are allowed only in the position where they cannot alias: the
+    // stack pointer as a memory base, a segment selector before a colon.
+    {
+        String8 invalid_literal_sources[] = {
+            S8("void f(int v) { __asm__ __volatile__(\"mov %0, %%rax\" : : \"r\"(v)); }\n"),
+            S8("void f(int v) { __asm__ __volatile__(\"mov %0, (%%rax)\" : : \"r\"(v)); }\n"),
+            S8("void f(int v) { __asm__ __volatile__(\"add $8, %%rsp ; mov %0, %0\" : \"+r\"(v)); }\n"),
+            S8("void f(int v) { __asm__ __volatile__(\"mov %0, %%fs\" : : \"r\"(v)); }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_literal_sources); source_index += 1)
+        {
+            TemporalArena invalid_literal_temporary = scratch_begin(0, 0);
+            Target invalid_literal_target = target_native;
+            invalid_literal_target.cpu_arch = CPU_ARCH_X86_64;
+            CPreprocessResult invalid_literal_tokens = {0};
+            CParseResult invalid_literal_parse = {0};
+            CIRLowerResult invalid_literal_lowered =
+                c_test_lower_source(invalid_literal_temporary.arena, invalid_literal_sources[source_index], S8("invalid-literal-register.c"),
+                                    invalid_literal_target, &invalid_literal_tokens, &invalid_literal_parse);
+            BUSTER_TEST(arguments, invalid_literal_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_literal_parse.diagnostic_count == 0);
+            // The template is policed in the emitter rather than in lowering,
+            // so what is asserted here is that the module still validates; the
+            // refusal itself is a code-generation failure the driver test sees.
+            if (invalid_literal_lowered.program && !invalid_literal_lowered.diagnostic_count)
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(invalid_literal_lowered.program, invalid_literal_lowered.program->modules).error ==
+                                           IR_VALIDATION_NONE);
+            }
+            scratch_end(invalid_literal_temporary);
+        }
+    }
     // The shapes a binding must refuse: a register the emitter's operand pool
     // does not cover, an assembler label on a local without register storage
     // (where the label would otherwise be read as a symbol rename that means

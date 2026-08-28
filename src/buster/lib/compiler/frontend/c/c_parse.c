@@ -4560,6 +4560,46 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
 // scans that ask "does an aggregate head start here" per identifier token.
 #define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
 
+// True when `index` starts an aggregate definition -- the keyword, an optional
+// tag, and a brace-enclosed body. `end_out` receives the index of the closing
+// brace. The members inside that body are declarations, so every scan that
+// classifies identifiers as uses has to step over the whole group.
+BUSTER_C_INTERNAL bool c_parse_aggregate_definition_at(CPreprocessResult preprocess, u32 index, u32 end, u32* end_out)
+{
+    if (index + 1 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS))
+    {
+        return false;
+    }
+    u32 open = index + 1;
+    if (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+    {
+        open += 1;
+    }
+    if (open >= end || !c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE))
+    {
+        return false;
+    }
+    u32 depth = 0;
+    for (u32 scan = open; scan < end; scan += 1)
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            depth -= 1;
+            if (!depth)
+            {
+                *end_out = scan;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 typedef struct CCleanupAttributeInfo CCleanupAttributeInfo;
 struct CCleanupAttributeInfo
 {
@@ -10329,6 +10369,17 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
             CToken use = preprocess.tokens[use_index];
+            // An aggregate definition inside an initializer declares its
+            // members; it does not use them. `int b = (union{float _f; int _i;}){x}._i`
+            // is a compound literal, and reading `_f` as a use of an undeclared
+            // name is how a libc's type punning failed here while the same
+            // expression in a return statement compiled.
+            u32 aggregate_end = 0;
+            if (c_parse_aggregate_definition_at(preprocess, use_index, segment_end, &aggregate_end))
+            {
+                use_index = aggregate_end;
+                continue;
+            }
             if (use.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, use), S8("__builtin_offsetof")) && use_index + 1 < segment_end &&
                 c_token_is_punctuator(&preprocess.tokens[use_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
@@ -10373,6 +10424,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
+BUSTER_C_INTERNAL void c_parse_bind_function_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                     CDeclaration* declaration);
 
 BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
@@ -11223,6 +11276,8 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         index += 1;
     }
     c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
+    // After the walk above, because it needs the block scopes that walk creates.
+    c_parse_bind_function_expression_aggregates(machine, result, preprocess, declaration);
     scratch_end(temporary);
 }
 
@@ -11379,6 +11434,60 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
         }
     }
     return best;
+}
+
+// An aggregate definition that appears inside a parenthesis is a type name,
+// not a declaration: `(union{float _f; uint32_t _i;}){x}` is a compound
+// literal, `(struct S{int x;}*)p` a cast, `sizeof(struct{int x;})` an operand.
+// The declaration paths never see these, so the type they define would be
+// registered nowhere and the lowering would meet an aggregate keyword it could
+// not resolve -- which is how most of a libc's math library, whose type
+// punning is written exactly this way, failed to compile.
+//
+// The `(` is what makes the shape unambiguous. A declaration's specifiers
+// cannot be preceded by one, so nothing a declaration owns is registered twice
+// here, and the check that no type already carries this definition keeps a
+// range that is somehow reached twice from defining two types.
+BUSTER_C_INTERNAL void c_parse_bind_function_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                     CDeclaration* declaration)
+{
+    u32 body_end = declaration->body_start + declaration->body_token_count;
+    if (body_end > preprocess.token_count)
+    {
+        body_end = (u32)preprocess.token_count;
+    }
+    for (u32 index = declaration->body_start; index + 2 < body_end; index += 1)
+    {
+        if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            continue;
+        }
+        u32 keyword = index + 1;
+        u32 close = 0;
+        if (!c_parse_aggregate_definition_at(preprocess, keyword, body_end, &close))
+        {
+            continue;
+        }
+        u32 open = keyword + 1;
+        if (preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+        {
+            open += 1;
+        }
+        bool defined = false;
+        for (u32 type_index = 0; type_index < result->type_count && !defined; type_index += 1)
+        {
+            defined = result->types[type_index].definition_start == open + 1;
+        }
+        if (defined)
+        {
+            index = close;
+            continue;
+        }
+        u32 declarator_start = 0;
+        CScopeId scope = c_parse_scope_for_token(result, declaration->scope, keyword);
+        c_parse_scalar_type_in_scope(machine, result, preprocess, scope, keyword, close + 1, &declarator_start);
+        index = close;
+    }
 }
 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,

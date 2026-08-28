@@ -665,8 +665,12 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, 
         }
         u64 constraint = instruction->immediates ? instruction->immediates[operand_index] : UINT64_MAX;
         bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        // An operand is a place when the assembly addresses its storage: every
+        // output, and every memory operand in either direction, since a memory
+        // input names where to read rather than what was read.
+        bool place = output || IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
         valid = ir_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) &&
-                function->values[operand_id.value].category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
+                function->values[operand_id.value].category == (place ? IR_VALUE_PLACE : IR_VALUE_VALUE);
         if (!valid)
         {
             break;

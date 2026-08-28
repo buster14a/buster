@@ -177,6 +177,30 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
+    // The read-modify-write instructions a libc's atomics are written in, the
+    // LOCK prefix that makes them atomic, the bit scans its ctz/clz reduce to,
+    // and the HLT its abort path ends on. Each writes only its named operands.
+    S8_INITIALIZER("lock"), S8_INITIALIZER("cmpxchg"), S8_INITIALIZER("cmpxchgb"), S8_INITIALIZER("cmpxchgw"), S8_INITIALIZER("cmpxchgl"),
+    S8_INITIALIZER("cmpxchgq"), S8_INITIALIZER("xadd"), S8_INITIALIZER("xaddb"), S8_INITIALIZER("xaddw"), S8_INITIALIZER("xaddl"),
+    S8_INITIALIZER("xaddq"), S8_INITIALIZER("bsf"), S8_INITIALIZER("bsfl"), S8_INITIALIZER("bsfq"), S8_INITIALIZER("bsr"),
+    S8_INITIALIZER("bsrl"), S8_INITIALIZER("bsrq"), S8_INITIALIZER("hlt"),
+};
+
+// The registers a template may name literally. The rule the ban exists for is
+// aliasing: a literal register that the emitter can also hand to an operand
+// could be overwritten under the template's feet. These four can never be
+// handed out -- RSP is the stack pointer and FS/GS are segment selectors --
+// and each is allowed only in the one position where it cannot do anything
+// else: RSP as a memory base, which is the fence idiom `lock orl $0,(%rsp)`,
+// and FS/GS before a colon, which is the segment override a thread-pointer
+// read is spelled with.
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_literal_base_registers[] = {
+    S8_INITIALIZER("rsp"),
+    S8_INITIALIZER("esp"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_literal_segment_registers[] = {
+    S8_INITIALIZER("fs"),
+    S8_INITIALIZER("gs"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
     S8_INITIALIZER("rax"), S8_INITIALIZER("eax"), S8_INITIALIZER("ax"), S8_INITIALIZER("al"), S8_INITIALIZER("rcx"), S8_INITIALIZER("ecx"), S8_INITIALIZER("cx"), S8_INITIALIZER("cl"), S8_INITIALIZER("rdx"), S8_INITIALIZER("edx"), S8_INITIALIZER("dx"), S8_INITIALIZER("dl"),
@@ -351,22 +375,52 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_name(String8 token)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_literal_registers_absent(String8 source)
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_name_in_set(String8 name, String8 const* set, u64 count)
 {
-    // A literal register is not tied to a compiler operand.  Reject it even
-    // when the general assembler could encode it: otherwise a generic input
-    // allocated in (say) RAX could be silently overwritten by `%%rax`.
+    for (u64 index = 0; index < count; index += 1)
+    {
+        if (string_equal(name, set[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// What the template itself is allowed to spell, checked before any operand is
+// substituted. The distinction matters: substituting a memory operand produces
+// a parenthesized register, and the source is not allowed to write one by hand,
+// so the rule has to be applied to the source rather than to the result.
+//
+// A literal register is refused because it is not tied to a compiler operand: a
+// generic input allocated in RAX would be silently overwritten by a template
+// that also writes `%%rax`. The two exceptions are registers the emitter can
+// never hand out, each allowed only in the position where it cannot alias
+// anything -- see codegen_x64_asm_literal_base_registers.
+//
+// Bracketed memory and the dereference star stay out entirely. In Intel syntax
+// a register is spelled without a sigil, so `[rax]` carries no marker this scan
+// could recognize, and refusing the brackets is what keeps that syntax as safe
+// as the AT&T one.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source)
+{
     for (u64 index = 0; index < source.length; index += 1)
     {
-        if (source.pointer[index] != '%')
+        u8 character = (u8)source.pointer[index];
+        if (character == '[' || character == ']' || character == '*')
+        {
+            return false;
+        }
+        if (character != '%')
         {
             continue;
         }
         u64 token_start = index + 1;
-            if (token_start < source.length && source.pointer[token_start] == '%')
-            {
-                token_start += 1;
-            }
+        bool escaped = token_start < source.length && source.pointer[token_start] == '%';
+        if (escaped)
+        {
+            token_start += 1;
+        }
         if (token_start < source.length && source.pointer[token_start] == '[')
         {
             while (token_start < source.length && source.pointer[token_start] != ']')
@@ -382,7 +436,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_literal_registers_absent(String
             {
                 token_start += 1;
             }
-            index = token_start;
+            index = token_start - 1;
             continue;
         }
         u64 token_end = token_start;
@@ -392,79 +446,41 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_literal_registers_absent(String
         {
             token_end += 1;
         }
-        if (token_end > token_start && codegen_inline_assembly_register_name((String8){.pointer = source.pointer + token_start,
-                                                                                .length = token_end - token_start}))
+        String8 name = {
+            .pointer = source.pointer + token_start,
+            .length = token_end - token_start,
+        };
+        if (name.length && codegen_inline_assembly_register_name(name))
         {
-            return false;
+            u64 previous = index;
+            while (previous && (source.pointer[previous - 1] == ' ' || source.pointer[previous - 1] == '\t'))
+            {
+                previous -= 1;
+            }
+            bool memory_base = previous && source.pointer[previous - 1] == '(' &&
+                               codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_base_registers,
+                                                                   BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_base_registers));
+            bool segment_override = token_end < source.length && source.pointer[token_end] == ':' &&
+                                    codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_segment_registers,
+                                                                        BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_segment_registers));
+            if (!memory_base && !segment_override)
+            {
+                return false;
+            }
         }
-        index = token_end;
+        index = token_end - 1;
     }
-    // Intel templates spell physical registers without a percent.  Scan words
-    // in that dialect; ATT mnemonics and punctuation do not match the table.
-    for (u64 index = 0; index < source.length;)
-    {
-        if (source.pointer[index] == '%')
-        {
-            if (index + 1 < source.length && source.pointer[index + 1] == '%')
-            {
-                index += 2;
-                continue;
-            }
-            if (index + 1 < source.length && source.pointer[index + 1] == '[')
-            {
-                while (index < source.length && source.pointer[index] != ']')
-                {
-                    index += 1;
-                }
-                if (index < source.length)
-                {
-                    index += 1;
-                }
-                continue;
-            }
-            if (index + 1 < source.length && source.pointer[index + 1] >= '0' && source.pointer[index + 1] <= '9')
-            {
-                index += 2;
-                while (index < source.length && source.pointer[index] >= '0' && source.pointer[index] <= '9')
-                {
-                    index += 1;
-                }
-                continue;
-            }
-        }
-        while (index < source.length && !((source.pointer[index] >= 'a' && source.pointer[index] <= 'z') ||
-                                          (source.pointer[index] >= 'A' && source.pointer[index] <= 'Z')))
-        {
-            index += 1;
-        }
-        u64 start = index;
-        while (index < source.length && ((source.pointer[index] >= 'a' && source.pointer[index] <= 'z') ||
-                                         (source.pointer[index] >= 'A' && source.pointer[index] <= 'Z') ||
-                                         (source.pointer[index] >= '0' && source.pointer[index] <= '9')))
-        {
-            index += 1;
-        }
-        if (index > start && codegen_inline_assembly_register_name((String8){.pointer = source.pointer + start, .length = index - start}))
-        {
-            return false;
-        }
-    }
+
     return true;
 }
 
+// What the substituted source is allowed to be: one mnemonic from the list per
+// statement, and operands the emitter either produced itself or the template
+// validator already cleared. The punctuation rules live on the template rather
+// than here, because by this point a memory operand has legitimately become a
+// parenthesized register.
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 source)
 {
-    // The canonical path deliberately has no memory or immediate constraints.
-    // Reject their source spellings before handing the text to the general
-    // assembler, including Intel memory forms that have no '$' marker.
-    for (u64 index = 0; index < source.length; index += 1)
-    {
-        u8 character = (u8)source.pointer[index];
-        if (character == '$' || character == '[' || character == ']' || character == '(' || character == ')' || character == '*' || character == ':')
-        {
-            return false;
-        }
-    }
     u64 index = 0;
     while (index < source.length)
     {
@@ -502,9 +518,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
             {
                 break;
             }
-            // Every ordinary operand is a substituted GPR.  A leading digit
-            // or sign therefore denotes an immediate, while '$' is the GNU
-            // spelling already rejected by the punctuation pass above.
+            // An operand is a substituted register, a memory reference the
+            // emitter or the cleared template produced, or a '$' immediate. A
+            // bare leading digit or sign is an Intel-syntax immediate that no
+            // pass above has seen, and stays out.
             if ((source.pointer[index] >= '0' && source.pointer[index] <= '9') || source.pointer[index] == '+' || source.pointer[index] == '-')
             {
                 return false;
@@ -523,12 +540,72 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
     return true;
 }
 
+// A GNU template separates statements with a semicolon, while this assembler
+// reads one as the start of a comment. Rewriting the separators is what makes
+// the two dialects the same text, and it is done here rather than in the
+// assembler because the semicolon means what the assembler says it means
+// everywhere else, including in a global assembly block.
+//
+// The one pair that is joined instead of split is `lock ; insn`: a bare LOCK
+// prefixes the statement that follows it, and this assembler wants the prefix
+// and its instruction in a single statement. Neither rewrite can lengthen the
+// text, so both happen in place.
+BUSTER_GLOBAL_LOCAL void codegen_inline_assembly_normalize_statements(String8* source)
+{
+    String8 text = *source;
+    u64 write = 0;
+    u64 read = 0;
+    while (read < text.length)
+    {
+        u64 previous = write;
+        while (previous && (text.pointer[previous - 1] == ' ' || text.pointer[previous - 1] == '\t'))
+        {
+            previous -= 1;
+        }
+        bool at_statement_start = !previous || text.pointer[previous - 1] == '\n';
+        u64 word_end = read;
+        while (word_end < text.length && text.pointer[word_end] >= 'a' && text.pointer[word_end] <= 'z')
+        {
+            word_end += 1;
+        }
+        String8 word = {.pointer = text.pointer + read, .length = word_end - read};
+        if (at_statement_start && string_equal(word, S8("lock")))
+        {
+            u64 scan = word_end;
+            while (scan < text.length && (text.pointer[scan] == ' ' || text.pointer[scan] == '\t'))
+            {
+                scan += 1;
+            }
+            if (scan < text.length && text.pointer[scan] == ';')
+            {
+                write = previous;
+                memmove(text.pointer + write, word.pointer, word.length);
+                write += word.length;
+                text.pointer[write++] = ' ';
+                read = scan + 1;
+                continue;
+            }
+        }
+        if (word.length)
+        {
+            memmove(text.pointer + write, word.pointer, word.length);
+            write += word.length;
+            read = word_end;
+            continue;
+        }
+        text.pointer[write] = text.pointer[read] == ';' ? '\n' : text.pointer[read];
+        write += 1;
+        read += 1;
+    }
+    source->length = write;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                    IrInstructionExtra extra, X64Register* registers, AssemblySyntax syntax,
                                                                    String8* source_out)
 {
     String8 template_source = extra.literal;
-    if (!codegen_inline_assembly_literal_registers_absent(template_source))
+    if (!codegen_inline_assembly_template_literal_valid(template_source))
     {
         return false;
     }
@@ -564,18 +641,26 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         }
         IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
         u32 type_class = codegen_inline_assembly_type_class(type);
-        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID
-                                                                                           ? 0
-                                                                                           : (u32)type->layout.size);
+        // A memory operand's register holds an address, so it is always spelled
+        // at pointer width and wrapped in the syntax's memory reference; every
+        // other operand is spelled at the width of its own type.
+        bool memory_operand =
+            IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+        String8 register_name = codegen_x64_asm_register_name(registers[operand_index],
+                                                              memory_operand                                              ? 8
+                                                              : type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ? 0
+                                                                                                                        : (u32)type->layout.size);
         if (!register_name.length || (syntax != ASSEMBLY_SYNTAX_ATT && syntax != ASSEMBLY_SYNTAX_INTEL))
         {
             return false;
         }
-        if (register_name.length > UINT64_MAX - output_length - (syntax == ASSEMBLY_SYNTAX_ATT ? 1 : 0))
+        u64 decoration = syntax == ASSEMBLY_SYNTAX_ATT ? 1 : 0;
+        decoration += memory_operand ? 2 : 0;
+        if (register_name.length > UINT64_MAX - output_length - decoration)
         {
             return false;
         }
-        output_length += register_name.length + (syntax == ASSEMBLY_SYNTAX_ATT ? 1 : 0);
+        output_length += register_name.length + decoration;
         index = end;
     }
     char8* output = arena_allocate(arena, char8, output_length ? output_length : 1);
@@ -605,17 +690,35 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         }
         IrValueId value = instruction->operands[operand_index];
         IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
-        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], (u32)type->layout.size);
+        bool memory_operand =
+            IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand ? 8 : (u32)type->layout.size);
+        if (memory_operand)
+        {
+            output[output_index++] = syntax == ASSEMBLY_SYNTAX_ATT ? '(' : '[';
+        }
         if (syntax == ASSEMBLY_SYNTAX_ATT)
         {
             output[output_index++] = '%';
         }
         memcpy(output + output_index, register_name.pointer, register_name.length);
         output_index += register_name.length;
+        if (memory_operand)
+        {
+            output[output_index++] = syntax == ASSEMBLY_SYNTAX_ATT ? ')' : ']';
+        }
         index = end;
     }
     *source_out = (String8){.pointer = output, .length = output_index};
-    return codegen_inline_assembly_register_only_source(*source_out);
+    // The shape check runs before the prefix is folded in, so LOCK is still a
+    // statement of its own there and is checked against the mnemonic list like
+    // every other one.
+    if (!codegen_inline_assembly_register_only_source(*source_out))
+    {
+        return false;
+    }
+    codegen_inline_assembly_normalize_statements(source_out);
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_is_rbx(String8 clobber)
@@ -1700,6 +1803,17 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_store(CodegenBuffer* buffer, 
         codegen_canonical_x64_metadata_gpr(source, memory_width),
     };
     (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
+}
+
+// The address of a frame slot, for a memory operand whose storage is the slot
+// itself rather than something the slot points at.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_address(CodegenBuffer* buffer, X64Register target, X64Register base, u32 displacement)
+{
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        codegen_canonical_x64_metadata_gpr(target, 64),
+        codegen_canonical_x64_metadata_memory(base, 64, (s64)(s32)displacement),
+    };
+    (void)codegen_canonical_x64_metadata_emit(buffer, S8("LEA"), operands, BUSTER_ARRAY_LENGTH(operands));
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_atomic_register_memory(CodegenBuffer* buffer, String8 mnemonic,
@@ -14672,7 +14786,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             u64 constraint = instruction->immediates[operand_index];
                             if (!codegen_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) ||
-                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
                             {
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
@@ -14728,7 +14842,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             u64 constraint = instruction->immediates[operand_index];
                             u64 constraint_index = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
-                            if (constraint_index > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            if (constraint_index >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
                             {
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
@@ -14851,7 +14965,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) && !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE))
+                            bool memory_operand = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+                            if (!memory_operand && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                                !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE))
                             {
                                 continue;
                             }
@@ -14862,6 +14978,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
+                            }
+                            // A memory operand's register holds the address of
+                            // its storage, so an indirect place hands over the
+                            // pointer the slot already holds and a direct one
+                            // hands over the slot's own address. Either way the
+                            // template reference expands to a load through it,
+                            // and nothing is read or written here.
+                            if (memory_operand)
+                            {
+                                u32 displacement = (u32)c_x64_frame_displacement(&emitter, value_offsets[input.value]);
+                                if (indirect[operand_index])
+                                {
+                                    codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_RBP, displacement, 8);
+                                }
+                                else
+                                {
+                                    codegen_canonical_x64_asm_address(&buffer, asm_registers[operand_index], X64_REGISTER_RBP, displacement);
+                                }
+                                continue;
                             }
                             if (indirect[operand_index])
                             {
@@ -14975,7 +15110,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            if (!(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT))
+                            // A memory output was written by the assembly
+                            // itself, through the address its register holds.
+                            // Storing a register back over it here would undo
+                            // exactly the write the operand exists for.
+                            if (!(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) ||
+                                IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
                             {
                                 continue;
                             }
