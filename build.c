@@ -687,6 +687,10 @@ typedef struct TestMuslOptions TestMuslOptions;
 struct TestMuslOptions
 {
     String8 source_directory;
+    // The optional second positional path: a pristine libc-test checkout. When
+    // it is absent the harness stops after the freestanding probe and the
+    // cross-ABI links, which is what the acceptance inventory needs on its own.
+    String8 libc_test_directory;
     String8 config;
 };
 
@@ -705,6 +709,22 @@ struct TestMuslOptions
 // units each, which is where a difference between them would show as a wrong
 // answer instead of as four identical object sets.
 #define MUSL_COMPATIBILITY_ALLOCATOR_MODE "fast"
+
+// libc-test is musl's own test suite. It carries no tags and no version file,
+// so the pin is a commit on upstream's master. Upstream's canonical remote is
+// https://git.musl-libc.org/cgit/libc-test; https://repo.or.cz/libc-test.git is
+// the same history and is what a clone here usually resolves.
+#define LIBC_TEST_COMMIT "68edb8bd73dab8147ee54c8bec638f4d2b3cff37"
+// The four subsets, named the way upstream names its source directories.
+// src/common is upstream's support library rather than a subset, and src/musl
+// tests musl internals through a header this build does not publish; both are
+// reported and neither is classified.
+#define LIBC_TEST_SUBSET_COUNT 4
+// Upstream's own runtest gives each test five seconds. That bound assumes a
+// libc built by a mature compiler on an idle machine; ten is used here so a
+// loaded runner cannot turn a slow test into a classified failure, and a test
+// that exceeds it is classified rather than left to hang.
+#define LIBC_TEST_TIMEOUT_US (10ull * 1000ull * 1000ull)
 
 // QuickJS publishes its releases as dated tarballs rather than tags, so the
 // pin is the commit whose tree is the release and the VERSION file that
@@ -16655,13 +16675,19 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_buster(Arena* arena, String8 ide, String8 
 {
     MuslCommonFlags flags = musl_common_flags(arena, root, object_directory);
     String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), allocator);
-    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    // Source metrics are optional: the harness compiles a few objects, the
+    // thread-pointer replacement among them, that are not part of any
+    // measurement, and an empty -fsource-metrics= is a rejected option.
+    String8 metrics_flag = metrics.length ? string_format(arena, S8("-fsource-metrics={S8}"), metrics) : (String8){0};
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
     musl_append_common_flags(&builder, flags);
     os_argument_builder_append(&builder, allocator_flag);
-    os_argument_builder_append(&builder, metrics_flag);
+    if (metrics_flag.length)
+    {
+        os_argument_builder_append(&builder, metrics_flag);
+    }
     os_argument_builder_append(&builder, S8("-c"));
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
@@ -16727,10 +16753,15 @@ BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive,
 // startup files, no host libc. Everything it resolves therefore comes out of
 // the musl archive that precedes it on the command line, which is the property
 // the acceptance criteria ask for.
-BUSTER_GLOBAL_LOCAL bool musl_link_probe(Arena* arena, String8 linker, String8 output, String8 object, String8 archive)
+BUSTER_GLOBAL_LOCAL bool musl_link_probe(Arena* arena, String8 linker, String8 output, String8 object, String8 archive, u64* elapsed_us)
 {
     String8 arguments[] = {linker, S8("-static"), S8("-o"), output, object, archive};
+    u64 start = os_now_microseconds();
     MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false, true);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -16766,13 +16797,926 @@ BUSTER_GLOBAL_LOCAL u64 musl_file_size(Arena* arena, String8 path)
     return size;
 }
 
+// ---------------------------------------------------------------------------
+// libc-test: musl's own test suite, run in classified subsets against a
+// Buster-built and a Clang-built musl of the same configuration.
+//
+// The suite is a set of self-contained programs, one `main` per file, that
+// print to standard output on failure and return zero on success. Upstream's
+// build system compiles them in-tree; this harness never writes into the
+// checkout, so it drives the same sources itself and writes every artefact
+// into the run directory beside the musl objects.
+//
+// A unit is classified rather than merely passed or failed, because most of
+// the suite cannot be reached yet and a single total would hide which wall it
+// is behind. The classification is derived, not written down:
+//
+//   excluded-dynamic     upstream ships a sibling .mk for it, which means it
+//                        needs shared objects, -rdynamic or an explicit
+//                        do-not-run rule. Nothing here links dynamically.
+//   excluded-reference   the Clang-built musl of this same configuration
+//                        cannot compile, link or run it green. That is a
+//                        property of the configuration -- musl's x86-64
+//                        assembly is excluded from both archives, so the fenv
+//                        and thread units are stubs -- and says nothing about
+//                        Buster, so it is held out of the comparison.
+//   blocked-compile      Buster cannot compile the test itself.
+//   blocked-link         Buster compiled it, and the Buster-built archive
+//                        cannot satisfy the link. Every undefined symbol is
+//                        recorded, which is what makes this subset grow: the
+//                        ranked symbol list is exactly the work the archive is
+//                        missing.
+//   fail                 it ran, and its transcript or exit status differs
+//                        from the Clang reference. This is the only state that
+//                        is a defect in generated code.
+//   pass                 it ran and matched. src/api is compile-only by
+//                        upstream's own design -- its units are declaration
+//                        conformance checks with no runtime -- so there a
+//                        successful compile is the pass.
+//
+// The gate is the passing count together with a hash of the sorted
+// "state subset/unit" lines of everything that did not pass, so a fix and a
+// regression both move a number that has to be updated on purpose.
+
+typedef enum LibcTestState
+{
+    LIBC_TEST_STATE_PASS,
+    LIBC_TEST_STATE_FAIL,
+    LIBC_TEST_STATE_BLOCKED_COMPILE,
+    LIBC_TEST_STATE_BLOCKED_LINK,
+    LIBC_TEST_STATE_EXCLUDED_DYNAMIC,
+    LIBC_TEST_STATE_EXCLUDED_REFERENCE,
+    LIBC_TEST_STATE_COUNT,
+} LibcTestState;
+
+BUSTER_GLOBAL_LOCAL String8 libc_test_state_names[LIBC_TEST_STATE_COUNT] = {
+    [LIBC_TEST_STATE_PASS] = S8_INITIALIZER("pass"),
+    [LIBC_TEST_STATE_FAIL] = S8_INITIALIZER("fail"),
+    [LIBC_TEST_STATE_BLOCKED_COMPILE] = S8_INITIALIZER("blocked-compile"),
+    [LIBC_TEST_STATE_BLOCKED_LINK] = S8_INITIALIZER("blocked-link"),
+    [LIBC_TEST_STATE_EXCLUDED_DYNAMIC] = S8_INITIALIZER("excluded-dynamic"),
+    [LIBC_TEST_STATE_EXCLUDED_REFERENCE] = S8_INITIALIZER("excluded-reference"),
+};
+
+typedef struct LibcTestSubset LibcTestSubset;
+struct LibcTestSubset
+{
+    String8 name;
+    // src/api is a build-time interface test: each unit is a translation unit
+    // full of declarations and no program, and upstream links one shared
+    // main.exe from all of them. Compiling it is the whole test.
+    bool compile_only;
+    u8 reserved[7];
+};
+
+BUSTER_GLOBAL_LOCAL LibcTestSubset libc_test_subsets[LIBC_TEST_SUBSET_COUNT] = {
+    {.name = S8_INITIALIZER("api"), .compile_only = true},
+    {.name = S8_INITIALIZER("functional")},
+    {.name = S8_INITIALIZER("math")},
+    {.name = S8_INITIALIZER("regression")},
+};
+
+typedef struct LibcTestUnit LibcTestUnit;
+struct LibcTestUnit
+{
+    // "functional/strtol": the unit's identity in every report line and in the
+    // gate hash.
+    String8 relative;
+    String8 source;
+    String8 clang_object;
+    String8 buster_object;
+    String8 clang_program;
+    String8 buster_program;
+    // Why it is not passing: a compiler diagnostic, a linker complaint, or the
+    // reference's own reason for being out of reach.
+    String8 detail;
+    // Every symbol the Buster-built archive could not satisfy, deduplicated
+    // within the unit. Empty unless the state is blocked-link.
+    String8* undefined;
+    u64 undefined_count;
+    u64 subset;
+    u64 compile_us;
+    u64 link_us;
+    u64 run_us;
+    SelfHostSourceMetrics metrics;
+    LibcTestState state;
+    // Whether Buster compiled the unit, recorded whether or not the state ended
+    // up depending on it.
+    bool compiled;
+    u8 reserved[3];
+};
+
+typedef struct LibcTestManifest LibcTestManifest;
+struct LibcTestManifest
+{
+    LibcTestUnit* units;
+    u64 unit_count;
+    // Upstream's own support library, src/common, minus runtest.c: that one is
+    // the process supervisor this harness performs itself.
+    String8* support;
+    u64 support_count;
+};
+
+// Counts and cost, one row per subset.
+typedef struct LibcTestSubsetTotals LibcTestSubsetTotals;
+struct LibcTestSubsetTotals
+{
+    u64 units;
+    u64 states[LIBC_TEST_STATE_COUNT];
+    // Units Buster could not compile, counted independently of the state: a
+    // unit the reference holds out still says something about the frontend.
+    u64 buster_compile_failed;
+    u64 compile_us;
+    u64 link_us;
+    u64 run_us;
+};
+
+// The gate: the passing count and the identity of everything that is not
+// passing. The count alone would accept a change that fixed one unit and broke
+// another, so a hash of the newline-joined "state subset/unit" lines is pinned
+// beside it, taken in manifest order -- the subsets in the order above, each
+// sorted by unit name, so the file system's order cannot move it. Both are
+// printed on the LIBCTEST_INVENTORY line, which is what a deliberate
+// rebaseline needs.
+#define LIBC_TEST_EXPECTED_PASSING 76
+#define LIBC_TEST_EXPECTED_STATE_HASH 0xfdd6d687ed6ac3e5ull
+
+// A test program is a child with a deadline. A miscompiled test does not
+// always crash: upstream's own runner kills the child rather than trusting it
+// to exit, and this harness has to do the same or one hanging unit stops the
+// run.
+BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command_deadline(Arena* arena, SliceString8 arguments, u64 timeout_us, bool* timed_out)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = S8("."),
+        .spawn_options =
+            {
+                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = 1,
+            },
+    };
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: test_musl could not start a libc-test program\n"));
+        return (MuslCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_deadline(arena, run.spawn, timeout_us);
+    if (timed_out)
+    {
+        *timed_out = wait.timed_out != 0;
+    }
+    return (MuslCommandResult){
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+}
+
+// libc-test carries no tags and no version file, so the pin is a bare commit.
+// The pristine check is the same one musl gets: a tracked or untracked change
+// in the checkout means the run is not describing upstream.
+BUSTER_GLOBAL_LOCAL bool libc_test_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_musl requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    MuslCommandResult head = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true, false);
+    String8 commit = musl_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(LIBC_TEST_COMMIT)))
+    {
+        string_print(S8("error: test_musl requires pristine libc-test commit {S8}; found {S8}\n"), S8(LIBC_TEST_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    MuslCommandResult status = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true, false);
+    if (status.result != PROCESS_RESULT_SUCCESS || musl_trim_ascii_space(status.output).length)
+    {
+        string_print(S8("error: test_musl libc-test checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        return false;
+    }
+    string_print(S8("LIBCTEST_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+    return true;
+}
+
+// The flag set for libc-test units. It is upstream's own config.mak.def
+// CFLAGS, minus what only one of the two compilers takes, plus the -nostdinc
+// and musl include set that makes the test see the musl under test rather than
+// the host libc:
+//
+//   -pedantic-errors, -frounding-math   Buster rejects both, so neither
+//                                       compiler gets them; this is the same
+//                                       tryflag reasoning the musl flag set is
+//                                       built on.
+//   -Wall -Wno-* -g                     warnings and debug info, neither of
+//                                       which changes what is compiled.
+//   -D_FILE_OFFSET_BITS=64              upstream's own comment marks it glibc
+//                                       specific; musl has one off_t.
+//   -lpthread -lm -lrt ...              there is one archive and no driver.
+//
+// Clang gets -Werror=implicit-function-declaration on top, which is upstream's
+// and is not a divergence: Buster rejects an undeclared callee outright, so the
+// flag is what makes the two compilers agree about a missing declaration --
+// which is the whole point of the api subset.
+typedef struct LibcTestFlags LibcTestFlags;
+struct LibcTestFlags
+{
+    String8 includes[7];
+};
+
+BUSTER_GLOBAL_LOCAL LibcTestFlags libc_test_flags(Arena* arena, String8 musl_root, String8 musl_object_directory, String8 libc_test_root,
+                                                  String8 generated_directory)
+{
+    LibcTestFlags flags = {
+        .includes =
+            {
+                string_format(arena, S8("-I{S8}"), path_join(arena, libc_test_root, S8("src/common"))),
+                string_format(arena, S8("-I{S8}"), generated_directory),
+                string_format(arena, S8("-I{S8}"), path_join(arena, musl_root, S8("arch/" MUSL_COMPATIBILITY_ARCHITECTURE))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, musl_root, S8("arch/generic"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, musl_object_directory, S8("include"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, musl_root, S8("include"))),
+                // src/internal is not here on purpose: a test compiles against
+                // the headers musl installs, not against musl's own build.
+                string_format(arena, S8("-I{S8}"), path_join(arena, musl_object_directory, S8("src/internal"))),
+            },
+    };
+    return flags;
+}
+
+BUSTER_GLOBAL_LOCAL void libc_test_append_common_flags(OsArgumentBuilder* builder, LibcTestFlags flags, bool extended)
+{
+    os_argument_builder_append(builder, S8("-std=c99"));
+    os_argument_builder_append(builder, S8("-nostdinc"));
+    os_argument_builder_append(builder, S8("-fno-builtin"));
+    os_argument_builder_append(builder, S8("-fno-strict-aliasing"));
+    os_argument_builder_append(builder, S8("-fno-stack-protector"));
+    os_argument_builder_append(builder, S8("-D_POSIX_C_SOURCE=200809L"));
+    if (extended)
+    {
+        // upstream's own api CFLAGS; the interface tests are written against
+        // the X/Open surface and drop out of it otherwise.
+        os_argument_builder_append(builder, S8("-D_XOPEN_SOURCE=700"));
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(flags.includes); index += 1)
+    {
+        os_argument_builder_append(builder, flags.includes[index]);
+    }
+    os_argument_builder_append(builder, S8("-O2"));
+    os_argument_builder_append(builder, S8("-g0"));
+}
+
+typedef struct LibcTestBuild LibcTestBuild;
+struct LibcTestBuild
+{
+    String8 musl_root;
+    String8 musl_object_directory;
+    String8 root;
+    String8 generated_directory;
+    String8 clang;
+    String8 ide;
+    String8 linker;
+    String8 ar;
+    // musl's crt1.o, which is not an archive member on either side: a program
+    // links it explicitly and libc.a separately. Each side uses the one its own
+    // compiler built, so a libc-test program is that compiler's code from
+    // _start down. When Buster cannot build it the harness falls back to the
+    // reference's copy and says so, because the alternative is not running the
+    // suite at all -- crt/crt1.c is module-level assembly, and that path has
+    // been a reported gap for longer than this stage has existed.
+    String8 clang_startup_object;
+    String8 buster_startup_object;
+    bool startup_shared;
+    u8 reserved[7];
+    String8 clang_thread_pointer_object;
+    String8 buster_thread_pointer_object;
+    String8 clang_archive;
+    String8 buster_archive;
+    String8 clang_support_archive;
+    String8 buster_support_archive;
+};
+
+BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, bool buster, String8 source, String8 output, String8 metrics,
+                                           bool extended, u64* elapsed_us, String8* diagnostic)
+{
+    LibcTestFlags flags = libc_test_flags(arena, build->musl_root, build->musl_object_directory, build->root, build->generated_directory);
+    String8 metrics_flag = metrics.length ? string_format(arena, S8("-fsource-metrics={S8}"), metrics) : (String8){0};
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, build->ide);
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    else
+    {
+        os_argument_builder_append(&builder, build->clang);
+    }
+    libc_test_append_common_flags(&builder, flags, extended);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, allocator_flag);
+        if (metrics_flag.length)
+        {
+            os_argument_builder_append(&builder, metrics_flag);
+        }
+    }
+    else
+    {
+        os_argument_builder_append(&builder, S8("-Werror=implicit-function-declaration"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    if (elapsed_us)
+    {
+        *elapsed_us += os_now_microseconds() - start;
+    }
+    if (diagnostic)
+    {
+        *diagnostic = musl_first_line(command.error.length ? command.error : command.output);
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// One test program: musl's startup object, the thread-pointer replacement, the
+// test, upstream's support archive and the libc under test, linked static with
+// `ld` and nothing else. The archive order is upstream's: the support library
+// resolves against libc, never the other way round.
+BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, bool buster, String8 object, String8 output, u64* elapsed_us,
+                                        String8* error_out)
+{
+    String8 arguments[] = {
+        build->linker,
+        S8("-static"),
+        S8("-o"),
+        output,
+        buster ? build->buster_startup_object : build->clang_startup_object,
+        buster ? build->buster_thread_pointer_object : build->clang_thread_pointer_object,
+        object,
+        buster ? build->buster_support_archive : build->clang_support_archive,
+        buster ? build->buster_archive : build->clang_archive,
+    };
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
+    if (elapsed_us)
+    {
+        *elapsed_us += os_now_microseconds() - start;
+    }
+    if (error_out)
+    {
+        *error_out = command.error;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// Every symbol `ld` could not resolve, in report order and deduplicated. The
+// first one is not enough: the link stops at the startup object every time, so
+// a ranking built from first symbols would name one symbol and hide the rest.
+BUSTER_GLOBAL_LOCAL void libc_test_collect_undefined(Arena* arena, String8 text, String8** symbols_out, u64* count_out)
+{
+    String8 needle = S8("undefined reference to `");
+    u64 capacity = 64;
+    String8* symbols = arena_allocate(arena, String8, capacity);
+    u64 count = 0;
+    u64 position = 0;
+    while (position + needle.length <= text.length)
+    {
+        if (string_equal(string_slice(text, position, position + needle.length), needle))
+        {
+            u64 start = position + needle.length;
+            u64 end = start;
+            while (end < text.length && text.pointer[end] != '\'')
+            {
+                end += 1;
+            }
+            String8 symbol = string_slice(text, start, end);
+            bool seen = false;
+            for (u64 index = 0; index < count; index += 1)
+            {
+                seen = seen || string_equal(symbols[index], symbol);
+            }
+            if (!seen && count < capacity)
+            {
+                symbols[count++] = string_duplicate_arena(arena, symbol, true);
+            }
+            position = end;
+        }
+        position += 1;
+    }
+    *symbols_out = symbols;
+    *count_out = count;
+}
+
+// src/common/options.h, from upstream's own recipe: preprocess options.h.in
+// against the musl under test and turn the surviving lines into defines. The
+// recipe is the one written at the top of options.h.in itself, which upstream's
+// Makefile spells again in awk.
+//
+// The reference preprocessor generates it, and it is the one generated header
+// both sides then compile against. That is not a choice about which compiler is
+// trusted: `ide cc -E` emits a token stream with the line structure removed --
+// the whole file comes back as one line of space-separated tokens -- and this
+// recipe, like musl's own three header recipes, is line-oriented. The header
+// describes the musl under test rather than either compiler, so one copy is
+// also the correct shape for the comparison.
+BUSTER_GLOBAL_LOCAL bool libc_test_generate_options(Arena* arena, LibcTestBuild* build)
+{
+    String8 sed = executable_resolve_in_path(arena, S8("sed"));
+    if (!sed.length)
+    {
+        string_print(S8("error: test_musl requires sed in PATH to run libc-test's own options.h recipe\n"));
+        return false;
+    }
+    String8 input = path_join(arena, build->root, S8("src/common/options.h.in"));
+    String8 output = path_join(arena, build->generated_directory, S8("options.h"));
+    String8 preprocessed = path_join(arena, build->generated_directory, S8("options.i"));
+    LibcTestFlags flags = libc_test_flags(arena, build->musl_root, build->musl_object_directory, build->root, build->generated_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, build->clang);
+    libc_test_append_common_flags(&builder, flags, true);
+    os_argument_builder_append(&builder, S8("-x"));
+    os_argument_builder_append(&builder, S8("c"));
+    os_argument_builder_append(&builder, S8("-E"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, preprocessed);
+    os_argument_builder_append(&builder, input);
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: test_musl could not preprocess {S8}: {S8}\n"), input,
+                     musl_first_line(command.error.length ? command.error : command.output));
+        return false;
+    }
+    String8 script[] = {sed,
+                        S8("-e"),
+                        S8("1,/optiongroups_unistd_end/d"),
+                        S8("-e"),
+                        S8("/^#/d"),
+                        S8("-e"),
+                        S8("/^[[:space:]]*$/d"),
+                        S8("-e"),
+                        S8("s/^/#define /"),
+                        preprocessed};
+    MuslCommandResult filtered = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(script), S8("."), true, false);
+    if (filtered.result != PROCESS_RESULT_SUCCESS || !filtered.output.length)
+    {
+        string_print(S8("error: test_musl could not run libc-test's options.h recipe\n"));
+        return false;
+    }
+    if (!file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(filtered.output)))
+    {
+        string_print(S8("error: test_musl could not write {S8}\n"), output);
+        return false;
+    }
+    u64 defines = 0;
+    for (u64 index = 0; index < filtered.output.length; index += 1)
+    {
+        defines += filtered.output.pointer[index] == '\n';
+    }
+    string_print(S8("LIBCTEST_GENERATED options={S8} defines={u64} preprocessor=clang\n"), output, defines);
+    return true;
+}
+
+// The manifest, enumerated from the checkout the way upstream's Makefile globs
+// it: every .c under each of the four subset directories, plus src/common
+// minus runtest.c. A release that adds or removes a test therefore shows up as
+// a manifest change rather than a silent omission.
+BUSTER_GLOBAL_LOCAL bool libc_test_collect_manifest(Arena* arena, LibcTestBuild* build, String8 output_directory, LibcTestManifest* manifest_out)
+{
+    u64 capacity = 1024;
+    LibcTestUnit* units = arena_allocate(arena, LibcTestUnit, capacity);
+    u64 unit_count = 0;
+    for (u64 subset = 0; subset < LIBC_TEST_SUBSET_COUNT; subset += 1)
+    {
+        String8 relative_directory = path_join(arena, S8("src"), libc_test_subsets[subset].name);
+        String8 directory = path_join(arena, build->root, relative_directory);
+        MuslDirectoryEntry* entries = 0;
+        u64 entry_count = 0;
+        if (!musl_list_directory(arena, directory, &entries, &entry_count))
+        {
+            string_print(S8("error: test_musl could not read {S8}\n"), directory);
+            return false;
+        }
+        u64 first = unit_count;
+        for (u64 index = 0; index < entry_count; index += 1)
+        {
+            String8 name = entries[index].name;
+            if (entries[index].is_directory || !string_ends_with_sequence(name, S8(".c")) || unit_count >= capacity)
+            {
+                continue;
+            }
+            String8 stem = string_slice(name, 0, name.length - 2);
+            String8 relative = string_format(arena, S8("{S8}/{S8}"), libc_test_subsets[subset].name, stem);
+            LibcTestUnit unit = {
+                .relative = relative,
+                .source = path_join(arena, directory, name),
+                .subset = subset,
+            };
+            // Upstream's sibling .mk is the marker: a test that carries one
+            // wants shared objects, a link flag or no run at all.
+            String8 makefile = string_format(arena, S8("{S8}/{S8}.mk"), directory, stem);
+            if (path_exists(arena, makefile))
+            {
+                unit.state = LIBC_TEST_STATE_EXCLUDED_DYNAMIC;
+                unit.detail = S8("upstream ships a sibling .mk: shared objects or an explicit do-not-run rule");
+            }
+            units[unit_count++] = unit;
+        }
+        // One stable order per subset, so the gate hash does not depend on the
+        // order the file system happens to hand back.
+        for (u64 index = first + 1; index < unit_count; index += 1)
+        {
+            LibcTestUnit value = units[index];
+            u64 position = index;
+            while (position > first && musl_string_less(value.relative, units[position - 1].relative))
+            {
+                units[position] = units[position - 1];
+                position -= 1;
+            }
+            units[position] = value;
+        }
+    }
+    String8 common_directory = path_join(arena, build->root, S8("src/common"));
+    MuslDirectoryEntry* common_entries = 0;
+    u64 common_count = 0;
+    if (!musl_list_directory(arena, common_directory, &common_entries, &common_count))
+    {
+        string_print(S8("error: test_musl could not read {S8}\n"), common_directory);
+        return false;
+    }
+    String8* support = arena_allocate(arena, String8, common_count ? common_count : 1);
+    u64 support_count = 0;
+    for (u64 index = 0; index < common_count; index += 1)
+    {
+        String8 name = common_entries[index].name;
+        if (common_entries[index].is_directory || !string_ends_with_sequence(name, S8(".c")) || string_equal(name, S8("runtest.c")))
+        {
+            continue;
+        }
+        support[support_count++] = path_join(arena, common_directory, name);
+    }
+    for (u64 index = 1; index < support_count; index += 1)
+    {
+        String8 value = support[index];
+        u64 position = index;
+        while (position && musl_string_less(value, support[position - 1]))
+        {
+            support[position] = support[position - 1];
+            position -= 1;
+        }
+        support[position] = value;
+    }
+    for (u64 index = 0; index < unit_count; index += 1)
+    {
+        LibcTestUnit* unit = units + index;
+        String8 stem = string_format(arena, S8("{u64}"), index);
+        unit->clang_object = string_format(arena, S8("{S8}/clang/{S8}.o"), output_directory, stem);
+        unit->buster_object = string_format(arena, S8("{S8}/buster/{S8}.o"), output_directory, stem);
+        unit->clang_program = string_format(arena, S8("{S8}/clang/{S8}"), output_directory, stem);
+        unit->buster_program = string_format(arena, S8("{S8}/buster/{S8}"), output_directory, stem);
+    }
+    *manifest_out = (LibcTestManifest){
+        .units = units,
+        .unit_count = unit_count,
+        .support = support,
+        .support_count = support_count,
+    };
+    return true;
+}
+
+// Upstream's src/common, compiled once per side into the support archive every
+// test links against. A support unit that does not compile is not fatal: the
+// tests that need it fail to link and say which symbol they wanted, which is
+// the classification this stage exists to produce.
+BUSTER_GLOBAL_LOCAL bool libc_test_build_support(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest, String8 output_directory, bool buster)
+{
+    String8* objects = arena_allocate(arena, String8, manifest->support_count ? manifest->support_count : 1);
+    u64 object_count = 0;
+    u64 elapsed_us = 0;
+    for (u64 index = 0; index < manifest->support_count; index += 1)
+    {
+        String8 object = string_format(arena, S8("{S8}/{S8}/support-{u64}.o"), output_directory, buster ? S8("buster") : S8("clang"), index);
+        String8 diagnostic = {0};
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        bool compiled =
+            libc_test_compile(temporary.arena, build, buster, manifest->support[index], object, (String8){0}, false, &elapsed_us, &diagnostic);
+        if (compiled)
+        {
+            objects[object_count++] = object;
+        }
+        else
+        {
+            string_print(S8("LIBCTEST_SUPPORT_UNSUPPORTED compiler={S8} unit={S8} diagnostic={S8}\n"), buster ? S8("buster") : S8("clang"),
+                         manifest->support[index], diagnostic);
+        }
+        scratch_end(temporary);
+    }
+    String8 archive = buster ? build->buster_support_archive : build->clang_support_archive;
+    u64 archive_start = os_now_microseconds();
+    bool archived = musl_archive(arena, build->ar, archive, objects, object_count,
+                                 string_format(arena, S8("{S8}/support-{S8}.rsp"), output_directory, buster ? S8("buster") : S8("clang")));
+    u64 archive_us = os_now_microseconds() - archive_start;
+    if (!archived)
+    {
+        string_print(S8("error: test_musl could not archive libc-test's support library\n"));
+        return false;
+    }
+    string_print(S8("LIBCTEST_SUPPORT compiler={S8} units={u64} compiled={u64} compile_us={u64} archive_us={u64} archive_bytes={u64}\n"),
+                 buster ? S8("buster") : S8("clang"), manifest->support_count, object_count, elapsed_us, archive_us, musl_file_size(arena, archive));
+    return true;
+}
+
+// A run is green when the program exits zero and prints nothing: that is
+// upstream's own protocol, written down in its README. Anything else is the
+// transcript the two sides are compared on.
+BUSTER_GLOBAL_LOCAL bool libc_test_run(Arena* arena, String8 program, u64* elapsed_us, String8* transcript_out, String8* status_out)
+{
+    String8 arguments[] = {program};
+    bool timed_out = false;
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command_deadline(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), LIBC_TEST_TIMEOUT_US, &timed_out);
+    if (elapsed_us)
+    {
+        *elapsed_us += os_now_microseconds() - start;
+    }
+    *transcript_out = command.output;
+    if (timed_out)
+    {
+        *status_out = S8("timed out");
+        return false;
+    }
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        *status_out = S8("non-zero exit");
+        return false;
+    }
+    if (command.output.length)
+    {
+        *status_out = musl_first_line(command.output);
+        return false;
+    }
+    *status_out = (String8){0};
+    return true;
+}
+
+// A ranked count of the symbols the Buster-built archive could not supply,
+// over every unit that failed to link. This is the stage's most useful output
+// while most of the suite is out of reach: it is the work list, in the order
+// that unblocks the most tests.
+typedef struct LibcTestBlocker LibcTestBlocker;
+struct LibcTestBlocker
+{
+    String8 symbol;
+    u64 units;
+};
+
+BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, String8 output_directory)
+{
+    if (!libc_test_git_verify(arena, build->root))
+    {
+        return false;
+    }
+    make_directory_recursive(arena, path_join(arena, output_directory, S8("clang")));
+    make_directory_recursive(arena, path_join(arena, output_directory, S8("buster")));
+    make_directory_recursive(arena, build->generated_directory);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    if (!libc_test_generate_options(arena, build))
+    {
+        return false;
+    }
+    LibcTestManifest manifest = {0};
+    if (!libc_test_collect_manifest(arena, build, output_directory, &manifest))
+    {
+        return false;
+    }
+    string_print(S8("LIBCTEST_MANIFEST units={u64} subsets={u64} support_units={u64} startup={S8} startup_source={S8}\n"), manifest.unit_count,
+                 (u64)LIBC_TEST_SUBSET_COUNT, manifest.support_count, build->buster_startup_object,
+                 build->startup_shared ? S8("clang-on-both-sides") : S8("per-compiler"));
+    if (!libc_test_build_support(arena, build, &manifest, output_directory, false) ||
+        !libc_test_build_support(arena, build, &manifest, output_directory, true))
+    {
+        return false;
+    }
+
+    SelfHostSourceMetrics totals = {0};
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        LibcTestUnit* unit = manifest.units + index;
+        if (unit->state == LIBC_TEST_STATE_EXCLUDED_DYNAMIC)
+        {
+            continue;
+        }
+        bool compile_only = libc_test_subsets[unit->subset].compile_only;
+        // Buster compiles first and unconditionally, even for a unit the
+        // reference is about to hold out. Its diagnostic is inventory -- the
+        // long double test tables under src/math are a compile gap whether or
+        // not the reference could have run them -- and a state that hid it
+        // would trade one measurement for another.
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
+        String8 diagnostic = {0};
+        bool compiled = libc_test_compile(temporary.arena, build, true, unit->source, unit->buster_object, metrics_path, compile_only,
+                                          &unit->compile_us, &diagnostic);
+        unit->compiled = compiled;
+        unit->detail = string_duplicate_arena(arena, diagnostic, true);
+        scratch_end(temporary);
+        if (compiled)
+        {
+            SelfHostSourceMetrics metrics = {0};
+            if (self_host_source_metrics_read(arena, metrics_path, &metrics))
+            {
+                unit->metrics = metrics;
+                totals.bytes += metrics.bytes;
+                totals.loc += metrics.loc;
+                totals.sloc += metrics.sloc;
+                totals.tokens += metrics.tokens;
+                totals.token_bytes += metrics.token_bytes;
+            }
+        }
+
+        temporary = scratch_begin(&arena, 1);
+        // The reference decides reach. A unit the Clang-built musl of this same
+        // configuration cannot compile, link or run green is out of the
+        // harness's reach -- musl's x86-64 assembly is in neither archive, so
+        // the fenv and thread units are portable stubs -- and holding it out
+        // keeps the comparison about Buster.
+        String8 reference_diagnostic = {0};
+        if (!libc_test_compile(temporary.arena, build, false, unit->source, unit->clang_object, (String8){0}, compile_only, &unit->compile_us,
+                               &reference_diagnostic))
+        {
+            unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+            unit->detail = string_format(arena, S8("reference compile: {S8}"), reference_diagnostic);
+            scratch_end(temporary);
+            continue;
+        }
+        String8 reference_transcript = {0};
+        if (!compile_only)
+        {
+            String8 link_error = {0};
+            if (!libc_test_link(temporary.arena, build, false, unit->clang_object, unit->clang_program, &unit->link_us, &link_error))
+            {
+                unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                unit->detail = string_format(arena, S8("reference link: {S8}"), musl_first_line(link_error));
+                scratch_end(temporary);
+                continue;
+            }
+            String8 status = {0};
+            if (!libc_test_run(temporary.arena, unit->clang_program, &unit->run_us, &reference_transcript, &status))
+            {
+                unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                unit->detail = string_format(arena, S8("reference run: {S8}"), status);
+                scratch_end(temporary);
+                continue;
+            }
+            reference_transcript = string_duplicate_arena(arena, reference_transcript, true);
+        }
+        scratch_end(temporary);
+
+        if (!compiled)
+        {
+            unit->state = LIBC_TEST_STATE_BLOCKED_COMPILE;
+            continue;
+        }
+        if (compile_only)
+        {
+            // src/api has no program to run: upstream builds one main.exe from
+            // the whole subset and the compile is the test.
+            unit->state = LIBC_TEST_STATE_PASS;
+            unit->detail = (String8){0};
+            continue;
+        }
+        temporary = scratch_begin(&arena, 1);
+        String8 link_error = {0};
+        bool linked = libc_test_link(temporary.arena, build, true, unit->buster_object, unit->buster_program, &unit->link_us, &link_error);
+        if (!linked)
+        {
+            libc_test_collect_undefined(arena, link_error, &unit->undefined, &unit->undefined_count);
+            unit->state = LIBC_TEST_STATE_BLOCKED_LINK;
+            unit->detail = string_format(arena, S8("{u64} unresolved: {S8}"), unit->undefined_count,
+                                         unit->undefined_count ? unit->undefined[0] : musl_first_line(link_error));
+            scratch_end(temporary);
+            continue;
+        }
+        String8 transcript = {0};
+        String8 status = {0};
+        bool ran = libc_test_run(temporary.arena, unit->buster_program, &unit->run_us, &transcript, &status);
+        bool matched = ran && string_equal(transcript, reference_transcript);
+        unit->state = matched ? LIBC_TEST_STATE_PASS : LIBC_TEST_STATE_FAIL;
+        unit->detail = matched ? (String8){0} : string_duplicate_arena(arena, status.length ? status : musl_first_line(transcript), true);
+        scratch_end(temporary);
+    }
+
+    // The classification, per unit, for everything that is not passing. This
+    // is the report: it names every test the archive cannot reach and why.
+    TemporalArena hash_temporary = scratch_begin(&arena, 1);
+    String8* hash_lines = arena_allocate(hash_temporary.arena, String8, manifest.unit_count * 4);
+    u64 hash_line_count = 0;
+    LibcTestSubsetTotals subset_totals[LIBC_TEST_SUBSET_COUNT] = {0};
+    LibcTestBlocker* blockers = arena_allocate(hash_temporary.arena, LibcTestBlocker, 512);
+    u64 blocker_count = 0;
+    u64 passing = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        LibcTestUnit* unit = manifest.units + index;
+        LibcTestSubsetTotals* subset = subset_totals + unit->subset;
+        subset->units += 1;
+        subset->states[unit->state] += 1;
+        subset->buster_compile_failed += unit->state != LIBC_TEST_STATE_EXCLUDED_DYNAMIC && !unit->compiled;
+        subset->compile_us += unit->compile_us;
+        subset->link_us += unit->link_us;
+        subset->run_us += unit->run_us;
+        if (unit->state == LIBC_TEST_STATE_PASS)
+        {
+            passing += 1;
+            continue;
+        }
+        string_print(S8("LIBCTEST_UNIT unit={S8} state={S8} detail={S8}\n"), unit->relative, libc_test_state_names[unit->state], unit->detail);
+        hash_lines[hash_line_count++] = libc_test_state_names[unit->state];
+        hash_lines[hash_line_count++] = S8(" ");
+        hash_lines[hash_line_count++] = unit->relative;
+        hash_lines[hash_line_count++] = S8("\n");
+        for (u64 symbol_index = 0; symbol_index < unit->undefined_count; symbol_index += 1)
+        {
+            String8 symbol = unit->undefined[symbol_index];
+            bool found = false;
+            for (u64 blocker_index = 0; blocker_index < blocker_count; blocker_index += 1)
+            {
+                if (string_equal(blockers[blocker_index].symbol, symbol))
+                {
+                    blockers[blocker_index].units += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && blocker_count < 512)
+            {
+                blockers[blocker_count++] = (LibcTestBlocker){.symbol = symbol, .units = 1};
+            }
+        }
+    }
+    for (u64 index = 1; index < blocker_count; index += 1)
+    {
+        LibcTestBlocker value = blockers[index];
+        u64 position = index;
+        while (position && (blockers[position - 1].units < value.units ||
+                            (blockers[position - 1].units == value.units && musl_string_less(value.symbol, blockers[position - 1].symbol))))
+        {
+            blockers[position] = blockers[position - 1];
+            position -= 1;
+        }
+        blockers[position] = value;
+    }
+    for (u64 index = 0; index < blocker_count; index += 1)
+    {
+        string_print(S8("LIBCTEST_BLOCKER rank={u64} symbol={S8} units={u64}\n"), index + 1, blockers[index].symbol, blockers[index].units);
+    }
+    for (u64 index = 0; index < LIBC_TEST_SUBSET_COUNT; index += 1)
+    {
+        LibcTestSubsetTotals* subset = subset_totals + index;
+        string_print(S8("LIBCTEST_SUBSET name={S8} mode={S8} units={u64} pass={u64} fail={u64} blocked_compile={u64} blocked_link={u64} "
+                        "excluded_dynamic={u64} excluded_reference={u64} buster_compile_failed={u64} compile_us={u64} link_us={u64} run_us={u64}\n"),
+                     libc_test_subsets[index].name, libc_test_subsets[index].compile_only ? S8("compile") : S8("run"), subset->units,
+                     subset->states[LIBC_TEST_STATE_PASS], subset->states[LIBC_TEST_STATE_FAIL], subset->states[LIBC_TEST_STATE_BLOCKED_COMPILE],
+                     subset->states[LIBC_TEST_STATE_BLOCKED_LINK], subset->states[LIBC_TEST_STATE_EXCLUDED_DYNAMIC],
+                     subset->states[LIBC_TEST_STATE_EXCLUDED_REFERENCE], subset->buster_compile_failed, subset->compile_us, subset->link_us,
+                     subset->run_us);
+    }
+    String8 hash_text = string_join_arena(hash_temporary.arena, (SliceString8){.pointer = hash_lines, .length = hash_line_count}, false);
+    u64 state_hash = hash_text.length ? buster_hash_64((u8*)hash_text.pointer, hash_text.length) : 0;
+    scratch_end(hash_temporary);
+    string_print(S8("LIBCTEST_METRICS units={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} tokens={u64}\n"), manifest.unit_count,
+                 totals.bytes, totals.loc, totals.sloc, totals.tokens);
+    string_print(S8("LIBCTEST_INVENTORY passing={u64} expected_passing={u64} state_hash={u64:x} expected_state_hash={u64:x}\n"), passing,
+                 (u64)LIBC_TEST_EXPECTED_PASSING, state_hash, (u64)LIBC_TEST_EXPECTED_STATE_HASH);
+    if (passing != LIBC_TEST_EXPECTED_PASSING || state_hash != LIBC_TEST_EXPECTED_STATE_HASH)
+    {
+        string_print(S8("error: the libc-test classification moved; update LIBC_TEST_EXPECTED_PASSING and LIBC_TEST_EXPECTED_STATE_HASH in build.c "
+                        "to the values on the LIBCTEST_INVENTORY line above, and record what changed\n"));
+        return false;
+    }
+    string_print(S8("LIBCTEST_SUMMARY commit={S8} units={u64} passing={u64} subsets={u64} blockers={u64}\n"), S8(LIBC_TEST_COMMIT), manifest.unit_count,
+                 passing, (u64)LIBC_TEST_SUBSET_COUNT, blocker_count);
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
 {
     TestMuslOptions options = *(TestMuslOptions*)data;
     if (!options.source_directory.length)
     {
         string_print(S8("error: test_musl requires an external musl {S8} checkout path\n"), S8(MUSL_COMPATIBILITY_TAG));
-        string_print(S8("usage: ./build/build test_musl [--config Debug|Release] /path/to/musl-{S8}\n"), S8(MUSL_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build/build test_musl [--config Debug|Release] /path/to/musl-{S8} [/path/to/libc-test]\n"),
+                     S8(MUSL_COMPATIBILITY_TAG));
         return PROCESS_RESULT_FAILED;
     }
     String8 source_directory = os_path_absolute(arena, options.source_directory, true);
@@ -16917,15 +17861,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    // The startup objects, and only they, stay out of the archive: musl links
-    // crt1.o explicitly and libc.a separately, and an archive member that
-    // defines _start would be a member no program ever selects.
+    // musl's own AOBJS rule: libc.a holds the src/ units and nothing else.
+    // The startup objects stay out because musl links crt1.o explicitly and
+    // libc.a separately, and an archive member that defines _start would be a
+    // member no program ever selects; ldso/ stays out because a static libc
+    // carrying the dynamic loader hands the linker a dlopen that wants setjmp,
+    // which is architecture assembly this build does not have. Both are still
+    // built, and the startup objects are written beside the archive the way
+    // musl's own build writes them into lib/.
     String8* buster_objects = arena_allocate(arena, String8, compiled ? compiled : 1);
     String8* clang_objects = arena_allocate(arena, String8, manifest.unit_count ? manifest.unit_count : 1);
     u64 buster_object_count = 0;
     u64 clang_object_count = 0;
     u64 startup_emitted = 0;
     u64 startup_absent = 0;
+    u64 loader_excluded = 0;
+    // crt1.o from each side, kept for the libc-test link lines below.
+    String8 buster_startup_object = {0};
+    String8 clang_startup_object = {0};
     for (u64 index = 0; index < manifest.unit_count; index += 1)
     {
         MuslUnit* unit = manifest.units + index;
@@ -16938,6 +17891,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             {
                 startup_emitted += 1;
                 string_print(S8("MUSL_STARTUP unit={S8} object={S8} status=emitted\n"), unit->relative, startup_object);
+                if (string_equal(unit->relative, S8("crt/crt1")))
+                {
+                    buster_startup_object = startup_object;
+                }
             }
             else
             {
@@ -16945,6 +17902,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
                 string_print(S8("MUSL_STARTUP unit={S8} object=- status=absent reason={S8}\n"), unit->relative,
                              unit->compiled ? S8("could not write the object beside the archive") : unit->diagnostic);
             }
+            if (string_equal(unit->relative, S8("crt/crt1")))
+            {
+                clang_startup_object = unit->clang_object;
+            }
+            continue;
+        }
+        if (string_starts_with_sequence(unit->relative, S8("ldso/")))
+        {
+            loader_excluded += 1;
             continue;
         }
         if (unit->compiled)
@@ -16967,16 +17933,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     }
     String8 buster_archive = path_join(arena, output_directory, S8("libc-buster.a"));
     String8 clang_archive = path_join(arena, output_directory, S8("libc-clang.a"));
+    u64 archive_start_us = os_now_microseconds();
     if (!musl_archive(arena, ar, buster_archive, buster_objects, buster_object_count, path_join(arena, output_directory, S8("buster-objects.rsp"))) ||
         !musl_archive(arena, ar, clang_archive, clang_objects, clang_object_count, path_join(arena, output_directory, S8("clang-objects.rsp"))))
     {
         string_print(S8("error: test_musl could not build the libc archives\n"));
         return PROCESS_RESULT_FAILED;
     }
+    u64 archive_us = os_now_microseconds() - archive_start_us;
     string_print(S8("MUSL_ARCHIVE buster_members={u64} buster_bytes={u64} clang_members={u64} clang_bytes={u64} startup_emitted={u64} "
-                    "startup_absent={u64}\n"),
+                    "startup_absent={u64} loader_excluded={u64} elapsed_us={u64}\n"),
                  buster_object_count, musl_file_size(arena, buster_archive), clang_object_count, musl_file_size(arena, clang_archive), startup_emitted,
-                 startup_absent);
+                 startup_absent, loader_excluded, archive_us);
 
     // The reference transcript. The probe enters at _start with the stack
     // aligned the way the kernel leaves it rather than the way a call leaves
@@ -16985,14 +17953,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     String8 clang_probe_object = path_join(arena, output_directory, S8("probe-clang.o"));
     String8 clang_probe = path_join(arena, output_directory, S8("probe-clang"));
     String8 reference_transcript = {0};
+    u64 reference_link_us = 0;
     if (!musl_compile_clang(arena, clang, source_directory, object_directory, fixture, clang_probe_object, S8("-mstackrealign")) ||
-        !musl_link_probe(arena, linker, clang_probe, clang_probe_object, clang_archive) ||
+        !musl_link_probe(arena, linker, clang_probe, clang_probe_object, clang_archive, &reference_link_us) ||
         !musl_run_probe(arena, clang_probe, &reference_transcript) || !reference_transcript.length)
     {
         string_print(S8("error: the Clang reference freestanding probe did not build and run\n"));
         return PROCESS_RESULT_FAILED;
     }
-    string_print(S8("MUSL_PROBE compiler=clang allocator=- bytes={u64} status=pass\n"), reference_transcript.length);
+    string_print(S8("MUSL_PROBE compiler=clang allocator=- bytes={u64} link_us={u64} status=pass\n"), reference_transcript.length,
+                 reference_link_us);
 
     // Every allocator, against the one Buster-built archive. The archive is
     // built once because the four allocators must produce the same answers, not
@@ -17004,6 +17974,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         String8 probe = string_format(arena, S8("{S8}/probe-{S8}"), output_directory, allocators[index]);
         String8 transcript = {0};
         u64 elapsed_us = 0;
+        u64 link_us = 0;
         String8 diagnostic = {0};
         if (!musl_compile_buster(arena, ide, source_directory, object_directory, fixture, probe_object,
                                  string_format(arena, S8("{S8}/probe-{S8}.txt"), metrics_directory, allocators[index]), allocators[index], &elapsed_us,
@@ -17012,7 +17983,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             string_print(S8("error: the freestanding probe did not compile under allocator {S8}: {S8}\n"), allocators[index], diagnostic);
             return PROCESS_RESULT_FAILED;
         }
-        if (!musl_link_probe(arena, linker, probe, probe_object, buster_archive))
+        if (!musl_link_probe(arena, linker, probe, probe_object, buster_archive, &link_us))
         {
             string_print(S8("error: the freestanding probe did not link against the Buster-built musl archive under allocator {S8}\n"),
                          allocators[index]);
@@ -17030,14 +18001,150 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(transcript));
             return PROCESS_RESULT_FAILED;
         }
-        string_print(S8("MUSL_PROBE compiler=buster allocator={S8} bytes={u64} elapsed_us={u64} status=pass\n"), allocators[index], transcript.length,
-                     elapsed_us);
+        string_print(S8("MUSL_PROBE compiler=buster allocator={S8} bytes={u64} elapsed_us={u64} link_us={u64} status=pass\n"), allocators[index],
+                     transcript.length, elapsed_us, link_us);
+    }
+
+    // The ABI check. Two separately compiled object sets calling each other
+    // across musl's own declarations is a direct test of the calling
+    // convention, the struct layouts and the return shapes the two compilers
+    // agree on, and a disagreement shows up as a wrong answer rather than as a
+    // link error.
+    //
+    // Two links do it. The first is the Clang-compiled probe against the
+    // Buster-built archive: a Clang caller into Buster-built musl. The second
+    // is that same probe against a mixed archive, built by taking Buster's
+    // object for every second unit and Clang's for the rest, so musl's own
+    // internal calls -- strstr into memchr, the ctype tables, the search
+    // routines -- cross the boundary in both directions inside one program.
+    //
+    // The Buster-compiled probe is deliberately not linked against the Clang
+    // archive. That pair does crash, and the reason is not an ABI
+    // disagreement: the probe is entered at _start with the alignment the
+    // kernel leaves rather than the one a call leaves, which is why the
+    // reference is compiled with -mstackrealign, and the Clang probe built
+    // without that flag crashes against Clang's own archive in exactly the
+    // same way. The Buster driver has no such flag, so that direction would
+    // measure the probe's entry rather than the two compilers, and the mixed
+    // archive covers what it was meant to cover.
+    String8* mixed_objects = arena_allocate(arena, String8, manifest.unit_count ? manifest.unit_count : 1);
+    u64 mixed_object_count = 0;
+    u64 mixed_buster_members = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        if (!string_starts_with_sequence(unit->relative, S8("src/")))
+        {
+            continue;
+        }
+        bool take_buster = unit->compiled && (mixed_object_count % 2) == 0;
+        mixed_buster_members += take_buster;
+        mixed_objects[mixed_object_count++] = take_buster ? unit->object : unit->clang_object;
+    }
+    String8 mixed_archive = path_join(arena, output_directory, S8("libc-mixed.a"));
+    if (!musl_archive(arena, ar, mixed_archive, mixed_objects, mixed_object_count, path_join(arena, output_directory, S8("mixed-objects.rsp"))))
+    {
+        string_print(S8("error: test_musl could not build the mixed-compiler musl archive\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("MUSL_ARCHIVE mixed_members={u64} mixed_buster_members={u64} mixed_bytes={u64}\n"), mixed_object_count, mixed_buster_members,
+                 musl_file_size(arena, mixed_archive));
+    struct
+    {
+        String8 name;
+        String8 slug;
+        String8 archive;
+    } abi_directions[] = {
+        {S8("clang-caller/buster-libc"), S8("clang-caller"), buster_archive},
+        {S8("mixed-libc"), S8("mixed"), mixed_archive},
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(abi_directions); index += 1)
+    {
+        String8 program = string_format(arena, S8("{S8}/probe-abi-{S8}"), output_directory, abi_directions[index].slug);
+        String8 transcript = {0};
+        u64 link_us = 0;
+        if (!musl_link_probe(arena, linker, program, clang_probe_object, abi_directions[index].archive, &link_us))
+        {
+            string_print(S8("MUSL_ABI direction={S8} status=link-failed\n"), abi_directions[index].name);
+            string_print(S8("error: the cross-compiler musl link failed for {S8}; the two object sets do not agree\n"), abi_directions[index].name);
+            return PROCESS_RESULT_FAILED;
+        }
+        bool ran = musl_run_probe(arena, program, &transcript);
+        if (!ran || !string_equal(transcript, reference_transcript))
+        {
+            string_print(S8("MUSL_ABI direction={S8} link_us={u64} bytes={u64} status=fail\n"), abi_directions[index].name, link_us,
+                         transcript.length);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(reference_transcript));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(transcript));
+            string_print(S8("error: the cross-compiler musl probe answered differently for {S8}; this is an ABI failure\n"),
+                         abi_directions[index].name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("MUSL_ABI direction={S8} link_us={u64} bytes={u64} status=pass\n"), abi_directions[index].name, link_us, transcript.length);
+    }
+
+    // libc-test, when a checkout was given. Everything above is the archive
+    // this stage links against, so it runs last.
+    bool libc_test_ran = false;
+    if (options.libc_test_directory.length)
+    {
+        if (!clang_startup_object.length)
+        {
+            string_print(S8("error: test_musl needs the Clang-built crt1.o to run libc-test and did not build one\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 thread_pointer_fixture = S8("tests/basic_musl_thread_pointer.c");
+        if (!path_exists(arena, thread_pointer_fixture))
+        {
+            string_print(S8("error: musl compatibility fixture is missing: {S8}\n"), thread_pointer_fixture);
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 libc_test_directory = path_join(arena, output_directory, S8("libc-test"));
+        make_directory_recursive(arena, libc_test_directory);
+        LibcTestBuild build = {
+            .musl_root = source_directory,
+            .musl_object_directory = object_directory,
+            .root = os_path_absolute(arena, options.libc_test_directory, true),
+            .generated_directory = path_join(arena, libc_test_directory, S8("common")),
+            .clang = clang,
+            .ide = ide,
+            .linker = linker,
+            .ar = ar,
+            .clang_startup_object = clang_startup_object,
+            // Each side links the crt1.o its own compiler produced. If Buster
+            // did not produce one the reference's copy stands in on both sides,
+            // which keeps the two comparing the same program and is reported
+            // on the LIBCTEST_MANIFEST line rather than left to be inferred.
+            .buster_startup_object = buster_startup_object.length ? buster_startup_object : clang_startup_object,
+            .startup_shared = !buster_startup_object.length,
+            .clang_thread_pointer_object = path_join(arena, libc_test_directory, S8("thread-pointer-clang.o")),
+            .buster_thread_pointer_object = path_join(arena, libc_test_directory, S8("thread-pointer-buster.o")),
+            .clang_archive = clang_archive,
+            .buster_archive = buster_archive,
+            .clang_support_archive = path_join(arena, libc_test_directory, S8("libtest-clang.a")),
+            .buster_support_archive = path_join(arena, libc_test_directory, S8("libtest-buster.a")),
+        };
+        String8 thread_pointer_diagnostic = {0};
+        if (!musl_compile_clang(arena, clang, source_directory, object_directory, thread_pointer_fixture, build.clang_thread_pointer_object,
+                                (String8){0}) ||
+            !musl_compile_buster(arena, ide, source_directory, object_directory, thread_pointer_fixture, build.buster_thread_pointer_object,
+                                 (String8){0}, S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), 0, &thread_pointer_diagnostic))
+        {
+            string_print(S8("error: the musl thread-pointer replacement did not compile: {S8}\n"), thread_pointer_diagnostic);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!libc_test_stage(arena, &build, libc_test_directory))
+        {
+            return PROCESS_RESULT_FAILED;
+        }
+        libc_test_ran = true;
     }
 
     string_print(S8("MUSL_SUMMARY tag={S8} commit={S8} units={u64} compiled={u64} unsupported={u64} assembly_only={u64} architecture_assembly={u64} "
-                    "allocators={u64}\n"),
+                    "allocators={u64} libc_test={S8}\n"),
                  S8(MUSL_COMPATIBILITY_TAG), S8(MUSL_COMPATIBILITY_COMMIT), manifest.unit_count, compiled, manifest.unit_count - compiled,
-                 manifest.assembly_only_count, manifest.architecture_assembly_count, BUSTER_ARRAY_LENGTH(allocators));
+                 manifest.assembly_only_count, manifest.architecture_assembly_count, BUSTER_ARRAY_LENGTH(allocators),
+                 libc_test_ran ? S8("run") : S8("skipped"));
     return PROCESS_RESULT_SUCCESS;
 }
 
@@ -30459,6 +31566,13 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TEST_MUSL && !test_musl_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
             {
                 test_musl_options.source_directory = argument;
+                argument_i += 1;
+            }
+            // The second positional path is the optional libc-test checkout.
+            else if (command == BUILD_COMMAND_TEST_MUSL && !test_musl_options.libc_test_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_musl_options.libc_test_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))

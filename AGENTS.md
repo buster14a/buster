@@ -758,13 +758,17 @@ checkout; upstream sources are never copied into or patched in this repository:
 ```sh
 ./build.sh build --config Release -t ide
 ./build/build test_musl --config Release /path/to/musl-v1.2.6
+./build/build test_musl --config Release /path/to/musl-v1.2.6 /path/to/libc-test
 ```
 
 The checkout must be tag `v1.2.6` at commit
 `9fa28ece75d8a2191de7c5bb53bed224c5947417` with no tracked or untracked
-changes. This is the stretch compatibility target: musl is a whole libc, so
-the harness is written to make partial coverage legible and gated rather than
-to claim a pass it has not earned.
+changes. The optional second path is a pristine checkout of libc-test, musl's
+own test suite, at commit `68edb8bd73dab8147ee54c8bec638f4d2b3cff37`; without
+it the run stops after the freestanding probe and the ABI links. This is the
+stretch compatibility target: musl is a whole libc, so the harness is written
+to make partial coverage legible and gated rather than to claim a pass it has
+not earned.
 
 The harness first runs musl's own three header recipes with `sed`
 (`bits/alltypes.h` through `tools/mkalltypes.sed`, `bits/syscall.h`, and
@@ -822,9 +826,17 @@ regression therefore both move a number that has to be updated on purpose.
 
 Both object sets are archived with `ar` through a response file — a musl
 archive is a thousand members, which is past what a Windows command line takes
-— and the freestanding probe is then linked against each. The `crt/` units are
-the one exclusion from both archives, for the reason in the startup-object note
-below. The probe,
+— under musl's own `AOBJS` rule, which puts the `src/` units in `libc.a` and
+nothing else. The `crt/` units are excluded for the reason in the
+startup-object note below, and `ldso/` because a static libc that carries the
+dynamic loader hands the linker a `dlopen` that wants `setjmp`, which is
+architecture assembly this build does not have; both are still built, and
+`MUSL_ARCHIVE` counts them as `startup_emitted`/`startup_absent` and
+`loader_excluded`. That is what makes the archive linkable by an ordinary
+program rather than only by a program that defines its own entry.
+`MUSL_ARCHIVE` also carries the wall time both archives took. The freestanding
+probe is then linked against each, and every link in the harness reports its
+own `link_us`. The probe,
 `tests/basic_musl_freestanding.c`, is a project-owned program with no include
 of any kind: it is compiled `-nostdinc` against musl's own headers, entered at
 `_start`, and linked with `ld -static` and nothing else, so no compiler driver,
@@ -840,6 +852,27 @@ answer. The reference is compiled with `-mstackrealign`: at process entry the
 stack pointer carries the alignment the kernel leaves rather than the one a
 `call` leaves, and Clang's aligned vector spills need the realignment while
 Buster's emitters, which spill through plain moves, do not.
+
+Two more links follow, and they are the ABI report. Two separately compiled
+object sets calling each other across musl's own declarations is a direct test
+of the calling convention, the struct layouts and the return shapes the two
+compilers agree on, and a disagreement surfaces as a wrong answer rather than
+as a link error. The first link is the Clang-compiled probe against the
+Buster-built archive: a Clang caller into Buster-built musl. The second is that
+same probe against a mixed archive, built by taking Buster's object for every
+second unit and Clang's for the rest, so musl's own internal calls — `strstr`
+into `memchr`, the character tables, the search routines — cross the boundary
+in both directions inside one program. Both must reproduce the reference
+transcript, and each prints a `MUSL_ABI` line.
+
+The Buster-compiled probe is deliberately not linked against the Clang
+archive. That pair does crash, and the reason is not an ABI disagreement: the
+probe is entered at `_start` with the alignment the kernel leaves rather than
+the one a `call` leaves, which is why the reference is compiled with
+`-mstackrealign`, and the Clang probe built without that flag crashes against
+Clang's own archive in exactly the same way. The Buster driver has no such
+flag, so that direction would measure the probe's entry rather than the two
+compilers, and the mixed archive covers what it was meant to cover.
 
 What Buster cannot yet build is reported rather than worked around, in three
 groups. Seven translation units are `assembly-only`: their `.c` file is empty
@@ -909,16 +942,179 @@ musl's allocator takes a lock through the thread pointer, which a program
 entered at `_start` with no startup object never established, and the
 Clang-built archive faults in the same place.
 
-For scale, one recorded run left 26 MB behind: the
-Buster pass spent 53,8 seconds of child time over 1349 units — 40 ms each — for
-102,9 MB of preprocessed source, 3.787.855 lines and 4.288.079 tokens, and
-produced 1190 archive members in 4.666.686 bytes against Clang's 1346 in
-2.652.374. Both counts are the manifest minus its `crt/` units, which the
-startup-object note above keeps out of the archives. The Buster archive is the larger of the two despite holding fewer
-members, which is what an emitter that spills through the frame rather than
-through registers looks like at this scale. Generated headers, objects, archives, metrics and logs remain under
+### libc-test
+
+Given a second path, the harness then runs libc-test, musl's own test suite.
+It carries no tags and no version file, so the pin is a bare commit on
+upstream's master, `68edb8bd73dab8147ee54c8bec638f4d2b3cff37`, verified
+pristine the same way musl's checkout is. Upstream's canonical remote is
+`https://git.musl-libc.org/cgit/libc-test`; `https://repo.or.cz/libc-test.git`
+is the same history and is what a clone usually resolves to. Upstream's own
+makefile builds in-tree, which is exactly what the pin exists to prevent, so
+the harness drives the sources from where they sit and writes every artefact
+into `libc-test/` under the run directory.
+
+One generated header stands between the suite and musl: `src/common/options.h`,
+which upstream derives by preprocessing `options.h.in` against the libc under
+test and turning what survives into defines. The harness runs that recipe --
+the four `sed` expressions written at the top of `options.h.in` itself, which
+upstream's makefile spells again in awk -- and both sides compile against the
+one copy. The reference preprocessor generates it, and that is not a statement
+about which compiler is trusted: `ide cc -E` emits a token stream with the line
+structure removed, the whole file coming back as one line of space-separated
+tokens, and this recipe like musl's own three is line-oriented. The header
+describes the musl under test rather than either compiler, so one copy is also
+the right shape for a comparison.
+
+One flag set again drives both compilers, and it is upstream's own
+`config.mak.def` `CFLAGS` minus what only one of them takes, plus the
+`-nostdinc` and musl include set that makes a test see the musl under test
+instead of the host libc: `-std=c99 -nostdinc -fno-builtin
+-fno-strict-aliasing -fno-stack-protector -D_POSIX_C_SOURCE=200809L -O2 -g0`,
+with `-D_XOPEN_SOURCE=700` added for `src/api` because that is what upstream's
+own api rule adds. `-pedantic-errors` and `-frounding-math` are dropped
+because Buster rejects both, which is the same `tryflag` reasoning musl's flag
+set is built on; the warning flags and `-g` change nothing about what is
+compiled; `-D_FILE_OFFSET_BITS=64` is marked glibc-specific by upstream and
+musl has one `off_t`; and the `-lpthread -lm -lrt` link libraries have no
+meaning where there is one archive and no compiler driver. Clang alone gets
+`-Werror=implicit-function-declaration`, which is upstream's and is not a
+divergence: Buster rejects an undeclared callee outright, so the flag is what
+makes the two compilers agree about a missing declaration -- which is most of
+what the api subset is testing.
+
+Two objects sit on every link line that neither archive supplies, and each
+side uses its own. `crt1.o` is musl's startup object, which is not an archive
+member on either side — a program links it explicitly and `libc.a` separately —
+so a libc-test program is one compiler's code from `_start` down. If Buster
+ever stops producing it the reference's copy stands in on both sides, and the
+`LIBCTEST_MANIFEST` line says which of the two arrangements is in force rather
+than leaving it to be inferred. `tests/basic_musl_thread_pointer.c` is
+project-owned and is compiled by each side with that side's compiler. It is one instruction sequence:
+`__set_thread_area` is x86-64 assembly in musl, the harness substitutes the
+portable C sibling for every architecture-assembly unit, and that sibling is
+written for architectures with a `SYS_set_thread_area` system call -- x86-64
+has none, so it returns `-ENOSYS`, `__init_tp` fails and `__init_tls` crashes
+the process before `main` in *both* archives. The replacement is the
+`arch_prctl(ARCH_SET_FS)` musl's own assembly performs. It goes ahead of the
+archive on the link line, which is what keeps musl's portable member from
+being pulled in beside it: an archive member is only extracted for a symbol
+that is still undefined.
+
+Each unit is classified rather than merely passed or failed, because most of
+the suite cannot be reached yet and a single total would hide which wall it is
+behind. The classification is derived from the checkout and from what the two
+sides do, not written down:
+
+- `excluded-dynamic` — upstream ships a sibling `.mk`, which means the unit
+  wants shared objects, `-rdynamic`, or an explicit do-not-run rule. Nothing
+  here links dynamically.
+- `excluded-reference` — the Clang-built musl of this same configuration
+  cannot compile, link or run it green. That is a property of the
+  configuration: musl's x86-64 assembly is in neither archive, so `fenv` is a
+  stub and every `src/math` unit that checks a floating-point exception flag
+  fails on both sides, and `clone` is absent so the thread tests hang. It says
+  nothing about Buster, so it is held out of the comparison.
+- `blocked-compile` — Buster cannot compile the test itself.
+- `blocked-link` — Buster compiled it and the Buster-built archive cannot
+  satisfy the link. Every undefined symbol is recorded, not just the first:
+  the link stops at the startup object every time, so a ranking built from
+  first symbols would name one symbol and hide the rest.
+- `fail` — it ran, and its transcript or exit status differs from the Clang
+  reference. This is the only state that is a defect in generated code.
+- `pass` — it ran and matched, or, in `src/api`, it compiled.
+
+Buster compiles every unit first and unconditionally, before the reference
+decides reach, because its diagnostic is inventory in its own right — the
+`long double` test tables under `src/math` are a compile gap whether or not
+the reference could have run them — and `buster_compile_failed` on each
+`LIBCTEST_SUBSET` line reports that count independently of the state.
+
+The four subsets are reported separately rather than as one total.
+`src/api` is compile-only by upstream's own design: its units are declaration
+conformance checks with no runtime, and upstream links a single `main.exe`
+from all of them, so there a successful compile is the pass. `src/functional`,
+`src/math` and `src/regression` are compiled, linked and run, and a run is
+green when the program exits zero and prints nothing, which is the protocol
+upstream writes down in its README. Upstream's `src/common` becomes a support
+archive on each side, minus `runtest.c`, which is the process supervisor the
+harness performs itself; upstream gives each test five seconds there, and the
+harness gives it ten so a loaded runner cannot turn a slow test into a
+classified failure. `src/musl` is not a subset: its one unit tests musl
+internals through a header this build does not publish.
+
+The gate is the passing count together with a hash of the newline-joined
+`state subset/unit` lines of everything that did not pass, taken in manifest
+order — the four subsets in the order above, each sorted by unit name —
+pinned as `LIBC_TEST_EXPECTED_PASSING` and `LIBC_TEST_EXPECTED_STATE_HASH`
+in `build.c` and printed on the `LIBCTEST_INVENTORY` line, which is what a
+deliberate rebaseline needs. The hash covers the excluded states as well as
+the blocked ones, so a change in the reference's reach is a deliberate edit
+too.
+
+Every unit that is not passing prints a `LIBCTEST_UNIT` line carrying its
+state and the reason — a compiler diagnostic, the count and the first of the
+unresolved symbols, or the reference's own reason for being out of reach — and
+each subset then prints one `LIBCTEST_SUBSET` line with its counts and its
+compile, link and run time. `LIBCTEST_SUPPORT` reports upstream's support
+library per side, including its archive time, and any support unit that did
+not compile is named on a `LIBCTEST_SUPPORT_UNSUPPORTED` line: `mtest.c` is
+one today, for a `long double` helper, which is why `src/math` cannot link
+even where its tests compile.
+
+`LIBCTEST_BLOCKER` is the stage's most useful output while most of the suite
+is out of reach: the symbols the Buster-built archive could not supply, ranked
+by how many tests wanted each. It is the work list in the order that unblocks
+the most tests, and it is why this stage grows by itself as the compiler
+improves rather than needing to be extended by hand.
+
+Today 76 of 424 units pass, and all 76 are `src/api`: 76 of its 79 units
+compile against musl's headers under both compilers, two want `_Complex` and
+one — `api/unistd` — is held out because musl defines neither
+`_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
+too. Nothing in the three runtime subsets links: `src/functional` is 7
+dynamic, 15 excluded-reference, 2 blocked-compile and 53 blocked-link;
+`src/math` is 144 excluded-reference, 21 blocked-compile and 34 blocked-link;
+`src/regression` is 2 dynamic, 12 excluded-reference, 1 blocked-compile and 54
+blocked-link.
+
+The ranked blockers are `__libc_start_main` (141 tests), `vfprintf` (140) and
+`__syscall_cp` (107), then a long tail led by `strerror`, `__stdout_FILE` and
+`__procfdname`. The weak-alias work moved the list without moving the count:
+`___errno_location`, `malloc`, `munmap` and `mprotect` were four of the top
+eight and are all resolved now, and what remains is three compile failures the
+inventory already names. `src/env/__libc_start_main.c` stops on `_init`, which
+`weak_alias` defines in that same file and the frontend cannot then bind as a
+call; `src/stdio/vfprintf.c` on wide floating-point `va_arg`;
+`src/thread/__syscall_cp.c` on a conflicting declaration. Any one of the three
+is worth more to this stage than everything below it: the first alone gates
+141 of the 424.
+
+For scale, one recorded run without libc-test left 26 MB behind: the
+Buster pass spent 55,3 seconds of child time over 1349 units — 41 ms each — for
+106,3 MB of preprocessed source, 3.910.724 lines and 4.544.856 tokens, and
+produced 1244 archive members in 5.087.502 bytes against Clang's 1344 in
+2.600.782. Both counts are the manifest minus its `crt/` and `ldso/` units,
+which the startup-object and archive notes above keep out. The Buster archive
+is the larger of the two despite holding fewer members, which is what an
+emitter that spills through the frame rather than through registers looks like
+at this scale. The two archives take 0,65 seconds to write and each probe link
+about 4 ms.
+
+Adding libc-test takes the run to 186 seconds wall and 76 MB. The suite's 424
+units cost 29,8 seconds of compiler time across both compilers for 30,6 MB of
+preprocessed source, 939.306 lines and 2.938.231 tokens; the links cost 2,8
+seconds and the runs 62,7. The runs dominate, and almost all of that is the
+reference's own structural hangs — the thread tests wait out the ten-second
+deadline because `clone` is architecture assembly and is in neither archive —
+so that number moves with the deadline rather than with the compiler.
+
+Generated headers, objects, archives, metrics and logs remain under
 `build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the
-directories of runs you are done with.
+directories of runs you are done with. Do not run `./build.sh generate` while a
+harness run is in flight: it recreates `build/` from scratch, which takes the
+in-progress run directory and the `ide` the run is invoking with it, and the
+run carries on reporting the missing output files as compiler failures.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
