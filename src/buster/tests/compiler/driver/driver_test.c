@@ -2427,6 +2427,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_case_range_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A plain case label is folded in its own type and used to reach dispatch
+    // with those bits: `case -1` on a `long long` switch was the immediate
+    // 0xffffffff, which matches nothing and collides with `case 4294967295`.
+    // Only running the program says whether the dispatch immediates and the
+    // controlling value speak the same type, so the fixture returns a
+    // per-shape code rather than being inspected as IR.
+    String8 c_switch_case_label_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-switch-case-label"),
+#if BUSTER_WINDOWS
+                                                                              S8(".exe"));
+#else
+                                                                              S8(""));
+#endif
+    String8 c_switch_case_label_command_line[] = {
+        S8("-std=gnu23"),
+        S8("-o"),
+        c_switch_case_label_executable_path,
+        S8("tests/basic_c_switch_case_label.c"),
+    };
+    CompilerDriverResult c_switch_case_label = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_switch_case_label_command_line)));
+    BUSTER_TEST(arguments, c_switch_case_label.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_switch_case_label.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_switch_case_label_run_arguments[] = {
+            c_switch_case_label_executable_path,
+        };
+        ProcessSpawnResult c_switch_case_label_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_switch_case_label_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_switch_case_label_spawn.handle != 0);
+        if (c_switch_case_label_spawn.handle)
+        {
+            ProcessWaitResult c_switch_case_label_wait = os_process_wait_sync(arguments->arena, c_switch_case_label_spawn);
+            BUSTER_TEST(arguments, c_switch_case_label_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // Compiling the wide-argument unit for every target only says the code
     // buffer held it. Running it on the host says the caller and the callee
     // agree on where each of those arguments went.

@@ -16940,6 +16940,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
                     {
+                        // A case immediate carries the switched type's own
+                        // bits while a register may hold that value extended
+                        // past them, so a 32-bit or narrower type is compared
+                        // at 32 bits -- the same rule the x86-64 branch above
+                        // and the AArch64 selector both apply.
+                        bool compare_words = false;
+                        if (instruction->operand_count && instruction->operands[0].value < function->value_count)
+                        {
+                            IrType* switch_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+                            compare_words = switch_type && (switch_type->kind == IR_TYPE_BOOLEAN ||
+                                                            (switch_type->kind == IR_TYPE_INTEGER && switch_type->bit_width <= 32));
+                        }
                         c_a64_load(&emitter, 9, instruction->operands[0]);
                         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
                         {
@@ -16948,7 +16960,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, 0xf2a0000a | ((u32)((immediate >> 16) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xf2c0000a | ((u32)((immediate >> 32) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xf2e0000a | ((u32)((immediate >> 48) & 0xffff) << 5));
-                            codegen_emit_u32(&buffer, 0xeb0a013f);
+                            codegen_emit_u32(&buffer, compare_words ? 0x6b0a013f : 0xeb0a013f);
                             codegen_emit_u32(&buffer, 0x54000041);
                             if (!c_branch_patch_push(&emitter, (CCanonicalBranchPatch){
                                 .target = instruction->targets[case_index],

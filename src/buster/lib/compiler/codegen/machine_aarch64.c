@@ -3069,6 +3069,24 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
     if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
+        // A case immediate carries the switched type's own bits, while a
+        // register may hold that value extended past them -- the cast a
+        // narrow switch takes to its promoted type emits `sxtb x, w`, which
+        // sign-extends to 64.  Comparing a 32-bit type at 64 bits therefore
+        // measures the extension rather than the value and `case -1` never
+        // matches.  Compare at the type's width, which is what the x86-64
+        // selector does with the same field.
+        u16 compare_width = 64;
+        if (instruction->operands[0].value < selector->function->value_count)
+        {
+            IrType* condition_type = ir_type_from_id(&selector->program->types,
+                                                      selector->function->values[instruction->operands[0].value].canonical_type);
+            if (condition_type && (condition_type->kind == IR_TYPE_BOOLEAN ||
+                                   (condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width <= 32)))
+            {
+                compare_width = 32;
+            }
+        }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
@@ -3076,6 +3094,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
             *case_row = (MachineSwitchCase){
                 .value = instruction->immediates[case_index],
                 .target_block = instruction->targets[case_index].value,
+                .compare_width = compare_width,
             };
         }
         machine_a64_select_row(selector, (MachineInstruction){
@@ -6268,7 +6287,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 {
                     MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
                     machine_a64_emit_immediate(&encoder, MACHINE_A64_X17, case_row->value);
-                    machine_a64_emit(&encoder, 0xeb11001fu | (switch_condition << 5));
+                    // subs wzr/xzr, <condition>, w17/x17 -- the 32-bit form
+                    // when the switched type is 32 bits or narrower, so the
+                    // comparison ignores whatever the value's producer left
+                    // above the type's own width.
+                    u32 compare_word = (case_row->compare_width ? case_row->compare_width : 64) == 32 ? 0x6b11001fu : 0xeb11001fu;
+                    machine_a64_emit(&encoder, compare_word | (switch_condition << 5));
                     MachineA64BranchFixup* case_fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
                     *case_fixup = (MachineA64BranchFixup){
                         .patch_offset = encoder.count,

@@ -25198,102 +25198,95 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
-            if (has_range)
+            // C compares the controlling value and every case constant in the
+            // promoted type of the controlling expression, so the switched
+            // value is converted to it here and the labels are converted to it
+            // below.  Promoting the value rather than truncating the labels is
+            // what keeps a narrow switch reading its operand's sign: the
+            // targets hold a narrow value as its own bits, so `case -1` on a
+            // `signed char` switch has to meet a widened -1, and `case -1` on
+            // an `unsigned char` switch has to stay -1 and never reach 255.
+            IrTypeId promoted_type = c_ir_switch_promoted_type(builder, switched_type_id);
+            if (promoted_type.value != switched_type_id.value)
             {
-                IrTypeId promoted_type = c_ir_switch_promoted_type(builder, switched_type_id);
-                if (promoted_type.value == IR_ID_UNDERLYING_INVALID)
+                switched = c_ir_emit_cast(builder, switched, promoted_type, state->child_source);
+                if (switched.value == IR_ID_UNDERLYING_INVALID)
                 {
                     return false;
                 }
-                if (promoted_type.value != switched_type_id.value)
-                {
-                    switched = c_ir_emit_cast(builder, switched, promoted_type, state->child_source);
-                    if (switched.value == IR_ID_UNDERLYING_INVALID)
-                    {
-                        return false;
-                    }
-                    switched_type_id = promoted_type;
-                    switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
-                }
+                switched_type_id = promoted_type;
+                switched_type = ir_type_from_id(&builder->program->types, switched_type_id);
                 if (!switched_type)
                 {
                     return false;
                 }
-                u64 switched_mask = c_ir_integer_type_mask(switched_type);
-                for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
+            }
+            // Every case label is converted here, plain labels included.  A
+            // label is folded in the type it is spelled in, so `case -1` on a
+            // `long long` switch arrives as an `int` carrying 32 bits:
+            // dispatched unconverted it never matches the controlling value,
+            // and it is indistinguishable from `case 4294967295LL` in the
+            // overlap check below.  The conversion is what makes the dispatch
+            // immediates and that check speak one type.
+            u64 switched_mask = c_ir_integer_type_mask(switched_type);
+            for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
+            {
+                CIrSwitchCase* current = switch_cases + case_index;
+                if (current->is_default)
                 {
-                    CIrSwitchCase* current = switch_cases + case_index;
-                    if (current->is_default)
-                    {
-                        continue;
-                    }
-                    CIrConstantValue converted = {0};
-                    if (!c_ir_constant_cast(builder, current->low_constant, switched_type_id, &converted) ||
-                        converted.kind != C_IR_CONSTANT_INTEGER)
+                    continue;
+                }
+                CIrConstantValue converted = {0};
+                if (!c_ir_constant_cast(builder, current->low_constant, switched_type_id, &converted) || converted.kind != C_IR_CONSTANT_INTEGER)
+                {
+                    builder->failure_message = S8("case label is not representable as the switch controlling type");
+                    builder->failure_token_index = current->label_start;
+                    return false;
+                }
+                current->value = converted.integer & switched_mask;
+                current->high_value = current->value;
+                if (current->is_range)
+                {
+                    if (!c_ir_constant_cast(builder, current->high_constant, switched_type_id, &converted) || converted.kind != C_IR_CONSTANT_INTEGER)
                     {
                         builder->failure_message = S8("case label is not representable as the switch controlling type");
                         builder->failure_token_index = current->label_start;
                         return false;
                     }
-                    current->value = converted.integer & switched_mask;
-                    current->high_value = current->value;
-                    if (current->is_range)
+                    current->high_value = converted.integer & switched_mask;
+                    if (!c_ir_switch_integer_less_equal(switched_type, current->value, current->high_value))
                     {
-                        if (!c_ir_constant_cast(builder, current->high_constant, switched_type_id, &converted) ||
-                            converted.kind != C_IR_CONSTANT_INTEGER)
-                        {
-                            builder->failure_message = S8("case label is not representable as the switch controlling type");
-                            builder->failure_token_index = current->label_start;
-                            return false;
-                        }
-                        current->high_value = converted.integer & switched_mask;
-                        if (!c_ir_switch_integer_less_equal(switched_type, current->value, current->high_value))
-                        {
-                            builder->failure_message = S8("case range is not ordered after conversion to the switch type");
-                            builder->failure_token_index = current->label_start;
-                            return false;
-                        }
-                    }
-                }
-                for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
-                {
-                    CIrSwitchCase* current = switch_cases + current_index;
-                    if (current->is_default)
-                    {
-                        continue;
-                    }
-                    for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
-                    {
-                        CIrSwitchCase* previous = switch_cases + previous_index;
-                        if (previous->is_default)
-                        {
-                            continue;
-                        }
-                        bool overlaps = c_ir_switch_integer_less_equal(switched_type, current->value, previous->high_value) &&
-                                        c_ir_switch_integer_less_equal(switched_type, previous->value, current->high_value);
-                        if (overlaps)
-                        {
-                            builder->failure_message = S8("case label overlaps another case label");
-                            builder->failure_token_index = current->label_start;
-                            return false;
-                        }
+                        builder->failure_message = S8("case range is not ordered after conversion to the switch type");
+                        builder->failure_token_index = current->label_start;
+                        return false;
                     }
                 }
             }
-            else
+            // A plain label is the one-element range [value, value], so this
+            // one test also answers the duplicate-label question the non-range
+            // path used to answer on its own -- and it names the offending
+            // label instead of failing the whole body as unsupported.
+            for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
             {
-                for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
+                CIrSwitchCase* current = switch_cases + current_index;
+                if (current->is_default)
                 {
-                    if (switch_cases[current_index].is_default)
+                    continue;
+                }
+                for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
+                {
+                    CIrSwitchCase* previous = switch_cases + previous_index;
+                    if (previous->is_default)
                     {
                         continue;
                     }
-                    for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
+                    bool overlaps = c_ir_switch_integer_less_equal(switched_type, current->value, previous->high_value) &&
+                                    c_ir_switch_integer_less_equal(switched_type, previous->value, current->high_value);
+                    if (overlaps)
                     {
-                        if (!switch_cases[previous_index].is_default && switch_cases[previous_index].value == switch_cases[current_index].value)
-                        {
-                            return false;
-                        }
+                        builder->failure_message = S8("case label overlaps another case label");
+                        builder->failure_token_index = current->label_start;
+                        return false;
                     }
                 }
             }

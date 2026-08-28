@@ -6594,6 +6594,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int range_overlap(int value) { switch (value) { case 1 ... 3: return 0; case 3 ... 5: return 1; } return 2; }\n"),
                                        S8("in function 'range_overlap': case label overlaps another case label"));
+    // A plain case label is folded in the type it is spelled in, so the
+    // lowering has to convert it to the promoted type of the controlling
+    // expression before it becomes a dispatch immediate.  `case -1` on a
+    // `long long` switch used to arrive as the `int` bits 0xffffffff: it
+    // matched nothing and was indistinguishable from `case 4294967295`.
+    // Promotion, not truncation to the switched value's own type, is what the
+    // narrow function pins -- an `unsigned char` switch promotes to `int`, so
+    // -1 stays -1 there and never collapses onto 255.
+    CPreprocessResult case_label_tokens = c_preprocess(control_flow_temporary.arena,
+                                                       S8("long long wide_labels(long long value) {\n"
+                                                          "    switch (value) {\n"
+                                                          "    case -1: return 11;\n"
+                                                          "    case 4294967295LL: return 22;\n"
+                                                          "    default: return 33;\n"
+                                                          "    }\n"
+                                                          "}\n"
+                                                          "int narrow_labels(unsigned char value) {\n"
+                                                          "    switch (value) {\n"
+                                                          "    case -1: return 11;\n"
+                                                          "    case 255: return 22;\n"
+                                                          "    default: return 33;\n"
+                                                          "    }\n"
+                                                          "}\n"),
+                                                       (CPreprocessOptions){
+                                                           .target = target_native,
+                                                           .data_layout = target_data_layout(target_native),
+                                                           .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                       });
+    CParseResult case_label_parse = c_parse(control_flow_temporary.arena, case_label_tokens);
+    CIRLowerResult case_label_ir = c_lower_to_ir(control_flow_temporary.arena, S8("case-label.c"), case_label_tokens, case_label_parse, target_native);
+    BUSTER_TEST(arguments, case_label_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, case_label_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, case_label_ir.diagnostic_count == 0);
+    if (case_label_ir.program)
+    {
+        IrModule* case_label_module = &case_label_ir.program->modules[0];
+        u64 wide_immediates[2] = {0};
+        u64 narrow_immediates[2] = {0};
+        u32 wide_immediate_count = 0;
+        u32 narrow_immediate_count = 0;
+        for (u32 function_index = 0; function_index < case_label_module->function_count; function_index += 1)
+        {
+            IrFunction* function = case_label_module->functions + function_index;
+            bool is_wide = string_equal(function->name, S8("wide_labels"));
+            bool is_narrow = string_equal(function->name, S8("narrow_labels"));
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode != IR_OPCODE_SWITCH || instruction->immediate_count != 2)
+                {
+                    continue;
+                }
+                for (u32 immediate_index = 0; immediate_index < 2; immediate_index += 1)
+                {
+                    if (is_wide)
+                    {
+                        wide_immediates[immediate_index] = instruction->immediates[immediate_index];
+                    }
+                    else if (is_narrow)
+                    {
+                        narrow_immediates[immediate_index] = instruction->immediates[immediate_index];
+                    }
+                }
+                wide_immediate_count += is_wide ? 2 : 0;
+                narrow_immediate_count += is_narrow ? 2 : 0;
+            }
+        }
+        BUSTER_TEST(arguments, wide_immediate_count == 2);
+        BUSTER_TEST(arguments, narrow_immediate_count == 2);
+        BUSTER_TEST(arguments, wide_immediates[0] == UINT64_MAX);
+        BUSTER_TEST(arguments, wide_immediates[1] == 0xffffffffull);
+        BUSTER_TEST(arguments, narrow_immediates[0] == 0xffffffffull);
+        BUSTER_TEST(arguments, narrow_immediates[1] == 0xffull);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(case_label_ir.program, case_label_module).error == IR_VALIDATION_NONE);
+    }
+    // Two plain labels that collide are the same fault as two overlapping
+    // ranges, and are now reported as one rather than failing the whole body
+    // as an unsupported statement.
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int duplicate_plain(int value) { switch (value) { case 3: return 0; case 3: return 1; } return 2; }\n"),
+                                       S8("in function 'duplicate_plain': case label overlaps another case label"));
     c_test_auto_type_diagnostic(arguments, &result,
                                 S8("int strict_range(int value) { switch (value) { case 1 ... 2: return 0; } return 1; }\n"), C_PREPROCESS_DIALECT_C23,
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
