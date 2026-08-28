@@ -752,7 +752,109 @@ QuickJS does not depend on either: `__attribute__((packed))` and
 a packed layout still has its natural alignment and padding. QuickJS's packed
 structs each hold a single scalar, where the two layouts agree.
 
-`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`,
+The opt-in musl compatibility harness takes an external, pristine musl v1.2.6
+checkout; upstream sources are never copied into or patched in this repository:
+
+```sh
+./build.sh build --config Release -t ide
+./build/build test_musl --config Release /path/to/musl-v1.2.6
+```
+
+The checkout must be tag `v1.2.6` at commit
+`9fa28ece75d8a2191de7c5bb53bed224c5947417` with no tracked or untracked
+changes. This is the stretch compatibility target: musl is a whole libc, so
+the harness is written to make partial coverage legible and gated rather than
+to claim a pass it has not earned.
+
+The harness first runs musl's own three header recipes with `sed`
+(`bits/alltypes.h` through `tools/mkalltypes.sed`, `bits/syscall.h`, and
+`src/internal/version.h`), then enumerates the manifest from the checkout the
+way musl's makefile globs it — every `.c` under each immediate subdirectory of
+`src/`, plus `src/malloc/mallocng`, `crt/` and `ldso/` — rather than carrying a
+written-down source list, so a release that adds or removes a translation unit
+shows up as a manifest change instead of a silent omission. On x86-64 that is
+1349 C units.
+
+One flag set drives both compilers, and it is musl's own `CFLAGS_ALL` minus the
+flags musl's `configure` only offers a compiler that accepts them: `-std=c99
+-nostdinc -fno-builtin -fno-strict-aliasing -fno-stack-protector
+-D_XOPEN_SOURCE=700 -O2 -g0` plus musl's seven include paths.
+`-ffreestanding` is absent because musl's configure falls back to
+`-fno-builtin`, which is in the set; `-fexcess-precision=standard`,
+`-frounding-math`, `-ffunction-sections`, `-fdata-sections`,
+`-fomit-frame-pointer`, `-fno-unwind-tables`,
+`-fno-asynchronous-unwind-tables` and `-Wa,--noexecstack` are `tryflag`-only,
+so a compiler that rejects them gets a build without them, which is the shape
+here. `-fno-stack-protector` is on both sides because Buster emits no canary
+and the reference build must not either: its canary load reads the thread
+pointer, which a program with no thread-local storage does not have.
+
+The Clang reference build runs first and every unit must compile — a musl unit
+Clang cannot build under this flag set is a broken workspace, not a Buster
+defect, and finding that out before a thousand Buster invocations keeps the two
+apart. Buster then compiles the same manifest under FAST, and every unit that
+fails is printed as a `MUSL_UNSUPPORTED` line carrying the first line of its
+diagnostic. That list is the inventory: it names every component the archive
+below is missing and why.
+
+The gate is the compiled-unit count together with a hash of the newline-joined
+sorted failing paths. The count alone would accept a change that fixed one unit
+and broke another, so both are pinned as `MUSL_EXPECTED_COMPILED_UNITS` and
+`MUSL_EXPECTED_FAILURE_HASH` in `build.c` and both are printed on the
+`MUSL_INVENTORY` line, which is what a deliberate rebaseline needs. A fix and a
+regression therefore both move a number that has to be updated on purpose.
+
+Both object sets are archived with `ar` through a response file — a musl
+archive is a thousand members, which is past what a Windows command line takes
+— and the freestanding probe is then linked against each. The probe,
+`tests/basic_musl_freestanding.c`, is a project-owned program with no include
+of any kind: it is compiled `-nostdinc` against musl's own headers, entered at
+`_start`, and linked with `ld -static` and nothing else, so no compiler driver,
+no startup file and no host libc are on the link line and everything it
+resolves comes out of the musl archive. It exercises the string, memory,
+search and character routines and writes a transcript through raw `write` and
+`exit` system calls; the Clang-built and Buster-built transcripts must be
+identical byte for byte, so a routine that computes a different answer fails
+the run where a link-and-exit check would not. The probe runs under FAST, NONE,
+MIR_STACK and QUALITY against the one Buster-built archive, because the four
+allocators have to produce the same answers rather than each produce some
+answer. The reference is compiled with `-mstackrealign`: at process entry the
+stack pointer carries the alignment the kernel leaves rather than the one a
+`call` leaves, and Clang's aligned vector spills need the realignment while
+Buster's emitters, which spill through plain moves, do not.
+
+What Buster cannot yet build is reported rather than worked around, in three
+groups. Seven translation units are `assembly-only`: their `.c` file is empty
+because x86-64 supplies the implementation in assembly (`crt/crti`,
+`crt/crtn`, `src/setjmp/setjmp`, `src/setjmp/longjmp`,
+`src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
+Thirty-two files are `architecture-assembly`: musl would prefer them over a
+portable C unit, and since the Buster driver takes no assembly input the
+harness compiles the portable C instead and lists each one. The remaining 302
+are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 73
+for `_Complex` arithmetic; 50 for the `"=m"` memory constraint musl's `a_cas`
+family of atomics is written against; 49 that reach code generation and fail
+there, mostly x87 `long double`; 40 for the `mov %fs:0,%0` thread-pointer read
+in `__get_tp`, which is what every unit touching `errno` or a lock goes
+through; 36 for a compound literal whose type name defines an anonymous
+aggregate, which is musl's `asuint`/`asdouble` type punning and therefore most
+of `src/math`; 21 global initializers; 4 startup objects; 2 conflicting
+declarations; and 27 singletons. musl's startup objects deserve their own note:
+`crt/crt1.c` and its siblings are written as module-level assembly, and
+Buster's global-assembly support covers `.byte`, `.p2align`, the section and
+symbol directives and a handful of instructions, which is not enough for a
+`crt_arch.h` that aligns the stack and calls into C. That path also
+misattributes its diagnostic to the next C function in the file, and it
+requires the symbol an assembly block defines to carry a C declaration as
+well.
+
+For scale, one recorded run took 86 seconds wall and left 23 MB behind: the
+Buster pass spent 52,2 seconds of child time over 1349 units — 39 ms each — for
+76,2 MB of preprocessed source, 2.807.812 lines and 2.978.238 tokens. Generated headers, objects, archives, metrics and logs remain under
+`build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the
+directories of runs you are done with.
+
+`build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,

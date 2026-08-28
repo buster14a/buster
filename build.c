@@ -85,6 +85,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_SBASE,
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
+    BUILD_COMMAND_TEST_MUSL,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -681,6 +682,29 @@ struct TestDoomOptions
 
 #define LZ4_COMPATIBILITY_TAG "v1.10.0"
 #define LZ4_COMPATIBILITY_COMMIT "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+
+typedef struct TestMuslOptions TestMuslOptions;
+struct TestMuslOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define MUSL_COMPATIBILITY_TAG "v1.2.6"
+#define MUSL_COMPATIBILITY_COMMIT "9fa28ece75d8a2191de7c5bb53bed224c5947417"
+#define MUSL_COMPATIBILITY_VERSION "1.2.6"
+// The one architecture the harness builds. musl selects its architecture
+// directory by name, and x86-64 is the only one whose whole portable manifest
+// this compiler is exercised against.
+#define MUSL_COMPATIBILITY_ARCHITECTURE "x86_64"
+// musl's MALLOC_DIR. The pinned release builds mallocng; src/malloc/oldmalloc
+// is present in the tree and is not part of the manifest.
+#define MUSL_COMPATIBILITY_ALLOCATOR "mallocng"
+// The register allocator the whole manifest is compiled under. The four
+// allocators are compared on the freestanding probe rather than on a thousand
+// units each, which is where a difference between them would show as a wrong
+// answer instead of as four identical object sets.
+#define MUSL_COMPATIBILITY_ALLOCATOR_MODE "fast"
 
 // QuickJS publishes its releases as dated tarballs rather than tags, so the
 // pin is the commit whose tree is the release and the VERSION file that
@@ -16044,6 +16068,936 @@ BUSTER_GLOBAL_LOCAL void test_quickjs_action_add(Arena* arena, TestQuickjsOption
     *run = (ProcessRun){.callback = test_quickjs_action, .callback_data = options_copy};
 }
 
+// The musl compatibility harness. It takes an external, pristine musl release
+// and treats it as a compiler, ABI, linker and freestanding-runtime target: it
+// generates musl's own configured headers, compiles the whole portable C
+// manifest with Buster and with Clang under one flag set, archives both, and
+// links and runs a project-owned freestanding program against the Buster-built
+// archive with no host libc on the link line.
+//
+// The manifest is enumerated from the checkout rather than written down here,
+// so a musl release that adds or removes a translation unit is a manifest
+// change the harness reports rather than a silent omission. What Buster cannot
+// yet compile is not hidden: the harness prints every failing unit with its
+// diagnostic and gates on the exact set, so a fix and a regression both move a
+// number that has to be updated deliberately.
+
+typedef struct MuslCommandResult MuslCommandResult;
+struct MuslCommandResult
+{
+    ProcessResult result;
+    u32 reserved;
+    String8 output;
+    String8 error;
+};
+
+typedef struct MuslUnit MuslUnit;
+struct MuslUnit
+{
+    // musl-relative path with no extension, for example "src/string/memcpy".
+    // It is the unit's identity in every report line and in the gate hash.
+    String8 relative;
+    String8 source;
+    String8 object;
+    String8 clang_object;
+    // First line of the Buster diagnostic; empty when the unit compiled.
+    String8 diagnostic;
+    u64 elapsed_us;
+    SelfHostSourceMetrics metrics;
+    bool compiled;
+    bool clang_compiled;
+    u8 reserved[6];
+};
+
+typedef struct MuslManifest MuslManifest;
+struct MuslManifest
+{
+    MuslUnit* units;
+    u64 unit_count;
+    // Translation units whose .c file is empty because the architecture
+    // supplies the implementation in assembly instead. musl replaces them
+    // wholesale on x86-64; they are reported and left out rather than compiled
+    // into empty objects that would define nothing.
+    String8* assembly_only;
+    u64 assembly_only_count;
+    // The architecture assembly musl would prefer over a portable C unit. The
+    // Buster driver takes no assembly input, so the harness compiles the
+    // portable C instead and reports each of these as an excluded component.
+    String8* architecture_assembly;
+    u64 architecture_assembly_count;
+};
+
+// The compiled-unit count and the identity of the failing set, both pinned. The
+// count alone would accept a change that fixed one unit and broke another, so
+// the hash of the newline-joined sorted failing paths is pinned beside it. Both
+// are printed on a mismatch along with the whole failing list, which is what a
+// deliberate rebaseline needs.
+#define MUSL_EXPECTED_COMPILED_UNITS 1047
+#define MUSL_EXPECTED_FAILURE_HASH 0xf0ea0e32346c2ed9ull
+
+BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    if (print)
+    {
+        command_print(arguments);
+    }
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: musl harness could not start a command\n"));
+        return (MuslCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+    MuslCommandResult result = {
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 musl_trim_ascii_space(String8 text)
+{
+    while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
+    {
+        text.length -= 1;
+    }
+    while (text.length && (u8)text.pointer[0] <= ' ')
+    {
+        text = string_slice(text, 1, text.length);
+    }
+    return text;
+}
+
+BUSTER_GLOBAL_LOCAL String8 musl_first_line(String8 text)
+{
+    u64 end = 0;
+    while (end < text.length && text.pointer[end] != '\n' && text.pointer[end] != '\r')
+    {
+        end += 1;
+    }
+    return musl_trim_ascii_space(string_slice(text, 0, end));
+}
+
+// Byte order over the shorter length first, then length: the manifest and the
+// failing list are sorted so that the report and the gate hash do not depend on
+// the order a directory happens to be read in.
+BUSTER_GLOBAL_LOCAL bool musl_string_less(String8 left, String8 right)
+{
+    u64 shared = left.length < right.length ? left.length : right.length;
+    for (u64 index = 0; index < shared; index += 1)
+    {
+        if (left.pointer[index] != right.pointer[index])
+        {
+            return (u8)left.pointer[index] < (u8)right.pointer[index];
+        }
+    }
+    return left.length < right.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_musl requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    MuslCommandResult head = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true, false);
+    String8 commit = musl_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(MUSL_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_musl requires pristine musl tag {S8} commit {S8}; found {S8}\n"), S8(MUSL_COMPATIBILITY_TAG),
+                     S8(MUSL_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 tag_arguments[] = {git, S8("describe"), S8("--tags"), S8("--exact-match"), S8("HEAD")};
+    MuslCommandResult tag = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tag_arguments), source_directory, true, false);
+    String8 tag_name = musl_trim_ascii_space(tag.output);
+    if (tag.result != PROCESS_RESULT_SUCCESS || !string_equal(tag_name, S8(MUSL_COMPATIBILITY_TAG)))
+    {
+        string_print(S8("error: test_musl requires musl tag {S8}; found {S8}\n"), S8(MUSL_COMPATIBILITY_TAG), tag_name);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    MuslCommandResult status = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true, false);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_musl checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("MUSL_SOURCE tag={S8} commit={S8} pristine=1 path={S8}\n"), tag_name, commit, source_directory);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 musl_ide_path(Arena* arena, String8 config)
+{
+    String8 configs[] = {config, S8("Release"), S8("Debug")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
+    {
+        if (configs[index].length)
+        {
+            String8 candidate = path_join(arena, path_join(arena, S8("build"), configs[index]), S8("ide"));
+            if (path_exists(arena, candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+    String8 fallback = S8("build/ide");
+    return path_exists(arena, fallback) ? fallback : (String8){0};
+}
+
+typedef struct MuslDirectoryEntry MuslDirectoryEntry;
+struct MuslDirectoryEntry
+{
+    String8 name;
+    bool is_directory;
+    u8 reserved[7];
+};
+
+// One directory level, names only. A symbolic link is refused rather than
+// followed: the manifest has to describe the pinned checkout and nothing a link
+// might point at outside it.
+BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, MuslDirectoryEntry** entries_out, u64* count_out)
+{
+    u64 capacity = 512;
+    MuslDirectoryEntry* entries = arena_allocate(arena, MuslDirectoryEntry, capacity);
+    u64 count = 0;
+    bool result = true;
+#if BUSTER_WINDOWS
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    String8 pattern = path_join(temporary.arena, directory, S8("*"));
+    String16 pattern_w = string16_from_string8(temporary.arena, pattern, true);
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        result = false;
+    }
+    else
+    {
+        do
+        {
+            String8 name =
+                string8_from_string16(arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
+            if (string_equal(name, S8(".")) || string_equal(name, S8("..")) || count >= capacity)
+            {
+                continue;
+            }
+            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            {
+                result = false;
+                break;
+            }
+            entries[count++] = (MuslDirectoryEntry){
+                .name = name,
+                .is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+            };
+        } while (FindNextFileW(find, &find_data));
+        FindClose(find);
+    }
+    scratch_end(temporary);
+#else
+    String8 directory_z = string_duplicate_arena(arena, directory, true);
+    DIR* handle = opendir((const char*)directory_z.pointer);
+    if (!handle)
+    {
+        result = false;
+    }
+    else
+    {
+        struct dirent* entry = 0;
+        while ((entry = readdir(handle)) != 0 && count < capacity)
+        {
+            String8 name = string_from_pointer((char8*)entry->d_name);
+            if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
+            {
+                continue;
+            }
+            String8 full = path_join(arena, directory, name);
+            struct stat status;
+            if (lstat((const char*)full.pointer, &status) != 0 || S_ISLNK(status.st_mode))
+            {
+                result = false;
+                break;
+            }
+            entries[count++] = (MuslDirectoryEntry){
+                .name = string_duplicate_arena(arena, name, true),
+                .is_directory = S_ISDIR(status.st_mode) != 0,
+            };
+        }
+        closedir(handle);
+    }
+#endif
+    *entries_out = entries;
+    *count_out = count;
+    return result;
+}
+
+typedef struct MuslManifestBuilder MuslManifestBuilder;
+struct MuslManifestBuilder
+{
+    Arena* arena;
+    String8 root;
+    String8 architecture_directory;
+    String8* base;
+    u64 base_count;
+    String8* architecture_assembly;
+    u64 architecture_assembly_count;
+    u64 capacity;
+    bool failed;
+    u8 reserved[7];
+};
+
+// Every `.c` in one directory, and every `.s`/`.S` in its architecture
+// subdirectory. This is musl's own BASE_GLOBS/ARCH_GLOBS pair for a single
+// source directory, with the replacement rule deliberately not applied: musl
+// would drop a portable unit in favour of the architecture assembly, and this
+// harness keeps the portable unit because the driver cannot assemble.
+BUSTER_GLOBAL_LOCAL void musl_collect_directory(MuslManifestBuilder* builder, String8 relative_directory)
+{
+    MuslDirectoryEntry* entries = 0;
+    u64 entry_count = 0;
+    String8 full = path_join(builder->arena, builder->root, relative_directory);
+    if (!musl_list_directory(builder->arena, full, &entries, &entry_count))
+    {
+        builder->failed = true;
+        return;
+    }
+    for (u64 index = 0; index < entry_count; index += 1)
+    {
+        String8 name = entries[index].name;
+        String8 relative = path_join(builder->arena, relative_directory, name);
+        if (entries[index].is_directory)
+        {
+            if (string_equal(name, builder->architecture_directory))
+            {
+                MuslDirectoryEntry* architecture_entries = 0;
+                u64 architecture_count = 0;
+                if (!musl_list_directory(builder->arena, path_join(builder->arena, full, name), &architecture_entries, &architecture_count))
+                {
+                    builder->failed = true;
+                    return;
+                }
+                for (u64 architecture_index = 0; architecture_index < architecture_count; architecture_index += 1)
+                {
+                    String8 architecture_name = architecture_entries[architecture_index].name;
+                    if (architecture_entries[architecture_index].is_directory ||
+                        (!string_ends_with_sequence(architecture_name, S8(".s")) && !string_ends_with_sequence(architecture_name, S8(".S"))))
+                    {
+                        continue;
+                    }
+                    if (builder->architecture_assembly_count >= builder->capacity)
+                    {
+                        builder->failed = true;
+                        return;
+                    }
+                    builder->architecture_assembly[builder->architecture_assembly_count++] =
+                        path_join(builder->arena, relative, architecture_name);
+                }
+            }
+            continue;
+        }
+        if (!string_ends_with_sequence(name, S8(".c")))
+        {
+            continue;
+        }
+        if (builder->base_count >= builder->capacity)
+        {
+            builder->failed = true;
+            return;
+        }
+        builder->base[builder->base_count++] = string_slice(relative, 0, relative.length - 2);
+    }
+}
+
+// musl's SRC_DIRS: every immediate subdirectory of src/, plus the one selected
+// allocator directory, plus crt/ and ldso/. src/malloc/oldmalloc is not in the
+// set because the pinned release builds mallocng.
+BUSTER_GLOBAL_LOCAL bool musl_collect_manifest(Arena* arena, String8 root, String8 output_directory, MuslManifest* manifest_out)
+{
+    MuslManifestBuilder builder = {
+        .arena = arena,
+        .root = root,
+        .architecture_directory = S8(MUSL_COMPATIBILITY_ARCHITECTURE),
+        .capacity = 4096,
+    };
+    builder.base = arena_allocate(arena, String8, builder.capacity);
+    builder.architecture_assembly = arena_allocate(arena, String8, builder.capacity);
+
+    MuslDirectoryEntry* source_entries = 0;
+    u64 source_entry_count = 0;
+    if (!musl_list_directory(arena, path_join(arena, root, S8("src")), &source_entries, &source_entry_count))
+    {
+        string_print(S8("error: test_musl could not read the src directory of the checkout\n"));
+        return false;
+    }
+    for (u64 index = 0; index < source_entry_count; index += 1)
+    {
+        if (source_entries[index].is_directory)
+        {
+            musl_collect_directory(&builder, path_join(arena, S8("src"), source_entries[index].name));
+        }
+    }
+    musl_collect_directory(&builder, S8("src/malloc/" MUSL_COMPATIBILITY_ALLOCATOR));
+    musl_collect_directory(&builder, S8("crt"));
+    musl_collect_directory(&builder, S8("ldso"));
+    if (builder.failed || !builder.base_count)
+    {
+        string_print(S8("error: test_musl could not enumerate the musl source manifest\n"));
+        return false;
+    }
+
+    for (u64 index = 1; index < builder.base_count; index += 1)
+    {
+        String8 value = builder.base[index];
+        u64 position = index;
+        while (position && musl_string_less(value, builder.base[position - 1]))
+        {
+            builder.base[position] = builder.base[position - 1];
+            position -= 1;
+        }
+        builder.base[position] = value;
+    }
+    for (u64 index = 1; index < builder.architecture_assembly_count; index += 1)
+    {
+        String8 value = builder.architecture_assembly[index];
+        u64 position = index;
+        while (position && musl_string_less(value, builder.architecture_assembly[position - 1]))
+        {
+            builder.architecture_assembly[position] = builder.architecture_assembly[position - 1];
+            position -= 1;
+        }
+        builder.architecture_assembly[position] = value;
+    }
+
+    MuslManifest manifest = {
+        .units = arena_allocate(arena, MuslUnit, builder.base_count),
+        .assembly_only = arena_allocate(arena, String8, builder.base_count),
+        .architecture_assembly = builder.architecture_assembly,
+        .architecture_assembly_count = builder.architecture_assembly_count,
+    };
+    String8 buster_root = path_join(arena, output_directory, S8("buster"));
+    String8 clang_root = path_join(arena, output_directory, S8("clang"));
+    for (u64 index = 0; index < builder.base_count; index += 1)
+    {
+        String8 relative = builder.base[index];
+        String8 source = string_format(arena, S8("{S8}.c"), path_join(arena, root, relative));
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        ByteSlice bytes = file_read(temporary.arena, string_duplicate_arena(temporary.arena, source, true), (FileReadOptions){0});
+        bool empty = !bytes.length;
+        scratch_end(temporary);
+        if (empty)
+        {
+            manifest.assembly_only[manifest.assembly_only_count++] = relative;
+            continue;
+        }
+        String8 object_directory = path_join(arena, buster_root, path_parent(arena, relative));
+        String8 clang_object_directory = path_join(arena, clang_root, path_parent(arena, relative));
+        make_directory_recursive(arena, object_directory);
+        make_directory_recursive(arena, clang_object_directory);
+        manifest.units[manifest.unit_count++] = (MuslUnit){
+            .relative = relative,
+            .source = source,
+            .object = string_format(arena, S8("{S8}.o"), path_join(arena, buster_root, relative)),
+            .clang_object = string_format(arena, S8("{S8}.o"), path_join(arena, clang_root, relative)),
+        };
+    }
+    *manifest_out = manifest;
+    return true;
+}
+
+// musl's Makefile builds three headers before anything compiles, and it builds
+// them with sed. Reproducing the recipes rather than reimplementing them is
+// what keeps this a compatibility target: a change in mkalltypes.sed is then a
+// change this harness picks up instead of one it silently diverges from.
+BUSTER_GLOBAL_LOCAL bool musl_generate_headers(Arena* arena, String8 root, String8 object_directory)
+{
+    String8 sed = executable_resolve_in_path(arena, S8("sed"));
+    if (!sed.length)
+    {
+        string_print(S8("error: test_musl requires sed in PATH to run musl's own header recipes\n"));
+        return false;
+    }
+    String8 include_bits = path_join(arena, object_directory, S8("include/bits"));
+    String8 internal = path_join(arena, object_directory, S8("src/internal"));
+    make_directory_recursive(arena, include_bits);
+    make_directory_recursive(arena, internal);
+
+    String8 alltypes_arguments[] = {
+        sed,
+        S8("-f"),
+        path_join(arena, root, S8("tools/mkalltypes.sed")),
+        path_join(arena, root, S8("arch/" MUSL_COMPATIBILITY_ARCHITECTURE "/bits/alltypes.h.in")),
+        path_join(arena, root, S8("include/alltypes.h.in")),
+    };
+    MuslCommandResult alltypes = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(alltypes_arguments), S8("."), true, true);
+    String8 alltypes_path = path_join(arena, include_bits, S8("alltypes.h"));
+    if (alltypes.result != PROCESS_RESULT_SUCCESS || !alltypes.output.length ||
+        !file_write(alltypes_path, BUSTER_SLICE_TO_BYTE_SLICE(alltypes.output)))
+    {
+        string_print(S8("error: test_musl could not generate {S8}\n"), alltypes_path);
+        return false;
+    }
+
+    String8 syscall_input = path_join(arena, root, S8("arch/" MUSL_COMPATIBILITY_ARCHITECTURE "/bits/syscall.h.in"));
+    String8 syscall_arguments[] = {sed, S8("-n"), S8("-e"), S8("s/__NR_/SYS_/p"), syscall_input};
+    MuslCommandResult syscall = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syscall_arguments), S8("."), true, true);
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    ByteSlice numbers = file_read(temporary.arena, string_duplicate_arena(temporary.arena, syscall_input, true), (FileReadOptions){0});
+    String8 syscall_path = path_join(arena, include_bits, S8("syscall.h"));
+    bool syscall_written = syscall.result == PROCESS_RESULT_SUCCESS && syscall.output.length && numbers.length;
+    if (syscall_written)
+    {
+        String8 parts[] = {
+            (String8){.pointer = (char8*)numbers.pointer, .length = numbers.length},
+            syscall.output,
+        };
+        String8 combined = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        syscall_written = file_write(syscall_path, BUSTER_SLICE_TO_BYTE_SLICE(combined));
+    }
+    scratch_end(temporary);
+    if (!syscall_written)
+    {
+        string_print(S8("error: test_musl could not generate {S8}\n"), syscall_path);
+        return false;
+    }
+
+    // musl's version.h comes from tools/version.sh, which reports the tag when
+    // the checkout is exactly on one. The checkout is verified to be on the
+    // pinned tag before this runs, so the VERSION file is that same string and
+    // the recipe needs no shell.
+    String8 version_path = path_join(arena, internal, S8("version.h"));
+    String8 version_text = string_format(arena, S8("#define VERSION \"{S8}\"\n"), S8(MUSL_COMPATIBILITY_VERSION));
+    if (!file_write(version_path, BUSTER_SLICE_TO_BYTE_SLICE(version_text)))
+    {
+        string_print(S8("error: test_musl could not generate {S8}\n"), version_path);
+        return false;
+    }
+    string_print(S8("MUSL_GENERATED alltypes={S8} syscall={S8} version={S8}\n"), alltypes_path, syscall_path, version_path);
+    return true;
+}
+
+// The one flag set both compilers are driven with. It is musl's own
+// CFLAGS_ALL for this architecture, minus the flags musl's configure only
+// offers a compiler that accepts them:
+//
+//   -ffreestanding             musl falls back to -fno-builtin, which is here.
+//   -fexcess-precision=standard, -frounding-math, -ffunction-sections,
+//   -fdata-sections, -fomit-frame-pointer, -fno-unwind-tables,
+//   -fno-asynchronous-unwind-tables, -Wa,--noexecstack
+//                              tryflag-only; a compiler that rejects them gets
+//                              a build without them, which is the shape here.
+//
+// -fno-stack-protector is added on both sides: Buster emits no canary, and the
+// reference build must not either, or its canary load would fault in a program
+// that has no thread pointer.
+typedef struct MuslCommonFlags MuslCommonFlags;
+struct MuslCommonFlags
+{
+    String8 includes[7];
+};
+
+// The include paths are materialized before any argument builder starts,
+// because the builder claims a contiguous run of String8 entries at the arena's
+// current position: anything else allocating on the same arena in between lands
+// inside the argument array.
+BUSTER_GLOBAL_LOCAL MuslCommonFlags musl_common_flags(Arena* arena, String8 root, String8 object_directory)
+{
+    MuslCommonFlags flags = {
+        .includes =
+            {
+                string_format(arena, S8("-I{S8}"), path_join(arena, root, S8("arch/" MUSL_COMPATIBILITY_ARCHITECTURE))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, root, S8("arch/generic"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, object_directory, S8("src/internal"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, root, S8("src/include"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, root, S8("src/internal"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, object_directory, S8("include"))),
+                string_format(arena, S8("-I{S8}"), path_join(arena, root, S8("include"))),
+            },
+    };
+    return flags;
+}
+
+BUSTER_GLOBAL_LOCAL void musl_append_common_flags(OsArgumentBuilder* builder, MuslCommonFlags flags)
+{
+    os_argument_builder_append(builder, S8("-std=c99"));
+    os_argument_builder_append(builder, S8("-nostdinc"));
+    os_argument_builder_append(builder, S8("-fno-builtin"));
+    os_argument_builder_append(builder, S8("-fno-strict-aliasing"));
+    os_argument_builder_append(builder, S8("-fno-stack-protector"));
+    os_argument_builder_append(builder, S8("-D_XOPEN_SOURCE=700"));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(flags.includes); index += 1)
+    {
+        os_argument_builder_append(builder, flags.includes[index]);
+    }
+    os_argument_builder_append(builder, S8("-O2"));
+    os_argument_builder_append(builder, S8("-g0"));
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_compile_buster(Arena* arena, String8 ide, String8 root, String8 object_directory, String8 source, String8 output,
+                                             String8 metrics, String8 allocator, u64* elapsed_us, String8* diagnostic)
+{
+    MuslCommonFlags flags = musl_common_flags(arena, root, object_directory);
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), allocator);
+    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    musl_append_common_flags(&builder, flags);
+    os_argument_builder_append(&builder, allocator_flag);
+    os_argument_builder_append(&builder, metrics_flag);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    if (diagnostic)
+    {
+        *diagnostic = musl_first_line(command.error.length ? command.error : command.output);
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8 root, String8 object_directory, String8 source, String8 output,
+                                            String8 extra)
+{
+    MuslCommonFlags flags = musl_common_flags(arena, root, object_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    musl_append_common_flags(&builder, flags);
+    if (extra.length)
+    {
+        os_argument_builder_append(&builder, extra);
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// `ar` is given the object list through a response file: a musl archive is a
+// thousand members, which is past what a command line takes on Windows and
+// uncomfortably close to it elsewhere.
+BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive, String8* objects, u64 object_count, String8 response_path)
+{
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    String8* lines = arena_allocate(temporary.arena, String8, object_count * 2);
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        lines[index * 2] = objects[index];
+        lines[index * 2 + 1] = S8("\n");
+    }
+    String8 response = string_join_arena(temporary.arena, (SliceString8){.pointer = lines, .length = object_count * 2}, false);
+    bool written = file_write(response_path, BUSTER_SLICE_TO_BYTE_SLICE(response));
+    scratch_end(temporary);
+    if (!written)
+    {
+        string_print(S8("error: test_musl could not write the archive response file {S8}\n"), response_path);
+        return false;
+    }
+    String8 arguments[] = {ar, S8("rcs"), archive, string_format(arena, S8("@{S8}"), response_path)};
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false, true);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// The probe is linked with `ld` and nothing else: no compiler driver, no
+// startup files, no host libc. Everything it resolves therefore comes out of
+// the musl archive that precedes it on the command line, which is the property
+// the acceptance criteria ask for.
+BUSTER_GLOBAL_LOCAL bool musl_link_probe(Arena* arena, String8 linker, String8 output, String8 object, String8 archive)
+{
+    String8 arguments[] = {linker, S8("-static"), S8("-o"), output, object, archive};
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false, true);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_run_probe(Arena* arena, String8 program, String8* transcript_out)
+{
+    String8 arguments[] = {program};
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, true);
+    *transcript_out = command.output;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL u64 musl_file_size(Arena* arena, String8 path)
+{
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(temporary.arena, string_duplicate_arena(temporary.arena, path, true), (FileReadOptions){0});
+    u64 size = bytes.length;
+    scratch_end(temporary);
+    return size;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
+{
+    TestMuslOptions options = *(TestMuslOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_musl requires an external musl {S8} checkout path\n"), S8(MUSL_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build/build test_musl [--config Debug|Release] /path/to/musl-{S8}\n"), S8(MUSL_COMPATIBILITY_TAG));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 fixture = S8("tests/basic_musl_freestanding.c");
+    if (!path_exists(arena, fixture))
+    {
+        string_print(S8("error: musl compatibility fixture is missing: {S8}\n"), fixture);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!musl_git_verify(arena, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 ide = musl_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    String8 linker = executable_resolve_in_path(arena, S8("ld"));
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    if (!ar.length)
+    {
+        ar = executable_resolve_in_path(arena, S8("llvm-ar"));
+    }
+    if (!ide.length || !clang.length || !ar.length || !linker.length)
+    {
+        string_print(S8("error: test_musl requires a built ide executable and clang, ld and ar/llvm-ar in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+
+    String8 output_directory = string_format_z(arena, S8("build/musl-{S8}-{u64}"), S8(MUSL_COMPATIBILITY_TAG), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 object_directory = path_join(arena, output_directory, S8("obj"));
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    make_directory_recursive(arena, metrics_directory);
+    string_print(S8("MUSL_HARNESS ide={S8} clang={S8} ar={S8} ld={S8} output={S8} architecture={S8} allocator={S8}\n"), ide, clang, ar, linker,
+                 output_directory, S8(MUSL_COMPATIBILITY_ARCHITECTURE), S8(MUSL_COMPATIBILITY_ALLOCATOR));
+
+    if (!musl_generate_headers(arena, source_directory, object_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    MuslManifest manifest = {0};
+    if (!musl_collect_manifest(arena, source_directory, output_directory, &manifest))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("MUSL_MANIFEST c_units={u64} assembly_only={u64} architecture_assembly={u64} fixture={S8}\n"), manifest.unit_count,
+                 manifest.assembly_only_count, manifest.architecture_assembly_count, fixture);
+    for (u64 index = 0; index < manifest.assembly_only_count; index += 1)
+    {
+        string_print(S8("MUSL_EXCLUDED reason=assembly-only unit={S8}\n"), manifest.assembly_only[index]);
+    }
+    for (u64 index = 0; index < manifest.architecture_assembly_count; index += 1)
+    {
+        string_print(S8("MUSL_EXCLUDED reason=architecture-assembly unit={S8}\n"), manifest.architecture_assembly[index]);
+    }
+
+    // The reference build comes first. A musl unit Clang cannot compile under
+    // this flag set is a broken workspace, not a Buster defect, and finding
+    // that out before a thousand Buster invocations keeps the two apart.
+    u64 clang_failures = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        unit->clang_compiled =
+            musl_compile_clang(temporary.arena, clang, source_directory, object_directory, unit->source, unit->clang_object, (String8){0});
+        scratch_end(temporary);
+        if (!unit->clang_compiled)
+        {
+            string_print(S8("MUSL_REFERENCE_FAILURE unit={S8}\n"), unit->relative);
+            clang_failures += 1;
+        }
+    }
+    if (clang_failures)
+    {
+        string_print(S8("error: the Clang reference build failed for {u64} musl units; the workspace or the flag set is wrong\n"), clang_failures);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    u64 compiled = 0;
+    u64 compile_us = 0;
+    SelfHostSourceMetrics totals = {0};
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        String8 diagnostic = {0};
+        unit->compiled = musl_compile_buster(temporary.arena, ide, source_directory, object_directory, unit->source, unit->object, metrics_path,
+                                             S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), &unit->elapsed_us, &diagnostic);
+        unit->diagnostic = string_duplicate_arena(arena, diagnostic, true);
+        scratch_end(temporary);
+        compile_us += unit->elapsed_us;
+        if (unit->compiled)
+        {
+            compiled += 1;
+            SelfHostSourceMetrics metrics = {0};
+            if (self_host_source_metrics_read(arena, metrics_path, &metrics))
+            {
+                unit->metrics = metrics;
+                totals.bytes += metrics.bytes;
+                totals.loc += metrics.loc;
+                totals.sloc += metrics.sloc;
+                totals.tokens += metrics.tokens;
+                totals.token_bytes += metrics.token_bytes;
+            }
+        }
+    }
+    string_print(S8("MUSL_COMPILE allocator={S8} units={u64} compiled={u64} failed={u64} elapsed_us={u64} source_bytes={u64} source_loc={u64} "
+                    "source_sloc={u64} tokens={u64}\n"),
+                 S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), manifest.unit_count, compiled, manifest.unit_count - compiled, compile_us, totals.bytes,
+                 totals.loc, totals.sloc, totals.tokens);
+
+    // The failing units, in manifest order, each with the first line of its
+    // diagnostic. This is the inventory: it names every component the archive
+    // below is missing and why.
+    TemporalArena failure_temporary = scratch_begin(&arena, 1);
+    String8* failure_lines = arena_allocate(failure_temporary.arena, String8, manifest.unit_count * 2);
+    u64 failure_line_count = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        if (unit->compiled)
+        {
+            continue;
+        }
+        string_print(S8("MUSL_UNSUPPORTED unit={S8} diagnostic={S8}\n"), unit->relative, unit->diagnostic);
+        failure_lines[failure_line_count++] = unit->relative;
+        failure_lines[failure_line_count++] = S8("\n");
+    }
+    String8 failure_text = string_join_arena(failure_temporary.arena, (SliceString8){.pointer = failure_lines, .length = failure_line_count}, false);
+    u64 failure_hash = failure_text.length ? buster_hash_64((u8*)failure_text.pointer, failure_text.length) : 0;
+    scratch_end(failure_temporary);
+    string_print(S8("MUSL_INVENTORY compiled={u64} expected_compiled={u64} failure_hash={u64:x} expected_failure_hash={u64:x}\n"), compiled,
+                 (u64)MUSL_EXPECTED_COMPILED_UNITS, failure_hash, (u64)MUSL_EXPECTED_FAILURE_HASH);
+    if (compiled != MUSL_EXPECTED_COMPILED_UNITS || failure_hash != MUSL_EXPECTED_FAILURE_HASH)
+    {
+        string_print(S8("error: the musl compile inventory moved; update MUSL_EXPECTED_COMPILED_UNITS and MUSL_EXPECTED_FAILURE_HASH in build.c to "
+                        "the values on the MUSL_INVENTORY line above, and record what changed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8* buster_objects = arena_allocate(arena, String8, compiled ? compiled : 1);
+    String8* clang_objects = arena_allocate(arena, String8, manifest.unit_count ? manifest.unit_count : 1);
+    u64 buster_object_count = 0;
+    u64 clang_object_count = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        if (unit->compiled)
+        {
+            buster_objects[buster_object_count++] = unit->object;
+        }
+        clang_objects[clang_object_count++] = unit->clang_object;
+    }
+    String8 buster_archive = path_join(arena, output_directory, S8("libc-buster.a"));
+    String8 clang_archive = path_join(arena, output_directory, S8("libc-clang.a"));
+    if (!musl_archive(arena, ar, buster_archive, buster_objects, buster_object_count, path_join(arena, output_directory, S8("buster-objects.rsp"))) ||
+        !musl_archive(arena, ar, clang_archive, clang_objects, clang_object_count, path_join(arena, output_directory, S8("clang-objects.rsp"))))
+    {
+        string_print(S8("error: test_musl could not build the libc archives\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("MUSL_ARCHIVE buster_members={u64} buster_bytes={u64} clang_members={u64} clang_bytes={u64}\n"), buster_object_count,
+                 musl_file_size(arena, buster_archive), clang_object_count, musl_file_size(arena, clang_archive));
+
+    // The reference transcript. The probe enters at _start with the stack
+    // aligned the way the kernel leaves it rather than the way a call leaves
+    // it, so Clang is asked to realign; Buster's emitters spill through plain
+    // moves and do not depend on it.
+    String8 clang_probe_object = path_join(arena, output_directory, S8("probe-clang.o"));
+    String8 clang_probe = path_join(arena, output_directory, S8("probe-clang"));
+    String8 reference_transcript = {0};
+    if (!musl_compile_clang(arena, clang, source_directory, object_directory, fixture, clang_probe_object, S8("-mstackrealign")) ||
+        !musl_link_probe(arena, linker, clang_probe, clang_probe_object, clang_archive) ||
+        !musl_run_probe(arena, clang_probe, &reference_transcript) || !reference_transcript.length)
+    {
+        string_print(S8("error: the Clang reference freestanding probe did not build and run\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("MUSL_PROBE compiler=clang allocator=- bytes={u64} status=pass\n"), reference_transcript.length);
+
+    // Every allocator, against the one Buster-built archive. The archive is
+    // built once because the four allocators must produce the same answers, not
+    // merely each produce some answer; the probe is what varies.
+    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
+    {
+        String8 probe_object = string_format(arena, S8("{S8}/probe-{S8}.o"), output_directory, allocators[index]);
+        String8 probe = string_format(arena, S8("{S8}/probe-{S8}"), output_directory, allocators[index]);
+        String8 transcript = {0};
+        u64 elapsed_us = 0;
+        String8 diagnostic = {0};
+        if (!musl_compile_buster(arena, ide, source_directory, object_directory, fixture, probe_object,
+                                 string_format(arena, S8("{S8}/probe-{S8}.txt"), metrics_directory, allocators[index]), allocators[index], &elapsed_us,
+                                 &diagnostic))
+        {
+            string_print(S8("error: the freestanding probe did not compile under allocator {S8}: {S8}\n"), allocators[index], diagnostic);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!musl_link_probe(arena, linker, probe, probe_object, buster_archive))
+        {
+            string_print(S8("error: the freestanding probe did not link against the Buster-built musl archive under allocator {S8}\n"),
+                         allocators[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!musl_run_probe(arena, probe, &transcript))
+        {
+            string_print(S8("error: the freestanding probe did not run under allocator {S8}\n"), allocators[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!string_equal(transcript, reference_transcript))
+        {
+            string_print(S8("error: the freestanding probe transcript differs from the Clang reference under allocator {S8}\n"), allocators[index]);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(reference_transcript));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(transcript));
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("MUSL_PROBE compiler=buster allocator={S8} bytes={u64} elapsed_us={u64} status=pass\n"), allocators[index], transcript.length,
+                     elapsed_us);
+    }
+
+    string_print(S8("MUSL_SUMMARY tag={S8} commit={S8} units={u64} compiled={u64} unsupported={u64} assembly_only={u64} architecture_assembly={u64} "
+                    "allocators={u64}\n"),
+                 S8(MUSL_COMPATIBILITY_TAG), S8(MUSL_COMPATIBILITY_COMMIT), manifest.unit_count, compiled, manifest.unit_count - compiled,
+                 manifest.assembly_only_count, manifest.architecture_assembly_count, BUSTER_ARRAY_LENGTH(allocators));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_musl_action_add(Arena* arena, TestMuslOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestMuslOptions* options_copy = arena_allocate(arena, TestMuslOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_musl_action, .callback_data = options_copy};
+}
+
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
 struct X86CompletionCensusPlan
 {
@@ -29192,6 +30146,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_SBASE] = S8_INITIALIZER("test_sbase"),
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
+        [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -29271,6 +30226,7 @@ ProcessResult process_arguments(void)
     TestSbaseOptions test_sbase_options = {0};
     TestDoomOptions test_doom_options = {0};
     TestQuickjsOptions test_quickjs_options = {0};
+    TestMuslOptions test_musl_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -29446,6 +30402,11 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_quickjs_options.test262_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_MUSL && !test_musl_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_musl_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -29731,6 +30692,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_QUICKJS)
                 {
                     test_quickjs_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_MUSL)
+                {
+                    test_musl_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -30311,6 +31276,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_QUICKJS:
         {
             test_quickjs_action_add(arena, test_quickjs_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_MUSL:
+        {
+            test_musl_action_add(arena, test_musl_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
