@@ -4156,7 +4156,8 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("unsigned")) || string_equal(spelling, S8("volatile")) ||
                string_equal(spelling, S8("restrict")) || string_equal(spelling, S8("register")) || string_equal(spelling, S8("__thread")) ||
-               string_equal(spelling, S8("__inline")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__int128"));
+               string_equal(spelling, S8("__inline")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__int128")) ||
+               string_equal(spelling, S8("__typeof"));
     }
     case 9:
     {
@@ -5799,6 +5800,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
         bool is_typeof =
             specifier_index + 2 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
             (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("__typeof__")) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("__typeof")) ||
              ((c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("typeof"))) ||
              (c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("typeof_unqual")))) &&
@@ -12501,6 +12503,22 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
 #endif
 }
 
+// Does a same-named file-scope entity declare the same thing this
+// declaration does, so that the two are one entity rather than a conflict?
+// A function declared through a type name instead of a parameter-list
+// declarator -- `extern __typeof(f) g;`, and the same through a typedef --
+// has no function declarator, so the declaration is filed as an object one;
+// musl's weak_alias() publishes every one of its public names that way, and
+// without this each of them would conflict with its own prototype instead of
+// redeclaring it. Only the entity-kind gate is relaxed: type compatibility
+// still decides the match, so `int f(void); extern int f;` stays a conflict.
+BUSTER_C_INTERNAL bool c_parse_entity_kind_redeclares(CEntityKind candidate, CEntityKind declared, bool declares_function_type)
+{
+    bool function_shaped = (candidate == C_ENTITY_FUNCTION || candidate == C_ENTITY_OBJECT) &&
+                           (declared == C_ENTITY_FUNCTION || declared == C_ENTITY_OBJECT);
+    return candidate == declared || (function_shaped && declares_function_type);
+}
+
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
     CParseResult result = {
@@ -12779,6 +12797,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                             c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
+        bool declares_function_type = declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION;
         // The name chain lists same-named entities newest first; the
         // redeclaration logic below needs ascending entity order, so gather
         // the file-scope candidates and walk them in reverse.
@@ -12810,7 +12829,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                 {
                     continue;
                 }
-                if (candidate->kind == entity_kind && c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
                 {
                     existing = candidate;
                     existing_index = entity_index;
@@ -12828,7 +12848,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             {
                 u32 entity_index = candidate_ids[position];
                 CEntity* candidate = &result.entities[entity_index];
-                if (candidate->kind == entity_kind && c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
                 {
                     existing = candidate;
                     existing_index = entity_index;

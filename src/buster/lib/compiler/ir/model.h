@@ -381,7 +381,25 @@ struct IrSymbol
     IrLinkage linkage;
     bool is_definition;
     bool is_thread_local;
-    u8 reserved[2];
+    // A replaceable definition or a reference that may go unresolved:
+    // __attribute__((weak)).  The object layer carries it as
+    // ObjectSymbol.weak; see that field for what each format spells it as.
+    bool is_weak;
+    u8 reserved[1];
+};
+
+// One symbol that is a second name for another: __attribute__((alias("t"))).
+// An alias owns no storage, no function body and no global initializer -- it
+// takes the target definition's section, offset and size and contributes only
+// its own binding -- so it is not a symbol property but a relation between
+// two, and it is kept as a module-level list of the pairs.  A module's
+// aliases must name definitions in that same module, which is what
+// ir_validate_canonical_module checks.
+typedef struct IrSymbolAlias IrSymbolAlias;
+struct IrSymbolAlias
+{
+    IrSymbolId symbol;
+    IrSymbolId target;
 };
 
 typedef struct IrSymbolTable IrSymbolTable;

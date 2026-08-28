@@ -2713,7 +2713,8 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("_Atomic"),       S8_INITIALIZER("_Bool"),     S8_INITIALIZER("_Complex"),       S8_INITIALIZER("_Generic"),
     S8_INITIALIZER("_Imaginary"),    S8_INITIALIZER("_Noreturn"), S8_INITIALIZER("_Static_assert"), S8_INITIALIZER("_Thread_local"),
     S8_INITIALIZER("__attribute__"), S8_INITIALIZER("__attribute"), S8_INITIALIZER("__declspec"),    S8_INITIALIZER("__auto_type"),
-    S8_INITIALIZER("__thread"),      S8_INITIALIZER("__typeof__"), S8_INITIALIZER("__extension__"),  S8_INITIALIZER("__inline"),
+    S8_INITIALIZER("__thread"),      S8_INITIALIZER("__typeof__"), S8_INITIALIZER("__typeof"),       S8_INITIALIZER("__extension__"),
+    S8_INITIALIZER("__inline"),
     S8_INITIALIZER("__inline__"),
     S8_INITIALIZER("__const"),       S8_INITIALIZER("__const__"), S8_INITIALIZER("__volatile"),     S8_INITIALIZER("__volatile__"),
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
@@ -2779,6 +2780,10 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_INLINE_GNU_ALT] = S8_INITIALIZER("__inline__"),
     [C_SYMBOL_WELL_KNOWN_SECTION] = S8_INITIALIZER("section"),
     [C_SYMBOL_WELL_KNOWN_SECTION_GNU] = S8_INITIALIZER("__section__"),
+    [C_SYMBOL_WELL_KNOWN_WEAK] = S8_INITIALIZER("weak"),
+    [C_SYMBOL_WELL_KNOWN_WEAK_GNU] = S8_INITIALIZER("__weak__"),
+    [C_SYMBOL_WELL_KNOWN_ALIAS] = S8_INITIALIZER("alias"),
+    [C_SYMBOL_WELL_KNOWN_ALIAS_GNU] = S8_INITIALIZER("__alias__"),
 };
 
 enum

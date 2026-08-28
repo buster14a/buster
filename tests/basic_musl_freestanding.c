@@ -34,6 +34,15 @@ extern void* bsearch(const void*, const void*, size_type, size_type, int (*)(con
 extern int toupper(int);
 extern int isalpha(int);
 extern int isdigit(int);
+// Names musl publishes only through weak_alias(): every one of them is
+// __attribute__((alias)) over an internal name, so before that attribute was
+// implemented the archive held the internal name and this link failed.  These
+// four and not malloc, which musl publishes the same way but which reaches a
+// lock through the thread pointer that a bare _start never established.
+extern char* stpcpy(char* restrict, const char* restrict);
+extern char* stpncpy(char* restrict, const char* restrict, size_type);
+extern char* strchrnul(const char*, int);
+extern void* memrchr(const void*, int, size_type);
 
 void _start(void);
 
@@ -155,6 +164,16 @@ static void run(void)
     record("bsearch_offset", found ? (long)(found - sorted_table) : -1);
     key = 14;
     record("bsearch_missing", bsearch(&key, sorted_table, sizeof(sorted_table) / sizeof(sorted_table[0]), sizeof(sorted_table[0]), compare_int) == 0);
+
+    strcpy(buffer, "the quick brown fox");
+    record("stpcpy_end", (long)(stpcpy(joined, "weak") - joined));
+    memset(joined, '.', sizeof(joined));
+    record("stpncpy_end", (long)(stpncpy(joined, "alias", 8) - joined));
+    record("stpncpy_pad", (long)(unsigned char)joined[7]);
+    record("strchrnul_found", (long)(strchrnul(buffer, 'q') - buffer));
+    record("strchrnul_missing", (long)(strchrnul(buffer, 'z') - buffer));
+    record("memrchr_offset", (long)((const char*)memrchr(buffer, 'o', strlen(buffer)) - buffer));
+    record("memrchr_missing", memrchr(buffer, 'z', strlen(buffer)) == 0);
 
     record("toupper", toupper('q'));
     record("isalpha", isalpha('q') != 0);

@@ -125,6 +125,70 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_x64_segment_ove
     return false;
 }
 
+// One row of the symbol table tests/basic_c_weak_alias.c must produce.
+// `target` names the definition an alias has to coincide with; it is empty
+// for a symbol that owns its own storage.
+typedef struct CompilerDriverWeakAliasExpectation CompilerDriverWeakAliasExpectation;
+struct CompilerDriverWeakAliasExpectation
+{
+    String8 name;
+    String8 target;
+    bool global;
+    bool weak;
+    u8 reserved[6];
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ObjectSymbol* compiler_driver_test_symbol_by_name(ObjectFile* object, String8 name)
+{
+    ObjectSymbol* result = 0;
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count && !result; symbol_index += 1)
+    {
+        result = string_equal(object->symbols[symbol_index].name, name) ? object->symbols + symbol_index : 0;
+    }
+
+    return result;
+}
+
+// The symbol table __attribute__((weak)) and __attribute__((alias)) have to
+// produce, which is the one Clang produces for the same fixture: an alias
+// takes its target's section, offset, size and kind and contributes only its
+// own binding, a weak definition keeps its own storage and is only rebound,
+// and a declaration whose name merely happens to be an attribute spelling
+// stays a strong definition.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_weak_alias_symbols(ObjectFile* object)
+{
+    CompilerDriverWeakAliasExpectation expectations[] = {
+        {.name = S8("alias_target_function"), .global = true},
+        {.name = S8("alias_static_target")},
+        {.name = S8("alias_target_object"), .global = true},
+        {.name = S8("weak_definition_function"), .global = true, .weak = true},
+        {.name = S8("weak_definition_object"), .global = true, .weak = true},
+        {.name = S8("weak"), .global = true},
+        {.name = S8("alias"), .global = true},
+        {.name = S8("alias_function"), .target = S8("alias_target_function"), .global = true, .weak = true},
+        {.name = S8("alias_function_typeof"), .target = S8("alias_target_function"), .global = true, .weak = true},
+        {.name = S8("alias_of_static"), .target = S8("alias_static_target"), .global = true},
+        {.name = S8("alias_object"), .target = S8("alias_target_object"), .global = true},
+        {.name = S8("alias_object_long"), .target = S8("alias_target_object"), .global = true},
+    };
+    bool result = object && object->error == OBJECT_ERROR_NONE && object->symbols;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expectations) && result; index += 1)
+    {
+        CompilerDriverWeakAliasExpectation expectation = expectations[index];
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, expectation.name);
+        result = symbol != 0 && symbol->global == expectation.global && symbol->weak == expectation.weak &&
+                 symbol->section != OBJECT_SECTION_UNDEFINED;
+        if (result && expectation.target.length)
+        {
+            ObjectSymbol* target = compiler_driver_test_symbol_by_name(object, expectation.target);
+            result = target != 0 && symbol->section == target->section && symbol->value == target->value && symbol->size == target->size &&
+                     symbol->kind == target->kind;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
 {
     if (object && object->error == OBJECT_ERROR_NONE && object->section_count > OBJECT_SECTION_TEXT && object->sections && object->symbols)
@@ -6189,6 +6253,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(segment_temporary);
 #endif
+    }
+    // __attribute__((weak)) and __attribute__((alias)), which is how musl
+    // publishes malloc, free, errno and most of its pthread surface: an
+    // archive built without them compiles and does not link. The fixture is
+    // both run and read, because the two failures are different -- running
+    // proves each alias reaches the right code and the right object, and the
+    // symbol table proves the binding and the coincidence with the target
+    // that another translation unit's linker resolves against.
+    {
+        String8 weak_alias_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(weak_alias_allocators); allocator_index += 1)
+        {
+            Arena* weak_alias_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena weak_alias_temporary = scratch_begin(weak_alias_conflicts, BUSTER_ARRAY_LENGTH(weak_alias_conflicts));
+            Arena* weak_alias_arena = weak_alias_temporary.arena;
+            String8 weak_alias_path = buster_test_temporary_path(weak_alias_arena, S8("buster-c-weak-alias"),
+                                                                  string_format(weak_alias_arena, S8("-{u32}"), allocator_index));
+            String8 weak_alias_command_line[] = {
+                string_format(weak_alias_arena, S8("-fregister-allocator={S8}"), weak_alias_allocators[allocator_index]),
+                S8("-o"),
+                weak_alias_path,
+                S8("tests/basic_c_weak_alias.c"),
+            };
+            CompilerDriverResult weak_alias = compiler_driver_execute_invocation(
+                weak_alias_arena, compiler_driver_parse_arguments(weak_alias_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_alias_command_line)));
+            BUSTER_TEST(arguments, weak_alias.error == COMPILER_DRIVER_ERROR_NONE);
+            if (weak_alias.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {weak_alias_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(weak_alias_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(weak_alias_temporary);
+        }
+        Arena* weak_alias_object_conflicts[] = {
+            arguments->arena,
+            c_asm_arena,
+        };
+        TemporalArena weak_alias_object_temporary = scratch_begin(weak_alias_object_conflicts, BUSTER_ARRAY_LENGTH(weak_alias_object_conflicts));
+        Arena* weak_alias_object_arena = weak_alias_object_temporary.arena;
+        String8 weak_alias_object_path = buster_test_temporary_path(weak_alias_object_arena, S8("buster-c-weak-alias-object"), S8(".o"));
+        String8 weak_alias_object_command_line[] = {S8("-c"), S8("-g0"), S8("-o"), weak_alias_object_path, S8("tests/basic_c_weak_alias.c")};
+        CompilerDriverResult weak_alias_object = compiler_driver_execute_invocation(
+            weak_alias_object_arena,
+            compiler_driver_parse_arguments(weak_alias_object_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_alias_object_command_line)));
+        BUSTER_TEST(arguments, weak_alias_object.error == COMPILER_DRIVER_ERROR_NONE);
+        if (weak_alias_object.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, weak_alias_object.has_object);
+            BUSTER_TEST(arguments, compiler_driver_test_weak_alias_symbols(&weak_alias_object.object));
+        }
+        scratch_end(weak_alias_object_temporary);
     }
     // Local register variables under every allocator, with -std=c99 because
     // that is the dialect a libc's build actually asks for. The fixture proves

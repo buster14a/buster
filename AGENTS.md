@@ -855,21 +855,32 @@ for; 22 static initializers, 17 of which are a `long double` constant or an
 array of them; 4 startup objects; 2 conflicting declarations; and 26
 singletons.
 
-Two of those deserve their own note. musl's startup objects -- `crt/crt1.c`
+One of those deserves its own note. musl's startup objects -- `crt/crt1.c`
 and its siblings -- are written as module-level assembly, and Buster's
 global-assembly support covers `.byte`, `.p2align`, the section and symbol
 directives and a handful of instructions, which is not enough for a
 `crt_arch.h` that aligns the stack and calls into C; that path also
 misattributes its diagnostic to the next C function in the file, and it
 requires the symbol an assembly block defines to carry a C declaration as
-well. And the archive is not linkable for most programs even where every unit
-in it compiled, because `__attribute__((alias))` is not implemented: musl
-publishes `malloc`, `free`, `errno` and most of the pthread surface as weak
-aliases of internal names, so those symbols are absent from the objects
-entirely. That is the next thing to fix for the archive to be usable rather
-than merely large, and it is invisible from the compile inventory -- it shows
-up only when something links against the archive, which is what the
-freestanding probe is for.
+well.
+
+The archive is linkable, which it was not until `__attribute__((weak))` and
+`__attribute__((alias))` reached the object writer. musl publishes `malloc`,
+`free`, `errno` and most of its pthread surface as weak aliases of internal
+names -- `weak_alias(old, new)` is
+`extern __typeof(old) new __attribute__((__weak__, __alias__(#old)))`, which
+also needs the `__typeof` spelling -- and while the attribute went
+unimplemented every one of those names was absent from the objects even
+though every unit holding them compiled. 250 weak symbols now come out of
+`libc-buster.a`, `malloc` among them. The compiled-unit inventory did not
+move by a single unit when they appeared, which is exactly why the probe
+exists: the gap was invisible from the compile side and showed up only when
+something linked. The probe therefore calls `stpcpy`, `stpncpy`, `strchrnul`
+and `memrchr`, four names musl publishes *only* through `weak_alias`, so the
+link that used to fail is now part of the gate. It does not call `malloc`:
+musl's allocator takes a lock through the thread pointer, which a program
+entered at `_start` with no startup object never established, and the
+Clang-built archive faults in the same place.
 
 For scale, one recorded run took 86 seconds wall and left 23 MB behind: the
 Buster pass spent 54,8 seconds of child time over 1349 units — 41 ms each — for
@@ -1785,6 +1796,40 @@ a date is a trap. Issues #537-#549 are the current examples of the form.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+- **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
+  object file, because musl publishes `malloc`, `free`, `errno` and most of
+  its pthread surface as weak aliases of internal names. Weak is
+  `IrSymbol.is_weak` and becomes `ObjectSymbol.weak`, which ELF writes as
+  `STB_WEAK` and Mach-O as `N_WEAK_DEF`. COFF spells a weak definition as a
+  selectany COMDAT, which needs a section per symbol while this model merges
+  sections by kind, so a COFF object reads `weak` back but cannot write it and
+  carries such a symbol as an ordinary external. That is the one gap of the
+  three formats, and it predates aliases: `object.c`'s header states it. An
+  alias is a pair in `IrModule.aliases` rather than a field on every symbol:
+  it is a relation between two symbols rather than a property of one, and
+  nearly every module has none. The object writer gives
+  the alias its target's section, offset, size and kind and only its own
+  binding, which is what Clang produces for the same source, and
+  `ir_validate_canonical_module` requires the target to be a definition in
+  that same module. The frontend keeps a static alias target alive -- an
+  attribute names it, no identifier use does -- and diagnoses an alias whose
+  target this translation unit does not define rather than emitting an
+  import. Both attributes are read inside the declaration's
+  `__attribute__((...))` list by `c_declaration_binding` in `c_gen.c`, never
+  anywhere in its token range the way `section` and `asm` are matched: a
+  marker attribute has no argument shape to recognise it by, and `weak` and
+  `alias` are ordinary identifiers, so `int weak;` must stay a strong
+  definition.
+- `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
+  `weak_alias` macro is written with it. A function declared through a type
+  name rather than a parameter-list declarator -- `extern __typeof(f) g;`, or
+  the same through a typedef -- is an *object* declaration to the parser, and
+  the call-target index only holds function declarations, so such a name
+  cannot be called by name (issue #641). Its address works, which is what an
+  alias needs and what another translation unit's call resolves against.
+  `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps the two
+  spellings one entity, so a name that also has an ordinary prototype -- which
+  in musl is all of them -- is called through that prototype.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.

@@ -3506,6 +3506,30 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
     return result;
 }
 
+IrSymbolAlias* ir_module_add_alias(Arena* arena, IrModule* module, IrSymbolAlias alias)
+{
+    IrSymbolAlias* result = 0;
+    if (arena && module)
+    {
+        if (module->alias_count >= module->alias_capacity)
+        {
+            u32 old_capacity = module->alias_capacity;
+            u32 capacity = old_capacity ? old_capacity * 2 : 4;
+            IrSymbolAlias* aliases = arena_allocate(arena, IrSymbolAlias, capacity);
+            if (module->alias_count)
+            {
+                memcpy(aliases, module->aliases, (u64)module->alias_count * sizeof(*aliases));
+            }
+            module->aliases = aliases;
+            module->alias_capacity = capacity;
+        }
+        result = module->aliases + module->alias_count++;
+        *result = alias;
+    }
+
+    return result;
+}
+
 IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block)
 {
     IrBlock* result;
@@ -4726,6 +4750,34 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_blocks(IrProgram* pr
     return result;
 }
 
+// An alias is a second name for a definition, so both ends have to exist and
+// the target has to be something this module actually emits: a function body
+// or a global. A target that is only declared here would leave the alias
+// pointing at an address the object writer never places, which no format can
+// express and every linker would resolve to the wrong thing.
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_alias(IrProgram* program, IrModule* module, IrSymbolAlias alias)
+{
+    IrValidationError result = IR_VALIDATION_ALIAS_TARGET;
+    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, alias.symbol);
+    IrSymbol* target = ir_symbol_from_id(&program->symbols, alias.target);
+    if (symbol && target && symbol->id.value != target->id.value && target->is_definition)
+    {
+        bool defined_here = false;
+        for (u32 function_index = 0; function_index < module->function_count && !defined_here; function_index += 1)
+        {
+            defined_here = module->functions[function_index].symbol.value == alias.target.value &&
+                           module->functions[function_index].state == IR_FUNCTION_LOWERED;
+        }
+        for (u32 global_index = 0; global_index < module->global_count && !defined_here; global_index += 1)
+        {
+            defined_here = module->globals[global_index].symbol.value == alias.target.value;
+        }
+        result = defined_here ? IR_VALIDATION_NONE : IR_VALIDATION_ALIAS_TARGET;
+    }
+
+    return result;
+}
+
 IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
@@ -4739,6 +4791,10 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
         {
             result.error = ir_validate_global(program, module, module->globals + global_index);
+        }
+        for (u32 alias_index = 0; alias_index < module->alias_count && result.error == IR_VALIDATION_NONE; alias_index += 1)
+        {
+            result.error = ir_validate_alias(program, module, module->aliases[alias_index]);
         }
         for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
         {

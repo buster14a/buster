@@ -14,6 +14,12 @@
 // ELF and Mach-O write it back out; COFF cannot, because a COMDAT needs its
 // own section and this model merges sections by kind.
 //
+// __attribute__((alias)) arrives as IrModule.aliases and is turned into
+// symbols by object_from_canonical_codegen_module: an alias owns no storage,
+// so it takes its target's section, offset, size and kind and contributes
+// only its own binding. All three formats carry that, because it is an
+// ordinary symbol pointing at an address another symbol already names.
+//
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
 //   object_assembly_append_*                       the disassembly printer
@@ -8956,8 +8962,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             apple_thread_local |= module->globals[global_index].is_thread_local;
         }
     }
-    result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
-                                                             (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
+    IrModule* ir_module = module->ir_module;
+    u32 alias_count = ir_module ? ir_module->alias_count : 0;
+    result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
+                                                             (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
                                                              (windows_unwind.function_count ? 1 : 0));
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
@@ -8976,6 +8984,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .section = OBJECT_SECTION_TEXT,
             .kind = OBJECT_SYMBOL_FUNCTION,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+            .weak = symbol->is_weak,
         };
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -9009,6 +9018,43 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                 : OBJECT_SECTION_DATA,
             .kind = OBJECT_SYMBOL_DATA,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+            .weak = symbol->is_weak,
+        };
+    }
+    // An alias owns no storage: it is a second name for a definition this
+    // module already placed, so it takes that definition's section, offset,
+    // size and kind, and only its binding is its own. The two loops above
+    // wrote one symbol per entry and then one per global in order, so a
+    // target's symbol index is its entry index, or the entry count plus its
+    // global index -- no lookup structure for a list that is empty in nearly
+    // every translation unit.
+    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+    {
+        IrSymbolAlias alias = ir_module->aliases[alias_index];
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, alias.symbol);
+        u32 target_index = UINT32_MAX;
+        for (u32 entry_index = 0; entry_index < module->entry_count && target_index == UINT32_MAX; entry_index += 1)
+        {
+            target_index = module->entries[entry_index].symbol.value == alias.target.value ? entry_index : UINT32_MAX;
+        }
+        for (u32 global_index = 0; global_index < module->global_count && target_index == UINT32_MAX; global_index += 1)
+        {
+            target_index = module->globals[global_index].symbol.value == alias.target.value ? module->entry_count + global_index : UINT32_MAX;
+        }
+        if (!symbol || target_index >= result.symbol_count)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
+        ObjectSymbol definition = result.symbols[target_index];
+        result.symbols[result.symbol_count++] = (ObjectSymbol){
+            .name = symbol->link_name.length ? symbol->link_name : symbol->name,
+            .value = definition.value,
+            .size = definition.size,
+            .section = definition.section,
+            .kind = definition.kind,
+            .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+            .weak = symbol->is_weak,
         };
     }
     if (apple_thread_local)
@@ -9079,6 +9125,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .section = OBJECT_SECTION_UNDEFINED,
                 .kind = target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
                 .global = true,
+                .weak = target_symbol->is_weak,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }

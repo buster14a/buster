@@ -625,12 +625,19 @@ struct IrModule
     IrFunction* functions;
     IrGlobal* globals;
     IrModuleAssembly* assemblies;
+    // The __attribute__((alias)) pairs this module defines. Aliases are rare
+    // -- a translation unit has none at all unless it publishes a second name
+    // for something -- so they are a short list the object writer walks once,
+    // not a mostly-unset field on every symbol.
+    IrSymbolAlias* aliases;
     u32 function_count;
     u32 function_capacity;
     u32 global_count;
     u32 global_capacity;
     u32 assembly_count;
     u32 assembly_capacity;
+    u32 alias_count;
+    u32 alias_capacity;
     u32 lowered_function_count;
     u32 rejected_function_count;
     // How many relocations across `globals` take a block label's address — the
@@ -679,6 +686,7 @@ typedef enum IrValidationError
     IR_VALIDATION_OPERATION,
     IR_VALIDATION_ALIGNMENT,
     IR_VALIDATION_INSTRUCTION_OWNERSHIP,
+    IR_VALIDATION_ALIAS_TARGET,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -718,6 +726,7 @@ BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symb
 BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);
 BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global);
+BUSTER_F_DECL IrSymbolAlias* ir_module_add_alias(Arena* arena, IrModule* module, IrSymbolAlias alias);
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
 BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source);

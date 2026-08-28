@@ -38,6 +38,8 @@
 //   prepares it inside the block that actually runs.
 //
 // Layout, in file order; each anchor is a definition to search for:
+//   c_declaration_binding                         __attribute__((weak)) and
+//                                                 __attribute__((alias))
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
@@ -109,6 +111,113 @@ BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess,
                 }
             }
         }
+    }
+
+    return result;
+}
+
+// How a file-scope declaration binds its symbol: __attribute__((weak)) makes
+// the definition replaceable, and __attribute__((alias("target"))) makes the
+// declaration a second name for a definition elsewhere in the unit. musl
+// spells its whole public surface this way -- `weak_alias(__libc_malloc,
+// malloc)` expands to both attributes at once -- so the two are found in one
+// walk.
+typedef struct CDeclarationBinding CDeclarationBinding;
+struct CDeclarationBinding
+{
+    String8 alias_target;
+    bool is_weak;
+    u8 reserved[7];
+};
+
+// One token range's `__attribute__((...))` lists, accumulated into `binding`.
+// Unlike `section` and `asm` these attributes are matched inside the list
+// rather than anywhere in the declaration: a marker attribute has no argument
+// shape to recognise it by, and `weak` and `alias` are ordinary identifiers,
+// so `int weak;` must not declare itself replaceable.
+BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, CDeclarationBinding* binding)
+{
+    u32 group_depth = 0;
+    for (u32 index = start; index + 2 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            // An attribute cannot appear after the `=` that opens an
+            // initializer, and an initializer is where nearly all of a
+            // file-scope declaration's tokens are -- one generated table is
+            // thousands of them. Stopping there keeps this pass proportional
+            // to declarators rather than to static data. The depth is what
+            // separates that `=` from an enumerator's inside a braced
+            // specifier, which attributes may still follow.
+            group_depth += c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN) ? 1 : 0;
+            group_depth -= group_depth && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE) ? 1 : 0;
+            if (!group_depth && token.punctuator == C_PUNCTUATOR_ASSIGN)
+            {
+                break;
+            }
+            continue;
+        }
+        if (!c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE) | C_SYMBOL_WELL_KNOWN_BIT(ATTRIBUTE_SHORT)) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            continue;
+        }
+        // Depth two is the attribute list itself; anything deeper belongs to
+        // one attribute's arguments and holds no attribute names.
+        u32 depth = 2;
+        u32 item = index + 3;
+        while (item < end && depth)
+        {
+            CToken inner = preprocess.tokens[item];
+            if (c_token_is_punctuator(&inner, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&inner, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth -= 1;
+            }
+            else if (depth == 2 && inner.kind == C_TOKEN_IDENTIFIER)
+            {
+                binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                                              C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU));
+                ByteSlice decoded = {0};
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU)) &&
+                    item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                    c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                {
+                    binding->alias_target = (String8){
+                        .pointer = (char8*)decoded.pointer,
+                        .length = decoded.length,
+                    };
+                }
+            }
+            item += 1;
+        }
+        index = item - 1;
+    }
+}
+
+// Both token ranges a declaration can carry attributes in: the specifiers
+// every declarator of a list shares, and, when the list was split, this
+// declarator's own tokens.
+BUSTER_C_INTERNAL CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+{
+    CDeclarationBinding result = {0};
+    u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
+    end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    c_declaration_binding_scan(arena, preprocess, declaration.token_start, end, &result);
+    if (declaration.declarator_count)
+    {
+        u32 declarator_end = declaration.declarator_start + declaration.declarator_count;
+        declarator_end = declarator_end < preprocess.token_count ? declarator_end : (u32)preprocess.token_count;
+        c_declaration_binding_scan(arena, preprocess, declaration.declarator_start, declarator_end, &result);
     }
 
     return result;
@@ -14602,6 +14711,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
     }
     else if (first.kind == C_TOKEN_IDENTIFIER &&
         (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__typeof__")) ||
+         string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("__typeof")) ||
          ((c_preprocess_dialect_is_gnu(builder->preprocess.dialect) || c_preprocess_dialect_is_c23(builder->preprocess.dialect)) &&
           string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typeof"))) ||
          (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("typeof_unqual")))) &&
@@ -34385,8 +34495,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .value_capacity = (u32)query_frame_capacity,
         .operator_capacity = (u32)query_frame_capacity,
     };
+    // One per declaration for the lowering failures, one per entity for the
+    // definition failures, one per deferred static assertion, and a second
+    // per declaration for an __attribute__((alias)) naming a target this unit
+    // never declares -- which is diagnosed before the entity's own pass runs
+    // and so cannot share that budget.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1);
+                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -35197,8 +35312,55 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             };
         }
     }
+    // __attribute__((weak)) and __attribute__((alias("target"))) per entity,
+    // collected before any symbol is created because both change what the
+    // symbol is: an alias declaration defines its name even though it has no
+    // body and no initializer, and its target has to survive to be aliased,
+    // which for a static target nothing else names it would not.
+    CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
+    bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    memset(entity_alias_targets, 0xff, sizeof(*entity_alias_targets) * parse.entity_count);
+    memset(entity_weak, 0, sizeof(*entity_weak) * parse.entity_count);
     bool* object_referenced = arena_allocate(arena, bool, parse.entity_count);
     memset(object_referenced, 0, sizeof(*object_referenced) * parse.entity_count);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        if (declaration.entity.value >= parse.entity_count ||
+            (declaration.kind != C_DECLARATION_OBJECT && declaration.kind != C_DECLARATION_FUNCTION))
+        {
+            continue;
+        }
+        CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+        entity_weak[declaration.entity.value] |= binding.is_weak;
+        if (!binding.alias_target.length)
+        {
+            continue;
+        }
+        CEntityId alias_target = parse.scope_count ? c_parse_lookup_entity(&parse,
+                                                                           (CScopeId){
+                                                                               .value = 0,
+                                                                           },
+                                                                           binding.alias_target)
+                                                   : C_ENTITY_ID_INVALID;
+        if (alias_target.value >= parse.entity_count || alias_target.value == declaration.entity.value)
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = string_format(arena, S8("alias target '{S8}' is not declared in this translation unit"), binding.alias_target),
+                .location = declaration.location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+            continue;
+        }
+        entity_alias_targets[declaration.entity.value] = alias_target;
+        // The target is named by an attribute, not by an identifier use, so
+        // nothing else marks it live. A static one would otherwise be dropped
+        // and the alias would point at an address the module never places.
+        if (parse.entities[alias_target.value].kind == C_ENTITY_OBJECT)
+        {
+            object_referenced[alias_target.value] = true;
+        }
+    }
     for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
     {
         CEntityId entity = parse.identifier_uses[use_index].entity;
@@ -35333,7 +35495,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             continue;
         }
-        if (!definition && !object_referenced[entity_index])
+        bool aliases_target = entity_alias_targets[entity_index].value < parse.entity_count;
+        if (!definition && !object_referenced[entity_index] && !aliases_target)
         {
             continue;
         }
@@ -35380,11 +35543,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                           .source = source,
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_DATA,
-                                                                          .linkage = internal     ? IR_LINKAGE_INTERNAL
-                                                                                     : definition ? IR_LINKAGE_EXTERNAL
-                                                                                                  : IR_LINKAGE_IMPORT,
-                                                                          .is_definition = definition != 0,
+                                                                          .linkage = internal                     ? IR_LINKAGE_INTERNAL
+                                                                                     : definition || aliases_target ? IR_LINKAGE_EXTERNAL
+                                                                                                                    : IR_LINKAGE_IMPORT,
+                                                                          .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
+                                                                          .is_weak = entity_weak[entity_index],
                                                                       });
     }
     u32* token_function_declarations = arena_allocate(arena, u32, preprocess.token_count);
@@ -35437,6 +35601,17 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     bool* function_referenced_outside = arena_allocate(arena, bool, parse.entity_count);
     memset(function_referenced_outside, 0, sizeof(*function_referenced_outside) * parse.entity_count);
+    // An alias names its target in an attribute rather than in an expression,
+    // so no identifier use keeps the target alive; a static target would be
+    // dropped as unreferenced and the alias would name nothing.
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntityId alias_target = entity_alias_targets[entity_index];
+        if (alias_target.value < parse.entity_count && parse.entities[alias_target.value].kind == C_ENTITY_FUNCTION)
+        {
+            function_referenced_outside[alias_target.value] = true;
+        }
+    }
     for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
     {
         CIdentifierUse use = parse.identifier_uses[use_index];
@@ -35520,7 +35695,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
-                                                                          .is_definition = definition != 0,
+                                                                          .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                          .is_weak = entity_weak[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -35567,7 +35743,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                           .type = type,
                                                                           .kind = IR_SYMBOL_FUNCTION,
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
-                                                                          .is_definition = definition != 0,
+                                                                          .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                          .is_weak = entity_weak[entity_index],
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -35935,6 +36112,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                         .kind = IR_SYMBOL_FUNCTION,
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
+                                                        .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {
@@ -36312,6 +36490,53 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;
         scratch_end(lowering_temporary);
+    }
+    // The alias pairs go in last, because only now is it settled which
+    // function bodies and globals this module actually keeps. An alias owns
+    // no storage: it renames a definition, so a target that is merely
+    // declared here -- or whose body was dropped -- is an error rather than
+    // an import, which is also what GCC and Clang say.
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntityId alias_target = entity_alias_targets[entity_index];
+        IrSymbolId alias_symbol = entity_symbols[entity_index];
+        if (alias_target.value >= parse.entity_count || alias_symbol.value == IR_ID_UNDERLYING_INVALID ||
+            entity_symbols[alias_target.value].value == IR_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        IrSymbolId target_symbol = entity_symbols[alias_target.value];
+        bool target_defined_here = false;
+        bool alias_defined_here = false;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            bool lowered = module->functions[function_index].state == IR_FUNCTION_LOWERED;
+            target_defined_here |= lowered && module->functions[function_index].symbol.value == target_symbol.value;
+            alias_defined_here |= lowered && module->functions[function_index].symbol.value == alias_symbol.value;
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            target_defined_here |= module->globals[global_index].symbol.value == target_symbol.value;
+            alias_defined_here |= module->globals[global_index].symbol.value == alias_symbol.value;
+        }
+        if (!target_defined_here || alias_defined_here)
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = alias_defined_here
+                               ? string_format(arena, S8("'{S8}' is both defined here and aliased to '{S8}'"), parse.entities[entity_index].name,
+                                               parse.entities[alias_target.value].name)
+                               : string_format(arena, S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
+                                               parse.entities[entity_index].name, parse.entities[alias_target.value].name),
+                .location = parse.entities[entity_index].location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+            continue;
+        }
+        ir_module_add_alias(arena, module,
+                            (IrSymbolAlias){
+                                .symbol = alias_symbol,
+                                .target = target_symbol,
+                            });
     }
     arena_destroy(lowering_arena, 1);
     scratch_end(temporary);
