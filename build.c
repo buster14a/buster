@@ -16132,8 +16132,8 @@ struct MuslManifest
 // the hash of the newline-joined sorted failing paths is pinned beside it. Both
 // are printed on a mismatch along with the whole failing list, which is what a
 // deliberate rebaseline needs.
-#define MUSL_EXPECTED_COMPILED_UNITS 1190
-#define MUSL_EXPECTED_FAILURE_HASH 0xa5f8413710a89d51ull
+#define MUSL_EXPECTED_COMPILED_UNITS 1192
+#define MUSL_EXPECTED_FAILURE_HASH 0x29957f2aab210b24ull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16742,6 +16742,21 @@ BUSTER_GLOBAL_LOCAL bool musl_run_probe(Arena* arena, String8 program, String8* 
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
+// musl's startup objects are not archive members: a program links crt1.o (or
+// Scrt1.o, or rcrt1.o) explicitly and libc.a separately, so the harness places
+// them beside the archive the way musl's own build places them in lib/. What
+// it can produce is whatever compiled -- crt/crti and crt/crtn have no
+// portable C at all on x86-64, and the driver takes no assembly input, so
+// crti.o and crtn.o are reported absent rather than silently missing.
+BUSTER_GLOBAL_LOCAL bool musl_copy_object(Arena* arena, String8 from, String8 to)
+{
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(temporary.arena, string_duplicate_arena(temporary.arena, from, true), (FileReadOptions){0});
+    bool copied = bytes.pointer != 0 && file_write(string_duplicate_arena(temporary.arena, to, true), bytes);
+    scratch_end(temporary);
+    return copied;
+}
+
 BUSTER_GLOBAL_LOCAL u64 musl_file_size(Arena* arena, String8 path)
 {
     TemporalArena temporary = scratch_begin(&arena, 1);
@@ -16902,18 +16917,53 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
+    // The startup objects, and only they, stay out of the archive: musl links
+    // crt1.o explicitly and libc.a separately, and an archive member that
+    // defines _start would be a member no program ever selects.
     String8* buster_objects = arena_allocate(arena, String8, compiled ? compiled : 1);
     String8* clang_objects = arena_allocate(arena, String8, manifest.unit_count ? manifest.unit_count : 1);
     u64 buster_object_count = 0;
     u64 clang_object_count = 0;
+    u64 startup_emitted = 0;
+    u64 startup_absent = 0;
     for (u64 index = 0; index < manifest.unit_count; index += 1)
     {
         MuslUnit* unit = manifest.units + index;
+        bool startup = string_starts_with_sequence(unit->relative, S8("crt/"));
+        if (startup)
+        {
+            String8 name = string_slice(unit->relative, 4, unit->relative.length);
+            String8 startup_object = string_format_z(arena, S8("{S8}/{S8}.o"), output_directory, name);
+            if (unit->compiled && musl_copy_object(arena, unit->object, startup_object))
+            {
+                startup_emitted += 1;
+                string_print(S8("MUSL_STARTUP unit={S8} object={S8} status=emitted\n"), unit->relative, startup_object);
+            }
+            else
+            {
+                startup_absent += 1;
+                string_print(S8("MUSL_STARTUP unit={S8} object=- status=absent reason={S8}\n"), unit->relative,
+                             unit->compiled ? S8("could not write the object beside the archive") : unit->diagnostic);
+            }
+            continue;
+        }
         if (unit->compiled)
         {
             buster_objects[buster_object_count++] = unit->object;
         }
         clang_objects[clang_object_count++] = unit->clang_object;
+    }
+    // crti.o and crtn.o come from crt/x86_64/crti.s and crtn.s, which have no
+    // portable C to fall back to; the driver takes no assembly input, so the
+    // pair is named here rather than left to be noticed as missing.
+    for (u64 index = 0; index < manifest.architecture_assembly_count; index += 1)
+    {
+        if (string_starts_with_sequence(manifest.architecture_assembly[index], S8("crt/")))
+        {
+            startup_absent += 1;
+            string_print(S8("MUSL_STARTUP unit={S8} object=- status=absent reason=the driver takes no assembly input\n"),
+                         manifest.architecture_assembly[index]);
+        }
     }
     String8 buster_archive = path_join(arena, output_directory, S8("libc-buster.a"));
     String8 clang_archive = path_join(arena, output_directory, S8("libc-clang.a"));
@@ -16923,8 +16973,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         string_print(S8("error: test_musl could not build the libc archives\n"));
         return PROCESS_RESULT_FAILED;
     }
-    string_print(S8("MUSL_ARCHIVE buster_members={u64} buster_bytes={u64} clang_members={u64} clang_bytes={u64}\n"), buster_object_count,
-                 musl_file_size(arena, buster_archive), clang_object_count, musl_file_size(arena, clang_archive));
+    string_print(S8("MUSL_ARCHIVE buster_members={u64} buster_bytes={u64} clang_members={u64} clang_bytes={u64} startup_emitted={u64} "
+                    "startup_absent={u64}\n"),
+                 buster_object_count, musl_file_size(arena, buster_archive), clang_object_count, musl_file_size(arena, clang_archive), startup_emitted,
+                 startup_absent);
 
     // The reference transcript. The probe enters at _start with the stack
     // aligned the way the kernel leaves it rather than the way a call leaves

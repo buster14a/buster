@@ -3919,9 +3919,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 read_ok = false;
             }
             u8 information = 0;
+            u8 other = 0;
             if (read_ok)
             {
                 information = bytes.pointer[source + 4];
+                other = bytes.pointer[source + 5];
             }
             u8 symbol_type = 0;
             String8 name = {0};
@@ -4034,6 +4036,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .kind = symbol_type == 2 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
+                    // st_other's low two bits are st_visibility; STV_HIDDEN
+                    // is 2 and STV_INTERNAL 3, both of which mean the symbol
+                    // does not leave the image.
+                    .hidden = (other & 3) == 2 || (other & 3) == 3,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -8985,6 +8991,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .kind = OBJECT_SYMBOL_FUNCTION,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
+            .hidden = symbol->is_hidden,
         };
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -9019,6 +9026,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .kind = OBJECT_SYMBOL_DATA,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
+            .hidden = symbol->is_hidden,
         };
     }
     // An alias owns no storage: it is a second name for a definition this
@@ -9055,6 +9063,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .kind = definition.kind,
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
+            .hidden = symbol->is_hidden,
         };
     }
     if (apple_thread_local)
@@ -9126,6 +9135,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .kind = target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
                 .global = true,
                 .weak = target_symbol->is_weak,
+                .hidden = target_symbol->is_hidden,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
@@ -9337,7 +9347,9 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         // STB_WEAK entry would contradict it.
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
         buffer.bytes[offset + 4] = (u8)(binding | (is_thread_local ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
-        buffer.bytes[offset + 5] = 0;
+        // st_other holds st_visibility in its low two bits: STV_DEFAULT 0,
+        // STV_HIDDEN 2.
+        buffer.bytes[offset + 5] = source->hidden ? 2 : 0;
         object_write_u16_at(&buffer, offset + 6, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)(source->section + 1));
         object_write_u64_at(&buffer, offset + 8, source->value);
         object_write_u64_at(&buffer, offset + 16, source->size);

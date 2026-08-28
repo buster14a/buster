@@ -380,6 +380,18 @@ struct CodegenModule
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
+    // Where a module-level assembly block failed. `failed_assembly` indexes
+    // IrModule.assemblies and `failed_assembly_line` is the one-based line
+    // inside that block's own text, both meaningful only while
+    // `failed_in_assembly`; `failed_function` and `failed_instruction` mean
+    // nothing then, which is what used to make the diagnostic blame the next
+    // C function in the file. The block's text is a concatenation of string
+    // literal contents and so has no offset in the file it was written in:
+    // IrModuleAssembly.source_range is what names that position.
+    u32 failed_assembly;
+    u32 failed_assembly_line;
+    bool failed_in_assembly;
+    u8 reserved_failure[3];
     u32 entry_count;
     u32 function_count;
     u32 global_count;

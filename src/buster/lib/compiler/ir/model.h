@@ -385,7 +385,10 @@ struct IrSymbol
     // __attribute__((weak)).  The object layer carries it as
     // ObjectSymbol.weak; see that field for what each format spells it as.
     bool is_weak;
-    u8 reserved[1];
+    // Not exported from the final image (ELF STV_HIDDEN). Only a `.hidden`
+    // directive in module-level assembly sets it today; the object layer
+    // carries it as ObjectSymbol.hidden.
+    bool is_hidden;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

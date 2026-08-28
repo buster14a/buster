@@ -224,6 +224,44 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
     return false;
 }
 
+// Finds one symbol a module-level assembly block put in an object. The
+// global-assembly fixtures assert on binding, visibility and section rather
+// than on encoded bytes, because what a startup object has to get right is
+// what the linker reads out of its symbol table.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ObjectSymbol const* compiler_driver_test_object_symbol(ObjectFile* object, String8 name)
+{
+    ObjectSymbol const* result = 0;
+    if (object && object->error == OBJECT_ERROR_NONE && object->symbols)
+    {
+        for (u32 symbol_index = 0; symbol_index < object->symbol_count && !result; symbol_index += 1)
+        {
+            if (string_equal(object->symbols[symbol_index].name, name))
+            {
+                result = object->symbols + symbol_index;
+            }
+        }
+    }
+
+    return result;
+}
+
+// True when the object relocates `kind` against `name` somewhere in its text.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_object_relocates(ObjectFile* object, String8 name, ObjectRelocationKind kind)
+{
+    bool result = false;
+    if (object && object->error == OBJECT_ERROR_NONE && object->relocations && object->symbols)
+    {
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count && !result; relocation_index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[relocation_index];
+            result = relocation.section == OBJECT_SECTION_TEXT && relocation.kind == kind && relocation.symbol < object->symbol_count &&
+                     string_equal(object->symbols[relocation.symbol].name, name);
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u16 compiler_driver_test_pe_read_u16(ByteSlice image, u64 offset)
 {
     u16 value = 0;
@@ -6432,6 +6470,80 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_asm_windows.has_object);
         BUSTER_TEST(arguments, compiler_driver_test_windows_x64_dynamic_rbx(&c_asm_windows.object));
     }
+    // A module-level assembly block that is the image's entry point, which is
+    // what a libc's startup object is. Linked with `-e`, so the label the
+    // block defines is the entry rather than something startup code reaches,
+    // and executed: the block aligns the stack, takes a PC-relative address
+    // and calls into C, and the C function returns a nonzero status for
+    // whichever of the three did not survive encoding.
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 entry_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-global-asm-entry"), S8(""));
+        String8 entry_command_line[] = {
+            S8("-e"), S8("global_asm_entry"), S8("-o"), entry_path, S8("tests/basic_c_global_asm_entry.c"),
+        };
+        CompilerDriverResult entry = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(entry_command_line)));
+        BUSTER_TEST(arguments, entry.error == COMPILER_DRIVER_ERROR_NONE);
+        if (entry.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 entry_arguments[] = {entry_path};
+            ProcessSpawnResult entry_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(entry_arguments), (SliceString8){0}, (SliceString8){0},
+                                                              (ProcessSpawnOptions){
+                                                                  .use_process_environment = true,
+                                                              });
+            BUSTER_TEST(arguments, entry_spawn.handle != 0);
+            if (entry_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, entry_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+#endif
+    // The same block cross-compiled: the AArch64 arm is the call relocation
+    // alone, because the textual assembler's AArch64 vocabulary cannot spell
+    // the rest of an entry point.
+    {
+        String8 entry_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-global-asm-entry-aarch64"), S8(".o"));
+        String8 entry_aarch64_command_line[] = {
+            S8("-c"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), entry_aarch64_path, S8("tests/basic_c_global_asm_entry.c"),
+        };
+        CompilerDriverResult entry_aarch64 = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(entry_aarch64_command_line)));
+        BUSTER_TEST(arguments, entry_aarch64.error == COMPILER_DRIVER_ERROR_NONE);
+        if (entry_aarch64.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ObjectSymbol const* entry_symbol = compiler_driver_test_object_symbol(&entry_aarch64.object, S8("global_asm_entry"));
+            BUSTER_TEST(arguments, entry_symbol && entry_symbol->global && entry_symbol->section == OBJECT_SECTION_TEXT);
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&entry_aarch64.object, S8("global_asm_entry_c"),
+                                                                         OBJECT_RELOCATION_AARCH64_CALL26));
+        }
+    }
+    // musl's crt_arch.h shape: `.weak` and `.hidden` on a symbol nothing
+    // defines, referenced PC-relatively. Compiled and not linked, because the
+    // undefined weak reference is the point; what the object records for that
+    // symbol is what a linker reads.
+#if BUSTER_CPU_ARCH_X86_64
+    {
+        String8 weak_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-global-asm-weak"), S8(".o"));
+        String8 weak_command_line[] = {
+            S8("-c"), S8("-o"), weak_path, S8("tests/basic_c_global_asm_weak.c"),
+        };
+        CompilerDriverResult weak = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command_line)));
+        BUSTER_TEST(arguments, weak.error == COMPILER_DRIVER_ERROR_NONE);
+        if (weak.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ObjectSymbol const* dynamic_symbol = compiler_driver_test_object_symbol(&weak.object, S8("global_asm_weak_dynamic"));
+            BUSTER_TEST(arguments, dynamic_symbol && dynamic_symbol->weak && dynamic_symbol->hidden && dynamic_symbol->global &&
+                                       dynamic_symbol->section == OBJECT_SECTION_UNDEFINED);
+            ObjectSymbol const* start_symbol = compiler_driver_test_object_symbol(&weak.object, S8("global_asm_weak_start"));
+            BUSTER_TEST(arguments, start_symbol && start_symbol->global && !start_symbol->weak && start_symbol->section == OBJECT_SECTION_TEXT);
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&weak.object, S8("global_asm_weak_dynamic"), OBJECT_RELOCATION_X86_64_PC32));
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&weak.object, S8("global_asm_weak_start_c"), OBJECT_RELOCATION_X86_64_PC32));
+        }
+    }
+#endif
     scratch_end(c_asm_temporary);
 #endif
     Arena* c_multi_conflicts[] = {

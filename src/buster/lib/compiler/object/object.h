@@ -122,7 +122,12 @@ struct ObjectSymbol
     ObjectSymbolKind kind;
     bool global;
     bool weak;
-    u8 reserved[2];
+    // Not exported from the final image: ELF STV_HIDDEN.  A `.hidden`
+    // directive in module-level assembly is the only producer today, and only
+    // the ELF writer and reader carry it -- COFF and Mach-O have no
+    // equivalent per-symbol visibility byte.
+    bool hidden;
+    u8 reserved;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

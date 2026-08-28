@@ -2377,6 +2377,38 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                            });
     result.codegen_statistics = code.statistics;
     result.codegen_error = code.error;
+    if (code.error != CODEGEN_ERROR_NONE && code.failed_in_assembly)
+    {
+        // A module-level assembly block has no function and no IR
+        // instruction, so the function-shaped report above it would name
+        // whichever C function happens to come next in the file. Name the
+        // block instead: where the `__asm__` was written, which line of it
+        // stopped, and what that line says.
+        IrModuleAssembly assembly = code.failed_assembly < module->assembly_count ? module->assemblies[code.failed_assembly] : (IrModuleAssembly){0};
+        IrSourcePosition position = ir_source_position(lowered.program, assembly.source_range);
+        String8 line = {0};
+        u32 line_number = 0;
+        u64 line_start = 0;
+        while (line_start < assembly.source.length && line_number < code.failed_assembly_line)
+        {
+            u64 line_end = line_start;
+            while (line_end < assembly.source.length && assembly.source.pointer[line_end] != '\n')
+            {
+                line_end += 1;
+            }
+            line_number += 1;
+            line = (String8){
+                .pointer = assembly.source.pointer + line_start,
+                .length = line_end - line_start,
+            };
+            line_start = line_end < assembly.source.length ? line_end + 1 : assembly.source.length;
+        }
+        result.error = COMPILER_DRIVER_ERROR_CODEGEN;
+        result.diagnostic =
+            string_format(arena, S8("C module assembly generation failed with error {u32}, block {u32}, block line {u32} ('{S8}'), source {u32}:{u32}"),
+                          (u32)code.error, code.failed_assembly, code.failed_assembly_line, line, position.line, position.column);
+        goto end;
+    }
     if (code.error != CODEGEN_ERROR_NONE)
     {
         String8 function_name = code.failed_function.value < module->function_count ? module->functions[code.failed_function.value].name : S8("<none>");

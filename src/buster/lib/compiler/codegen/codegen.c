@@ -35,7 +35,10 @@
 //   codegen_canonical_*_adjust_stack             frame setup and stack probes
 //   codegen_canonical_x64_evex_*,                AVX-512 SIMD emission for
 //   codegen_canonical_x64_simd_emit_*            IR_OPCODE_SIMD
-//   codegen_global_assembly_*                    module-level asm directives
+//   codegen_global_assembly_*,                   module-level asm: directives
+//   codegen_emit_global_assembly                 here, instructions through
+//                                                assembly_encode, relocations
+//                                                into the module
 //   a64_emit_*, codegen_canonical_a64_*          AArch64 emission helpers
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
@@ -5024,7 +5027,13 @@ BUSTER_GLOBAL_LOCAL u64 codegen_global_assembly_alignment_padding(String8 source
     return padding;
 }
 
-BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target)
+// Names one symbol a module-level assembly block refers to, creating it when
+// the translation unit never declared it in C. A crt's entry point is defined
+// by the block and by nothing else, so requiring a C declaration would fail
+// the very block that defines `_start` on the label that names it. `kind`
+// decides only what a newly created symbol becomes; an existing one keeps the
+// kind its declaration gave it.
+BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind)
 {
     String8 alternate = name;
     if ((target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && alternate.length && alternate.pointer[0] == '_')
@@ -5032,25 +5041,481 @@ BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program
         alternate.pointer += 1;
         alternate.length -= 1;
     }
-    for (u32 symbol_index = 0; symbol_index < program->symbols.count; symbol_index += 1)
+    IrSymbolId result = IR_SYMBOL_ID_INVALID;
+    for (u32 symbol_index = 0; symbol_index < program->symbols.count && result.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
     {
         IrSymbol* symbol = &program->symbols.symbols[symbol_index];
         String8 link_name = symbol->link_name.length ? symbol->link_name : symbol->name;
-        if (symbol->kind == IR_SYMBOL_FUNCTION && (string_equal(link_name, name) || string_equal(link_name, alternate)))
+        // A type symbol shares its spelling with a struct tag, which is not a
+        // linker name; only code and data symbols can answer here.
+        if ((symbol->kind == IR_SYMBOL_FUNCTION || symbol->kind == IR_SYMBOL_DATA) && (string_equal(link_name, name) || string_equal(link_name, alternate)))
         {
-            return (IrSymbolId){
+            result = (IrSymbolId){
                 .value = symbol_index,
             };
         }
     }
-    return IR_SYMBOL_ID_INVALID;
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        // The name points into the block's own source text, which outlives
+        // every code-generation attempt: the retry that doubles the code
+        // buffer rewinds the attempt arena, and a symbol added here survives
+        // it and is found by the search above on the next pass rather than
+        // being added twice.
+        result = ir_program_add_symbol(program, (IrSymbol){
+                                                    .name = name,
+                                                    .type = IR_TYPE_ID_INVALID,
+                                                    .kind = kind,
+                                                    .linkage = IR_LINKAGE_EXTERNAL,
+                                                });
+    }
+
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* program, IrModuleAssembly assembly, Target target, CodegenBuffer* buffer,
-                                                      CodegenModule* result)
+// True when every byte can appear in an assembler symbol name. It is what
+// separates a label from a colon inside an operand: `%fs:0` is a segment
+// override, not a definition of `%fs`.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_name(String8 name)
 {
+    bool result = name.length != 0;
+    for (u64 index = 0; index < name.length && result; index += 1)
+    {
+        char8 character = name.pointer[index];
+        result = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') ||
+                 character == '_' || character == '.' || character == '$';
+    }
+
+    return result;
+}
+
+// Defines the label chain at the head of a line -- `a: b: insn` names both at
+// the current offset -- and advances `line` past it.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_define_labels(IrProgram* program, Target target, CodegenBuffer* buffer, CodegenModule* result, String8* line)
+{
+    bool valid = true;
+    bool done = false;
+    while (valid && !done)
+    {
+        u64 colon = UINT64_MAX;
+        for (u64 index = 0; index < line->length && colon == UINT64_MAX; index += 1)
+        {
+            colon = line->pointer[index] == ':' ? index : colon;
+        }
+        String8 name = codegen_global_assembly_trim((String8){
+            .pointer = line->pointer,
+            .length = colon == UINT64_MAX ? 0 : colon,
+        });
+        if (colon == UINT64_MAX || !codegen_global_assembly_name(name))
+        {
+            done = true;
+        }
+        else
+        {
+            IrSymbolId symbol = codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_FUNCTION);
+            if (symbol.value == IR_ID_UNDERLYING_INVALID)
+            {
+                valid = false;
+            }
+            else
+            {
+                program->symbols.symbols[symbol.value].is_definition = true;
+                // A label in this block names an address in the text section,
+                // so the definition is a function however the name was first
+                // declared.
+                program->symbols.symbols[symbol.value].kind = IR_SYMBOL_FUNCTION;
+                result->entries[result->entry_count++] = (CodegenModuleEntry){
+                    .symbol = symbol,
+                    .offset = (u32)buffer->count,
+                };
+                line->pointer += colon + 1;
+                line->length -= colon + 1;
+                *line = codegen_global_assembly_trim(*line);
+                done = line->length == 0;
+            }
+        }
+    }
+
+    return valid;
+}
+
+// `.byte 1, 2, 0x03`.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_emit_bytes(CodegenBuffer* buffer, String8 values)
+{
+    bool valid = true;
+    bool done = values.length == 0;
+    while (valid && !done)
+    {
+        u64 comma = values.length;
+        for (u64 index = 0; index < values.length && comma == values.length; index += 1)
+        {
+            comma = values.pointer[index] == ',' ? index : comma;
+        }
+        u64 value = 0;
+        if (!codegen_global_assembly_unsigned(
+                (String8){
+                    .pointer = values.pointer,
+                    .length = comma,
+                },
+                &value) ||
+            value > UINT8_MAX)
+        {
+            valid = false;
+        }
+        else
+        {
+            codegen_emit_u8(buffer, (u8)value);
+            done = comma == values.length;
+            values.pointer += done ? 0 : comma + 1;
+            values.length -= done ? 0 : comma + 1;
+            // A list ending in a separator has no value after it to parse,
+            // and never had one to reject.
+            done = done || values.length == 0;
+        }
+    }
+
+    return valid;
+}
+
+// `.p2align <exponent>`, padded with the target's one-instruction no-op.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_emit_alignment(CodegenBuffer* buffer, Target target, String8 operand)
+{
+    u64 alignment = 0;
+    bool valid = codegen_global_assembly_alignment(operand, &alignment);
+    // The emit helpers refuse a byte the buffer cannot hold without advancing
+    // its count, so a reserve too small for this padding has to end the loop
+    // here instead of asking forever.
+    while (valid && (buffer->count & (alignment - 1)) && buffer->error == CODEGEN_ERROR_NONE)
+    {
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            valid = codegen_canonical_x64_metadata_emit(buffer, S8("NOP"), 0, 0);
+        }
+        else if (buffer->count & 3)
+        {
+            valid = false;
+        }
+        else
+        {
+            codegen_emit_u32(buffer, 0xd503201f);
+        }
+    }
+
+    return valid;
+}
+
+// The directives that speak about a symbol instead of about bytes. `.size` is
+// accepted and dropped: the emitter already computes every entry's size from
+// the next entry's offset.
+typedef struct CodegenGlobalAssemblySymbolDirective CodegenGlobalAssemblySymbolDirective;
+struct CodegenGlobalAssemblySymbolDirective
+{
+    String8 spelling;
+    bool external;
+    bool weak;
+    bool hidden;
+    bool typed;
+};
+
+BUSTER_GLOBAL_LOCAL CodegenGlobalAssemblySymbolDirective const codegen_global_assembly_symbol_directives[] = {
+    {S8_INITIALIZER(".globl"), true, false, false, false},  {S8_INITIALIZER(".global"), true, false, false, false},
+    {S8_INITIALIZER(".weak"), true, true, false, false},    {S8_INITIALIZER(".hidden"), false, false, true, false},
+    {S8_INITIALIZER(".type"), false, false, false, true},   {S8_INITIALIZER(".size"), false, false, false, false},
+};
+
+// True when `line` starts with `directive` and the directive name ends there,
+// so `.globl` does not also answer for a hypothetical `.globlfoo`.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_directive(String8 line, String8 directive)
+{
+    bool result = line.length >= directive.length && memcmp(line.pointer, directive.pointer, directive.length) == 0;
+    if (result && line.length > directive.length)
+    {
+        char8 next = line.pointer[directive.length];
+        result = next == ' ' || next == '\t';
+    }
+
+    return result;
+}
+
+// Applies one symbol directive. `recognized` stays false for a line no entry
+// in the table claims, which the caller reports as unsupported.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line, bool* recognized)
+{
+    bool valid = true;
+    for (u32 directive_index = 0; directive_index < BUSTER_ARRAY_LENGTH(codegen_global_assembly_symbol_directives) && !*recognized; directive_index += 1)
+    {
+        CodegenGlobalAssemblySymbolDirective directive = codegen_global_assembly_symbol_directives[directive_index];
+        if (!codegen_global_assembly_directive(line, directive.spelling))
+        {
+            continue;
+        }
+        *recognized = true;
+        String8 operands = codegen_global_assembly_trim((String8){
+            .pointer = line.pointer + directive.spelling.length,
+            .length = line.length - directive.spelling.length,
+        });
+        String8 name = operands;
+        for (u64 index = 0; index < operands.length; index += 1)
+        {
+            if (operands.pointer[index] == ',')
+            {
+                name.length = index;
+                break;
+            }
+        }
+        name = codegen_global_assembly_trim(name);
+        // A directive alone never says "function": `.weak` on a data symbol is
+        // what a position-independent crt writes about `_DYNAMIC`. Only a
+        // label definition, or an explicit `.type`, promotes the kind.
+        IrSymbolId symbol = codegen_global_assembly_name(name) ? codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
+        if (symbol.value == IR_ID_UNDERLYING_INVALID)
+        {
+            valid = false;
+        }
+        else
+        {
+            IrSymbol* record = &program->symbols.symbols[symbol.value];
+            record->linkage = directive.external ? IR_LINKAGE_EXTERNAL : record->linkage;
+            record->is_weak = record->is_weak || directive.weak;
+            record->is_hidden = record->is_hidden || directive.hidden;
+            if (directive.typed && !record->is_definition)
+            {
+                // `@function` in GAS, `%function` on the targets where `@`
+                // starts a comment, and the spelled-out `STT_FUNC` are the
+                // forms a libc's startup assembly uses.
+                String8 type_operand = codegen_global_assembly_trim((String8){
+                    .pointer = name.pointer + name.length,
+                    .length = operands.length - (u64)(name.pointer - operands.pointer) - name.length,
+                });
+                bool function_type = string_ends_with_sequence(type_operand, S8("function")) || string_ends_with_sequence(type_operand, S8("STT_FUNC"));
+                bool object_type = string_ends_with_sequence(type_operand, S8("object")) || string_ends_with_sequence(type_operand, S8("STT_OBJECT"));
+                record->kind = function_type ? IR_SYMBOL_FUNCTION : object_type ? IR_SYMBOL_DATA : record->kind;
+            }
+        }
+    }
+
+    return valid;
+}
+
+// The instruction forms this emitter encodes without the assembler. They are
+// kept because they predate the assembler path and because the two `-masm`
+// dialects spell them identically; `emitted` stays false for everything else.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_emit_fixed_instruction(CodegenBuffer* buffer, Target target, String8 instruction, bool* emitted)
+{
+    bool valid = true;
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        String8 mnemonic = {0};
+        if (string_equal(instruction, S8("ret")) || string_equal(instruction, S8("retq")))
+        {
+            mnemonic = S8("RET");
+        }
+        else if (string_equal(instruction, S8("nop")))
+        {
+            mnemonic = S8("NOP");
+        }
+        else if (string_equal(instruction, S8("ud2")))
+        {
+            mnemonic = S8("UD2");
+        }
+        if (mnemonic.length)
+        {
+            valid = codegen_canonical_x64_metadata_emit(buffer, mnemonic, 0, 0);
+            *emitted = valid;
+        }
+        else
+        {
+            String8 prefixes[] = {
+                S8("mov$"),
+                S8("movl$"),
+            };
+            for (u32 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(prefixes) && !*emitted && valid; prefix_index += 1)
+            {
+                String8 prefix = prefixes[prefix_index];
+                String8 suffix = S8(",%eax");
+                if (instruction.length <= prefix.length + suffix.length || memcmp(instruction.pointer, prefix.pointer, prefix.length) != 0 ||
+                    memcmp(instruction.pointer + instruction.length - suffix.length, suffix.pointer, suffix.length) != 0)
+                {
+                    continue;
+                }
+                u64 immediate = 0;
+                if (!codegen_global_assembly_unsigned(
+                        (String8){
+                            .pointer = instruction.pointer + prefix.length,
+                            .length = instruction.length - prefix.length - suffix.length,
+                        },
+                        &immediate) ||
+                    immediate > UINT32_MAX)
+                {
+                    valid = false;
+                }
+                else
+                {
+                    BusterX86MetadataPhysicalOperand operands[2] = {
+                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                        codegen_canonical_x64_metadata_unsigned_immediate(immediate, 32),
+                    };
+                    valid = codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
+                    *emitted = valid;
+                }
+            }
+        }
+    }
+    else
+    {
+        String8 movw0 = S8("movw0,#");
+        if (string_equal(instruction, S8("ret")))
+        {
+            codegen_emit_u32(buffer, 0xd65f03c0);
+            *emitted = true;
+        }
+        else if (string_equal(instruction, S8("nop")))
+        {
+            codegen_emit_u32(buffer, 0xd503201f);
+            *emitted = true;
+        }
+        else if (string_equal(instruction, S8("brk#0")))
+        {
+            codegen_emit_u32(buffer, 0xd4200000);
+            *emitted = true;
+        }
+        else if (instruction.length > movw0.length && memcmp(instruction.pointer, movw0.pointer, movw0.length) == 0)
+        {
+            u64 immediate = 0;
+            if (!codegen_global_assembly_unsigned(
+                    (String8){
+                        .pointer = instruction.pointer + movw0.length,
+                        .length = instruction.length - movw0.length,
+                    },
+                    &immediate) ||
+                immediate > UINT16_MAX)
+            {
+                valid = false;
+            }
+            else
+            {
+                codegen_emit_u32(buffer, 0x52800000 | ((u32)immediate << 5));
+                *emitted = true;
+            }
+        }
+    }
+
+    return valid;
+}
+
+// Translates one relocation the assembler reported against an undefined name
+// into the module vocabulary. False means the module cannot express that
+// family, which the caller reports as an unsupported instruction rather than
+// emitting an unrelocated reference.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocationKind kind, CodegenModuleRelocationKind* module_kind)
+{
+    bool result = true;
+    switch (kind)
+    {
+        case ASSEMBLY_RELOCATION_X86_PC32:
+            *module_kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+            break;
+        case ASSEMBLY_RELOCATION_X86_ABSOLUTE32:
+            *module_kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE32;
+            break;
+        case ASSEMBLY_RELOCATION_X86_ABSOLUTE64:
+            *module_kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
+            break;
+        case ASSEMBLY_RELOCATION_AARCH64_CALL26:
+            *module_kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26;
+            break;
+        default:
+            result = false;
+            break;
+    }
+
+    return result;
+}
+
+// Assembles one instruction line through the same assembler the inline
+// assembly path uses, and records the relocations it reports against names
+// the block does not define. `call sym` and `lea sym(%rip),%reg` -- what a
+// crt's entry point is made of -- are the two shapes this exists for.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena, IrProgram* program, Target target, CodegenModuleOptions options, String8 line,
+                                                                     CodegenBuffer* buffer, CodegenModule* result, u32 relocation_capacity)
+{
+    u32 instruction_offset = (u32)buffer->count;
+    AssemblyEncodeResult encoded = assembly_encode(arena, line,
+                                                    (AssemblyEncodeOptions){
+                                                        .target = target,
+                                                        // The AT&T/Intel distinction is x86-only, and the
+                                                        // assembler rejects either spelling for another
+                                                        // target rather than ignoring it.
+                                                        .syntax = target.cpu_arch == CPU_ARCH_X86_64 ? codegen_inline_assembly_syntax(options)
+                                                                                                     : ASSEMBLY_SYNTAX_DEFAULT,
+                                                    });
+    u8* encoded_bytes = 0;
+    bool valid = !encoded.diagnostic_count && result->relocation_count <= relocation_capacity &&
+                 encoded.relocation_count <= relocation_capacity - result->relocation_count &&
+                 codegen_buffer_reserve(buffer, encoded.bytes.length, &encoded_bytes);
+    if (valid && encoded.bytes.length)
+    {
+        memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
+    }
+    for (u32 relocation_index = 0; relocation_index < encoded.relocation_count && valid; relocation_index += 1)
+    {
+        AssemblyRelocation relocation = encoded.relocations[relocation_index];
+        CodegenModuleRelocationKind kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32;
+        IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+        valid = relocation.symbol < encoded.symbol_count && codegen_global_assembly_relocation_kind(relocation.kind, &kind) &&
+                relocation.offset <= UINT32_MAX - instruction_offset;
+        // The assembler's PC-relative addend already carries the distance from
+        // the relocated field to the end of its instruction. The module
+        // vocabulary's does not: the object writer subtracts four on the way
+        // out, which is that distance only for a field that ends the
+        // instruction. Adding those four back here leaves one addend that is
+        // right whatever follows the field.
+        s64 addend = relocation.addend;
+        if (kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32)
+        {
+            valid = valid && addend <= INT64_MAX - 4;
+            addend += 4;
+        }
+        if (valid)
+        {
+            symbol = codegen_global_assembly_symbol(program, encoded.symbols[relocation.symbol].name, target, IR_SYMBOL_DATA);
+            valid = symbol.value != IR_ID_UNDERLYING_INVALID;
+        }
+        if (valid)
+        {
+            result->relocations[result->relocation_count++] = (CodegenModuleRelocation){
+                .addend = addend,
+                .symbol = symbol,
+                .offset = instruction_offset + (u32)relocation.offset,
+                .source = CODEGEN_MODULE_RELOCATION_CODE,
+                .aarch64 = kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+                .absolute = kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE32 || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
+                .kind = (u8)kind,
+            };
+        }
+    }
+
+    return valid;
+}
+
+// Emits one module-level `__asm__` block into the module's text.
+//
+// Directives are interpreted here: `.text` is the only section this can emit
+// into, `.byte` and `.p2align` write bytes directly, and the table above
+// speaks about symbols. Everything else on a line is an instruction: the few
+// forms with a fixed encoding go through the canonical metadata bridge, and
+// the rest go to the real assembler with relocation support.
+//
+// `failed_line` receives the one-based line inside `assembly.source` that
+// stopped the block, so the diagnostic can name the assembly rather than the
+// next C function in the file. It is zero when the block was emitted whole.
+BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* program, IrModuleAssembly assembly, Target target, CodegenModuleOptions options,
+                                                      CodegenBuffer* buffer, CodegenModule* result, u32 relocation_capacity, u32* failed_line)
+{
+    bool valid = true;
     u64 line_start = 0;
-    while (line_start < assembly.source.length)
+    u32 line_number = 0;
+    while (line_start < assembly.source.length && valid)
     {
         u64 line_end = line_start;
         while (line_end < assembly.source.length && assembly.source.pointer[line_end] != '\n')
@@ -5062,281 +5527,71 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
             .length = line_end - line_start,
         });
         line_start = line_end < assembly.source.length ? line_end + 1 : assembly.source.length;
-        if (!line.length || line.pointer[0] == '#')
+        line_number += 1;
+        *failed_line = line_number;
+        if (line.length && line.pointer[0] != '#')
         {
-            continue;
-        }
-        for (;;)
-        {
-            u64 colon = UINT64_MAX;
-            for (u64 index = 0; index < line.length; index += 1)
-            {
-                if (line.pointer[index] == ':')
-                {
-                    colon = index;
-                    break;
-                }
-            }
-            if (colon == UINT64_MAX)
-            {
-                break;
-            }
-            String8 name = codegen_global_assembly_trim((String8){
-                .pointer = line.pointer,
-                .length = colon,
-            });
-            IrSymbolId symbol = codegen_global_assembly_symbol(program, name, target);
-            if (symbol.value == IR_ID_UNDERLYING_INVALID)
-            {
-                return false;
-            }
-            program->symbols.symbols[symbol.value].is_definition = true;
-            result->entries[result->entry_count++] = (CodegenModuleEntry){
-                .symbol = symbol,
-                .offset = (u32)buffer->count,
-            };
-            line.pointer += colon + 1;
-            line.length -= colon + 1;
-            line = codegen_global_assembly_trim(line);
-            if (!line.length)
-            {
-                break;
-            }
-        }
-        if (!line.length)
-        {
-            continue;
-        }
-        if (line.pointer[0] == '.')
-        {
-            if ((line.length >= 5 && memcmp(line.pointer, ".byte", 5) == 0))
-            {
-                String8 values = {
-                    .pointer = line.pointer + 5,
-                    .length = line.length - 5,
-                };
-                while (values.length)
-                {
-                    u64 comma = values.length;
-                    for (u64 index = 0; index < values.length; index += 1)
-                    {
-                        if (values.pointer[index] == ',')
-                        {
-                            comma = index;
-                            break;
-                        }
-                    }
-                    u64 value = 0;
-                    if (!codegen_global_assembly_unsigned(
-                            (String8){
-                                .pointer = values.pointer,
-                                .length = comma,
-                            },
-                            &value) ||
-                        value > UINT8_MAX)
-                    {
-                        return false;
-                    }
-                    codegen_emit_u8(buffer, (u8)value);
-                    if (comma == values.length)
-                    {
-                        break;
-                    }
-                    values.pointer += comma + 1;
-                    values.length -= comma + 1;
-                }
-                continue;
-            }
-            if (line.length >= 8 && memcmp(line.pointer, ".p2align", 8) == 0)
-            {
-                u64 alignment = 0;
-                if (!codegen_global_assembly_alignment(
-                        (String8){
-                            .pointer = line.pointer + 8,
-                            .length = line.length - 8,
-                        },
-                        &alignment))
-                {
-                    return false;
-                }
-                // The emit helpers refuse a byte the buffer cannot hold without
-                // advancing its count, so a reserve too small for this padding
-                // has to end the loop here instead of asking forever.
-                while ((buffer->count & (alignment - 1)) && buffer->error == CODEGEN_ERROR_NONE)
-                {
-                    if (target.cpu_arch == CPU_ARCH_X86_64)
-                    {
-                        if (!codegen_canonical_x64_metadata_emit(buffer, S8("NOP"), 0, 0))
-                        {
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        if (buffer->count & 3)
-                        {
-                            return false;
-                        }
-                        codegen_emit_u32(buffer, 0xd503201f);
-                    }
-                }
-                continue;
-            }
-            bool recognized = (line.length >= 5 && memcmp(line.pointer, ".text", 5) == 0) || (line.length >= 6 && memcmp(line.pointer, ".globl", 6) == 0) ||
-                              (line.length >= 7 && memcmp(line.pointer, ".global", 7) == 0) || (line.length >= 5 && memcmp(line.pointer, ".type", 5) == 0) ||
-                              (line.length >= 5 && memcmp(line.pointer, ".size", 5) == 0);
-            if (!recognized)
-            {
-                return false;
-            }
-            continue;
-        }
-        char8* normalized = arena_allocate(arena, char8, line.length);
-        u64 normalized_length = 0;
-        for (u64 index = 0; index < line.length; index += 1)
-        {
-            if (line.pointer[index] != ' ' && line.pointer[index] != '\t')
-            {
-                normalized[normalized_length++] = line.pointer[index];
-            }
-        }
-        String8 instruction = {
-            .pointer = normalized,
-            .length = normalized_length,
-        };
-        if (target.cpu_arch == CPU_ARCH_X86_64)
-        {
-            if (string_equal(instruction, S8("ret")) || string_equal(instruction, S8("retq")))
-            {
-                if (!codegen_canonical_x64_metadata_emit(buffer, S8("RET"), 0, 0))
-                {
-                    return false;
-                }
-            }
-            else if (string_equal(instruction, S8("nop")))
-            {
-                if (!codegen_canonical_x64_metadata_emit(buffer, S8("NOP"), 0, 0))
-                {
-                    return false;
-                }
-            }
-            else if (string_equal(instruction, S8("ud2")))
-            {
-                if (!codegen_canonical_x64_metadata_emit(buffer, S8("UD2"), 0, 0))
-                {
-                    return false;
-                }
-            }
-            else if (string_equal(instruction, S8("pause")))
-            {
-                AssemblyEncodeResult encoded = assembly_encode(arena, instruction,
-                                                                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
-                if (encoded.diagnostic_count || encoded.relocation_count)
-                {
-                    return false;
-                }
-                for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
-                {
-                    if (!encoded.symbols[symbol_index].defined)
-                    {
-                        return false;
-                    }
-                }
-                u8* encoded_bytes = 0;
-                if (!codegen_buffer_reserve(buffer, encoded.bytes.length, &encoded_bytes))
-                {
-                    return false;
-                }
-                if (encoded.bytes.length)
-                {
-                    memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
-                }
-            }
-            else
-            {
-                String8 prefixes[] = {
-                    S8("mov$"),
-                    S8("movl$"),
-                };
-                bool emitted = false;
-                for (u32 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(prefixes); prefix_index += 1)
-                {
-                    String8 prefix = prefixes[prefix_index];
-                    String8 suffix = S8(",%eax");
-                    if (instruction.length <= prefix.length + suffix.length || memcmp(instruction.pointer, prefix.pointer, prefix.length) != 0 ||
-                        memcmp(instruction.pointer + instruction.length - suffix.length, suffix.pointer, suffix.length) != 0)
-                    {
-                        continue;
-                    }
-                    u64 immediate = 0;
-                    if (!codegen_global_assembly_unsigned(
-                            (String8){
-                                .pointer = instruction.pointer + prefix.length,
-                                .length = instruction.length - prefix.length - suffix.length,
-                            },
-                            &immediate) ||
-                        immediate > UINT32_MAX)
-                    {
-                        return false;
-                    }
-                    BusterX86MetadataPhysicalOperand operands[2] = {
-                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
-                        codegen_canonical_x64_metadata_unsigned_immediate(immediate, 32),
-                    };
-                    if (!codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands)))
-                    {
-                        return false;
-                    }
-                    emitted = true;
-                    break;
-                }
-                if (!emitted)
-                {
-                    return false;
-                }
-            }
+            valid = codegen_global_assembly_define_labels(program, target, buffer, result, &line);
         }
         else
         {
-            if (string_equal(instruction, S8("ret")))
-            {
-                codegen_emit_u32(buffer, 0xd65f03c0);
-            }
-            else if (string_equal(instruction, S8("nop")))
-            {
-                codegen_emit_u32(buffer, 0xd503201f);
-            }
-            else if (string_equal(instruction, S8("brk#0")))
-            {
-                codegen_emit_u32(buffer, 0xd4200000);
-            }
-            else
-            {
-                String8 prefix = S8("movw0,#");
-                if (instruction.length <= prefix.length || memcmp(instruction.pointer, prefix.pointer, prefix.length) != 0)
-                {
-                    return false;
-                }
-                u64 immediate = 0;
-                if (!codegen_global_assembly_unsigned(
-                        (String8){
-                            .pointer = instruction.pointer + prefix.length,
-                            .length = instruction.length - prefix.length,
-                        },
-                        &immediate) ||
-                    immediate > UINT16_MAX)
-                {
-                    return false;
-                }
-                codegen_emit_u32(buffer, 0x52800000 | ((u32)immediate << 5));
-            }
+            line.length = 0;
         }
-        if (buffer->error != CODEGEN_ERROR_NONE)
+        if (valid && line.length && line.pointer[0] == '.')
         {
-            return false;
+            bool recognized = codegen_global_assembly_directive(line, S8(".text"));
+            if (line.length >= 5 && memcmp(line.pointer, ".byte", 5) == 0)
+            {
+                recognized = true;
+                valid = codegen_global_assembly_emit_bytes(buffer, (String8){
+                                                                       .pointer = line.pointer + 5,
+                                                                       .length = line.length - 5,
+                                                                   });
+            }
+            else if (line.length >= 8 && memcmp(line.pointer, ".p2align", 8) == 0)
+            {
+                recognized = true;
+                valid = codegen_global_assembly_emit_alignment(buffer, target,
+                                                                (String8){
+                                                                    .pointer = line.pointer + 8,
+                                                                    .length = line.length - 8,
+                                                                });
+            }
+            else if (!recognized)
+            {
+                valid = codegen_global_assembly_apply_symbol_directive(program, target, line, &recognized);
+            }
+            valid = valid && recognized;
+            line.length = 0;
         }
+        if (valid && line.length)
+        {
+            char8* normalized = arena_allocate(arena, char8, line.length);
+            u64 normalized_length = 0;
+            for (u64 index = 0; index < line.length; index += 1)
+            {
+                if (line.pointer[index] != ' ' && line.pointer[index] != '\t')
+                {
+                    normalized[normalized_length++] = line.pointer[index];
+                }
+            }
+            bool emitted = false;
+            valid = codegen_global_assembly_emit_fixed_instruction(buffer, target,
+                                                                    (String8){
+                                                                        .pointer = normalized,
+                                                                        .length = normalized_length,
+                                                                    },
+                                                                    &emitted);
+            // The assembler sees the untouched line rather than the
+            // whitespace-stripped spelling the comparisons above want.
+            valid = valid &&
+                    (emitted || codegen_global_assembly_encode_instruction(arena, program, target, options, line, buffer, result, relocation_capacity));
+        }
+        valid = valid && buffer->error == CODEGEN_ERROR_NONE;
     }
-    return true;
+    *failed_line = valid ? 0 : *failed_line;
+
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_address(CodegenBuffer* buffer, X64Register target, s32 displacement)
@@ -7761,7 +8016,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         global_relocation_count += global->relocation_count;
         global_relocation_count += global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
     }
-    result.relocations = arena_allocate(arena, CodegenModuleRelocation, instruction_count * 3 + global_relocation_count);
+    // A module-level assembly block reports at most one relocation per symbol
+    // reference, and a reference costs at least one source byte, so the
+    // block's own length bounds what it can add on top of the per-instruction
+    // and per-global terms. The total is carried into the emitter, which is
+    // the only producer that appends after this array is sized.
+    u32 relocation_capacity = instruction_count * 3 + global_relocation_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - global_relocation_count);
+    result.relocations = arena_allocate(arena, CodegenModuleRelocation, relocation_capacity);
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
         IrGlobal* global = module->globals + global_index;
@@ -18206,9 +18467,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     }
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
     {
-        if (!codegen_emit_global_assembly(arena, program, module->assemblies[assembly_index], target, &buffer, &result))
+        u32 failed_line = 0;
+        if (!codegen_emit_global_assembly(arena, program, module->assemblies[assembly_index], target, options, &buffer, &result, relocation_capacity,
+                                           &failed_line))
         {
             result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            result.failed_in_assembly = true;
+            result.failed_assembly = assembly_index;
+            result.failed_assembly_line = failed_line;
             return result;
         }
     }

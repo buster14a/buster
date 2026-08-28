@@ -822,7 +822,9 @@ regression therefore both move a number that has to be updated on purpose.
 
 Both object sets are archived with `ar` through a response file — a musl
 archive is a thousand members, which is past what a Windows command line takes
-— and the freestanding probe is then linked against each. The probe,
+— and the freestanding probe is then linked against each. The `crt/` units are
+the one exclusion from both archives, for the reason in the startup-object note
+below. The probe,
 `tests/basic_musl_freestanding.c`, is a project-owned program with no include
 of any kind: it is compiled `-nostdinc` against musl's own headers, entered at
 `_start`, and linked with `ld -static` and nothing else, so no compiler driver,
@@ -846,13 +848,13 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 159
+harness compiles the portable C instead and lists each one. The remaining 157
 are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
 for `_Complex` arithmetic, which the frontend has no type for; 54 that reach
 code generation and fail there, nearly all of them x87 `long double`, either a
 `union` holding one passed by value or an operation the emitter has no shape
-for; 5 static initializers; 4 startup objects; 2 conflicting declarations; and
-26 singletons.
+for; 5 static initializers; 2 startup objects; 2 conflicting declarations; and
+26 singletons (measured 2026-08-29).
 
 Seventeen of those code-generation failures were static initializers until the
 folder learned the two shapes musl writes. `floorl`, `ceill`, `roundl`,
@@ -865,14 +867,25 @@ has a type that contains an x87 `long double` without being one, so an array of
 them is refused whether or not it carries an initializer at all. The compiled
 count therefore did not move.
 
-One of those deserves its own note. musl's startup objects -- `crt/crt1.c`
-and its siblings -- are written as module-level assembly, and Buster's
-global-assembly support covers `.byte`, `.p2align`, the section and symbol
-directives and a handful of instructions, which is not enough for a
-`crt_arch.h` that aligns the stack and calls into C; that path also
-misattributes its diagnostic to the next C function in the file, and it
-requires the symbol an assembly block defines to carry a C declaration as
-well.
+musl's startup objects are their own report now that module-level assembly
+goes through the real assembler. `crt/crt1.c` and `crt/Scrt1.c` compile, and
+the harness writes `crt1.o` and `Scrt1.o` beside the archive rather than into
+it, the way musl's own build keeps startup objects out of `libc.a`; a
+`MUSL_STARTUP` line names each object it produced, and each one it did not
+with the reason. The produced `crt1.o` is a complete startup object:
+`_start`'s bytes are Clang's, `_DYNAMIC` is weak and hidden, `_init` and
+`_fini` are weak undefined, and `ld -static` links it into a program the
+kernel enters and that exits cleanly.
+
+Three objects are still absent, for two reasons that are not the module-level
+path. `crt/rcrt1.c` and `ldso/dlstart.c` stop on x86-64's `GETFUNCSYM` in
+`arch/x86_64/reloc.h`, which is *inline* assembly carrying a `.hidden`
+directive and a RIP-relative `lea` against a symbol with an output operand:
+`codegen_generate_canonical_module_attempt`'s inline-assembly arm still
+refuses any encode that reports a relocation, so the same relocation plumbing
+has to reach that path before those two build. `crti.o` and `crtn.o` come from
+`crt/x86_64/crti.s` and `crtn.s`, which have no portable C to fall back to,
+and the driver takes no assembly input.
 
 The archive is linkable, which it was not until `__attribute__((weak))` and
 `__attribute__((alias))` reached the object writer. musl publishes `malloc`,
@@ -892,11 +905,12 @@ musl's allocator takes a lock through the thread pointer, which a program
 entered at `_start` with no startup object never established, and the
 Clang-built archive faults in the same place.
 
-For scale, one recorded run took 86 seconds wall and left 23 MB behind: the
-Buster pass spent 54,8 seconds of child time over 1349 units — 41 ms each — for
-102,8 MB of preprocessed source, 3.783.876 lines and 4.283.521 tokens, and
-produced 1190 archive members in 4.636.304 bytes against Clang's 1349 in
-2.657.772. The Buster archive is the larger of the two despite holding fewer
+For scale, one recorded run left 26 MB behind: the
+Buster pass spent 53,8 seconds of child time over 1349 units — 40 ms each — for
+102,9 MB of preprocessed source, 3.787.855 lines and 4.288.079 tokens, and
+produced 1190 archive members in 4.666.686 bytes against Clang's 1346 in
+2.652.374. Both counts are the manifest minus its `crt/` units, which the
+startup-object note above keeps out of the archives. The Buster archive is the larger of the two despite holding fewer
 members, which is what an emitter that spills through the frame rather than
 through registers looks like at this scale. Generated headers, objects, archives, metrics and logs remain under
 `build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the
@@ -1881,6 +1895,30 @@ on a commit you already know is incomplete tells nobody anything.
   own `CODEGEN_ERROR_UNSUPPORTED_ABI` rather than a diagnostic, is an object
   of more than one `long double` — `long double v[2]`, local or global —
   because its slot is not the sixteen-byte x87 shape the value paths read.
+- **A module-level `__asm__` block emits into the module's text through
+  `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
+  directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives
+  `.globl`/`.global`, `.weak`, `.hidden`, `.type` and `.size` — and hands
+  every instruction it does not have a fixed encoding for to `assembly_encode`,
+  the same assembler the inline-assembly path uses, one line at a time. That
+  is where relocation support comes from: a `call sym` or a
+  `lea sym(%rip),%reg` against a name the block does not define becomes a
+  `CodegenModuleRelocation`. The assembler's PC-relative addend already carries
+  the distance from the relocated field to the end of its instruction, and the
+  module vocabulary's does not — the object writer subtracts four on the way
+  out — so the emitter adds those four back rather than restricting the shapes
+  it accepts. A symbol the block names does not need a C declaration: the
+  emitter adds one to `IrProgram.symbols` when the search misses, which is what
+  lets a startup object define `_start`. Two things follow from the AT&T/Intel
+  dialect being x86-only: the emitter passes `ASSEMBLY_SYNTAX_DEFAULT` for
+  every other target, and the assembler's AArch64 vocabulary is the bootstrap
+  control-flow set, so an AArch64 block gets `bl`, `brk`, `ret` and `nop` and
+  not an ADRP/ADD page pair. A block that fails reports through
+  `CodegenModule.failed_in_assembly` and the block/line beside it, which is what
+  keeps the driver's diagnostic off the next C function in the file. The
+  *inline*-assembly arm of `codegen_generate_canonical_module_attempt` is a
+  separate path and still refuses any encode that reports a relocation, which
+  is what a `lea sym(%rip),%0` in a GNU asm template needs.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.
