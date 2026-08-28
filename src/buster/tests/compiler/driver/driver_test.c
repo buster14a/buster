@@ -6166,9 +6166,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 scratch_end(libc_shape_temporary);
             }
         }
+#if BUSTER_CPU_ARCH_X86_64
         // The thread-pointer read is in the atomics fixture but never called
         // there, because a program this driver links has no thread area. Its
-        // encoding is what the fixture is carrying it for.
+        // encoding is what the fixture is carrying it for. The fixture compiles
+        // to an empty main off x86-64, where there is no such encoding to find.
         Arena* segment_conflicts[] = {
             arguments->arena,
             c_asm_arena,
@@ -6186,6 +6188,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, compiler_driver_test_x64_segment_override_load(&segment.object));
         }
         scratch_end(segment_temporary);
+#endif
     }
     // Local register variables under every allocator, with -std=c99 because
     // that is the dialect a libc's build actually asks for. The fixture proves

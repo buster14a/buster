@@ -789,6 +789,22 @@ here. `-fno-stack-protector` is on both sides because Buster emits no canary
 and the reference build must not either: its canary load reads the thread
 pointer, which a program with no thread-local storage does not have.
 
+The inline-assembly vocabulary the harness needs is the one a libc's atomics
+and thread pointer are written in, and it is bounded by two rules rather than
+by a list of accepted templates. A memory constraint (`m`, `=m`) carries the
+operand's storage rather than its value: the register the emitter assigns
+holds the address, the template reference expands to a memory reference
+through it, and no value is loaded or stored around the assembly. A literal
+register in a template is still refused, because one the emitter can also hand
+to an operand could be overwritten under the template's feet; the two
+exceptions are registers it can never hand out, each allowed only where it
+cannot alias anything -- the stack pointer as a memory base, which is the
+`lock orl $0,(%rsp)` fence idiom, and `%fs`/`%gs` before a colon, which is how
+a thread-pointer read is spelled. GNU's semicolon separates statements while
+this assembler reads one as a comment, so the inline-assembly path rewrites
+the separators, folding `lock ; insn` into the single statement the assembler
+wants and splitting the rest onto their own lines.
+
 The Clang reference build runs first and every unit must compile — a musl unit
 Clang cannot build under this flag set is a broken workspace, not a Buster
 defect, and finding that out before a thousand Buster invocations keeps the two
@@ -830,27 +846,38 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 302
-are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 73
-for `_Complex` arithmetic; 50 for the `"=m"` memory constraint musl's `a_cas`
-family of atomics is written against; 49 that reach code generation and fail
-there, mostly x87 `long double`; 40 for the `mov %fs:0,%0` thread-pointer read
-in `__get_tp`, which is what every unit touching `errno` or a lock goes
-through; 36 for a compound literal whose type name defines an anonymous
-aggregate, which is musl's `asuint`/`asdouble` type punning and therefore most
-of `src/math`; 21 global initializers; 4 startup objects; 2 conflicting
-declarations; and 27 singletons. musl's startup objects deserve their own note:
-`crt/crt1.c` and its siblings are written as module-level assembly, and
-Buster's global-assembly support covers `.byte`, `.p2align`, the section and
-symbol directives and a handful of instructions, which is not enough for a
-`crt_arch.h` that aligns the stack and calls into C. That path also
+harness compiles the portable C instead and lists each one. The remaining 159
+are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
+for `_Complex` arithmetic, which the frontend has no type for; 37 that reach
+code generation and fail there, nearly all of them x87 `long double`, either a
+`union` holding one passed by value or an operation the emitter has no shape
+for; 22 static initializers, 17 of which are a `long double` constant or an
+array of them; 4 startup objects; 2 conflicting declarations; and 26
+singletons.
+
+Two of those deserve their own note. musl's startup objects -- `crt/crt1.c`
+and its siblings -- are written as module-level assembly, and Buster's
+global-assembly support covers `.byte`, `.p2align`, the section and symbol
+directives and a handful of instructions, which is not enough for a
+`crt_arch.h` that aligns the stack and calls into C; that path also
 misattributes its diagnostic to the next C function in the file, and it
 requires the symbol an assembly block defines to carry a C declaration as
-well.
+well. And the archive is not linkable for most programs even where every unit
+in it compiled, because `__attribute__((alias))` is not implemented: musl
+publishes `malloc`, `free`, `errno` and most of the pthread surface as weak
+aliases of internal names, so those symbols are absent from the objects
+entirely. That is the next thing to fix for the archive to be usable rather
+than merely large, and it is invisible from the compile inventory -- it shows
+up only when something links against the archive, which is what the
+freestanding probe is for.
 
 For scale, one recorded run took 86 seconds wall and left 23 MB behind: the
-Buster pass spent 52,2 seconds of child time over 1349 units — 39 ms each — for
-76,2 MB of preprocessed source, 2.807.812 lines and 2.978.238 tokens. Generated headers, objects, archives, metrics and logs remain under
+Buster pass spent 54,8 seconds of child time over 1349 units — 41 ms each — for
+102,8 MB of preprocessed source, 3.783.876 lines and 4.283.521 tokens, and
+produced 1190 archive members in 4.636.304 bytes against Clang's 1349 in
+2.657.772. The Buster archive is the larger of the two despite holding fewer
+members, which is what an emitter that spills through the frame rather than
+through registers looks like at this scale. Generated headers, objects, archives, metrics and logs remain under
 `build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the
 directories of runs you are done with.
 
