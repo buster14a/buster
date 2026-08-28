@@ -81,6 +81,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_YYJSON,
     BUILD_COMMAND_TEST_STB,
     BUILD_COMMAND_TEST_LZ4,
+    BUILD_COMMAND_TEST_SQLITE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -11084,8 +11085,12 @@ BUSTER_GLOBAL_LOCAL void test_yyjson_action_add(Arena* arena, TestYyjsonOptions 
 // compiler cost to produce a unit; LZ4_THROUGHPUT and LZ4_CODEGEN report what
 // the produced code then did on a compression workload.  Conflating them
 // hides a codegen regression behind a compile-time win and the reverse.
-typedef struct Lz4CommandResult Lz4CommandResult;
-struct Lz4CommandResult
+// The primitives every compatibility harness shares: run a child, time it,
+// trim, hash and compare.  They carry no target-specific policy, which is why
+// the LZ4 and SQLite harnesses both call them rather than each growing its
+// own copy.
+typedef struct CompatCommandResult CompatCommandResult;
+struct CompatCommandResult
 {
     ProcessResult result;
     String8 output;
@@ -11117,7 +11122,7 @@ struct Lz4CrossCase
     String8 options[4];
 };
 
-BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+BUSTER_GLOBAL_LOCAL CompatCommandResult compat_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
 {
     ProcessRun run = {
         .arguments = arguments,
@@ -11133,10 +11138,10 @@ BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command(Arena* arena, SliceString8 argu
     if (!run.spawn.handle)
     {
         string_print(S8("error: lz4 harness could not start the command above\n"));
-        return (Lz4CommandResult){.result = PROCESS_RESULT_FAILED};
+        return (CompatCommandResult){.result = PROCESS_RESULT_FAILED};
     }
     ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
-    Lz4CommandResult result = {
+    CompatCommandResult result = {
         .result = wait.result,
         .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
         .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
@@ -11152,12 +11157,12 @@ BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command(Arena* arena, SliceString8 argu
 // entry_point covers this process and its descendants, and the harness runs
 // its children one at a time, so the delta is that child alone.  Linux-only:
 // a zero count means no counter, which is never an error.
-BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command_measured(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, u64* elapsed_us,
+BUSTER_GLOBAL_LOCAL CompatCommandResult compat_command_measured(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, u64* elapsed_us,
                                                           u64* instructions)
 {
     u64 start_instructions = instruction_counter_read();
     u64 start_us = os_now_microseconds();
-    Lz4CommandResult result = lz4_command(arena, arguments, working_directory, capture);
+    CompatCommandResult result = compat_command(arena, arguments, working_directory, capture);
     if (elapsed_us)
     {
         *elapsed_us = os_now_microseconds() - start_us;
@@ -11170,11 +11175,11 @@ BUSTER_GLOBAL_LOCAL Lz4CommandResult lz4_command_measured(Arena* arena, SliceStr
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool lz4_run_arguments(Arena* arena, String8* arguments, u64 argument_count, String8 working_directory, String8* output, u64* elapsed_us,
+BUSTER_GLOBAL_LOCAL bool compat_run_arguments(Arena* arena, String8* arguments, u64 argument_count, String8 working_directory, String8* output, u64* elapsed_us,
                                            u64* instructions)
 {
     SliceString8 slice = {.pointer = arguments, .length = argument_count};
-    Lz4CommandResult command = lz4_command_measured(arena, slice, working_directory, output != 0, elapsed_us, instructions);
+    CompatCommandResult command = compat_command_measured(arena, slice, working_directory, output != 0, elapsed_us, instructions);
     if (output)
     {
         *output = command.output;
@@ -11182,7 +11187,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_run_arguments(Arena* arena, String8* arguments, u64
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL String8 lz4_trim_ascii_space(String8 text)
+BUSTER_GLOBAL_LOCAL String8 compat_trim_ascii_space(String8 text)
 {
     while (text.length && (u8)text.pointer[text.length - 1] <= ' ')
     {
@@ -11195,7 +11200,7 @@ BUSTER_GLOBAL_LOCAL String8 lz4_trim_ascii_space(String8 text)
     return text;
 }
 
-BUSTER_GLOBAL_LOCAL String8 lz4_basename(String8 path)
+BUSTER_GLOBAL_LOCAL String8 compat_basename(String8 path)
 {
     u64 start = 0;
     for (u64 index = 0; index < path.length; index += 1)
@@ -11217,8 +11222,8 @@ BUSTER_GLOBAL_LOCAL bool lz4_git_verify(Arena* arena, String8 source_directory)
         return false;
     }
     String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
-    Lz4CommandResult head = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
-    String8 commit = lz4_trim_ascii_space(head.output);
+    CompatCommandResult head = compat_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+    String8 commit = compat_trim_ascii_space(head.output);
     if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(LZ4_COMPATIBILITY_COMMIT)))
     {
         string_print(S8("error: test_lz4 requires pristine lz4 tag {S8} commit {S8}; found {S8}\n"), S8(LZ4_COMPATIBILITY_TAG), S8(LZ4_COMPATIBILITY_COMMIT),
@@ -11228,15 +11233,15 @@ BUSTER_GLOBAL_LOCAL bool lz4_git_verify(Arena* arena, String8 source_directory)
     // The commit alone would accept a detached checkout of the same tree under
     // a different name; the tag is what the harness reports and pins.
     String8 tag_arguments[] = {git, S8("describe"), S8("--tags"), S8("--exact-match"), S8("HEAD")};
-    Lz4CommandResult tag = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tag_arguments), source_directory, true);
-    String8 tag_name = lz4_trim_ascii_space(tag.output);
+    CompatCommandResult tag = compat_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tag_arguments), source_directory, true);
+    String8 tag_name = compat_trim_ascii_space(tag.output);
     if (tag.result != PROCESS_RESULT_SUCCESS || !string_equal(tag_name, S8(LZ4_COMPATIBILITY_TAG)))
     {
         string_print(S8("error: test_lz4 requires lz4 tag {S8}; found {S8}\n"), S8(LZ4_COMPATIBILITY_TAG), tag_name);
         return false;
     }
     String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
-    Lz4CommandResult status = lz4_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+    CompatCommandResult status = compat_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
     if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
     {
         string_print(S8("error: test_lz4 checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
@@ -11250,7 +11255,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_git_verify(Arena* arena, String8 source_directory)
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL String8 lz4_ide_path(Arena* arena, String8 config)
+// The `ide` executable the harness drives, preferring the requested
+// configuration and falling back to whichever one is built.
+BUSTER_GLOBAL_LOCAL String8 compat_ide_path(Arena* arena, String8 config)
 {
     String8 configs[] = {config, S8("Release"), S8("Debug")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(configs); index += 1)
@@ -11406,7 +11413,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_compile_buster(Arena* arena, String8 ide, String8 s
     os_argument_builder_append(&builder, output);
     os_argument_builder_append(&builder, source);
     u64 start = os_now_microseconds();
-    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
     *elapsed_us = os_now_microseconds() - start;
     return command.result == PROCESS_RESULT_SUCCESS;
 }
@@ -11423,7 +11430,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_compile_clang(Arena* arena, String8 clang, String8 
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
     os_argument_builder_append(&builder, source);
-    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -11437,7 +11444,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_archive(Arena* arena, String8 archive, String8 ar, 
     {
         os_argument_builder_append(&builder, objects[index]);
     }
-    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -11469,14 +11476,14 @@ BUSTER_GLOBAL_LOCAL bool lz4_link(Arena* arena, String8 linker, String8 output, 
     os_argument_builder_append(&builder, S8("-lm"));
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
-    Lz4CommandResult command = lz4_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
 // File contents are read into a scratch arena: the corpora reach tens of
 // megabytes and the harness compares them hundreds of times, which would
 // otherwise accumulate in the build driver's arena for the whole run.
-BUSTER_GLOBAL_LOCAL u64 lz4_hash_file(Arena* arena, String8 path, u64* size_out)
+BUSTER_GLOBAL_LOCAL u64 compat_hash_file(Arena* arena, String8 path, u64* size_out)
 {
     TemporalArena scratch = scratch_begin(&arena, 1);
     ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
@@ -11489,12 +11496,12 @@ BUSTER_GLOBAL_LOCAL u64 lz4_hash_file(Arena* arena, String8 path, u64* size_out)
     return hash;
 }
 
-BUSTER_GLOBAL_LOCAL bool lz4_files_equal(Arena* arena, String8 left, String8 right)
+BUSTER_GLOBAL_LOCAL bool compat_files_equal(Arena* arena, String8 left, String8 right)
 {
     u64 left_size = 0;
     u64 right_size = 0;
-    u64 left_hash = lz4_hash_file(arena, left, &left_size);
-    u64 right_hash = lz4_hash_file(arena, right, &right_size);
+    u64 left_hash = compat_hash_file(arena, left, &left_size);
+    u64 right_hash = compat_hash_file(arena, right, &right_size);
     return left_size != 0 && left_size == right_size && left_hash == right_hash;
 }
 
@@ -11581,7 +11588,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_output_value(String8 output, String8 key, u64* valu
     {
         String8 line_key = {0};
         String8 line_value = {0};
-        if (text_split_field(lz4_trim_ascii_space(line), &line_key, &line_value) && string_equal(line_key, key))
+        if (text_split_field(compat_trim_ascii_space(line), &line_key, &line_value) && string_equal(line_key, key))
         {
             return text_parse_u64(line_value, value);
         }
@@ -11613,7 +11620,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_compile_stage(Arena* arena, String8 ide, String8 so
 {
     for (u64 index = 0; index < source_count; index += 1)
     {
-        String8 name = lz4_basename(sources[index]);
+        String8 name = compat_basename(sources[index]);
         objects_out[index] = path_join(arena, object_directory, string_format(arena, S8("{S8}.o"), name));
         String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), name));
         u64 elapsed_us = 0;
@@ -11665,7 +11672,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_cross_check(Arena* arena, String8 buster_cli, Strin
         count += 1;
         arguments[count] = side ? clang_frame : buster_frame;
         count += 1;
-        if (!lz4_run_arguments(arena, arguments, count, directory, 0, 0, 0))
+        if (!compat_run_arguments(arena, arguments, count, directory, 0, 0, 0))
         {
             string_print(S8("error: lz4 cross-check compress failed config={S8} allocator={S8} case={S8} side={S8}\n"), config_name, mode, entry.name,
                          side ? S8("clang") : S8("buster"));
@@ -11675,9 +11682,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_cross_check(Arena* arena, String8 buster_cli, Strin
 
     u64 compressed_size = 0;
     u64 corpus_size = 0;
-    lz4_hash_file(arena, corpus, &corpus_size);
-    lz4_hash_file(arena, buster_frame, &compressed_size);
-    if (!lz4_files_equal(arena, buster_frame, clang_frame))
+    compat_hash_file(arena, corpus, &corpus_size);
+    compat_hash_file(arena, buster_frame, &compressed_size);
+    if (!compat_files_equal(arena, buster_frame, clang_frame))
     {
         string_print(S8("error: lz4 compressed bytes differ config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
         return false;
@@ -11687,15 +11694,15 @@ BUSTER_GLOBAL_LOCAL bool lz4_cross_check(Arena* arena, String8 buster_cli, Strin
     String8 decompress_buster[] = {buster_cli, S8("-d"), S8("-f"), S8("-q"), clang_frame, buster_from_clang};
     String8 test_clang[] = {clang_cli, S8("-t"), S8("-q"), buster_frame};
     String8 test_buster[] = {buster_cli, S8("-t"), S8("-q"), clang_frame};
-    if (!lz4_run_arguments(arena, decompress_clang, BUSTER_ARRAY_LENGTH(decompress_clang), directory, 0, 0, 0) ||
-        !lz4_run_arguments(arena, decompress_buster, BUSTER_ARRAY_LENGTH(decompress_buster), directory, 0, 0, 0) ||
-        !lz4_run_arguments(arena, test_clang, BUSTER_ARRAY_LENGTH(test_clang), directory, 0, 0, 0) ||
-        !lz4_run_arguments(arena, test_buster, BUSTER_ARRAY_LENGTH(test_buster), directory, 0, 0, 0))
+    if (!compat_run_arguments(arena, decompress_clang, BUSTER_ARRAY_LENGTH(decompress_clang), directory, 0, 0, 0) ||
+        !compat_run_arguments(arena, decompress_buster, BUSTER_ARRAY_LENGTH(decompress_buster), directory, 0, 0, 0) ||
+        !compat_run_arguments(arena, test_clang, BUSTER_ARRAY_LENGTH(test_clang), directory, 0, 0, 0) ||
+        !compat_run_arguments(arena, test_buster, BUSTER_ARRAY_LENGTH(test_buster), directory, 0, 0, 0))
     {
         string_print(S8("error: lz4 cross-check decompress failed config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
         return false;
     }
-    if (!lz4_files_equal(arena, clang_from_buster, corpus) || !lz4_files_equal(arena, buster_from_clang, corpus))
+    if (!compat_files_equal(arena, clang_from_buster, corpus) || !compat_files_equal(arena, buster_from_clang, corpus))
     {
         string_print(S8("error: lz4 cross-check round-trip differs from the corpus config={S8} allocator={S8} case={S8}\n"), config_name, mode, entry.name);
         return false;
@@ -11716,7 +11723,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_golden_sample_check(Arena* arena, String8 buster_cl
     String8 payload_frame = path_join(arena, directory, S8("payload.lz4"));
     String8 concatenated = path_join(arena, directory, S8("skippable-concatenated.lz4"));
     String8 compress[] = {buster_cli, S8("-9"), S8("-f"), S8("-q"), payload, payload_frame};
-    if (!lz4_run_arguments(arena, compress, BUSTER_ARRAY_LENGTH(compress), directory, 0, 0, 0))
+    if (!compat_run_arguments(arena, compress, BUSTER_ARRAY_LENGTH(compress), directory, 0, 0, 0))
     {
         return false;
     }
@@ -11734,10 +11741,10 @@ BUSTER_GLOBAL_LOCAL bool lz4_golden_sample_check(Arena* arena, String8 buster_cl
     String8 skip_clang_output = {0};
     String8 concatenated_buster_output = {0};
     String8 concatenated_clang_output = {0};
-    if (!lz4_run_arguments(arena, skip_buster, BUSTER_ARRAY_LENGTH(skip_buster), directory, &skip_buster_output, 0, 0) ||
-        !lz4_run_arguments(arena, skip_clang, BUSTER_ARRAY_LENGTH(skip_clang), directory, &skip_clang_output, 0, 0) ||
-        !lz4_run_arguments(arena, concatenated_buster, BUSTER_ARRAY_LENGTH(concatenated_buster), directory, &concatenated_buster_output, 0, 0) ||
-        !lz4_run_arguments(arena, concatenated_clang, BUSTER_ARRAY_LENGTH(concatenated_clang), directory, &concatenated_clang_output, 0, 0))
+    if (!compat_run_arguments(arena, skip_buster, BUSTER_ARRAY_LENGTH(skip_buster), directory, &skip_buster_output, 0, 0) ||
+        !compat_run_arguments(arena, skip_clang, BUSTER_ARRAY_LENGTH(skip_clang), directory, &skip_clang_output, 0, 0) ||
+        !compat_run_arguments(arena, concatenated_buster, BUSTER_ARRAY_LENGTH(concatenated_buster), directory, &concatenated_buster_output, 0, 0) ||
+        !compat_run_arguments(arena, concatenated_clang, BUSTER_ARRAY_LENGTH(concatenated_clang), directory, &concatenated_clang_output, 0, 0))
     {
         string_print(S8("error: lz4 skippable-frame decode failed config={S8} allocator={S8}\n"), config_name, mode);
         return false;
@@ -11749,7 +11756,7 @@ BUSTER_GLOBAL_LOCAL bool lz4_golden_sample_check(Arena* arena, String8 buster_cl
         return false;
     }
     string_print(S8("LZ4_INTEROP config={S8} allocator={S8} sample={S8} skippable_bytes={u64} payload_bytes={u64} status=pass\n"), config_name, mode,
-                 lz4_basename(golden_sample), skip_buster_output.length, concatenated_buster_output.length);
+                 compat_basename(golden_sample), skip_buster_output.length, concatenated_buster_output.length);
     return true;
 }
 
@@ -11822,7 +11829,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    String8 ide = lz4_ide_path(arena, options.config);
+    String8 ide = compat_ide_path(arena, options.config);
     String8 clang = executable_resolve_in_path(arena, S8("clang"));
     String8 ar = executable_resolve_in_path(arena, S8("ar"));
     if (!ar.length)
@@ -11872,7 +11879,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             return PROCESS_RESULT_FAILED;
         }
         string_print(S8("LZ4_CORPUS name={S8} kind={u32} bytes={u64} hash={u64:x}\n"), corpus_names[index], corpus_kinds[index], corpus_sizes[index],
-                     lz4_hash_file(arena, path, 0));
+                     compat_hash_file(arena, path, 0));
     }
 
     // The Clang reference: the same manifest, the same flags, its own archive
@@ -11883,7 +11890,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
     for (u64 index = 0; index < library_count; index += 1)
     {
         String8 relative = index < BUSTER_ARRAY_LENGTH(block_sources) ? block_sources[index] : frame_sources[index - BUSTER_ARRAY_LENGTH(block_sources)];
-        clang_library_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), lz4_basename(relative)));
+        clang_library_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), compat_basename(relative)));
         if (!lz4_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, relative), clang_library_objects[index]))
         {
             return PROCESS_RESULT_FAILED;
@@ -11896,7 +11903,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
     }
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cli_sources); index += 1)
     {
-        clang_cli_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), lz4_basename(cli_sources[index])));
+        clang_cli_objects[index] = path_join(arena, clang_directory, string_format(arena, S8("{S8}.o"), compat_basename(cli_sources[index])));
         if (!lz4_compile_clang(arena, clang, source_directory, path_join(arena, source_directory, cli_sources[index]), clang_cli_objects[index]))
         {
             return PROCESS_RESULT_FAILED;
@@ -11920,7 +11927,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
     u64 reference_elapsed = 0;
     u64 reference_instructions = 0;
     String8 reference_arguments[] = {clang_probe};
-    if (!lz4_run_arguments(arena, reference_arguments, BUSTER_ARRAY_LENGTH(reference_arguments), clang_directory, &reference_output, &reference_elapsed,
+    if (!compat_run_arguments(arena, reference_arguments, BUSTER_ARRAY_LENGTH(reference_arguments), clang_directory, &reference_output, &reference_elapsed,
                            &reference_instructions))
     {
         string_print(S8("error: the Clang reference probe failed\n"));
@@ -12037,7 +12044,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8 probe_arguments[] = {probe};
             String8 probe_cross_arguments[] = {probe_cross};
             String8 probe_cross_buster_arguments[] = {probe_cross_buster};
-            if (!lz4_run_arguments(arena, probe_arguments, BUSTER_ARRAY_LENGTH(probe_arguments), directory, &probe_output, &probe_elapsed,
+            if (!compat_run_arguments(arena, probe_arguments, BUSTER_ARRAY_LENGTH(probe_arguments), directory, &probe_output, &probe_elapsed,
                                    &probe_instructions) ||
                 !string_equal(probe_output, reference_output))
             {
@@ -12048,13 +12055,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
                 }
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, probe_cross_arguments, BUSTER_ARRAY_LENGTH(probe_cross_arguments), directory, &probe_cross_output, 0, 0) ||
+            if (!compat_run_arguments(arena, probe_cross_arguments, BUSTER_ARRAY_LENGTH(probe_cross_arguments), directory, &probe_cross_output, 0, 0) ||
                 !string_equal(probe_cross_output, reference_output))
             {
                 string_print(S8("error: lz4 Clang fixture over the Buster archive differs from the reference config={S8} allocator={S8}\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, probe_cross_buster_arguments, BUSTER_ARRAY_LENGTH(probe_cross_buster_arguments), directory,
+            if (!compat_run_arguments(arena, probe_cross_buster_arguments, BUSTER_ARRAY_LENGTH(probe_cross_buster_arguments), directory,
                                    &probe_cross_buster_output, 0, 0) ||
                 !string_equal(probe_cross_buster_output, reference_output))
             {
@@ -12080,19 +12087,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             u64 compress_instructions = 0;
             u64 decompress_elapsed = 0;
             u64 decompress_instructions = 0;
-            if (!lz4_run_arguments(arena, workload_compress, BUSTER_ARRAY_LENGTH(workload_compress), directory, 0, &compress_elapsed,
+            if (!compat_run_arguments(arena, workload_compress, BUSTER_ARRAY_LENGTH(workload_compress), directory, 0, &compress_elapsed,
                                    &compress_instructions) ||
-                !lz4_run_arguments(arena, workload_decompress, BUSTER_ARRAY_LENGTH(workload_decompress), directory, 0, &decompress_elapsed,
+                !compat_run_arguments(arena, workload_decompress, BUSTER_ARRAY_LENGTH(workload_decompress), directory, 0, &decompress_elapsed,
                                    &decompress_instructions) ||
-                !lz4_files_equal(arena, large_restored, large_corpus))
+                !compat_files_equal(arena, large_restored, large_corpus))
             {
                 string_print(S8("error: lz4 large-input workload failed config={S8} allocator={S8}\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
             u64 large_size = 0;
             u64 large_frame_size = 0;
-            lz4_hash_file(arena, large_corpus, &large_size);
-            lz4_hash_file(arena, large_frame, &large_frame_size);
+            compat_hash_file(arena, large_corpus, &large_size);
+            compat_hash_file(arena, large_frame, &large_frame_size);
             lz4_report_rate(S8("cli-large"), config_name, mode, S8("compress"), large_size, compress_elapsed, compress_instructions);
             lz4_report_rate(S8("cli-large"), config_name, mode, S8("decompress"), large_size, decompress_elapsed, decompress_instructions);
             string_print(S8("LZ4_WORKLOAD config={S8} allocator={S8} corpus_bytes={u64} compressed_bytes={u64} status=pass\n"), config_name, mode, large_size,
@@ -12137,7 +12144,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8 lorem_object = {0};
             for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cli_sources); index += 1)
             {
-                if (string_equal(lz4_basename(cli_sources[index]), S8("lorem.c")))
+                if (string_equal(compat_basename(cli_sources[index]), S8("lorem.c")))
                 {
                     lorem_object = cli_objects[index];
                 }
@@ -12156,7 +12163,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8* test_binaries = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(test_sources));
             for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(test_sources); index += 1)
             {
-                String8 name = lz4_basename(test_sources[index]);
+                String8 name = compat_basename(test_sources[index]);
                 test_binaries[index] = path_join(arena, directory, string_slice(name, 0, name.length - 2));
                 String8 link_objects[] = {test_objects[index], archive};
                 if (!lz4_link(arena, clang, test_binaries[index], link_objects, BUSTER_ARRAY_LENGTH(link_objects), false, (String8){0}))
@@ -12171,7 +12178,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8 generated = path_join(arena, directory, S8("datagen-1m.bin"));
             String8 datagen_arguments[] = {datagen, S8("-g1048576"), S8("-s7")};
             String8 datagen_output = {0};
-            if (!lz4_run_arguments(arena, datagen_arguments, BUSTER_ARRAY_LENGTH(datagen_arguments), directory, &datagen_output, 0, 0) ||
+            if (!compat_run_arguments(arena, datagen_arguments, BUSTER_ARRAY_LENGTH(datagen_arguments), directory, &datagen_output, 0, 0) ||
                 !datagen_output.length || !file_write(generated, BUSTER_SLICE_TO_BYTE_SLICE(datagen_output)))
             {
                 string_print(S8("error: lz4 datagen failed config={S8} allocator={S8}\n"), config_name, mode);
@@ -12201,39 +12208,39 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8 decompress_partial_dict_arguments[] = {test_binaries[5]};
             String8 abitest_arguments[] = {test_binaries[7], mixed_corpus};
             String8 checktag_arguments[] = {test_binaries[8], S8(LZ4_COMPATIBILITY_TAG)};
-            if (!lz4_run_arguments(arena, fuzzer_arguments, BUSTER_ARRAY_LENGTH(fuzzer_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, fuzzer_arguments, BUSTER_ARRAY_LENGTH(fuzzer_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: fuzzer (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, frametest_arguments, BUSTER_ARRAY_LENGTH(frametest_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, frametest_arguments, BUSTER_ARRAY_LENGTH(frametest_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: frametest (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, fullbench_arguments, BUSTER_ARRAY_LENGTH(fullbench_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, fullbench_arguments, BUSTER_ARRAY_LENGTH(fullbench_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: fullbench (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, roundtrip_arguments, BUSTER_ARRAY_LENGTH(roundtrip_arguments), directory, 0, 0, 0) ||
-                !lz4_run_arguments(arena, roundtrip_hc_arguments, BUSTER_ARRAY_LENGTH(roundtrip_hc_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, roundtrip_arguments, BUSTER_ARRAY_LENGTH(roundtrip_arguments), directory, 0, 0, 0) ||
+                !compat_run_arguments(arena, roundtrip_hc_arguments, BUSTER_ARRAY_LENGTH(roundtrip_hc_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: roundTripTest (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, decompress_partial_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_arguments), directory, 0, 0, 0) ||
-                !lz4_run_arguments(arena, decompress_partial_dict_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_dict_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, decompress_partial_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_arguments), directory, 0, 0, 0) ||
+                !compat_run_arguments(arena, decompress_partial_dict_arguments, BUSTER_ARRAY_LENGTH(decompress_partial_dict_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: decompress-partial (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, abitest_arguments, BUSTER_ARRAY_LENGTH(abitest_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, abitest_arguments, BUSTER_ARRAY_LENGTH(abitest_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: abiTest (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
             }
-            if (!lz4_run_arguments(arena, checktag_arguments, BUSTER_ARRAY_LENGTH(checktag_arguments), directory, 0, 0, 0))
+            if (!compat_run_arguments(arena, checktag_arguments, BUSTER_ARRAY_LENGTH(checktag_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: checkTag (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
@@ -12249,10 +12256,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
             String8 checkframe_compress_second[] = {buster_cli, S8("-f"), S8("-q"), S8("-B65536"), generated, checkframe_second};
             String8 checkframe_parts[] = {checkframe_first, checkframe_second};
             String8 checkframe_arguments[] = {test_binaries[6], S8("-B65536"), S8("-b4"), checkframe_stream};
-            if (!lz4_run_arguments(arena, checkframe_compress_first, BUSTER_ARRAY_LENGTH(checkframe_compress_first), directory, 0, 0, 0) ||
-                !lz4_run_arguments(arena, checkframe_compress_second, BUSTER_ARRAY_LENGTH(checkframe_compress_second), directory, 0, 0, 0) ||
+            if (!compat_run_arguments(arena, checkframe_compress_first, BUSTER_ARRAY_LENGTH(checkframe_compress_first), directory, 0, 0, 0) ||
+                !compat_run_arguments(arena, checkframe_compress_second, BUSTER_ARRAY_LENGTH(checkframe_compress_second), directory, 0, 0, 0) ||
                 !lz4_concatenate(arena, checkframe_stream, checkframe_parts, BUSTER_ARRAY_LENGTH(checkframe_parts)) ||
-                !lz4_run_arguments(arena, checkframe_arguments, BUSTER_ARRAY_LENGTH(checkframe_arguments), directory, 0, 0, 0))
+                !compat_run_arguments(arena, checkframe_arguments, BUSTER_ARRAY_LENGTH(checkframe_arguments), directory, 0, 0, 0))
             {
                 string_print(S8("error: lz4 upstream test failed: checkFrame (config={S8} allocator={S8})\n"), config_name, mode);
                 return PROCESS_RESULT_FAILED;
@@ -12275,6 +12282,692 @@ BUSTER_GLOBAL_LOCAL void test_lz4_action_add(Arena* arena, TestLz4Options option
     TestLz4Options* options_copy = arena_allocate(arena, TestLz4Options, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_lz4_action, .callback_data = options_copy};
+}
+
+// The opt-in SQLite compatibility harness.  SQLite is the industrial C target:
+// one 9,5 MB translation unit, a bytecode interpreter written as a switch with
+// labels inside its cases, its own memory allocator and page cache, POSIX file
+// locking, memory-mapped I/O and floating point, all in a program whose output
+// is a file format with a published on-disk layout.  That last property is
+// what makes the cross-check strong: the Buster build and the Clang build must
+// not merely agree on query results but produce byte-identical databases.
+//
+// The harness takes the official amalgamation (sqlite3.c, sqlite3.h,
+// sqlite3ext.h, shell.c) and the official source distribution, both pinned by
+// content, and drives neither upstream's configure script nor its makefiles --
+// upstream build-system detection is a later driver milestone.  Nothing is
+// copied into or patched in this repository.
+//
+// Two measurements are kept apart, as in the LZ4 harness.  SQLITE_METRIC is
+// what the compiler cost to produce a unit; SQLITE_WORKLOAD and SQLITE_CODEGEN
+// are what the produced code then did on a database workload.
+#define SQLITE_COMPATIBILITY_VERSION "3.53.4"
+#define SQLITE_COMPATIBILITY_NUMBER "3530400"
+// The source distribution carries the Fossil check-in it was cut from, which
+// pins the whole tree with one line no matter how many files the harness
+// reaches into.
+#define SQLITE_COMPATIBILITY_MANIFEST "bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc"
+
+typedef struct TestSqliteOptions TestSqliteOptions;
+struct TestSqliteOptions
+{
+    String8 amalgamation_directory;
+    String8 source_directory;
+    String8 config;
+};
+
+// One pinned upstream file: its path relative to the checkout, its exact byte
+// count and the Buster hash of its contents.  The amalgamation ships no
+// manifest of its own, so this table is what makes "the official 3.53.4
+// amalgamation" a checkable statement rather than a claim.
+typedef struct SqliteSourceFile SqliteSourceFile;
+struct SqliteSourceFile
+{
+    String8 path;
+    u64 bytes;
+    u64 hash;
+};
+
+// One configuration of the threading axis.  The threadsafe row is upstream's
+// default build and runs first; it carries the upstream test programs, whose
+// multi-process scripts are a property of the library rather than of the
+// threading model.
+typedef struct SqliteConfiguration SqliteConfiguration;
+struct SqliteConfiguration
+{
+    String8 name;
+    String8 threadsafe;
+    bool upstream_tests;
+};
+
+BUSTER_GLOBAL_LOCAL bool sqlite_verify_files(Arena* arena, String8 root, SqliteSourceFile* files, u64 file_count, String8 label)
+{
+    bool valid = true;
+    for (u64 index = 0; index < file_count; index += 1)
+    {
+        String8 path = path_join(arena, root, files[index].path);
+        u64 size = 0;
+        u64 hash = compat_hash_file(arena, path, &size);
+        if (size != files[index].bytes || hash != files[index].hash)
+        {
+            string_print(S8("error: test_sqlite {S8} file {S8} is not the pinned {S8} release: expected bytes={u64} hash={u64:x}, found bytes={u64} "
+                            "hash={u64:x}\n"),
+                         label, files[index].path, S8(SQLITE_COMPATIBILITY_VERSION), files[index].bytes, files[index].hash, size, hash);
+            valid = false;
+        }
+    }
+    return valid;
+}
+
+// A pinned one-line file, compared as text so the diagnostic can name what the
+// checkout actually is.  VERSION and manifest.uuid are how the source
+// distribution identifies itself.
+BUSTER_GLOBAL_LOCAL bool sqlite_verify_line(Arena* arena, String8 path, String8 expected)
+{
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(scratch.arena, path, (FileReadOptions){0});
+    String8 text = compat_trim_ascii_space((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length});
+    bool equal = string_equal(text, expected);
+    if (!equal)
+    {
+        string_print(S8("error: test_sqlite expected {S8} to contain {S8}; found {S8}\n"), path, expected, text);
+    }
+    scratch_end(scratch);
+    return equal;
+}
+
+// Every formatted flag is materialized before a builder starts: the argument
+// builder hands out one contiguous run of the arena, so an allocation between
+// its start and its flush would land in the middle of the argument vector.
+typedef struct SqliteCommonFlags SqliteCommonFlags;
+struct SqliteCommonFlags
+{
+    String8 include_directory;
+    String8 threadsafe;
+};
+
+BUSTER_GLOBAL_LOCAL SqliteCommonFlags sqlite_common_flags(Arena* arena, String8 amalgamation_directory, String8 threadsafe)
+{
+    SqliteCommonFlags flags = {
+        .include_directory = amalgamation_directory,
+        .threadsafe = string_format(arena, S8("-DSQLITE_THREADSAFE={S8}"), threadsafe),
+    };
+    return flags;
+}
+
+BUSTER_GLOBAL_LOCAL void sqlite_append_defines(OsArgumentBuilder* builder, SqliteCommonFlags flags)
+{
+    os_argument_builder_append(builder, S8("-I"));
+    os_argument_builder_append(builder, flags.include_directory);
+    os_argument_builder_append(builder, flags.threadsafe);
+    // Upstream's own recommended compile-time options for a build that is
+    // exercised rather than shipped: deterministic query planning stays on,
+    // and nothing here disables a feature the acceptance criteria ask for.
+    os_argument_builder_append(builder, S8("-DSQLITE_ENABLE_MATH_FUNCTIONS"));
+    os_argument_builder_append(builder, S8("-DSQLITE_ENABLE_COLUMN_METADATA"));
+}
+
+BUSTER_GLOBAL_LOCAL bool sqlite_compile_buster(Arena* arena, String8 ide, String8 amalgamation_directory, String8 source, String8 output, String8 metrics,
+                                               String8 mode, String8 threadsafe, bool verbose, u64* elapsed_us)
+{
+    SqliteCommonFlags flags = sqlite_common_flags(arena, amalgamation_directory, threadsafe);
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+    String8 metrics_flag = string_format(arena, S8("-fsource-metrics={S8}"), metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    sqlite_append_defines(&builder, flags);
+    os_argument_builder_append(&builder, allocator_flag);
+    os_argument_builder_append(&builder, metrics_flag);
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool sqlite_compile_clang(Arena* arena, String8 clang, String8 amalgamation_directory, String8 source, String8 output, String8 threadsafe)
+{
+    SqliteCommonFlags flags = sqlite_common_flags(arena, amalgamation_directory, threadsafe);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-w"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    sqlite_append_defines(&builder, flags);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// SQLite links against libm for its math functions, libdl for extension
+// loading and libpthread in the threadsafe configuration.  The Buster driver
+// links through `ide cc`, which is the point of the exercise.
+BUSTER_GLOBAL_LOCAL bool sqlite_link(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, bool buster_driver, bool threads)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, linker);
+    if (buster_driver)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+    }
+    os_argument_builder_append(&builder, buster_driver ? S8("-fno-pie") : S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-ldl"));
+    if (threads)
+    {
+        os_argument_builder_append(&builder, S8("-lpthread"));
+    }
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    CompatCommandResult command = compat_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool sqlite_metric_report(Arena* arena, String8 config_name, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, path, &metrics))
+    {
+        string_print(S8("warning: sqlite compiler metrics missing config={S8} allocator={S8} unit={S8}: {S8}\n"), config_name, mode, unit, path);
+        return false;
+    }
+    string_print(S8("SQLITE_METRIC config={S8} allocator={S8} unit={S8} elapsed_us={u64} source_bytes={u64} source_loc={u64} source_sloc={u64} "
+                    "tokens={u64}\n"),
+                 config_name, mode, unit, elapsed_us, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+    return true;
+}
+
+// The deterministic SQL the two CLIs run.  It covers what the milestone asks
+// for -- schema changes, transactions and savepoints, indexes, joins,
+// triggers, the eponymous virtual tables the selected configuration has,
+// backup and restore, ANALYZE, VACUUM and PRAGMA integrity_check -- and it
+// avoids every source of nondeterminism, so the two databases can be compared
+// byte for byte rather than row by row.  randomblob() and datetime() are
+// therefore absent on purpose.
+BUSTER_GLOBAL_LOCAL bool sqlite_write_workload(String8 path)
+{
+    static char8 const script[] =
+        "PRAGMA page_size=4096;\n"
+        "PRAGMA auto_vacuum=NONE;\n"
+        "PRAGMA journal_mode=DELETE;\n"
+        "PRAGMA encoding='UTF-8';\n"
+        ".bail on\n"
+        "BEGIN;\n"
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT NOT NULL, weight REAL, blob BLOB, tag TEXT);\n"
+        "CREATE TABLE audit(id INTEGER PRIMARY KEY, op TEXT, rowid_seen INTEGER);\n"
+        "CREATE INDEX t_name ON t(name);\n"
+        "CREATE INDEX t_tag_weight ON t(tag, weight DESC);\n"
+        "CREATE TRIGGER t_after_insert AFTER INSERT ON t BEGIN\n"
+        "  INSERT INTO audit(op, rowid_seen) VALUES('insert', new.id);\n"
+        "END;\n"
+        "CREATE TRIGGER t_after_delete AFTER DELETE ON t BEGIN\n"
+        "  INSERT INTO audit(op, rowid_seen) VALUES('delete', old.id);\n"
+        "END;\n"
+        "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 2000)\n"
+        "INSERT INTO t(id, name, weight, blob, tag)\n"
+        "  SELECT n, 'name-' || printf('%05d', n * 7919 % 100003), n * 1.5 - 0.25, zeroblob(n % 17), 'tag-' || (n % 23) FROM seq;\n"
+        "COMMIT;\n"
+        "SELECT count(*), sum(id), round(sum(weight), 6), count(distinct tag) FROM t;\n"
+        "SELECT count(*) FROM audit WHERE op='insert';\n"
+        "CREATE TABLE other(id INTEGER PRIMARY KEY, t_id INTEGER REFERENCES t(id), score INTEGER);\n"
+        "INSERT INTO other(t_id, score) SELECT id, (id * 31) % 977 FROM t WHERE id % 3 = 0;\n"
+        "SELECT count(*), sum(score) FROM other;\n"
+        "SELECT t.tag, count(*), round(avg(o.score), 6), min(t.name), max(t.name)\n"
+        "  FROM t JOIN other o ON o.t_id = t.id GROUP BY t.tag HAVING count(*) > 5 ORDER BY t.tag LIMIT 12;\n"
+        "SELECT t.id, t.name FROM t LEFT JOIN other o ON o.t_id = t.id WHERE o.id IS NULL ORDER BY t.id LIMIT 8;\n"
+        "SELECT group_concat(name, '|') FROM (SELECT name FROM t ORDER BY name LIMIT 6);\n"
+        "SELECT typeof(blob), length(blob) FROM t WHERE id IN (1, 17, 34, 1999) ORDER BY id;\n"
+        "SELECT sum(length(quote(blob))) FROM t;\n"
+        "BEGIN;\n"
+        "DELETE FROM t WHERE id % 97 = 0;\n"
+        "SELECT count(*) FROM audit WHERE op='delete';\n"
+        "ROLLBACK;\n"
+        "SELECT count(*) FROM t;\n"
+        "SELECT count(*) FROM audit WHERE op='delete';\n"
+        "BEGIN;\n"
+        "UPDATE t SET weight = weight * 2 WHERE tag = 'tag-5';\n"
+        "SAVEPOINT inner_point;\n"
+        "UPDATE t SET name = upper(name) WHERE id % 500 = 0;\n"
+        "ROLLBACK TO inner_point;\n"
+        "RELEASE inner_point;\n"
+        "COMMIT;\n"
+        "SELECT round(sum(weight), 6) FROM t;\n"
+        "SELECT count(*) FROM t WHERE name GLOB 'NAME-*';\n"
+        "SELECT count(*), sum(value) FROM generate_series(1, 40, 3);\n"
+        "SELECT count(*) FROM pragma_table_info('t');\n"
+        "CREATE TABLE big(x TEXT);\n"
+        "INSERT INTO big(x) SELECT hex(zeroblob(200)) FROM t LIMIT 300;\n"
+        "SELECT count(*), sum(length(x)) FROM big;\n"
+        "ANALYZE;\n"
+        "SELECT count(*) FROM sqlite_stat1;\n"
+        "PRAGMA integrity_check;\n"
+        "PRAGMA foreign_key_check;\n"
+        "PRAGMA quick_check;\n"
+        "SELECT name, type FROM sqlite_schema ORDER BY name;\n"
+        "VACUUM;\n"
+        "PRAGMA integrity_check;\n"
+        "SELECT count(*), sum(id) FROM t;\n"
+        ".backup 'backup.db'\n"
+        ".open 'backup.db'\n"
+        "PRAGMA integrity_check;\n"
+        "SELECT count(*), sum(id), round(sum(weight), 6) FROM t;\n"
+        "SELECT count(*) FROM audit;\n"
+        ".open 'restored.db'\n"
+        ".restore 'backup.db'\n"
+        "PRAGMA integrity_check;\n"
+        "SELECT count(*), sum(score) FROM other;\n";
+    return file_write(path, (ByteSlice){.pointer = (u8*)script, .length = sizeof(script) - 1});
+}
+
+// Runs the workload in its own directory, so the database, the backup and the
+// restored copy of one side never meet the other side's.
+BUSTER_GLOBAL_LOCAL bool sqlite_run_workload(Arena* arena, String8 cli, String8 directory, String8 script, String8* output, u64* elapsed_us, u64* instructions)
+{
+    String8 arguments[] = {cli, S8("main.db"), string_format(arena, S8(".read {S8}"), script)};
+    SliceString8 slice = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments);
+    CompatCommandResult command = compat_command_measured(arena, slice, directory, true, elapsed_us, instructions);
+    *output = command.output;
+    if (command.result != PROCESS_RESULT_SUCCESS)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(command.output));
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void sqlite_report_workload(String8 config_name, String8 mode, String8 workload, u64 bytes, u64 elapsed_us, u64 instructions)
+{
+    string_print(S8("SQLITE_WORKLOAD config={S8} allocator={S8} workload={S8} database_bytes={u64} elapsed_us={u64}\n"), config_name, mode, workload, bytes,
+                 elapsed_us);
+    // An absent hardware counter is ordinary: the line is simply omitted.
+    if (instructions)
+    {
+        string_print(S8("SQLITE_CODEGEN config={S8} allocator={S8} workload={S8} database_bytes={u64} instructions={u64}\n"), config_name, mode, workload,
+                     bytes, instructions);
+    }
+}
+
+// One upstream program built against the harness's own library object.  These
+// are upstream's own test drivers: `mptest` runs the multi-process scripts
+// that ship with it, `speedtest1` is the standard workload generator whose
+// database the two compilers must agree on byte for byte, and `wordcount` and
+// `kvtest` exercise the text and blob paths from a different angle.
+typedef struct SqliteUpstreamProgram SqliteUpstreamProgram;
+struct SqliteUpstreamProgram
+{
+    String8 name;
+    String8 path;
+};
+
+BUSTER_GLOBAL_LOCAL bool sqlite_run_upstream_program(Arena* arena, String8 program, String8 directory, String8* arguments, u64 argument_count, String8 label,
+                                                     String8 config_name, String8 mode)
+{
+    SliceString8 slice = {.pointer = arguments, .length = argument_count};
+    u64 elapsed_us = 0;
+    CompatCommandResult command = compat_command_measured(arena, slice, directory, true, &elapsed_us, 0);
+    bool passed = command.result == PROCESS_RESULT_SUCCESS;
+    // mptest reports a failed script through its exit status, but it also
+    // prints every failure, and a script that fails half way still exits 0 in
+    // some upstream versions; treat a printed ERROR as a failure too.
+    passed = passed && !string_contains(command.output, S8("ERROR"));
+    string_print(S8("SQLITE_UPSTREAM config={S8} allocator={S8} program={S8} elapsed_us={u64} status={S8}\n"), config_name, mode, label, elapsed_us,
+                 passed ? S8("pass") : S8("fail"));
+    if (!passed)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(command.output));
+    }
+    return passed;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_sqlite_action(Arena* arena, void* data)
+{
+    TestSqliteOptions options = *(TestSqliteOptions*)data;
+    if (!options.amalgamation_directory.length || !options.source_directory.length)
+    {
+        string_print(S8("error: test_sqlite requires the official SQLite {S8} amalgamation and source distributions\n"), S8(SQLITE_COMPATIBILITY_VERSION));
+        string_print(S8("usage: ./build/build test_sqlite [--config Debug|Release] /path/to/sqlite-amalgamation-{S8} /path/to/sqlite-src-{S8}\n"),
+                     S8(SQLITE_COMPATIBILITY_NUMBER), S8(SQLITE_COMPATIBILITY_NUMBER));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 amalgamation = os_path_absolute(arena, options.amalgamation_directory, true);
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+
+    // The pinned release, by content.  sqlite.org publishes a hash for each
+    // archive; these are the per-file equivalents, computed once from the
+    // official 3.53.4 downloads.
+    SqliteSourceFile amalgamation_files[] = {
+        {S8("sqlite3.c"), 9515341ull, 0x5b11eacdbea1ab99ull},
+        {S8("sqlite3.h"), 690838ull, 0x77398dfd18e0b2c8ull},
+        {S8("sqlite3ext.h"), 39175ull, 0xa2ba56eafcb935e8ull},
+        {S8("shell.c"), 1185915ull, 0x2421cdd1e36e1b7aull},
+    };
+    SqliteSourceFile upstream_files[] = {
+        {S8("test/speedtest1.c"), 116785ull, 0x5b33c45211439362ull},
+        {S8("test/wordcount.c"), 23690ull, 0x5cd35d2c04025805ull},
+        {S8("test/kvtest.c"), 35993ull, 0xa4be9e029d3a59c8ull},
+        {S8("mptest/mptest.c"), 39960ull, 0x661b0ccfb147c233ull},
+        {S8("mptest/config01.test"), 950ull, 0xa4cdce1951a4a68cull},
+        {S8("mptest/config02.test"), 2657ull, 0x84f9265a71bb48aull},
+        {S8("mptest/crash01.test"), 2980ull, 0x1d85eec1da39c36cull},
+        {S8("mptest/crash02.subtest"), 1247ull, 0x7c6d3a664944f64eull},
+        {S8("mptest/multiwrite01.test"), 10826ull, 0xc48a8a7a2fce95b5ull},
+    };
+    if (!sqlite_verify_files(arena, amalgamation, amalgamation_files, BUSTER_ARRAY_LENGTH(amalgamation_files), S8("amalgamation")) ||
+        !sqlite_verify_line(arena, path_join(arena, source_directory, S8("VERSION")), S8(SQLITE_COMPATIBILITY_VERSION)) ||
+        !sqlite_verify_line(arena, path_join(arena, source_directory, S8("manifest.uuid")), S8(SQLITE_COMPATIBILITY_MANIFEST)) ||
+        !sqlite_verify_files(arena, source_directory, upstream_files, BUSTER_ARRAY_LENGTH(upstream_files), S8("source distribution")))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("SQLITE_SOURCE version={S8} manifest={S8} amalgamation={S8} source={S8}\n"), S8(SQLITE_COMPATIBILITY_VERSION),
+                 S8(SQLITE_COMPATIBILITY_MANIFEST), amalgamation, source_directory);
+
+    String8 ide = compat_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_sqlite requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+
+    String8 output_directory = string_format_z(arena, S8("build/sqlite-{S8}-{u64}"), S8(SQLITE_COMPATIBILITY_VERSION), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 workload_script = path_join(arena, output_directory, S8("workload.sql"));
+    if (!sqlite_write_workload(workload_script))
+    {
+        string_print(S8("error: test_sqlite could not write {S8}\n"), workload_script);
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("SQLITE_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+
+    SqliteConfiguration configurations[] = {
+        {S8("threadsafe"), S8("1"), true},
+        {S8("single-thread"), S8("0"), false},
+    };
+    // FAST and NONE first, as the acceptance criteria ask, then the two that
+    // do more work per function.
+    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    SqliteUpstreamProgram programs[] = {
+        {S8("speedtest1"), S8("test/speedtest1.c")},
+        {S8("wordcount"), S8("test/wordcount.c")},
+        {S8("kvtest"), S8("test/kvtest.c")},
+        {S8("mptest"), S8("mptest/mptest.c")},
+    };
+    String8 mptest_scripts[] = {S8("multiwrite01.test"), S8("config01.test"), S8("config02.test"), S8("crash01.test")};
+
+    u32 checked_workloads = 0;
+    for (u64 configuration_index = 0; configuration_index < BUSTER_ARRAY_LENGTH(configurations); configuration_index += 1)
+    {
+        SqliteConfiguration configuration = configurations[configuration_index];
+        bool threads = string_equal(configuration.threadsafe, S8("1"));
+        String8 clang_directory = path_join(arena, output_directory, string_format(arena, S8("clang-{S8}"), configuration.name));
+        make_directory_recursive(arena, clang_directory);
+        String8 clang_library = path_join(arena, clang_directory, S8("sqlite3.o"));
+        String8 clang_shell = path_join(arena, clang_directory, S8("shell.o"));
+        String8 clang_cli = path_join(arena, clang_directory, S8("sqlite3"));
+        String8 clang_objects[] = {clang_library, clang_shell};
+        if (!sqlite_compile_clang(arena, clang, amalgamation, path_join(arena, amalgamation, S8("sqlite3.c")), clang_library, configuration.threadsafe) ||
+            !sqlite_compile_clang(arena, clang, amalgamation, path_join(arena, amalgamation, S8("shell.c")), clang_shell, configuration.threadsafe) ||
+            !sqlite_link(arena, clang, clang_cli, clang_objects, BUSTER_ARRAY_LENGTH(clang_objects), false, threads))
+        {
+            string_print(S8("error: test_sqlite could not build the Clang reference for config={S8}\n"), configuration.name);
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 clang_run = path_join(arena, clang_directory, S8("workload"));
+        make_directory_recursive(arena, clang_run);
+        String8 clang_output = {0};
+        u64 clang_elapsed_us = 0;
+        if (!sqlite_run_workload(arena, clang_cli, clang_run, workload_script, &clang_output, &clang_elapsed_us, 0))
+        {
+            string_print(S8("error: test_sqlite Clang reference workload failed for config={S8}\n"), configuration.name);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
+        {
+            String8 mode = allocators[allocator_index];
+            String8 directory = path_join(arena, output_directory, string_format(arena, S8("{S8}-{S8}"), configuration.name, mode));
+            String8 metrics_directory = path_join(arena, directory, S8("metrics"));
+            make_directory_recursive(arena, metrics_directory);
+            String8 library = path_join(arena, directory, S8("sqlite3.o"));
+            String8 shell = path_join(arena, directory, S8("shell.o"));
+            String8 cli = path_join(arena, directory, S8("sqlite3"));
+            u64 elapsed_us = 0;
+            // Stage 1: the amalgamation itself, the 9,5 MB translation unit
+            // this milestone is about.
+            if (!sqlite_compile_buster(arena, ide, amalgamation, path_join(arena, amalgamation, S8("sqlite3.c")), library,
+                                       path_join(arena, metrics_directory, S8("sqlite3.metrics")), mode, configuration.threadsafe,
+                                       configuration_index == 0 && allocator_index == 0, &elapsed_us) ||
+                !sqlite_metric_report(arena, configuration.name, mode, S8("sqlite3.c"), path_join(arena, metrics_directory, S8("sqlite3.metrics")),
+                                      elapsed_us))
+            {
+                string_print(S8("error: test_sqlite stage=library config={S8} allocator={S8} failed\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("SQLITE_STAGE config={S8} allocator={S8} stage=library units=1 status=pass\n"), configuration.name, mode);
+            // Stage 2: the shell, which is the amalgamation's public API seen
+            // from outside plus its own extensions.
+            if (!sqlite_compile_buster(arena, ide, amalgamation, path_join(arena, amalgamation, S8("shell.c")), shell,
+                                       path_join(arena, metrics_directory, S8("shell.metrics")), mode, configuration.threadsafe, false, &elapsed_us) ||
+                !sqlite_metric_report(arena, configuration.name, mode, S8("shell.c"), path_join(arena, metrics_directory, S8("shell.metrics")), elapsed_us))
+            {
+                string_print(S8("error: test_sqlite stage=shell config={S8} allocator={S8} failed\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            string_print(S8("SQLITE_STAGE config={S8} allocator={S8} stage=shell units=1 status=pass\n"), configuration.name, mode);
+            // Stage 3: the executable, linked through `ide cc`.
+            String8 cli_objects[] = {library, shell};
+            u64 link_start = os_now_microseconds();
+            if (!sqlite_link(arena, ide, cli, cli_objects, BUSTER_ARRAY_LENGTH(cli_objects), true, threads))
+            {
+                string_print(S8("error: test_sqlite stage=cli-link config={S8} allocator={S8} failed\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            u64 link_elapsed_us = os_now_microseconds() - link_start;
+            u64 image_bytes = 0;
+            compat_hash_file(arena, cli, &image_bytes);
+            string_print(S8("SQLITE_LINK config={S8} allocator={S8} elapsed_us={u64} image_bytes={u64} status=pass\n"), configuration.name, mode,
+                         link_elapsed_us, image_bytes);
+
+            // The workload, and the comparison the whole milestone rests on:
+            // the same script, the same output, and a database file that
+            // matches the Clang build's byte for byte.
+            String8 run_directory = path_join(arena, directory, S8("workload"));
+            make_directory_recursive(arena, run_directory);
+            String8 buster_output = {0};
+            u64 workload_elapsed_us = 0;
+            u64 workload_instructions = 0;
+            if (!sqlite_run_workload(arena, cli, run_directory, workload_script, &buster_output, &workload_elapsed_us, &workload_instructions))
+            {
+                string_print(S8("error: test_sqlite workload config={S8} allocator={S8} failed\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!string_equal(buster_output, clang_output))
+            {
+                string_print(S8("error: test_sqlite workload output differs from Clang config={S8} allocator={S8}\n"), configuration.name, mode);
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(buster_output));
+                os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(clang_output));
+                return PROCESS_RESULT_FAILED;
+            }
+            String8 databases[] = {S8("main.db"), S8("backup.db"), S8("restored.db")};
+            u64 database_bytes = 0;
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(databases); index += 1)
+            {
+                String8 left = path_join(arena, run_directory, databases[index]);
+                String8 right = path_join(arena, clang_run, databases[index]);
+                u64 bytes = 0;
+                u64 hash = compat_hash_file(arena, left, &bytes);
+                if (!compat_files_equal(arena, left, right))
+                {
+                    string_print(S8("error: test_sqlite database {S8} differs from the Clang build config={S8} allocator={S8}\n"), databases[index],
+                                 configuration.name, mode);
+                    return PROCESS_RESULT_FAILED;
+                }
+                string_print(S8("SQLITE_DATABASE config={S8} allocator={S8} file={S8} bytes={u64} hash={u64:x} matches_clang=1\n"), configuration.name, mode,
+                             databases[index], bytes, hash);
+                database_bytes += bytes;
+            }
+            sqlite_report_workload(configuration.name, mode, S8("sql-workload"), database_bytes, workload_elapsed_us, workload_instructions);
+            checked_workloads += 1;
+
+            if (!configuration.upstream_tests)
+            {
+                continue;
+            }
+            // The upstream programs, built against this configuration's own
+            // library object and run in their own directory.
+            String8 program_objects[BUSTER_ARRAY_LENGTH(programs)];
+            String8 program_binaries[BUSTER_ARRAY_LENGTH(programs)];
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(programs); index += 1)
+            {
+                program_objects[index] = path_join(arena, directory, string_format(arena, S8("{S8}.o"), programs[index].name));
+                program_binaries[index] = path_join(arena, directory, programs[index].name);
+                String8 metrics = path_join(arena, metrics_directory, string_format(arena, S8("{S8}.metrics"), programs[index].name));
+                String8 link_objects[] = {program_objects[index], library};
+                if (!sqlite_compile_buster(arena, ide, amalgamation, path_join(arena, source_directory, programs[index].path), program_objects[index], metrics,
+                                           mode, configuration.threadsafe, false, &elapsed_us) ||
+                    !sqlite_metric_report(arena, configuration.name, mode, programs[index].name, metrics, elapsed_us) ||
+                    !sqlite_link(arena, ide, program_binaries[index], link_objects, BUSTER_ARRAY_LENGTH(link_objects), true, threads))
+                {
+                    string_print(S8("error: test_sqlite stage=upstream-programs config={S8} allocator={S8} failed at {S8}\n"), configuration.name, mode,
+                                 programs[index].path);
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+            string_print(S8("SQLITE_STAGE config={S8} allocator={S8} stage=upstream-programs units={u64} status=pass\n"), configuration.name, mode,
+                         BUSTER_ARRAY_LENGTH(programs));
+
+            String8 upstream_directory = path_join(arena, directory, S8("upstream"));
+            make_directory_recursive(arena, upstream_directory);
+            // speedtest1 writes a database from a fixed workload; it is the
+            // second byte-for-byte comparison, over a far larger schema than
+            // the SQL script builds.
+            String8 speed_database = path_join(arena, upstream_directory, S8("speedtest1.db"));
+            String8 clang_speed_database = path_join(arena, clang_directory, S8("speedtest1.db"));
+            String8 speed_arguments[] = {program_binaries[0], S8("--size"), S8("5"), S8("--testset"), S8("main"), speed_database};
+            String8 clang_speed_source = path_join(arena, clang_directory, S8("speedtest1.o"));
+            String8 clang_speed_binary = path_join(arena, clang_directory, S8("speedtest1"));
+            String8 clang_speed_objects[] = {clang_speed_source, clang_library};
+            String8 clang_speed_arguments[] = {clang_speed_binary, S8("--size"), S8("5"), S8("--testset"), S8("main"), clang_speed_database};
+            if (allocator_index == 0 &&
+                (!sqlite_compile_clang(arena, clang, amalgamation, path_join(arena, source_directory, programs[0].path), clang_speed_source,
+                                       configuration.threadsafe) ||
+                 !sqlite_link(arena, clang, clang_speed_binary, clang_speed_objects, BUSTER_ARRAY_LENGTH(clang_speed_objects), false, threads) ||
+                 !sqlite_run_upstream_program(arena, clang_speed_binary, clang_directory, clang_speed_arguments,
+                                              BUSTER_ARRAY_LENGTH(clang_speed_arguments), S8("speedtest1-clang"), configuration.name, S8("clang"))))
+            {
+                string_print(S8("error: test_sqlite could not build the Clang speedtest1 reference\n"));
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!sqlite_run_upstream_program(arena, program_binaries[0], upstream_directory, speed_arguments, BUSTER_ARRAY_LENGTH(speed_arguments),
+                                             S8("speedtest1"), configuration.name, mode))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!compat_files_equal(arena, speed_database, clang_speed_database))
+            {
+                string_print(S8("error: test_sqlite speedtest1 database differs from the Clang build config={S8} allocator={S8}\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            u64 speed_bytes = 0;
+            u64 speed_hash = compat_hash_file(arena, speed_database, &speed_bytes);
+            string_print(S8("SQLITE_DATABASE config={S8} allocator={S8} file=speedtest1.db bytes={u64} hash={u64:x} matches_clang=1\n"), configuration.name,
+                         mode, speed_bytes, speed_hash);
+
+            // wordcount over the shell's own source: a text workload with a
+            // second byte-for-byte database comparison.
+            String8 wordcount_database = path_join(arena, upstream_directory, S8("wordcount.db"));
+            String8 clang_wordcount_database = path_join(arena, clang_directory, S8("wordcount.db"));
+            String8 wordcount_input = path_join(arena, amalgamation, S8("shell.c"));
+            String8 wordcount_arguments[] = {program_binaries[1], wordcount_database, wordcount_input, S8("--all")};
+            String8 clang_wordcount_source = path_join(arena, clang_directory, S8("wordcount.o"));
+            String8 clang_wordcount_binary = path_join(arena, clang_directory, S8("wordcount"));
+            String8 clang_wordcount_objects[] = {clang_wordcount_source, clang_library};
+            String8 clang_wordcount_arguments[] = {clang_wordcount_binary, clang_wordcount_database, wordcount_input, S8("--all")};
+            if (allocator_index == 0 &&
+                (!sqlite_compile_clang(arena, clang, amalgamation, path_join(arena, source_directory, programs[1].path), clang_wordcount_source,
+                                       configuration.threadsafe) ||
+                 !sqlite_link(arena, clang, clang_wordcount_binary, clang_wordcount_objects, BUSTER_ARRAY_LENGTH(clang_wordcount_objects), false, threads) ||
+                 !sqlite_run_upstream_program(arena, clang_wordcount_binary, clang_directory, clang_wordcount_arguments,
+                                              BUSTER_ARRAY_LENGTH(clang_wordcount_arguments), S8("wordcount-clang"), configuration.name, S8("clang"))))
+            {
+                string_print(S8("error: test_sqlite could not build the Clang wordcount reference\n"));
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!sqlite_run_upstream_program(arena, program_binaries[1], upstream_directory, wordcount_arguments, BUSTER_ARRAY_LENGTH(wordcount_arguments),
+                                             S8("wordcount"), configuration.name, mode) ||
+                !compat_files_equal(arena, wordcount_database, clang_wordcount_database))
+            {
+                string_print(S8("error: test_sqlite wordcount database differs from the Clang build config={S8} allocator={S8}\n"), configuration.name, mode);
+                return PROCESS_RESULT_FAILED;
+            }
+            u64 wordcount_bytes = 0;
+            u64 wordcount_hash = compat_hash_file(arena, wordcount_database, &wordcount_bytes);
+            string_print(S8("SQLITE_DATABASE config={S8} allocator={S8} file=wordcount.db bytes={u64} hash={u64:x} matches_clang=1\n"), configuration.name,
+                         mode, wordcount_bytes, wordcount_hash);
+
+            // kvtest fills its blobs from the platform's random source, so the
+            // database it writes is not comparable; running it is still the
+            // large-blob path exercised end to end.
+            String8 kv_database = path_join(arena, upstream_directory, S8("kv.db"));
+            String8 kv_init_arguments[] = {program_binaries[2], S8("init"),  kv_database,   S8("--count"),
+                                           S8("400"),          S8("--size"), S8("2000")};
+            String8 kv_run_arguments[] = {program_binaries[2], S8("run"), kv_database, S8("--count"), S8("400")};
+            if (!sqlite_run_upstream_program(arena, program_binaries[2], upstream_directory, kv_init_arguments, BUSTER_ARRAY_LENGTH(kv_init_arguments),
+                                             S8("kvtest-init"), configuration.name, mode) ||
+                !sqlite_run_upstream_program(arena, program_binaries[2], upstream_directory, kv_run_arguments, BUSTER_ARRAY_LENGTH(kv_run_arguments),
+                                             S8("kvtest-run"), configuration.name, mode))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+
+            // The upstream test suite, in the staged subsets the milestone
+            // asks for: mptest's own scripts, run by the Buster-built driver
+            // against the Buster-built library, each in a fresh database.
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(mptest_scripts); index += 1)
+            {
+                String8 script = path_join(arena, path_join(arena, source_directory, S8("mptest")), mptest_scripts[index]);
+                String8 database = path_join(arena, upstream_directory, string_format(arena, S8("mp-{S8}.db"), mptest_scripts[index]));
+                String8 arguments[] = {program_binaries[3], database, script};
+                if (!sqlite_run_upstream_program(arena, program_binaries[3], upstream_directory, arguments, BUSTER_ARRAY_LENGTH(arguments),
+                                                 string_format(arena, S8("mptest/{S8}"), mptest_scripts[index]), configuration.name, mode))
+                {
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+        }
+    }
+    string_print(S8("SQLITE_SUMMARY version={S8} configurations={u64} allocators={u64} workloads={u32} upstream_scripts={u64} status=pass\n"),
+                 S8(SQLITE_COMPATIBILITY_VERSION), BUSTER_ARRAY_LENGTH(configurations), BUSTER_ARRAY_LENGTH(allocators), checked_workloads,
+                 BUSTER_ARRAY_LENGTH(mptest_scripts));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_sqlite_action_add(Arena* arena, TestSqliteOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestSqliteOptions* options_copy = arena_allocate(arena, TestSqliteOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_sqlite_action, .callback_data = options_copy};
 }
 
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
@@ -25421,6 +26114,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_YYJSON] = S8_INITIALIZER("test_yyjson"),
         [BUILD_COMMAND_TEST_STB] = S8_INITIALIZER("test_stb"),
         [BUILD_COMMAND_TEST_LZ4] = S8_INITIALIZER("test_lz4"),
+        [BUILD_COMMAND_TEST_SQLITE] = S8_INITIALIZER("test_sqlite"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -25496,6 +26190,7 @@ ProcessResult process_arguments(void)
     TestYyjsonOptions test_yyjson_options = {0};
     TestStbOptions test_stb_options = {0};
     TestLz4Options test_lz4_options = {0};
+    TestSqliteOptions test_sqlite_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -25630,6 +26325,19 @@ ProcessResult process_arguments(void)
             else if (command == BUILD_COMMAND_TEST_LZ4 && !test_lz4_options.source_directory.length && !string_starts_with_sequence(argument, S8("--")))
             {
                 test_lz4_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_SQLITE && !string_starts_with_sequence(argument, S8("--")) &&
+                     (!test_sqlite_options.amalgamation_directory.length || !test_sqlite_options.source_directory.length))
+            {
+                if (!test_sqlite_options.amalgamation_directory.length)
+                {
+                    test_sqlite_options.amalgamation_directory = argument;
+                }
+                else
+                {
+                    test_sqlite_options.source_directory = argument;
+                }
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -25899,6 +26607,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_LZ4)
                 {
                     test_lz4_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_SQLITE)
+                {
+                    test_sqlite_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -26459,6 +27171,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_LZ4:
         {
             test_lz4_action_add(arena, test_lz4_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_SQLITE:
+        {
+            test_sqlite_action_add(arena, test_sqlite_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

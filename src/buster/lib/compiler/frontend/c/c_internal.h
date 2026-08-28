@@ -484,6 +484,20 @@ struct CTypeParseFrame
     u32 close_index;
     u32 pointer_start;
     u32 parameter_start;
+    u32 written_parameter_count;
+    // A parenthesized declarator whose name carries its own parameter list --
+    // `void (*getf(int))(void)` -- is a function returning the pointer, so its
+    // list is scanned before the outer suffix and the range kept here until
+    // the return type is complete.
+    u32 inner_parameter_start;
+    u32 inner_parameter_count;
+    u32 inner_open;
+    u32 inner_close;
+    // A declarator group may hold another one -- `void (*(*sym)(int))(void)`
+    // -- and then this frame owns only the outer suffix and pointer chain,
+    // with the group starting here parsed by a child frame over the type they
+    // produce.
+    u32 nested_start;
     u32 segment_start;
     u32 scan_index;
     u32 depth;
@@ -505,6 +519,10 @@ struct CTypeParseFrame
     bool original_type_valid;
     bool is_bit_field;
     bool auto_conditional;
+    bool scanning_inner_parameters;
+    bool has_inner_parameters;
+    bool inner_variadic;
+    bool nested;
     u8 reserved[1];
 };
 

@@ -87,6 +87,11 @@ BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u
 // Synthetic compiler-runtime input for hosted Windows executable links only;
 // object and relocatable output paths, UEFI, and non-Windows targets do not use it.
 BUSTER_F_DECL ObjectFile link_windows_runtime_object(Arena* arena, Target target);
+// The same for hosted ELF executable links: the glibc stubs that live in
+// libc_nonshared.a rather than in the shared object the ELF writers import
+// from.  Selected the way an archive member is, so a program that references
+// none of them never sees it.
+BUSTER_F_DECL ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target);
 BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options);
 BUSTER_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,

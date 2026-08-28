@@ -34,6 +34,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_windows_runtime_object_target(Target ta
     return target.os == OPERATING_SYSTEM_WINDOWS && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
 }
 
+// The ELF runtime object carries the glibc stubs that live in
+// libc_nonshared.a rather than in the shared object the ELF writers import
+// from; see link_elf_libc_runtime_object.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_runtime_object_target(Target target)
+{
+    return target.os == OPERATING_SYSTEM_LINUX && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, String8 prefix)
 {
     if (!string_starts_with_sequence(argument, prefix))
@@ -2449,11 +2457,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    ObjectFile link_inputs[2] = {object};
+    ObjectFile link_inputs[3] = {object};
     u32 link_input_count = 1;
     if (compiler_driver_windows_runtime_object_target(invocation.target))
     {
         link_inputs[link_input_count++] = link_windows_runtime_object(arena, invocation.target);
+    }
+    if (compiler_driver_elf_runtime_object_target(invocation.target))
+    {
+        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
+        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, link_inputs, link_input_count))
+        {
+            link_inputs[link_input_count++] = runtime;
+        }
     }
     LinkObjectResult linked = link_objects(arena, link_inputs, link_input_count,
                                            (LinkOptions){
@@ -2793,7 +2809,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += archive.object_count;
     }
-    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
+    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
+        (compiler_driver_windows_runtime_object_target(invocation.target) || compiler_driver_elf_runtime_object_target(invocation.target)))
     {
         if (object_capacity == UINT32_MAX)
         {
@@ -3046,6 +3063,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
     {
         objects[object_count++] = link_windows_runtime_object(arena, invocation.target);
+    }
+    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_elf_runtime_object_target(invocation.target))
+    {
+        // Selected the way an archive member is: only a program that
+        // references one of its stubs and defines none of them pulls it in.
+        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
+        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, objects, object_count))
+        {
+            objects[object_count++] = runtime;
+        }
     }
     if (invocation.emit_llvm_bitcode)
     {

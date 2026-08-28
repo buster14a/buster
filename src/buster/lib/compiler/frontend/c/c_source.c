@@ -2458,6 +2458,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__c11_atomic_is_lock_free"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__c11_atomic_thread_fence"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__c11_atomic_signal_fence"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_synchronize"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__builtin_floorf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_floor"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_ceilf"), C_SYMBOL_BUILTIN_MATH },
@@ -6148,6 +6149,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     if (layout.has_128_bit_integer)
     {
         C_DEFINE_TYPE_MACRO("__SIZEOF_INT128__", string_format(arena, S8("{u32}"), layout.integer128.size));
+        // Clang and GCC predefine these two spellings as builtin typedef names
+        // for the 128-bit integer keyword rather than declaring them in a
+        // header, and code that uses 128-bit arithmetic reaches for them
+        // directly (SQLite's decimal and integer-overflow helpers do).  The
+        // keyword itself is already understood, so name it the same way
+        // __builtin_va_list is named above.
+        C_DEFINE_TYPE_MACRO("__int128_t", S8("__int128"));
+        C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_DOUBLE__", string_format(arena, S8("{u32}"), layout.double_type.size));

@@ -941,6 +941,98 @@ ObjectFile link_windows_runtime_object(Arena* arena, Target target)
     return result;
 }
 
+// glibc splits its C library in two: libc.so.6 carries the shared symbols and
+// libc_nonshared.a a handful of stubs that every program links statically.
+// `atexit` and `at_quick_exit` are two of them -- the shared object exports
+// only their `__cxa_` forms -- and the ELF writers here resolve undefined
+// symbols against libc.so.6 alone, so a program that registers an exit handler
+// (SQLite's shell does, on its first line of main) links and then dies in the
+// loader.  Supply the stubs the way glibc does, as weak definitions that
+// forward with a null argument and a null DSO handle, which is exactly what
+// the executable's own stubs pass.  The driver adds this object only when
+// something references one of them and nothing defines it, and a program with
+// its own definition keeps it.
+ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
+{
+    ObjectFile result = {
+        .target = target,
+    };
+    if (!arena)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+        return result;
+    }
+    bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
+    if (object_format_for_target(target) != OBJECT_FORMAT_ELF64 || (!x86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        return result;
+    }
+    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+    result.section_count = OBJECT_SECTION_COUNT;
+    for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+    {
+        ObjectSectionKind kind = (ObjectSectionKind)section_index;
+        result.sections[section_index] = (ObjectSection){
+            .name = object_section_name_for_kind(kind),
+            .kind = kind,
+            .alignment = object_section_default_alignment(kind),
+        };
+    }
+    // x86-64: zero the second and third arguments and tail-call the import.
+    // AArch64: the same two arguments in x1/x2 and a tail branch.
+    static u8 const x86_64_thunk[] = {
+        0x31, 0xf6,                   // xor esi, esi
+        0x31, 0xd2,                   // xor edx, edx
+        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32 __cxa_atexit
+    };
+    static u8 const aarch64_thunk[] = {
+        0x01, 0x00, 0x80, 0xd2, // mov x1, #0
+        0x02, 0x00, 0x80, 0xd2, // mov x2, #0
+        0x00, 0x00, 0x00, 0x14, // b __cxa_atexit
+    };
+    // One thunk per stub, laid out back to back in the same section.
+    static char8 const* const stub_names[] = {"atexit", "at_quick_exit"};
+    static char8 const* const target_names[] = {"__cxa_atexit", "__cxa_at_quick_exit"};
+    u64 thunk_size = x86_64 ? sizeof(x86_64_thunk) : sizeof(aarch64_thunk);
+    u64 stub_count = BUSTER_ARRAY_LENGTH(stub_names);
+    u8* thunks = arena_allocate(arena, u8, thunk_size * stub_count);
+    result.symbols = arena_allocate(arena, ObjectSymbol, stub_count * 2);
+    result.relocations = arena_allocate(arena, ObjectRelocation, stub_count);
+    for (u64 index = 0; index < stub_count; index += 1)
+    {
+        u64 offset = thunk_size * index;
+        memcpy(thunks + offset, x86_64 ? x86_64_thunk : aarch64_thunk, thunk_size);
+        result.symbols[index * 2] = (ObjectSymbol){
+            .name = string_from_pointer((char8*)stub_names[index]),
+            .value = offset,
+            .size = thunk_size,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+            .weak = true,
+        };
+        result.symbols[index * 2 + 1] = (ObjectSymbol){
+            .name = string_from_pointer((char8*)target_names[index]),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+        result.relocations[index] = (ObjectRelocation){
+            .addend = x86_64 ? -4 : 0,
+            .offset = offset + (x86_64 ? 5 : 8),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = (u32)(index * 2 + 1),
+            .kind = x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26,
+        };
+    }
+    result.symbol_count = (u32)(stub_count * 2);
+    result.relocation_count = (u32)stub_count;
+    result.sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = thunks, .length = thunk_size * stub_count};
+    result.sections[OBJECT_SECTION_TEXT].virtual_size = thunk_size * stub_count;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void link_write_u16(u8* bytes, u64 offset, u16 value)
 {
     memcpy(bytes + offset, &value, sizeof(value));

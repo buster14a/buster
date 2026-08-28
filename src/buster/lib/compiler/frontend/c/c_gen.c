@@ -562,6 +562,16 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     {
         return IR_TYPE_ID_INVALID;
     }
+    // The qualified type is a copy of the base, layout included, and an
+    // aggregate's mapping exists before its fields are laid out.  Copying then
+    // would freeze an unresolved layout into a type nothing revisits, which
+    // codegen rejects as invalid IR -- SQLite reaches one through
+    // `volatile WalCkptInfo *`.  The mapping pass keeps a qualified type
+    // pending, so refusing here is a retry, not a failure.
+    if (!base->layout.resolved)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
     for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
     {
         IrType* type = program->types.types + type_index;
@@ -1254,6 +1264,9 @@ typedef enum CIrAtomicBuiltin
     C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK,
     C_IR_ATOMIC_BUILTIN_THREAD_FENCE,
     C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE,
+    // GCC's legacy full barrier, which takes no ordering argument because it
+    // is always sequentially consistent.
+    C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE,
     C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE,
     C_IR_ATOMIC_BUILTIN_COUNT,
 } CIrAtomicBuiltin;
@@ -1582,6 +1595,10 @@ BUSTER_C_INTERNAL CIrAtomicBuiltin c_ir_atomic_builtin(String8 name)
         {
             S8("__c11_atomic_signal_fence"),
             C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE,
+        },
+        {
+            S8("__sync_synchronize"),
+            C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE,
         },
         {
             S8("__c11_atomic_is_lock_free"),
@@ -10572,6 +10589,54 @@ BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u
     return cursor < end ? cursor : end;
 }
 
+// A declarator group carries no base type of its own: `(*)`, `(**)` and
+// `(*(*)(int))` declare what a cast's type name points to rather than name
+// something callable.  Without this test a cast like
+// `(void (*(*)(void *, const char *))(void))dlsym` reads as a call of the
+// stars with the parameter list for its arguments.
+BUSTER_C_INTERNAL bool c_ir_abstract_pointer_declarator(CIntegerIrBuilder* builder, u32 open, u32 close)
+{
+    CType ignored = {0};
+    u32 index = open + 1;
+    u32 pointer_count = 0;
+    while (index < close)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_STAR))
+        {
+            pointer_count += 1;
+            index += 1;
+            continue;
+        }
+        if (token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, token), &ignored))
+        {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if (index == close)
+    {
+        return pointer_count != 0;
+    }
+    if (!pointer_count || !c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return false;
+    }
+    u32 inner_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    if (inner_close >= close || !c_ir_abstract_pointer_declarator(builder, index, inner_close))
+    {
+        return false;
+    }
+    u32 suffix = inner_close + 1;
+    if (suffix < close && c_token_is_punctuator(&builder->preprocess.tokens[suffix], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 suffix_close = c_ir_matching_delimiter_cached(builder, suffix, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        suffix = suffix_close < close ? suffix_close + 1 : suffix;
+    }
+    return suffix == close;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -10776,8 +10841,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                 }
             }
         }
-        bool empty_pointer_declarator = parenthesized_callee && callee_start + 2 == index &&
-                                        c_token_is_punctuator(&builder->preprocess.tokens[callee_start + 1], C_PUNCTUATOR_STAR);
+        // `(*)`, `(**)` and `(*(*)(int))` are abstract declarators, not
+        // callees: SQLite reads a virtual-table method through
+        // `*(int(**)(sqlite3_vtab*))(...)` and casts dlsym through a nested
+        // one, both of which otherwise read as a call of the stars.
+        bool empty_pointer_declarator = parenthesized_callee && c_ir_abstract_pointer_declarator(builder, callee_start, index);
         if (parenthesized_callee && (callee_start + 1 >= index || empty_pointer_declarator ||
                                      c_ir_type_name(builder, callee_start + 1, index).value != IR_ID_UNDERLYING_INVALID))
         {
@@ -10845,11 +10913,50 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                 }
             }
         }
-        while (callee_start >= start + 2 && builder->preprocess.tokens[callee_start - 2].kind == C_TOKEN_IDENTIFIER &&
-               (c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_DOT) ||
-                c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_ARROW)))
+        bool walking_postfix_chain = true;
+        while (walking_postfix_chain)
         {
-            callee_start -= 2;
+            walking_postfix_chain = false;
+            bool member_access = callee_start >= start + 2 && (c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_DOT) ||
+                                                               c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 1], C_PUNCTUATOR_ARROW));
+            if (member_access && builder->preprocess.tokens[callee_start - 2].kind == C_TOKEN_IDENTIFIER)
+            {
+                callee_start -= 2;
+                walking_postfix_chain = true;
+            }
+            // The member's base may be an array element: SQLite destroys its
+            // collation sequences through `pColl[j].xDel(pColl[j].pUser)`.
+            // Step over the subscript group and continue from what it indexes,
+            // so the whole chain becomes the callee rather than the member
+            // alone, which resolves to no entity at all.
+            else if (member_access && c_token_is_punctuator(&builder->preprocess.tokens[callee_start - 2], C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                u32 bracket_depth = 0;
+                u32 open = UINT32_MAX;
+                for (u32 cursor = callee_start - 1; cursor > start;)
+                {
+                    cursor -= 1;
+                    CToken current = builder->preprocess.tokens[cursor];
+                    if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+                    {
+                        bracket_depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+                    {
+                        bracket_depth -= 1;
+                        if (!bracket_depth)
+                        {
+                            open = cursor;
+                            break;
+                        }
+                    }
+                }
+                if (open != UINT32_MAX && open > start && builder->preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
+                {
+                    callee_start = open - 1;
+                    walking_postfix_chain = true;
+                }
+            }
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
@@ -11436,16 +11543,24 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
                                      ? 1
-                                     : 3;
+                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE ? 0
+                                                                                                     : 3;
             IrSourceRange source = c_ir_token_source_range(builder, token);
-            if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) || argument_count != expected_count)
+            // `__sync_synchronize()` is the one atomic builtin with an empty
+            // argument list, which the argument scan reports as malformed.
+            bool empty_arguments = selected->open_index + 1 == selected->close_index;
+            if (empty_arguments ? expected_count != 0
+                                : (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+                                   argument_count != expected_count))
             {
                 return false;
             }
-            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE)
+            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+                selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE)
             {
-                IrMemoryOrder order = IR_MEMORY_ORDER_COUNT;
-                if (!c_ir_atomic_memory_order(builder, starts[0], ends[0], &order))
+                // `__sync_synchronize()` carries its ordering in its name.
+                IrMemoryOrder order = IR_MEMORY_ORDER_SEQUENTIAL;
+                if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE && !c_ir_atomic_memory_order(builder, starts[0], ends[0], &order))
                 {
                     return false;
                 }
@@ -12473,12 +12588,34 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         // expression without the redundant dereference: the
                         // place machine intentionally only accepts a simple
                         // identifier/field chain and cannot form a place for
-                        // a parenthesized field designator.
+                        // a parenthesized field designator.  The dereference
+                        // is only redundant when the operand is a pointer to
+                        // a function: `(*q)(args)` through a pointer to a
+                        // function pointer -- SQLite reads a virtual-table
+                        // method that way -- really does read q first.
                         if (callee_start < callee_end &&
                             c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
                         {
-                            callee_start += 1;
+                            IrTypeId operand_type = c_ir_predict_expression_type(builder, callee_start + 1, callee_end);
+                            IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
+                            IrType* pointee = operand && operand->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, operand->element_type) : 0;
+                            if (!pointee || pointee->kind == IR_TYPE_FUNCTION)
+                            {
+                                callee_start += 1;
+                            }
                         }
+                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
+                                                                     callee_end, false);
+                    }
+                    // The callee's base may be a parenthesized cast over a
+                    // postfix chain: SQLite's memdb VFS calls through
+                    // `ORIGVFS(pVfs)->xDlOpen`, which expands to
+                    // `((sqlite3_vfs*)((pVfs)->pAppData))->xDlOpen`.  The place
+                    // machine forms places for identifier/field chains, and
+                    // that group is an ordinary value expression, so ask for
+                    // the value the callee needs instead of a place for it.
+                    if (callee_start < callee_end && c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
                         return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
                                                                      callee_end, false);
                     }
@@ -13505,7 +13642,18 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 }
                 else
                 {
+                    // The load only materialized the lvalue for the expression
+                    // walk; `&E` never reads E.  Drop it when it is still the
+                    // last instruction emitted, because the read is not merely
+                    // wasted: `&pOrig[nReuse]` in SQLite's unixRemapfile
+                    // addresses the first byte past a memory mapping, and
+                    // loading it faults.
                     IrValueId place = materialization->operands[0];
+                    IrValueId recovered = c_ir_recover_place_from_value(builder, operand);
+                    if (recovered.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        place = recovered;
+                    }
                     IrTypeId place_type = builder->function->values[place.value].canonical_type;
                     result = c_ir_emit_address_of_place(builder, place, place_type, pointer_source);
                 }
@@ -14089,6 +14237,19 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     }
     if (result_out)
     {
+        // The value of `E op= x` is what E holds afterwards, in E's own type.
+        // The operation runs in the promoted type, so a narrower object's
+        // result comes back down here -- `(data[i] += 2) == 0` has to see the
+        // stored byte, not the 256 the addition produced.
+        if (!atomic && values[0].value < builder->function->value_count &&
+            builder->function->values[values[0].value].canonical_type.value != value_type.value)
+        {
+            values[0] = c_ir_emit_cast(builder, values[0], value_type, source);
+            if (values[0].value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
         *result_out = values[0];
     }
     return true;
@@ -14444,6 +14605,58 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
     return result;
 }
 
+// One declarator over `type`, abstract as a type name always is.  It recurses
+// because the grammar does: `void (*(*)(void *, const char *))(void)` -- the
+// cast SQLite's Unix VFS applies to dlsym -- is a group whose own content is
+// another group, and each level's suffix and pointer chain describe what the
+// level inside it returns.
+BUSTER_C_INTERNAL IrTypeId c_ir_type_name_declarator(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end, bool allow_function_pointer,
+                                                       CType* qualifiers)
+{
+    if (allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        u32 pointer_index = index + 1;
+        u32 pointer_count = 0;
+        while (pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_STAR))
+        {
+            pointer_count += 1;
+            pointer_index += 1;
+            while (pointer_index < pointer_close && builder->preprocess.tokens[pointer_index].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[pointer_index]), qualifiers))
+            {
+                pointer_index += 1;
+            }
+        }
+        u32 parameters_open = pointer_close + 1;
+        u32 parameters_close =
+            parameters_open < end ? c_ir_matching_delimiter_cached(builder, parameters_open, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                                  : end;
+        bool has_parameter_list = parameters_open < end && parameters_close + 1 == end &&
+                                  c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool nested_group = pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (has_parameter_list && (nested_group || (pointer_count && pointer_index == pointer_close)))
+        {
+            type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
+            while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
+            {
+                type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
+                pointer_count -= 1;
+            }
+            return nested_group ? c_ir_type_name_declarator(builder, type, pointer_index, pointer_close, true, qualifiers) : type;
+        }
+        if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
+        {
+            // The declarator's only parenthesized group is the parameter list,
+            // so the type name is the function type itself. Without this shape
+            // the suffix below rejected the whole type name, and sizeof over it
+            // fell back to the prediction's int guess -- 4, where GNU folds 1.
+            return c_ir_type_name_function_type(builder, type, index, pointer_close);
+        }
+    }
+    return c_ir_type_name_suffix(builder, type, index, end);
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool allow_function_pointer)
 {
     u32 index = start;
@@ -14454,53 +14667,12 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_internal_attempt(CIntegerIrBuilder* bu
     };
     IrTypeId type = c_ir_type_name_prefix(builder, start, end, &index, &qualifiers);
     // An unresolved prefix is already the whole answer: it leaves `index`
-    // unwritten, so neither declarator shape below nor the suffix may run.
-    bool done = type.value == IR_ID_UNDERLYING_INVALID;
-    if (!done && allow_function_pointer && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    // unwritten, so no declarator shape may run over it.
+    if (type.value == IR_ID_UNDERLYING_INVALID)
     {
-        u32 pointer_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        u32 pointer_index = index + 1;
-        u32 pointer_count = 0;
-        while (pointer_index < pointer_close && c_token_is_punctuator(&builder->preprocess.tokens[pointer_index], C_PUNCTUATOR_STAR))
-        {
-            pointer_count += 1;
-            pointer_index += 1;
-            while (pointer_index < pointer_close && builder->preprocess.tokens[pointer_index].kind == C_TOKEN_IDENTIFIER &&
-                   c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[pointer_index]), &qualifiers))
-            {
-                pointer_index += 1;
-            }
-        }
-        u32 parameters_open = pointer_close + 1;
-        u32 parameters_close =
-            parameters_open < end ? c_ir_matching_delimiter_cached(builder, parameters_open, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                  : end;
-        if (pointer_count && pointer_index == pointer_close && parameters_open < end && parameters_close + 1 == end &&
-            c_token_is_punctuator(&builder->preprocess.tokens[parameters_open], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            type = c_ir_type_name_function_type(builder, type, parameters_open, parameters_close);
-            while (type.value != IR_ID_UNDERLYING_INVALID && pointer_count)
-            {
-                type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type);
-                pointer_count -= 1;
-            }
-            done = true;
-        }
-        else if (!pointer_count && pointer_close < end && pointer_close + 1 == end)
-        {
-            // The declarator's only parenthesized group is the parameter list,
-            // so the type name is the function type itself. Without this shape
-            // the suffix below rejected the whole type name, and sizeof over it
-            // fell back to the prediction's int guess -- 4, where GNU folds 1.
-            type = c_ir_type_name_function_type(builder, type, index, pointer_close);
-            done = true;
-        }
+        return type;
     }
-    if (!done)
-    {
-        type = c_ir_type_name_suffix(builder, type, index, end);
-    }
-    return type;
+    return c_ir_type_name_declarator(builder, type, index, end, allow_function_pointer, &qualifiers);
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrTypeId type, u32 index, u32 end)
@@ -14789,6 +14961,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrVa
         value_count != 1 || !c_ir_emit_store_place(builder, place, type, values[0], source))
     {
         return IR_VALUE_ID_INVALID;
+    }
+    if (prefix && values[0].value < builder->function->value_count && builder->function->values[values[0].value].canonical_type.value != type.value)
+    {
+        // `++E` has the value E holds after the store, which is the value in
+        // E's own type: the addition ran in the promoted type, so a narrower
+        // object's result has to come back down before anything reads it.
+        // SQLite carries its page-header cell count into the high byte with
+        // `if( (++data[hdr+4])==0 ) data[hdr+3]++;`, and that carry is lost
+        // when the comparison sees 256 instead of 0.
+        values[0] = c_ir_emit_cast(builder, values[0], type, source);
     }
     return prefix ? values[0] : previous;
 }
@@ -18047,6 +18229,15 @@ c_ir_expression_core_loop:
             continue;
         }
         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
+        // A call keys on the first token of its callee, so the call this
+        // range is the callee of is found here as well -- its argument list
+        // closes past the end of the range.  That call is not an operand of
+        // its own callee; the place machine draws the same line for a call
+        // that is the base of a postfix chain.
+        if (prepared_call && prepared_call->close_index >= end)
+        {
+            prepared_call = 0;
+        }
         if (prepared_call)
         {
             if (!expect_operand)
@@ -19685,6 +19876,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* bui
     builder->last_instruction = previous;
     builder->previous_instruction_known = false;
     IrValueId place = definition->operands[0];
+    // The value id goes back to the allocator, so its label provenance must
+    // not survive to describe whatever value takes the id next: a load of an
+    // object holding a `&&label` address carries that metadata, and the
+    // address-of that replaces the load would inherit it and be rejected as a
+    // label address passed to a function.  The removed value is the highest
+    // one allocated, so its entry is the last in the sorted table.
+    if (builder->function->label_metadata_count &&
+        builder->function->label_metadata_values[builder->function->label_metadata_count - 1].value == value.value)
+    {
+        builder->function->label_metadata_count -= 1;
+    }
     builder->function->instruction_count -= 1;
     builder->function->value_count -= 1;
     return place;
@@ -22866,6 +23068,48 @@ struct CIrSwitchCase
 // One case label whose block the statement stream has to branch into when it
 // reaches the label, keyed by the label's token index. Nested switches reuse
 // the switch-case scratch array, so this registry lives for the whole body.
+// A declaration between a switch's `{` and its first case label declares
+// objects the cases go on to use, but no statement stream ever reaches it:
+// the dispatch jumps straight to a label.  SQLite's lemon-generated parser
+// declares `YYMINORTYPE yylhsminor;` exactly there and half of its reduce
+// actions read it.  Give those objects their frame slots before the dispatch,
+// where they dominate every case block, and leave any initializer unrun --
+// which is what C says jumping past an initializer does.
+BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder, u32 body_start, u32 prefix_end)
+{
+    CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+                                                                                  : C_SCOPE_ID_INVALID;
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, body_start);
+    if (scope.value >= builder->parse.scope_count)
+    {
+        return true;
+    }
+    for (CEntityId entity = builder->parse.scopes[scope.value].first_entity; entity.value < builder->parse.entity_count;
+         entity = builder->parse.entities[entity.value].next_in_scope)
+    {
+        CEntity* value = builder->parse.entities + entity.value;
+        u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
+        if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || declaration_token < body_start ||
+            declaration_token >= prefix_end || value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
+        {
+            continue;
+        }
+        IrTypeId local_type = builder->c_type_ir_map[value->type.value];
+        IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+        u32 alignment = local_type_value ? local_type_value->layout.alignment : 0;
+        if (!local_type_value || !local_type_value->layout.resolved ||
+            !c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment) ||
+            c_ir_emit_local(builder, builder->preprocess.tokens[declaration_token], local_type, entity, alignment).value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_message =
+                string_format(builder->arena, S8("could not declare local '{S8}', which precedes the first case label of a switch"), value->name);
+            builder->failure_token_index = declaration_token;
+            return false;
+        }
+    }
+    return true;
+}
+
 typedef struct CIrSubstatementCase CIrSubstatementCase;
 struct CIrSubstatementCase
 {
@@ -23096,14 +23340,38 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     return UINT32_MAX;
 }
 
+// True when this statement is a control statement whose body is a brace group,
+// which is then what ends the statement rather than a semicolon.  The body is
+// found past the header, and past the headers of any control statements nested
+// in it, because a brace group inside an expression is not a body: glibc's
+// assert() expands to a GNU statement expression, so
+// `if (p) for (i = 0; i < n; i++) assert(p[i] == 0);` -- SQLite's debug builds
+// are full of that shape -- would otherwise be measured as ending at the
+// assert's closing brace instead of at its semicolon.
 BUSTER_C_INTERNAL bool c_ir_control_statement_ends_with_body(CPreprocessResult preprocess, u32 start, u32 end)
 {
-    if (start >= end || preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER)
+    u32 cursor = start;
+    bool control = false;
+    while (cursor < end && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER)
     {
-        return false;
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
+        if (!string_equal(spelling, S8("switch")) && !string_equal(spelling, S8("for")) && !string_equal(spelling, S8("while")))
+        {
+            break;
+        }
+        if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            return false;
+        }
+        u32 header_close = c_ir_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (header_close == UINT32_MAX)
+        {
+            return false;
+        }
+        control = true;
+        cursor = header_close + 1;
     }
-    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);
-    return string_equal(spelling, S8("switch")) || string_equal(spelling, S8("for")) || string_equal(spelling, S8("while"));
+    return control && cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE);
 }
 
 /* The label prefixes of a statement, if any. `name :`, `default :`, and
@@ -25829,6 +26097,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     default_block = switch_cases[case_index].block;
                 }
             }
+            if (state->switch_case_count && !c_ir_emit_switch_prefix_locals(builder, state->switch_body_start, switch_cases[0].label_start))
+            {
+                return false;
+            }
             bool terminated = has_range ? c_ir_terminate_switch_ranges(builder, switched, switch_cases, state->switch_case_count, default_block,
                                                                         state->child_source)
                                          : c_ir_terminate_switch(builder, switched, switch_cases, state->switch_case_count, default_block,
@@ -25978,9 +26250,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 // it reachable again, so this hop goes candidate to candidate
                 // rather than token to token; the not-found landing spot is
                 // task.end - 1, exactly where the scalar scan stopped.
+                u32 found = task.end;
                 if (builder->label_candidates_valid)
                 {
-                    u32 found = task.end;
                     for (u32 candidate = c_ir_label_candidate_lower_bound(builder, index); candidate < builder->label_candidate_count;
                          candidate += 1)
                     {
@@ -25995,19 +26267,35 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                             break;
                         }
                     }
-                    index = found < task.end ? found : task.end - 1;
                 }
                 else
                 {
-                    while (index + 1 < task.end)
+                    for (u32 position = index; position + 1 < task.end; position += 1)
                     {
-                        if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end))
+                        if (c_ir_named_label_at(&builder->preprocess, task.start, position, task.end))
                         {
+                            found = position;
                             break;
                         }
-                        index += 1;
                     }
                 }
+                // A case label the enclosing switch left inside this range is
+                // a re-entry point as well -- the dispatch branches straight
+                // into it -- so dead code ends there the way it ends at a
+                // named label.  A `case` token is no label candidate: the
+                // index records an identifier followed by a colon, and this
+                // one is followed by its constant.  SQLite's interpreter
+                // reaches OP_Next exactly this way, past the `goto next_tail`
+                // of the case above it.
+                for (u32 case_index = 0; case_index < state->substatement_case_count; case_index += 1)
+                {
+                    u32 position = state->substatement_cases[case_index].label_start;
+                    if (position >= index && position < found && position + 1 < task.end)
+                    {
+                        found = position;
+                    }
+                }
+                index = found < task.end ? found : task.end - 1;
                 if (index + 1 >= task.end)
                 {
                     break;
@@ -26188,8 +26476,28 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         brace_depth -= 1;
                         continue;
                     }
-                    bool is_case = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
-                    bool is_default = !brace_depth && token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DEFAULT);
+                    // A nested switch owns every label in its own controlled
+                    // statement, whether or not that statement is a block, so
+                    // step over the whole of it rather than relying on brace
+                    // depth to tell the two switches apart.
+                    if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SWITCH) &&
+                        scan + 1 < body_close && c_token_is_punctuator(&builder->preprocess.tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        u32 nested_condition_close =
+                            c_ir_matching_delimiter_cached(builder, scan + 1, body_close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                        u32 nested_open = 0;
+                        u32 nested_close = 0;
+                        u32 nested_after = 0;
+                        if (nested_condition_close == UINT32_MAX ||
+                            !c_ir_builder_controlled_body_range(builder, nested_condition_close + 1, body_close, &nested_open, &nested_close, &nested_after))
+                        {
+                            return false;
+                        }
+                        scan = nested_after - 1;
+                        continue;
+                    }
+                    bool is_case = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
+                    bool is_default = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DEFAULT);
                     if (!is_case && !is_default)
                     {
                         continue;
@@ -26257,7 +26565,20 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     // The very first label of a switch is never treated that
                     // way: with no enclosing case there would be no stream to
                     // reach it from.
-                    bool in_substatement = case_count != 0 && c_ir_control_substatement_position(&builder->preprocess, body_open + 1, scan);
+                    // A label inside a block of the body is a dispatch target
+                    // the same way a control statement's substatement label is:
+                    // the block's tokens belong to the case that opened it, and
+                    // SQLite's VDBE interpreter falls out of one opcode's block
+                    // into the next opcode's label that way.  With no enclosing
+                    // case there is no stream that reaches it.
+                    if (brace_depth && !case_count)
+                    {
+                        builder->failure_message = S8("case label inside a block precedes every case of its switch");
+                        builder->failure_token_index = scan;
+                        return false;
+                    }
+                    bool in_substatement =
+                        case_count != 0 && (brace_depth != 0 || c_ir_control_substatement_position(&builder->preprocess, body_open + 1, scan));
                     if (!in_substatement)
                     {
                         if (last_ranged_case != UINT32_MAX)
@@ -27915,17 +28236,27 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilder*
         }
         if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end))
         {
+            CIrDecodedString decoded = {0};
+            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+            bool string_contents = element && element->layout.resolved &&
+                                   c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end,
+                                                                               &decoded) &&
+                                   decoded.element_count != UINT64_MAX && decoded.element_width &&
+                                   c_ir_string_array_element_compatible(builder, type->element_type, decoded);
+            if (!string_contents && braced)
+            {
+                // A braced string literal is the contents of a character array
+                // but one element of an array of pointers, which is how SQLite
+                // spells `static const char *azEndings[] = {"so"};`.  Leave
+                // that one to the ordinary aggregate walk.
+                return true;
+            }
             if (handled)
             {
                 *handled = true;
             }
-            CIrDecodedString decoded = {0};
-            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-            if (!element || !element->layout.resolved ||
-                !c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &decoded) ||
-                decoded.element_count == UINT64_MAX || !decoded.element_width || !c_ir_string_array_element_compatible(builder, type->element_type, decoded) ||
-                decoded.element_count > UINT64_MAX / decoded.element_width || decoded.element_count * decoded.element_width > byte_count ||
-                decoded.bytes.length > byte_count)
+            if (!string_contents || decoded.element_count > UINT64_MAX / decoded.element_width ||
+                decoded.element_count * decoded.element_width > byte_count || decoded.bytes.length > byte_count)
             {
                 return false;
             }
@@ -29417,16 +29748,21 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
     }
     if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end))
     {
+        // A braced string literal sizes a character array -- `char s[] =
+        // {"abc"}` holds four elements -- but it is one element of an array of
+        // pointers, which is how SQLite lists the shared-library suffixes to
+        // try: `static const char *azEndings[] = {"so"};`.  An element type no
+        // string can initialize therefore falls through to the ordinary
+        // element count below instead of failing here.
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
-        if (!element || !element->layout.resolved ||
-            !c_ir_decode_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, string_start, string_end, &decoded) ||
-            decoded.element_count == UINT64_MAX || !c_ir_string_array_element_compatible(builder, element_type, decoded))
+        if (element && element->layout.resolved &&
+            c_ir_decode_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, string_start, string_end, &decoded) &&
+            decoded.element_count != UINT64_MAX && c_ir_string_array_element_compatible(builder, element_type, decoded))
         {
-            return c_ir_initializer_inference_fail(message_out, token_out, S8("could not determine the size of the string initializer"), start);
+            *count_out = decoded.element_count + 1;
+            return true;
         }
-        *count_out = decoded.element_count + 1;
-        return true;
     }
     u64 span = (u64)end - start;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrInitializerInferenceFrame) ||

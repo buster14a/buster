@@ -6116,62 +6116,231 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
     c_type_parse_frame_complete(machine, frame->type, frame->end, true);
 }
 
+// One record per parameter the list at `open` declares.  `()`, `(void)` and
+// the `...` of a variadic list declare none.  The records are reserved before
+// the segments are parsed because a parameter that is itself a function
+// pointer appends the records of its own parameters first: without a reserved
+// block the enclosing list would count those too, and the function type would
+// claim more parameters than the calls that pass them.
+BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult preprocess, u32 open, u32 end)
+{
+    u32 reserved = 0;
+    u32 segment_start = open + 1;
+    u32 depth = 1;
+    for (u32 index = segment_start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            depth += 1;
+            continue;
+        }
+        if ((c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET)) && depth > 1)
+        {
+            depth -= 1;
+            continue;
+        }
+        bool separator = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+        bool list_end = depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (!separator && !list_end)
+        {
+            continue;
+        }
+        u32 count = index - segment_start;
+        bool omitted = !count || (count == 1 && (c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS) ||
+                                                 (list_end && !reserved && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]), S8("void")))));
+        reserved += omitted ? 0 : 1;
+        if (list_end)
+        {
+            break;
+        }
+        segment_start = index + 1;
+    }
+    return reserved;
+}
+
+// The outer suffix of a parenthesized declarator: `(*fp)(int)` and
+// `(*getf(int))(void)` both continue after the group's closing parenthesis,
+// with a parameter list making the declared type a function and anything else
+// leaving it to the array suffixes the finish stage applies.
+BUSTER_C_INTERNAL void c_type_parse_parenthesized_suffix_begin(CTypeParseFrame* frame, CParseResult* result, CPreprocessResult preprocess)
+{
+    frame->index = frame->close_index + 1;
+    if (frame->index < frame->end && c_token_is_punctuator(&preprocess.tokens[frame->index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        frame->parameter_start = result->parameter_count;
+        frame->written_parameter_count = 0;
+        result->parameter_count += c_parse_parameter_list_reserved_count(preprocess, frame->index, frame->end);
+        frame->segment_start = frame->index + 1;
+        frame->scan_index = frame->segment_start;
+        frame->depth = 1;
+        frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+    }
+    else
+    {
+        frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+    }
+}
+
+// One parameter list has been scanned to its closing parenthesis.  The name's
+// own list is scanned first but applied last -- it is the outermost derivation
+// of `void (*getf(int))(void)` -- so it only records its range here and hands
+// the frame on to the outer suffix; the outer list is the return type and
+// becomes a function type immediately.
+BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame* frame, CParseResult* result, CPreprocessResult preprocess, u32 list_close)
+{
+    if (frame->scanning_inner_parameters)
+    {
+        frame->inner_parameter_start = frame->parameter_start;
+        frame->inner_parameter_count = frame->written_parameter_count;
+        frame->inner_variadic = frame->variadic;
+        frame->has_inner_parameters = true;
+        frame->scanning_inner_parameters = false;
+        frame->variadic = false;
+        c_type_parse_parenthesized_suffix_begin(frame, result, preprocess);
+        return;
+    }
+    frame->index = list_close + 1;
+    frame->type = c_parse_add_type(result, (CType){
+                                             .element_type = C_TYPE_ID_INVALID,
+                                             .return_type = frame->type,
+                                             .array_bound = C_ARRAY_BOUND_INVALID,
+                                             .parameter_start = frame->parameter_start,
+                                             .parameter_count = frame->written_parameter_count,
+                                             .kind = C_TYPE_FUNCTION,
+                                             .is_variadic = frame->variadic,
+                                         });
+    frame->has_function_suffix = true;
+    frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
     CPreprocessResult preprocess = frame->preprocess;
+    if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
+    {
+        // The nested group carries the name, so its type is this declarator's.
+        if (!machine->result_valid)
+        {
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        c_type_parse_frame_complete(machine, machine->result_type, frame->end, true);
+        return;
+    }
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
-        if (frame->declarator_start >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            frame->name_index >= frame->end)
+        if (frame->declarator_start >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
-        frame->close_index = frame->has_name ? frame->name_index + 1 : frame->name_index;
-        u32 bracket_depth = 0;
-        while (frame->has_name && frame->close_index < frame->end)
+        // `(*(*sym)(int))(void)` holds a whole declarator of its own after the
+        // pointer chain.  This frame then owns the outer suffix and that
+        // pointer chain only; the group starting here is a child frame parsed
+        // over the type they produce, which is what makes the derivation
+        // recursive rather than one group deep.
+        u32 nested_index = frame->declarator_start + 1;
+        while (nested_index < frame->end && c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_STAR))
         {
-            const CToken* token = &preprocess.tokens[frame->close_index];
-            if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
+            nested_index += 1;
+            CType ignored = {0};
+            while (nested_index < frame->end && preprocess.tokens[nested_index].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[nested_index], &ignored))
             {
-                u32 bracket_close = c_parse_matching_delimiter_indexed(result, preprocess, frame->close_index);
-                if (bracket_close < frame->end)
-                {
-                    frame->close_index = bracket_close + 1;
-                    continue;
-                }
-                bracket_depth += 1;
+                nested_index += 1;
             }
-            else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_BRACKET) && bracket_depth)
-            {
-                bracket_depth -= 1;
-            }
-            else if (!bracket_depth && c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                break;
-            }
-            frame->close_index += 1;
         }
-        frame->pointer_start = frame->declarator_start + 1;
-        if (frame->close_index >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->close_index], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-            (frame->pointer_start < frame->name_index && !c_token_is_punctuator(&preprocess.tokens[frame->pointer_start], C_PUNCTUATOR_STAR)))
+        frame->nested = nested_index < frame->end && nested_index > frame->declarator_start + 1 &&
+                        c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (frame->nested)
+        {
+            frame->nested_start = nested_index;
+            frame->close_index = c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start);
+            frame->pointer_start = frame->declarator_start + 1;
+            if (frame->close_index >= frame->end)
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+            c_type_parse_parenthesized_suffix_begin(frame, result, preprocess);
+        }
+        else if (frame->name_index >= frame->end)
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
-        }
-        frame->index = frame->close_index + 1;
-        if (frame->index < frame->end && c_token_is_punctuator(&preprocess.tokens[frame->index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            frame->parameter_start = result->parameter_count;
-            frame->segment_start = frame->index + 1;
-            frame->scan_index = frame->segment_start;
-            frame->depth = 1;
-            frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
         }
         else
         {
-            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+            // `void (*getf(int))(void)` is a function returning a pointer to
+            // function: the name inside the pointer declarator carries its own
+            // parameter list.  Take that group out of the way of the scan looking
+            // for the group's closing parenthesis, and remember it so the return
+            // type can be completed before it is applied.
+            frame->inner_open = C_ID_UNDERLYING_INVALID;
+            frame->inner_close = C_ID_UNDERLYING_INVALID;
+            if (frame->has_name && frame->name_index + 1 < frame->end &&
+                c_token_is_punctuator(&preprocess.tokens[frame->name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 inner_close = c_parse_matching_delimiter_indexed(result, preprocess, frame->name_index + 1);
+                if (inner_close >= frame->end)
+                {
+                    c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                    return;
+                }
+                frame->inner_open = frame->name_index + 1;
+                frame->inner_close = inner_close;
+            }
+            frame->close_index = frame->inner_open != C_ID_UNDERLYING_INVALID ? frame->inner_close + 1
+                                 : frame->has_name                            ? frame->name_index + 1
+                                                                              : frame->name_index;
+            u32 bracket_depth = 0;
+            while (frame->has_name && frame->close_index < frame->end)
+            {
+                const CToken* token = &preprocess.tokens[frame->close_index];
+                if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 bracket_close = c_parse_matching_delimiter_indexed(result, preprocess, frame->close_index);
+                    if (bracket_close < frame->end)
+                    {
+                        frame->close_index = bracket_close + 1;
+                        continue;
+                    }
+                    bracket_depth += 1;
+                }
+                else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_BRACKET) && bracket_depth)
+                {
+                    bracket_depth -= 1;
+                }
+                else if (!bracket_depth && c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    break;
+                }
+                frame->close_index += 1;
+            }
+            frame->pointer_start = frame->declarator_start + 1;
+            if (frame->close_index >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->close_index], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                (frame->pointer_start < frame->name_index && !c_token_is_punctuator(&preprocess.tokens[frame->pointer_start], C_PUNCTUATOR_STAR)))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+            if (frame->inner_open != C_ID_UNDERLYING_INVALID)
+            {
+                frame->parameter_start = result->parameter_count;
+                frame->written_parameter_count = 0;
+                result->parameter_count += c_parse_parameter_list_reserved_count(preprocess, frame->inner_open, frame->end);
+                frame->segment_start = frame->inner_open + 1;
+                frame->scan_index = frame->segment_start;
+                frame->depth = 1;
+                frame->scanning_inner_parameters = true;
+                frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
+            }
+            else
+            {
+                c_type_parse_parenthesized_suffix_begin(frame, result, preprocess);
+            }
         }
     }
     if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETER_RESULT)
@@ -6182,21 +6351,22 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
+        // The child appended its own record on top of any it created for a
+        // function-pointer parameter's own parameters; move it down into the
+        // block reserved for this list, which is what the function type spans.
+        if (result->parameter_count <= frame->parameter_start + frame->written_parameter_count)
+        {
+            result->parameter_count = frame->parameter_start;
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
+        }
+        result->parameters[frame->parameter_start + frame->written_parameter_count] = result->parameters[result->parameter_count - 1];
+        frame->written_parameter_count += 1;
+        result->parameter_count -= 1;
         frame->segment_start = frame->scan_index + 1;
         if (c_token_is_punctuator(&preprocess.tokens[frame->scan_index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
-            frame->index = frame->scan_index + 1;
-            frame->type = c_parse_add_type(result, (CType){
-                                                     .element_type = C_TYPE_ID_INVALID,
-                                                     .return_type = frame->type,
-                                                     .array_bound = C_ARRAY_BOUND_INVALID,
-                                                     .parameter_start = frame->parameter_start,
-                                                     .parameter_count = result->parameter_count - frame->parameter_start,
-                                                     .kind = C_TYPE_FUNCTION,
-                                                     .is_variadic = frame->variadic,
-                                                 });
-            frame->has_function_suffix = true;
-            frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+            c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
         }
         else
         {
@@ -6204,7 +6374,10 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             frame->stage = C_TYPE_PARSE_STAGE_PARAMETERS;
         }
     }
-    if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
+    // The name's own parameter list hands the frame back to this stage for the
+    // outer suffix, which is a second list to scan, so the stage repeats
+    // instead of running once.
+    while (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
     {
         while (frame->scan_index < frame->end)
         {
@@ -6237,26 +6410,16 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 continue;
             }
             u32 segment_count = frame->scan_index - frame->segment_start;
-            if (list_end && !segment_count && result->parameter_count == frame->parameter_start)
+            if (list_end && !segment_count && !frame->written_parameter_count)
             {
-                frame->index = frame->scan_index + 1;
-                frame->type = c_parse_add_type(result, (CType){
-                                                         .element_type = C_TYPE_ID_INVALID,
-                                                         .return_type = frame->type,
-                                                         .array_bound = C_ARRAY_BOUND_INVALID,
-                                                         .parameter_start = frame->parameter_start,
-                                                         .kind = C_TYPE_FUNCTION,
-                                                         .is_variadic = frame->variadic,
-                                                     });
-                frame->has_function_suffix = true;
-                frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+                c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
                 break;
             }
             if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[frame->segment_start], C_PUNCTUATOR_ELLIPSIS))
             {
                 frame->variadic = true;
             }
-            else if (!(list_end && result->parameter_count == frame->parameter_start && segment_count == 1 &&
+            else if (!(list_end && !frame->written_parameter_count && segment_count == 1 &&
                        string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[frame->segment_start]), S8("void"))))
             {
                 if (!segment_count)
@@ -6282,23 +6445,15 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
             frame->segment_start = frame->scan_index + 1;
             if (list_end)
             {
-                frame->index = frame->scan_index + 1;
-                frame->type = c_parse_add_type(result, (CType){
-                                                         .element_type = C_TYPE_ID_INVALID,
-                                                         .return_type = frame->type,
-                                                         .array_bound = C_ARRAY_BOUND_INVALID,
-                                                         .parameter_start = frame->parameter_start,
-                                                         .parameter_count = result->parameter_count - frame->parameter_start,
-                                                         .kind = C_TYPE_FUNCTION,
-                                                         .is_variadic = frame->variadic,
-                                                     });
-                frame->has_function_suffix = true;
-                frame->stage = C_TYPE_PARSE_STAGE_FINISH;
+                c_type_parse_parenthesized_list_complete(frame, result, preprocess, frame->scan_index);
                 break;
             }
             frame->scan_index += 1;
         }
-        if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS)
+        // Still scanning with nothing left is an unterminated list; still
+        // scanning with tokens left is the outer suffix, which the completed
+        // inner list just handed back to this stage.
+        if (frame->stage == C_TYPE_PARSE_STAGE_PARAMETERS && frame->scan_index >= frame->end)
         {
             result->parameter_count = frame->parameter_start;
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
@@ -6316,21 +6471,62 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 return;
             }
         }
-        frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->pointer_start, frame->name_index);
-        if (frame->pointer_start != frame->name_index)
+        u32 pointer_end = frame->nested ? frame->nested_start : frame->name_index;
+        frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->pointer_start, pointer_end);
+        if (frame->pointer_start != pointer_end)
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
+        if (frame->nested)
+        {
+            if (frame->type.value == C_ID_UNDERLYING_INVALID || (frame->has_function_suffix && frame->index != frame->end))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+                return;
+            }
+            u32 nested_name_index = 0;
+            bool nested_has_name = c_parse_parenthesized_declarator_name(preprocess, frame->nested_start, frame->close_index, &nested_name_index);
+            frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                      .result = result,
+                                                      .preprocess = preprocess,
+                                                      .type = frame->type,
+                                                      .start = frame->nested_start,
+                                                      .end = frame->close_index,
+                                                      .declarator_start = frame->nested_start,
+                                                      .name_index = nested_has_name ? nested_name_index : frame->nested_start,
+                                                      .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
+                                                      .has_name = nested_has_name,
+                                                  }))
+            {
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            }
+            return;
+        }
         if (frame->has_name)
         {
-            u32 array_index = frame->name_index + 1;
+            u32 array_index = frame->has_inner_parameters ? frame->inner_close + 1 : frame->name_index + 1;
             frame->type = c_parse_array_suffixes(result, preprocess, frame->type, &array_index, frame->close_index);
             if (array_index != frame->close_index)
             {
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                 return;
             }
+        }
+        if (frame->has_inner_parameters)
+        {
+            // Everything derived so far -- the outer suffix and the pointer
+            // chain -- is what the name's own parameter list returns.
+            frame->type = c_parse_add_type(result, (CType){
+                                                     .element_type = C_TYPE_ID_INVALID,
+                                                     .return_type = frame->type,
+                                                     .array_bound = C_ARRAY_BOUND_INVALID,
+                                                     .parameter_start = frame->inner_parameter_start,
+                                                     .parameter_count = frame->inner_parameter_count,
+                                                     .kind = C_TYPE_FUNCTION,
+                                                     .is_variadic = frame->inner_variadic,
+                                                 });
         }
         bool valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
         c_type_parse_frame_complete(machine, frame->type, frame->end, valid);
@@ -7336,21 +7532,33 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         return false;
     }
     u32 index = declarator_start + 1;
-    while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
+    while (index < end)
     {
-        index += 1;
-        CType ignored = {0};
-        while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+        while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-            if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
-                string_equal(spelling, S8("_Null_unspecified")))
+            index += 1;
+            CType ignored = {0};
+            while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
             {
-                index += 1;
-                continue;
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                if (c_parse_type_qualifier_word(spelling, &ignored) || string_equal(spelling, S8("_Nonnull")) || string_equal(spelling, S8("_Nullable")) ||
+                    string_equal(spelling, S8("_Null_unspecified")))
+                {
+                    index += 1;
+                    continue;
+                }
+                break;
             }
-            break;
         }
+        // A declarator group may hold another one: the name of
+        // `void (*(*xDlSym)(sqlite3_vfs*, void*, const char*))(void)` is two
+        // groups deep, and it is still the one name the declarator declares.
+        if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            index += 1;
+            continue;
+        }
+        break;
     }
     // Parenthesized declarators may redundantly wrap a plain function name
     // (`extern int (f)(void)`) as well as a function pointer (`int (*f)`).
@@ -7400,6 +7608,16 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult pre
     }
     *name_index = candidate;
     return true;
+}
+
+// A pointer declarator whose name carries its own parameter list is a
+// function that returns the pointer -- `void (*getf(int))(void)` -- rather
+// than an object holding one.  `void (*fp)(void)` and `void (*table[3])(void)`
+// put a `)` or a `[` after the name instead, so the parameter list is exactly
+// what separates the two shapes.
+BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult preprocess, u32 name_index, u32 end)
+{
+    return name_index + 1 < end && c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
@@ -7713,7 +7931,12 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
             bool parenthesized = declarator_start < name_index && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
             if (parenthesized)
             {
-                u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, end);
+                // A definition's declarator stops at its body: the segment scan
+                // sees no top-level `=`, `,` or `;` inside a brace-balanced
+                // body, so bounding it by the whole declaration would hand the
+                // declarator parser the function body as a declarator suffix
+                // and fail every parenthesized definition.
+                u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, declarator_end);
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
                 // The parenthesized declarator parser owns the parameter
@@ -8747,6 +8970,9 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* resul
                                     string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_va_end"));
     predefined_function_name |= string_starts_with_sequence(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_"));
     predefined_function_name |= string_starts_with_sequence(c_token_spelling(preprocess.spelling_base, token), S8("__c11_atomic_"));
+    // GCC's legacy full barrier is the one __sync builtin the compiler
+    // implements; SQLite reaches for it in sqlite3MemoryBarrier.
+    predefined_function_name |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__sync_synchronize"));
     predefined_function_name |=
         c_preprocess_dialect_is_c23(preprocess.dialect) &&
         (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("false")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("nullptr")));
@@ -8762,6 +8988,38 @@ BUSTER_C_INTERNAL bool c_parse_identifier_is_bound(CParseResult* result, u32 tok
     return c_parse_identifier_use_index(result, token_index) != C_ID_UNDERLYING_INVALID;
 }
 
+// One past the `__builtin_offsetof(type, designator)` group whose opening
+// parenthesis is at `open`.  The designator names struct members rather than
+// objects in scope, so an identifier binder walking a token range has to step
+// over the whole group instead of resolving what is inside it.
+BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess, u32 open, u32 end)
+{
+    u32 depth = 0;
+    u32 index = open;
+    while (index < end)
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            if (!depth)
+            {
+                break;
+            }
+            depth -= 1;
+            if (!depth)
+            {
+                index += 1;
+                break;
+            }
+        }
+        index += 1;
+    }
+    return index;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
                                                               u32 end)
 {
@@ -8769,6 +9027,15 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParse
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
+        // An array bound may be spelled with offsetof -- SQLite sizes a save
+        // buffer as `sizeof(Parse) - offsetof(Parse, sLastToken)` -- and the
+        // member named there is not an object this scope can resolve.
+        if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) &&
+            token_index + 1 < end && c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            token_index = c_parse_builtin_offsetof_end(preprocess, token_index + 1, end) - 1;
+            continue;
+        }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
         {
             bracket_depth += 1;
@@ -9644,11 +9911,27 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
                 close += 1;
             }
-            if (parenthesis_depth || close <= index + 1 || preprocess.tokens[close - 1].kind != C_TOKEN_IDENTIFIER)
+            u32 parenthesized_name = 0;
+            if (parenthesis_depth || close <= index + 1)
             {
                 return false;
             }
-            name_index = close - 1;
+            if (c_parse_parenthesized_declarator_name(preprocess, index, suffix_end, &parenthesized_name))
+            {
+                // The name may be a group deeper than this one:
+                // `void (*(*x)(void *, const char *))(void)` declares a
+                // pointer to a function returning a function pointer, which is
+                // how SQLite's Unix VFS holds dlsym.
+                name_index = parenthesized_name;
+            }
+            else if (preprocess.tokens[close - 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                name_index = close - 1;
+            }
+            else
+            {
+                return false;
+            }
             name = preprocess.tokens[name_index];
             type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, index, name_index, suffix_end, true);
             index = suffix_end;
@@ -11244,9 +11527,11 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                 {
                     declarator.name_token = parenthesized_name_token;
                     // `(*f)(...)` declares an object holding a function
-                    // pointer; only the redundant plain `(f)(...)` form is
-                    // a function declaration in the AST.
-                    if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
+                    // pointer; the redundant plain `(f)(...)` form and the
+                    // pointer-returning `(*f(...))(...)` form are function
+                    // declarations in the AST.
+                    if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
+                        c_parse_declarator_name_has_parameters(preprocess, parenthesized_name_token, end))
                     {
                         declarator.function_name_token = parenthesized_name_token;
                     }
@@ -11370,7 +11655,8 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         if (parenthesized_function)
                         {
                             name_token = parenthesized_name_token;
-                            if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
+                            if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
+                                c_parse_declarator_name_has_parameters(preprocess, parenthesized_name_token, token_count))
                             {
                                 function_name_token = parenthesized_name_token;
                             }

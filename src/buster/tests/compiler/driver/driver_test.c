@@ -5166,6 +5166,59 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // SQLite compatibility reduced its own set of frontend, lowering and
+    // linker failures to these fixtures: declarators that return function
+    // pointers and the type names that cast to them, case labels inside a
+    // block of a switch body, the value of an update on a narrow object, the
+    // address of an indexed pointer, a braced string literal in an array of
+    // pointers, calls through a postfix chain, and the glibc exit-handler
+    // stubs that live outside libc.so.6.  They run under every register
+    // allocator for the same reason the LZ4 table does: several of them are
+    // lowering rather than parsing defects.
+    String8 c_sqlite_regression_paths[] = {
+        S8("tests/basic_c_function_pointer_declarators.c"),
+        S8("tests/basic_c_switch_case_blocks.c"),
+        S8("tests/basic_c_narrow_place_update.c"),
+        S8("tests/basic_c_pointer_index_address.c"),
+        S8("tests/basic_c_pointer_array_initializers.c"),
+        S8("tests/basic_c_indirect_call_targets.c"),
+        S8("tests/basic_c_atexit_handler.c"),
+    };
+    String8 c_sqlite_regression_names[] = {
+        S8("buster-c-function-pointer-declarators"),
+        S8("buster-c-switch-case-blocks"),
+        S8("buster-c-narrow-place-update"),
+        S8("buster-c-pointer-index-address"),
+        S8("buster-c-pointer-array-initializers"),
+        S8("buster-c-indirect-call-targets"),
+        S8("buster-c-atexit-handler"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_sqlite_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, c_sqlite_regression_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_sqlite_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit
     // syscall: the syscall skips stdio flushing and every atexit handler, and
