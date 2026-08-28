@@ -6306,6 +6306,18 @@ BUSTER_C_INTERNAL u32 c_parse_parameter_list_reserved_count(CPreprocessResult pr
     return reserved;
 }
 
+// `()` -- an empty parameter list -- declares a function with no prototype,
+// which C11 6.2.7p3 makes compatible with a non-variadic prototype; `(void)`
+// declares a prototype with zero parameters and is compatible with no other
+// list. Both produce zero parameter records, so the shape is read back off
+// the tokens: the list is empty exactly when its closing parenthesis abuts
+// its opening one.
+BUSTER_C_INTERNAL bool c_parse_parameter_list_unprototyped(CPreprocessResult preprocess, u32 list_close)
+{
+    return list_close && list_close - 1 < preprocess.token_count &&
+           c_token_is_punctuator(&preprocess.tokens[list_close - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+}
+
 // The outer suffix of a parenthesized declarator: `(*fp)(int)` and
 // `(*getf(int))(void)` both continue after the group's closing parenthesis,
 // with a parameter list making the declared type a function and anything else
@@ -6341,6 +6353,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame*
         frame->inner_parameter_start = frame->parameter_start;
         frame->inner_parameter_count = frame->written_parameter_count;
         frame->inner_variadic = frame->variadic;
+        frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
         frame->has_inner_parameters = true;
         frame->scanning_inner_parameters = false;
         frame->variadic = false;
@@ -6356,6 +6369,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseFrame*
                                              .parameter_count = frame->written_parameter_count,
                                              .kind = C_TYPE_FUNCTION,
                                              .is_variadic = frame->variadic,
+                                             .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close),
                                          });
     frame->has_function_suffix = true;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -6673,6 +6687,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                                                      .parameter_count = frame->inner_parameter_count,
                                                      .kind = C_TYPE_FUNCTION,
                                                      .is_variadic = frame->inner_variadic,
+                                                     .is_unprototyped = frame->inner_unprototyped,
                                                  });
         }
         bool valid = frame->type.value != C_ID_UNDERLYING_INVALID && (!frame->has_function_suffix || frame->index == frame->end);
@@ -8204,6 +8219,7 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
                 u32 segment_start = name_index + 2;
                 u32 depth = 1;
                 bool valid = true;
+                bool unprototyped = false;
                 for (u32 index = segment_start; index < end; index += 1)
                 {
                     CToken token = preprocess.tokens[index];
@@ -8229,6 +8245,7 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
                     u32 segment_count = index - segment_start;
                     if (list_end && !segment_count && result->parameter_count == parameter_start)
                     {
+                        unprototyped = true;
                         break;
                     }
                     if (segment_count == 1 && c_token_is_punctuator(&preprocess.tokens[segment_start], C_PUNCTUATOR_ELLIPSIS))
@@ -8280,6 +8297,7 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
                                                                  .parameter_count = declaration->parameter_count,
                                                                  .kind = C_TYPE_FUNCTION,
                                                                  .is_variadic = declaration->is_variadic,
+                                                                 .is_unprototyped = unprototyped,
                                                              });
             }
         }
@@ -8516,6 +8534,24 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
         }
         case C_TYPE_FUNCTION:
         {
+            // C11 6.2.7p3: one type has a parameter list and the other does
+            // not, so only the return types have to agree -- provided the
+            // prototyped one is not variadic. This is what makes musl's
+            // `long __syscall_cp_asm();` and the prototype beside it one
+            // function; the parameter types are checked at the call.
+            if (left_type.is_unprototyped != right_type.is_unprototyped)
+            {
+                if (left_type.is_variadic || right_type.is_variadic)
+                {
+                    compatible = false;
+                    break;
+                }
+                stack[stack_count++] = (CTypePair){
+                    .left = left_type.return_type,
+                    .right = right_type.return_type,
+                };
+                break;
+            }
             if (left_type.parameter_count != right_type.parameter_count || left_type.is_variadic != right_type.is_variadic)
             {
                 compatible = false;
@@ -9903,6 +9939,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                                .parameter_count = parameter_count,
                                                .kind = C_TYPE_FUNCTION,
                                                .is_variadic = variadic,
+                                               .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, close),
                                            });
 }
 
@@ -12783,9 +12820,17 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                 CType* declared_function = &result.types[declaration->type.value];
                 kind = C_DECLARATION_FUNCTION;
                 declaration->kind = kind;
-                declaration->parameter_start = declared_function->parameter_start;
-                declaration->parameter_count = declared_function->parameter_count;
                 declaration->is_variadic = declared_function->is_variadic;
+                // The parameter records stay on the type rather than moving
+                // onto the declaration. `__typeof(f)` resolves to f's own
+                // function type, so the records this declaration would claim
+                // are the ones f's declarator wrote, and the parameter-scope
+                // pass below rebinds every record a declaration lists to a
+                // fresh entity in a fresh scope -- claiming them takes f's
+                // parameter names away from f's body, which is what musl's
+                // `weak_alias(__wcsxfrm_l, wcsxfrm_l)` does to the definition
+                // above it. c_ir_function_signature reads the range off the
+                // type when the declaration carries none.
             }
         }
         if (!static_assertion && !declaration->name.length && c_preprocess_dialect_is_c23(preprocess.dialect))

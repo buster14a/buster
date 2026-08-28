@@ -683,7 +683,12 @@ struct CType
     bool is_variadic;
     bool is_complete;
     bool has_unqualified_type;
-    u8 reserved;
+    // The function type was written `()`, with no parameter list at all --
+    // not `(void)`, which declares zero parameters. C11 6.2.7p3 makes an
+    // unprototyped declaration compatible with a non-variadic prototype, so
+    // musl's `long __syscall_cp_asm();` and the eight-parameter prototype
+    // beside it declare one function rather than two conflicting ones.
+    bool is_unprototyped;
 };
 
 typedef struct CMember CMember;

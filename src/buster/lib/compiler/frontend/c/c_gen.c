@@ -1146,8 +1146,13 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
             {
                 result.returns_void = return_type->kind == C_TYPE_VOID;
                 result.is_variadic = function_type->is_variadic;
-                result.parameters = &parse->parameters[declaration.parameter_start];
-                result.parameter_count = declaration.parameter_count;
+                // A declarator with no parameter list of its own may still
+                // have a function type from its specifiers -- musl's
+                // `extern __typeof(dummy) alias;` -- and its parameters live
+                // on the type rather than on the declaration.
+                u32 parameter_start = declaration.parameter_count ? declaration.parameter_start : function_type->parameter_start;
+                result.parameters = &parse->parameters[parameter_start];
+                result.parameter_count = declaration.parameter_count ? declaration.parameter_count : function_type->parameter_count;
                 if (result.parameter_count != function_type->parameter_count)
                 {
                     return (CIrSignature){0};
@@ -3432,7 +3437,28 @@ BUSTER_C_INTERNAL bool c_ir_entity_is_read_only(CIntegerIrBuilder* builder, CEnt
 
 BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
-    if (local && local->place.value < builder->function->value_count && c_ir_entity_is_read_only(builder, local->entity))
+    if (!local || local->place.value >= builder->function->value_count)
+    {
+        return;
+    }
+    // A parameter written with an array type is adjusted to a pointer to the
+    // element type (C11 6.7.6.3p7), and a `const` in front of that element
+    // type qualifies what the pointer points to rather than the pointer
+    // itself. The walk in c_ir_c_type_is_read_only descends through an array
+    // into its element, which is right for an array object -- its elements
+    // are const, so it is not modifiable -- and wrong for the pointer a
+    // parameter became. musl's `utimensat` takes
+    // `const struct timespec times[2]` and assigns `times = 0`.
+    if (local->is_parameter && local->entity.value < builder->parse.entity_count)
+    {
+        CTypeId declared = builder->parse.entities[local->entity.value].type;
+        if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
+            !builder->parse.types[declared.value].is_const)
+        {
+            return;
+        }
+    }
+    if (c_ir_entity_is_read_only(builder, local->entity))
     {
         builder->function->values[local->place.value].is_read_only = true;
     }
@@ -4396,14 +4422,27 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, Ir
     {
         return IR_VALUE_ID_INVALID;
     }
-    IrType* base_value_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
-    if (base_value_type && base_value_type->kind == IR_TYPE_POINTER && c_ir_value_contains_label_provenance(builder, base))
+    IrType* base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
+    IrType* index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+    // `E1[E2]` is `*(E1 + E2)` and addition commutes, so the subscripted
+    // operand may be written on either side: musl's `getenv` tests
+    // `l[*e] == '='` with the length on the left.  Put the pointer or array
+    // back in the base position before anything below -- including the
+    // label-provenance refusal -- reads either one.
+    if (base_type && index_type && (base_type->kind == IR_TYPE_INTEGER || base_type->kind == IR_TYPE_BOOLEAN) &&
+        (index_type->kind == IR_TYPE_ARRAY || index_type->kind == IR_TYPE_VECTOR || index_type->kind == IR_TYPE_POINTER))
+    {
+        IrValueId subscripted = index;
+        index = base;
+        base = subscripted;
+        index_type = base_type;
+        base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
+    }
+    if (base_type && base_type->kind == IR_TYPE_POINTER && c_ir_value_contains_label_provenance(builder, base))
     {
         builder->failure_message = S8("a label-provenance value may not be used as an addressable place");
         return IR_VALUE_ID_INVALID;
     }
-    IrType* base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
-    IrType* index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
     if (index_type && index_type->kind == IR_TYPE_BOOLEAN)
     {
         index = c_ir_emit_cast(builder, index, builder->s32_type, source);
@@ -4614,6 +4653,19 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
         return false;
     }
     local->is_parameter = true;
+    // The pointer an array parameter was adjusted to points at the element
+    // type, qualifiers included: `const struct timespec times[2]` yields a
+    // modifiable pointer to constant elements, so the read-only answer moves
+    // from the object to what it points to.
+    if (entity.value < builder->parse.entity_count)
+    {
+        CTypeId declared = builder->parse.entities[entity.value].type;
+        if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
+            c_ir_c_type_is_read_only(builder, builder->parse.types[declared.value].element_type))
+        {
+            builder->function->values[place.value].points_to_read_only = true;
+        }
+    }
     IrValueId value = c_ir_add_result(builder, type);
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = argument_index;
@@ -7607,14 +7659,33 @@ BUSTER_C_INTERNAL bool c_ir_build_function_name_index(Arena* arena, CParseResult
         }
         CIrFunctionNameResolution* group = index->groups + group_index;
         bool duplicate_entity = false;
+        bool declaration_prototyped =
+            declaration.type.value < parse->type_count && !parse->types[declaration.type.value].is_unprototyped;
         for (u32 candidate_index = group->first_candidate; candidate_index != UINT32_MAX; candidate_index = index->candidates[candidate_index].next)
         {
-            CDeclaration candidate = parse->declarations[index->candidates[candidate_index].declaration_index];
-            if (candidate.entity.value == declaration.entity.value)
+            u32 candidate_declaration = index->candidates[candidate_index].declaration_index;
+            CDeclaration candidate = parse->declarations[candidate_declaration];
+            if (candidate.entity.value != declaration.entity.value)
             {
-                duplicate_entity = true;
-                break;
+                continue;
             }
+            duplicate_entity = true;
+            // One entity keeps one candidate, and the first declaration is
+            // the one it took.  When that first declaration was the
+            // unprototyped `long __cancel();` and a later one spells the
+            // parameters, the call site needs the spelled signature: the
+            // arity check below reads the candidate's declaration.  Both
+            // declarations share the entity's IrFunction, so moving the
+            // candidate changes which signature is consulted and nothing else.
+            if (declaration_prototyped && candidate.type.value < parse->type_count && parse->types[candidate.type.value].is_unprototyped)
+            {
+                index->candidates[candidate_index].declaration_index = declaration_index;
+                if (group->declaration_index == candidate_declaration)
+                {
+                    group->declaration_index = declaration_index;
+                }
+            }
+            break;
         }
         if (duplicate_entity)
         {
@@ -15299,6 +15370,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         }
         else
         {
+            bool named = builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
             String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
             {
@@ -15307,6 +15379,37 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 {
                     type = builder->c_type_ir_map[type_index];
                     break;
+                }
+            }
+            // A tag first named inside a type name declares an incomplete
+            // type there and then (C11 6.7.2.3p8): musl's `dlinfo` writes
+            // `*(struct link_map **)res = dso;` without ever including the
+            // header that defines the tag, and only a pointer to it is
+            // formed. Give it the opaque aggregate that stands for one,
+            // reusing the opaque already made for this tag so two casts to
+            // it agree on one type.
+            if (type.value == IR_ID_UNDERLYING_INVALID && (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION) && named && tag.length)
+            {
+                IrTypeKind opaque_kind = kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION;
+                for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+                {
+                    IrType* candidate = builder->program->types.types + type_index;
+                    if (candidate->kind == opaque_kind && !candidate->layout.resolved && !candidate->field_count && string_equal(candidate->name, tag))
+                    {
+                        type = (IrTypeId){
+                            .value = type_index,
+                        };
+                        break;
+                    }
+                }
+                if (type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    type = ir_program_add_type(builder->program, (IrType){
+                                                                     .name = tag,
+                                                                     .element_type = IR_TYPE_ID_INVALID,
+                                                                     .return_type = IR_TYPE_ID_INVALID,
+                                                                     .kind = opaque_kind,
+                                                                 });
                 }
             }
             index += 2;
@@ -15948,6 +16051,39 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
+// A designator is a chain, not one step: C11 6.7.9p6 lets `.member`, `[index]`
+// and any mix of them follow one another before the `=`. musl's mutex,
+// barrier and rlimit initializers all write one -- `._m_type` is
+// `__u.__i[0]` after the header's macros -- so the walk below accepts both
+// step kinds and stops at the first token that is neither. It returns the
+// index of the token after the last step, which the caller checks is the `=`.
+BUSTER_C_INTERNAL u32 c_ir_designator_chain_end(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 index = start;
+    while (index < end)
+    {
+        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end &&
+            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            index += 2;
+            continue;
+        }
+        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            if (close >= end || close == index + 1)
+            {
+                break;
+            }
+            index = close + 1;
+            continue;
+        }
+        break;
+    }
+
+    return index;
+}
+
 BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builder, u32 start, u32 close)
 {
     for (u32 index = start + 1; index < close; index += 1)
@@ -16158,7 +16294,13 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     goto c_ir_nested_compound_failed;
                 }
                 selected_index = (u32)designated;
-                value_start = close + 2;
+                nested_designator_start = close + 1;
+                designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
+                if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
+                {
+                    goto c_ir_nested_compound_failed;
+                }
+                value_start = designator_equals + 1;
             }
             else if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT))
             {
@@ -16182,12 +16324,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     selected_index = 0;
                 }
                 nested_designator_start = item_start + 2;
-                designator_equals = nested_designator_start;
-                while (designator_equals + 1 < index && c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_DOT) &&
-                       builder->preprocess.tokens[designator_equals + 1].kind == C_TOKEN_IDENTIFIER)
-                {
-                    designator_equals += 2;
-                }
+                designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
                 {
                     goto c_ir_nested_compound_failed;
@@ -16240,10 +16377,29 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             {
                 goto c_ir_nested_compound_failed;
             }
-            for (u32 designator = nested_designator_start; designator < designator_equals; designator += 2)
+            for (u32 designator = nested_designator_start; designator < designator_equals;)
             {
-                child_place =
-                    c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator], builder->preprocess.tokens[designator + 1]);
+                if (c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 subscript_close =
+                        c_ir_matching_delimiter_cached(builder, designator, designator_equals, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                    u64 subscript_value = UINT64_MAX;
+                    if (subscript_close >= designator_equals || c_ir_array_designator_has_range(builder, designator, subscript_close) ||
+                        !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, subscript_close, &subscript_value) ||
+                        subscript_value > UINT32_MAX)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                    IrValueId subscript = c_ir_emit_integer_value(builder, subscript_value, false, builder->preprocess.tokens[designator]);
+                    child_place = c_ir_emit_index_place(builder, child_place, subscript, source);
+                    designator = subscript_close + 1;
+                }
+                else
+                {
+                    child_place = c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator],
+                                                                   builder->preprocess.tokens[designator + 1]);
+                    designator += 2;
+                }
                 if (child_place.value >= builder->function->value_count)
                 {
                     goto c_ir_nested_compound_failed;
@@ -16507,6 +16663,33 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             {
                 nested = true;
                 break;
+            }
+            // A designator chain may continue with a subscript as well as a
+            // member (C11 6.7.9p6): musl writes `._m_type`, which the header
+            // spells `__u.__i[0]`, and `struct ctx c = { .lim[0] = ... }`.
+            // The flat machine below holds one operand per slot and cannot
+            // express a path into one, so hand these to the nested walker.
+            // Only an item's first token starts a designator, which keeps a
+            // subscript inside a value expression out of the test.
+            bool item_start_token = token_index == open + 1 || c_token_is_punctuator(&builder->preprocess.tokens[token_index - 1], C_PUNCTUATOR_COMMA);
+            if (item_start_token && token_index + 2 < close && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_DOT) &&
+                builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
+                c_token_is_punctuator(&builder->preprocess.tokens[token_index + 2], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                nested = true;
+                break;
+            }
+            if (item_start_token && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 subscript_close =
+                    c_ir_matching_delimiter_cached(builder, token_index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                if (subscript_close + 1 < close &&
+                    (c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_LEFT_BRACKET) ||
+                     c_token_is_punctuator(&builder->preprocess.tokens[subscript_close + 1], C_PUNCTUATOR_DOT)))
+                {
+                    nested = true;
+                    break;
+                }
             }
             if (token_index + 1 < close && type->kind != IR_TYPE_ARRAY && c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_DOT) &&
                 builder->preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER)
@@ -17051,7 +17234,31 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-            if (close >= end || (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER))
+            if (close >= end)
+            {
+                return false;
+            }
+            // `E1[E2]` may be written with the subscripted operand on either
+            // side (C11 6.5.2.1p2), so an integer on the left names the
+            // element of whatever the brackets hold -- `sizeof 0[letters]` is
+            // one char, not one int.
+            if (value->kind == IR_TYPE_INTEGER || value->kind == IR_TYPE_BOOLEAN)
+            {
+                IrTypeId subscripted = IR_TYPE_ID_INVALID;
+                if (!c_ir_sizeof_operand_type_attempt(builder, index + 1, close, &subscripted))
+                {
+                    return false;
+                }
+                IrType* subscripted_value = ir_type_from_id(&builder->program->types, subscripted);
+                if (!subscripted_value || (subscripted_value->kind != IR_TYPE_ARRAY && subscripted_value->kind != IR_TYPE_POINTER))
+                {
+                    return false;
+                }
+                *type = subscripted_value->element_type;
+                index = close + 1;
+                continue;
+            }
+            if (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER)
             {
                 return false;
             }
@@ -17684,13 +17891,17 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         *type_out = inner;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end);
     }
-    if (first.kind == C_TOKEN_PREPROCESSING_NUMBER && start + 1 == end)
+    // A number is normally the whole operand. The one continuation it can
+    // carry is a subscript written the other way round -- `sizeof 0[letters]`
+    // -- so the postfix chain runs from here as well.
+    if (first.kind == C_TOKEN_PREPROCESSING_NUMBER &&
+        (start + 1 == end || c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET)))
     {
         if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
         {
             char8 suffix = c_token_spelling(builder->preprocess.spelling_base, first).length ? c_token_spelling(builder->preprocess.spelling_base, first).pointer[c_token_spelling(builder->preprocess.spelling_base, first).length - 1] : 0;
             *type_out = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
-            return true;
+            return start + 1 == end;
         }
         u64 integer_value = 0;
         if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, first), &integer_value))
@@ -17703,7 +17914,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
             return false;
         }
         *type_out = literal_type;
-        return true;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, start + 1, end);
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && start + 1 == end)
     {
@@ -20063,6 +20274,15 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
                                (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                                 (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR) && start + 1 < assignment &&
                                  c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)));
+    // A left operand that increments something -- `while ((*d++ = *s++))`,
+    // which is how musl writes `wcscpy` and `wcsftime`'s output cursor -- has
+    // an update of its own to emit before the store, which the direct place
+    // stage does not carry either. Same escape.
+    for (u32 index = start; !parenthesized_place && index < assignment; index += 1)
+    {
+        parenthesized_place = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_PLUS_PLUS) ||
+                              c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_MINUS_MINUS);
+    }
     if (parenthesized_place)
     {
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_CORE;
@@ -22214,6 +22434,31 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     if (!true_value || !false_value)
     {
         return IR_TYPE_ID_INVALID;
+    }
+    // C11 6.5.15p6: the second and third operands go through the usual
+    // conversions, and an operand of array type becomes a pointer to its
+    // first element. musl's select, pselect, ppoll and utime all write
+    // `x ? (T[2]){...} : 0`, whose branches are an array and a null pointer
+    // constant; without the decay the two kinds never met. Two array
+    // branches of one type keep the fast path above, so only a mismatch
+    // decays here.
+    if (true_value->kind == IR_TYPE_ARRAY && false_value->kind != IR_TYPE_ARRAY)
+    {
+        true_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, true_value->element_type);
+        true_value = ir_type_from_id(&builder->program->types, true_type);
+    }
+    else if (false_value->kind == IR_TYPE_ARRAY && true_value->kind != IR_TYPE_ARRAY)
+    {
+        false_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, false_value->element_type);
+        false_value = ir_type_from_id(&builder->program->types, false_type);
+    }
+    if (!true_value || !false_value)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
+    if (true_type.value == false_type.value)
+    {
+        return true_type;
     }
     IrTypeId arithmetic_type = c_ir_usual_arithmetic_type(builder, true_type, false_type);
     if (arithmetic_type.value != IR_ID_UNDERLYING_INVALID)
@@ -33599,6 +33844,34 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 index = consumed_index;
                 continue;
             }
+            // `sizeof` over an expression takes no parentheses of its own: the
+            // operand is the unary expression that follows. musl's `__tz.c`
+            // writes `static size_t old_tz_size = sizeof old_tz_buf;` and
+            // `c_locale.c` writes `.map_size = sizeof empty_mo`, both of which
+            // are static initializers and so reach this evaluator.
+            // `_Alignof` is not spelled this way -- C11 6.5.3.4 gives it a
+            // parenthesized type name only -- so only `sizeof` is taken here.
+            if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && index + 1 < end &&
+                !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 operand_end = c_ir_unary_expression_end(builder, index + 1, end);
+                if (operand_end <= index + 1)
+                {
+                    return false;
+                }
+                u64 size = 0;
+                u32 alignment = 0;
+                builder->queries->value_count = value_start + value_count;
+                builder->queries->operator_count = operator_start + operator_count;
+                if (!c_ir_query_sizeof(builder, index + 1, operand_end, &size, &alignment))
+                {
+                    return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+                }
+                values[value_count++] = c_ir_constant_integer(builder->size_type, size);
+                expect_operand = false;
+                index = operand_end - 1;
+                continue;
+            }
             if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_offsetof")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("offsetof"))) &&
                 index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
@@ -33754,8 +34027,25 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
         {
-            if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER || !value_count ||
-                !c_ir_constant_lvalue_field(builder, &values[value_count - 1], c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))) return false;
+            if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER || !value_count) return false;
+            // `p->m` is `(*p).m`, so a constant pointer becomes the lvalue it
+            // points at before the member is selected. That is the portable
+            // `offsetof` musl's <stddef.h> falls back to when the compiler
+            // does not claim GCC 4 --
+            // `((size_t)((char *)&(((type *)0)->member) - (char *)0))` -- and
+            // it stands in static storage in `strerror`'s message index and
+            // in `dynlink`'s MIN_TLS_ALIGN.
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+            {
+                CIrConstantValue* target = values + value_count - 1;
+                IrType* pointer = ir_type_from_id(&builder->program->types, target->type);
+                if (target->kind == C_IR_CONSTANT_POINTER && pointer && pointer->kind == IR_TYPE_POINTER)
+                {
+                    target->type = pointer->element_type;
+                    target->kind = C_IR_CONSTANT_LVALUE;
+                }
+            }
+            if (!c_ir_constant_lvalue_field(builder, &values[value_count - 1], c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))) return false;
             index += 1;
             continue;
         }

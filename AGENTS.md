@@ -803,6 +803,18 @@ this assembler reads one as a comment, so the inline-assembly path rewrites
 the separators, folding `lock ; insn` into the single statement the assembler
 wants and splitting the rest onto their own lines.
 
+One flag the set does not carry is a dialect, and that makes the two compilers
+read different source. `ide cc` predefines `__GNUC__` only in a GNU dialect,
+while Clang predefines it in every one, so under `-std=c99` musl's
+`<stddef.h>` gives Clang `__builtin_offsetof` and gives Buster the portable
+`((size_t)((char *)&(((type *)0)->member) - (char *)0))`. Every `offsetof` in
+the archive is therefore a different expression on the two sides. Nothing
+about the comparison is unsound — both spellings mean the same offset, and
+`tests/basic_c_null_pointer_offsetof.c` pins that they agree — but a class
+that looks like a Buster gap can be a branch Clang never took, so check what
+the unit actually preprocessed to (`ide cc -E` with the same flags) before
+naming a construct.
+
 The Clang reference build runs first and every unit must compile — a musl unit
 Clang cannot build under this flag set is a broken workspace, not a Buster
 defect, and finding that out before a thousand Buster invocations keeps the two
@@ -878,12 +890,18 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 103
+harness compiles the portable C instead and lists each one. The remaining 77
 are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
 for `_Complex` arithmetic, which the frontend has no type for, and which is
-every remaining unit under `src/complex`; 7 static initializers, none of them
-`long double` any more; 3 that reach code generation and fail on an inline
-assembly block; 2 conflicting declarations; and 23 singletons
+every remaining unit under `src/complex`; 4 that reach code generation and
+fail on an inline assembly block (`crt/rcrt1`, `ldso/dlstart`,
+`ldso/dynlink`, `src/thread/__unmapself`); 1 static initializer
+(`src/misc/ioctl`'s `compat_map`); and 4 singletons -- `res_msend` (an
+over-aligned automatic), `lsearch` (a pointer to a VLA), and
+`vfprintf`/`vfwprintf` (wide floating-point `va_arg`). Conflicting
+declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
+`long f();` compatible with a non-variadic prototype for the same function,
+which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write
 (measured 2026-08-29).
 
 `long double` is no longer among them. Seventeen units were static
@@ -897,9 +915,11 @@ type that *contained* an x87 `long double` without *being* one, so an array of
 them was refused whether or not it carried an initializer. Classifying those
 aggregates by the ABI rather than by that shape test released them along with
 every unit reaching a value through musl's `union ldshape`: 54 units, 1192 to
-1246, and the whole x87 code-generation class with them. The three left in
+1246, and the whole x87 code-generation class with them. The four left in
 that class are inline assembly: `crt/rcrt1` and `ldso/dlstart` on
-`GETFUNCSYM`, described below, and `src/thread/__unmapself`.
+`GETFUNCSYM`, described below, `src/thread/__unmapself`, and `ldso/dynlink`,
+which joined them once the portable `offsetof` in its `MIN_TLS_ALIGN` folded
+and it stopped failing earlier.
 
 musl's startup objects are their own report now that module-level assembly
 goes through the real assembler. `crt/crt1.c` and `crt/Scrt1.c` compile, and

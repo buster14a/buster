@@ -5880,6 +5880,79 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The musl singleton fixtures. Each one is a shape musl uses that the
+    // frontend refused, and each answer is observable at run time rather than
+    // only in a diagnostic, so they run rather than merely compile -- and run
+    // under every register allocator, because the value a subscript or a
+    // typeof-declared call produces must not depend on which one placed it.
+    String8 c_musl_shape_fixture_paths[] = {
+        S8("tests/basic_c_reversed_subscript.c"),
+        S8("tests/basic_c_macro_self_reference.c"),
+        S8("tests/basic_c_typeof_declaration.c"),
+        S8("tests/basic_c_opaque_tag_cast.c"),
+        S8("tests/basic_c_designated_subscript_initializer.c"),
+        S8("tests/basic_c_conditional_array_branch.c"),
+        S8("tests/basic_c_array_parameter_assignment.c"),
+        S8("tests/basic_c_unparenthesized_sizeof_initializer.c"),
+        S8("tests/basic_c_incrementing_assignment_condition.c"),
+        S8("tests/basic_c_null_pointer_offsetof.c"),
+    };
+    String8 c_musl_shape_fixture_names[] = {
+        S8("buster-c-reversed-subscript"),
+        S8("buster-c-macro-self-reference"),
+        S8("buster-c-typeof-declaration"),
+        S8("buster-c-opaque-tag-cast"),
+        S8("buster-c-designated-subscript-initializer"),
+        S8("buster-c-conditional-array-branch"),
+        S8("buster-c-array-parameter-assignment"),
+        S8("buster-c-unparenthesized-sizeof-initializer"),
+        S8("buster-c-incrementing-assignment-condition"),
+        S8("buster-c-null-pointer-offsetof"),
+    };
+    String8 c_musl_shape_allocator_flags[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_musl_shape_fixture_paths); fixture_index += 1)
+    {
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_musl_shape_allocator_flags); allocator_index += 1)
+        {
+            TemporalArena c_musl_shape_temporary = arena_begin_temporal(arguments->arena);
+            String8 c_musl_shape_path =
+                buster_test_temporary_path(c_musl_shape_temporary.arena, c_musl_shape_fixture_names[fixture_index],
+                                           string_format(c_musl_shape_temporary.arena, S8("-{u32}"), allocator_index));
+            String8 c_musl_shape_command_line[] = {
+                c_musl_shape_allocator_flags[allocator_index],
+                S8("-o"),
+                c_musl_shape_path,
+                c_musl_shape_fixture_paths[fixture_index],
+            };
+            CompilerDriverResult c_musl_shape = compiler_driver_execute_invocation(
+                c_musl_shape_temporary.arena,
+                compiler_driver_parse_arguments(c_musl_shape_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_musl_shape_command_line)));
+            BUSTER_TEST(arguments, c_musl_shape.error == COMPILER_DRIVER_ERROR_NONE);
+            if (c_musl_shape.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 c_musl_shape_arguments[] = {
+                    c_musl_shape_path,
+                };
+                ProcessSpawnResult c_musl_shape_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_musl_shape_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){
+                                         .use_process_environment = true,
+                                     });
+                BUSTER_TEST(arguments, c_musl_shape_spawn.handle != 0);
+                if (c_musl_shape_spawn.handle)
+                {
+                    ProcessWaitResult c_musl_shape_wait = os_process_wait_sync(c_musl_shape_temporary.arena, c_musl_shape_spawn);
+                    BUSTER_TEST(arguments, c_musl_shape_wait.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(c_musl_shape_temporary);
+        }
+    }
     // A negative constant narrower than the global it initializes is folded
     // and written into the data image without ever reaching code generation,
     // so only running the program reads the bytes the object writer emitted.

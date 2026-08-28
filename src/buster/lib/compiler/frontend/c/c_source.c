@@ -2882,6 +2882,18 @@ BUSTER_C_INTERNAL void c_symbols_intern_tokens(CSymbolTable* table, char8 const*
 // stop answering — a replacement token stands where the invocation was, not
 // where it was spelled — so from there the flag carries it. The field rides
 // in the padding the `foreign` byte already left, so it costs no memory.
+// `no_expand` is C11 6.10.3.4p2's blue paint. The expansion machinery keeps
+// one `disabled` bit per macro rather than a hide set per token, which is
+// enough while a replacement is being rescanned in place: the bit is set
+// across the rescan and cleared after it. It is not enough for a token that
+// leaves that rescan alive. A macro argument is fully expanded in a nested
+// context and the resulting tokens are then substituted and rescanned again
+// in the parent, by which time the bit has been cleared, so a self-naming
+// macro reached through an argument expanded once more per nesting level
+// (`si_pid` -> `a.b.si_pid` -> `a.b.a.b.si_pid`). Painting the name where the
+// disabled bit stopped it makes the refusal permanent, which is what the
+// standard requires and what the disabled bit alone cannot express. It rides
+// in the same padding, so it too costs no memory.
 typedef struct CPpToken CPpToken;
 struct CPpToken
 {
@@ -2889,6 +2901,7 @@ struct CPpToken
     CSourceLocation location;
     bool foreign;
     bool preceded_by_space;
+    bool no_expand;
 };
 
 BUSTER_CT_CHECK(sizeof(CPpToken) == 36);
@@ -3802,9 +3815,16 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
             continue;
         }
         CPpToken token = task->token;
-        CMacro* macro = token.token.kind == C_TOKEN_IDENTIFIER ? c_macro_find_token(first_macro, symbols, space->base, &token.token) : 0;
+        CMacro* macro = token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand
+                            ? c_macro_find_token(first_macro, symbols, space->base, &token.token)
+                            : 0;
         if (!macro || !macro->definition.defined || macro->disabled)
         {
+            // The disabled bit is cleared as soon as this rescan ends, so a
+            // name it refused here would expand on any later rescan the token
+            // survives into -- the one an argument's expanded tokens get in
+            // the parent context.  Paint the refusal onto the token instead.
+            token.no_expand = token.no_expand || (macro && macro->definition.defined && macro->disabled);
             c_preprocess_output_push(arena, &context->first_output, &context->last_output, token, &context->output_count);
             continue;
         }

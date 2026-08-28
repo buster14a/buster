@@ -528,6 +528,7 @@ struct CTypeParseFrame
     bool scanning_inner_parameters;
     bool has_inner_parameters;
     bool inner_variadic;
+    bool inner_unprototyped;
     bool nested;
     u8 reserved[1];
 };
