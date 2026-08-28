@@ -326,6 +326,27 @@ so a run is minutes rather than hours. `abiTest` links against the harness's
 own static archive rather than an installed shared `liblz4`, since the harness
 must not depend on a system-installed lz4; it therefore checks the
 same-version API/ABI surface rather than cross-version stability.
+
+The harness raises its own `RLIMIT_STACK` soft limit to 128 MB before it spawns
+anything, and the reason is Buster's frame layout rather than an upstream
+quirk: Buster gives every sibling block in a function its own frame slot where
+Clang overlaps the ones whose live ranges cannot intersect, so the fuzzer's
+`FUZ_unitTests` — a long chain of sibling scopes each holding a multi-megabyte
+buffer — lands on a 10,0 MB frame under FAST, MIR_STACK and QUALITY and a
+24,7 MB one under NONE, against the Clang build's 271 KB. Under the 8 MB a
+login shell hands out, the Buster-built fuzzer dies with SIGSEGV before it
+executes a single test; the NONE build still dies at 32 MB and passes at 40 MB,
+so 128 MB is about three times the worst measured requirement. The program is
+correct — every test passes once it has room — so this is a code-quality gap,
+not a miscompile, and shrinking the frame is optimization work that is not to
+be added unasked. The limit is raised rather than the manifest trimmed or the
+iteration count lowered, because `FUZ_unitTests` is the part of the fuzzer
+worth running. A soft limit is inherited at spawn, which is why it is set once
+up front; it is a finite value rather than `RLIM_INFINITY`, which would move
+the loader's mmap layout, and it is POSIX-only — a Windows thread's stack size
+lives in the PE header of the image being run, so a parent cannot grant a child
+more of it, and there the harness reports the limit unchanged.
+
 Cross-checking runs both directions over a deterministic corpus: each frame
 shape is compressed by the Buster CLI and by the Clang CLI, the compressed
 bytes must be identical — LZ4 output is deterministic for a given level, so a
@@ -352,11 +373,20 @@ separately and must not be conflated: `LZ4_METRIC` lines carry per-unit
 compiler wall time with the `-fsource-metrics=` source metrics, while
 `LZ4_THROUGHPUT` reports compress and decompress MB/s for the compression
 workload and `LZ4_CODEGEN` reports instructions retired and instructions per
-byte for the same runs. The instruction counts come from the same Linux
-hardware counter as `STEP_INSTRUCTIONS`, read either side of a child that runs
-alone; where no counter is available the `LZ4_CODEGEN` line is simply absent,
-which is never an error. Generated objects, metrics, archives, corpora, and
-logs remain under `build/lz4-v1.10.0-<pid>/`.
+byte for the same runs. Both quote the uncompressed byte count, which is the
+conventional denominator for a compression rate in either direction. The
+throughput is end-to-end for the whole CLI process, including its startup and
+its reads and writes, so it is indicative rather than a benchmark and drifts
+with whatever else the machine is doing. The instruction counts do not: they
+come from the same Linux hardware counter as `STEP_INSTRUCTIONS`, read either
+side of a child that runs alone, and the counter follows this process tree
+only, so they are contention-immune and are the number to trend. Where no
+counter is available the `LZ4_CODEGEN` line is simply absent, which is never an
+error. For scale, one recorded portable run put the Clang reference probe at
+713 MB/s and 13,8 instructions/byte against FAST's 162 MB/s and
+97,6 instructions/byte over the same 53,7 MB workload. Generated objects,
+metrics, archives, corpora, and logs remain under
+`build/lz4-v1.10.0-<pid>/`.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,

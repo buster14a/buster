@@ -11281,6 +11281,72 @@ BUSTER_GLOBAL_LOCAL bool lz4_metrics_report(Arena* arena, String8 config_name, S
     return true;
 }
 
+// The Buster-built upstream fuzzer needs more stack than the 8 MB a Linux
+// login shell hands out, and the reason is Buster's own frame layout rather
+// than anything upstream: Buster gives every sibling block in a function its
+// own frame slot where Clang overlaps the ones whose live ranges cannot
+// intersect, so `FUZ_unitTests` -- which is a long chain of sibling scopes
+// each holding its own multi-megabyte buffer -- lands on a frame tens of times
+// larger than the Clang build's 271.000 bytes. That is a code-quality gap, not
+// a miscompile: the program is correct and every test it runs passes once it
+// has room. Shrinking the frame is optimization work, which AGENTS.md says is
+// not to be added unasked, so the harness makes room instead of the compiler
+// using less. The soft limit is raised here and inherited by every child
+// spawned afterwards, and the request is clamped to the inherited hard limit.
+// The measured `FUZ_unitTests` frames are 10,0 MB under FAST, 10,1 MB under
+// MIR_STACK, 10,0 MB under QUALITY and 24,7 MB under NONE, and the whole call
+// chain needs more than the frame alone: the NONE build segfaults at a 32 MB
+// limit and passes at 40 MB. 128 MB is therefore about three times the worst
+// measured requirement, and still small enough not to matter as a glibc
+// default thread stack size, which is taken from this same limit. It stays a
+// finite number rather than RLIM_INFINITY, which changes the loader's mmap
+// layout on Linux.
+//
+// POSIX-only. A Windows thread's stack size is a field in the PE header of the
+// image being run, so a parent process cannot grant a child more of it; there
+// the limit is reported unchanged and left alone.
+#define LZ4_STACK_LIMIT_BYTES (128ull * 1024ull * 1024ull)
+
+BUSTER_GLOBAL_LOCAL void lz4_raise_stack_limit(u64 requested_bytes)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct rlimit limit = {0};
+    if (getrlimit(RLIMIT_STACK, &limit) != 0)
+    {
+        string_print(S8("warning: test_lz4 could not read RLIMIT_STACK; upstream tests run with the inherited stack\n"));
+        return;
+    }
+    if (limit.rlim_cur == RLIM_INFINITY)
+    {
+        string_print(S8("LZ4_STACK_LIMIT soft=unlimited hard=unlimited requested_bytes={u64} status=inherited\n"), requested_bytes);
+        return;
+    }
+    u64 previous = (u64)limit.rlim_cur;
+    u64 target = requested_bytes;
+    if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < target)
+    {
+        target = (u64)limit.rlim_max;
+    }
+    if (target <= previous)
+    {
+        string_print(S8("LZ4_STACK_LIMIT soft_bytes={u64} requested_bytes={u64} status=already-sufficient\n"), previous, requested_bytes);
+        return;
+    }
+    struct rlimit updated = limit;
+    updated.rlim_cur = (rlim_t)target;
+    if (setrlimit(RLIMIT_STACK, &updated) != 0)
+    {
+        string_print(S8("warning: test_lz4 could not raise RLIMIT_STACK from {u64} to {u64} bytes; the upstream fuzzer may overflow its stack\n"), previous,
+                     target);
+        return;
+    }
+    string_print(S8("LZ4_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} requested_bytes={u64} reason=buster-frame-layout status=raised\n"), previous,
+                 target, requested_bytes);
+#else
+    string_print(S8("LZ4_STACK_LIMIT requested_bytes={u64} status=unsupported-platform\n"), requested_bytes);
+#endif
+}
+
 // The include and macro set every unit shares.  lib, programs, and tests are
 // built with one flag set on purpose: upstream's three makefiles agree on
 // XXH_NAMESPACE, and objects compiled without it would not link against
@@ -11781,6 +11847,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
     make_directory_recursive(arena, corpus_directory);
     make_directory_recursive(arena, clang_directory);
     string_print(S8("LZ4_HARNESS ide={S8} clang={S8} ar={S8} output={S8} multithread=disabled\n"), ide, clang, ar, output_directory);
+    // Raised once, here, rather than around the upstream tests: a soft limit is
+    // inherited at spawn, so it has to be in place before any child that needs
+    // it starts, and raising it once keeps one line in the log instead of one
+    // per combination.
+    lz4_raise_stack_limit(LZ4_STACK_LIMIT_BYTES);
     string_print(S8("LZ4_MANIFEST block_sources={u64} frame_sources={u64} cli_sources={u64} test_sources={u64} datagen_sources={u64} total_units={u64} "
                     "excluded=tests/freestanding.c fixture={S8}\n"),
                  BUSTER_ARRAY_LENGTH(block_sources), BUSTER_ARRAY_LENGTH(frame_sources), BUSTER_ARRAY_LENGTH(cli_sources), BUSTER_ARRAY_LENGTH(test_sources),

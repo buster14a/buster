@@ -5139,12 +5139,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
         {
-            String8 fixture_path = buster_test_temporary_path(arguments->arena, c_lz4_regression_names[fixture_index], S8(""));
+            // Each fixture compiles into a scratch arena rather than the
+            // module's own: this table runs one whole in-process compilation
+            // per fixture per allocator, and the module arena is never
+            // rewound, so accumulating them there spends its reservation and
+            // the next unrelated invocation is the one that fails.
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, c_lz4_regression_names[fixture_index], S8(""));
             String8 fixture_command_line[] = {
                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_lz4_regression_paths[fixture_index],
             };
             CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
@@ -5154,9 +5160,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
-                    BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
                 }
             }
+            scratch_end(fixture_temporary);
         }
     }
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
@@ -5169,12 +5176,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 main_return_flush_expected = S8("buffered stdout survives returning from main\nand so does a second buffered write\n");
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
     {
-        String8 flush_path = buster_test_temporary_path(arguments->arena, S8("buster-c-main-return-flush"), S8(""));
+        TemporalArena flush_temporary = scratch_begin(&arguments->arena, 1);
+        String8 flush_path = buster_test_temporary_path(flush_temporary.arena, S8("buster-c-main-return-flush"), S8(""));
         String8 flush_command_line[] = {
             c_lz4_regression_allocators[allocator_index], S8("-o"), flush_path, S8("tests/basic_c_main_return_flush.c"),
         };
         CompilerDriverResult flush = compiler_driver_execute_invocation(
-            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flush_command_line)));
+            flush_temporary.arena, compiler_driver_parse_arguments(flush_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flush_command_line)));
         BUSTER_TEST(arguments, flush.error == COMPILER_DRIVER_ERROR_NONE);
         if (flush.error == COMPILER_DRIVER_ERROR_NONE)
         {
@@ -5185,7 +5193,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, flush_spawn.handle != 0);
             if (flush_spawn.handle)
             {
-                ProcessWaitResult flush_wait = os_process_wait_sync(arguments->arena, flush_spawn);
+                ProcessWaitResult flush_wait = os_process_wait_sync(flush_temporary.arena, flush_spawn);
                 String8 flush_output = (String8){
                     .pointer = (char8*)flush_wait.streams[STANDARD_STREAM_OUTPUT].pointer,
                     .length = flush_wait.streams[STANDARD_STREAM_OUTPUT].length,
@@ -5194,6 +5202,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, string_equal(flush_output, main_return_flush_expected));
             }
         }
+        scratch_end(flush_temporary);
     }
     // 80-bit x87 `long double` arithmetic: the conversions, the comparisons,
     // the four operators, and the variadic `%.2Lf` call LZ4IO_toHuman needs.
@@ -5212,12 +5221,14 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
     {
-        String8 long_double_path = buster_test_temporary_path(arguments->arena, S8("buster-c-long-double-arithmetic"), S8(""));
+        TemporalArena long_double_temporary = scratch_begin(&arguments->arena, 1);
+        String8 long_double_path = buster_test_temporary_path(long_double_temporary.arena, S8("buster-c-long-double-arithmetic"), S8(""));
         String8 long_double_command_line[] = {
             c_long_double_allocators[allocator_index], S8("-o"), long_double_path, S8("tests/basic_c_long_double_arithmetic.c"),
         };
         CompilerDriverResult long_double = compiler_driver_execute_invocation(
-            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(long_double_command_line)));
+            long_double_temporary.arena,
+            compiler_driver_parse_arguments(long_double_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(long_double_command_line)));
         BUSTER_TEST(arguments, long_double.error == COMPILER_DRIVER_ERROR_NONE);
         if (long_double.error == COMPILER_DRIVER_ERROR_NONE)
         {
@@ -5228,9 +5239,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, long_double_spawn.handle != 0);
             if (long_double_spawn.handle)
             {
-                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, long_double_spawn).result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, os_process_wait_sync(long_double_temporary.arena, long_double_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+        scratch_end(long_double_temporary);
     }
     // A loop body that allocates nothing must carry no stack checkpoint at
     // all: the restore is what read a stale frame slot into RSP, and its
