@@ -887,6 +887,22 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     };
 }
 
+// One x87 stack slot, ST(index).  The metadata tables carry ST0..ST7 as
+// SPECIAL registers of architectural width 80, which is also how the
+// assembler's own crosswalk spells ASSEMBLY_REGISTER_X87.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_x87(u32 register_index)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = 80,
+        .reg = {
+            .index = (u16)register_index,
+            .width = 80,
+            .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL,
+        },
+    };
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_immediate(s64 value, u16 width)
 {
     return (BusterX86MetadataPhysicalOperand){
@@ -4403,6 +4419,366 @@ bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displac
     return buffer->error == CODEGEN_ERROR_NONE;
 }
 
+// x87 arithmetic is emitted as memory-to-memory transactions: each sequence
+// below pushes its operands from frame slots, operates, stores the result
+// back, and leaves the x87 stack exactly as empty as it found it.  Nothing is
+// ever live in an ST register across a machine instruction boundary, so the
+// register allocators need no x87 class and no interference model, and the
+// eight-deep stack cannot overflow.  `x87_depth` is the running proof of that
+// invariant rather than a scheduling resource; every helper here balances it.
+//
+// The scratch area is the one piece of frame the value slots cannot supply:
+// FILD/FISTP need a plain integer image, the u64 correction needs an f80
+// constant, and the truncating conversion needs somewhere to park the two
+// control words.  Its layout, all relative to the area's own displacement:
+//   +0  sixteen-byte f80 temporary (the 2^63 or 2^64 correction constant)
+//   +16 eight-byte integer temporary for FILD/FISTP
+//   +24 saved x87 control word
+//   +26 truncating x87 control word
+#define CODEGEN_X64_X87_SCRATCH_SIZE 32
+#define CODEGEN_X64_X87_SCRATCH_FLOAT_OFFSET 0
+#define CODEGEN_X64_X87_SCRATCH_INTEGER_OFFSET 16
+#define CODEGEN_X64_X87_SCRATCH_CONTROL_OFFSET 24
+#define CODEGEN_X64_X87_SCRATCH_TRUNCATE_OFFSET 26
+// 2^64 as an 80-bit value: an explicit leading significand bit and a biased
+// exponent of 16383 + 64.  Adding it turns FILD's signed reading of a
+// negative eightbyte back into the unsigned value, exactly, because f80
+// carries all 64 significand bits.
+#define CODEGEN_X64_F80_TWO_POWER_64_SIGNIFICAND UINT64_C(0x8000000000000000)
+#define CODEGEN_X64_F80_TWO_POWER_64_SIGN_EXPONENT UINT16_C(0x403f)
+// 2^63, the bias the unsigned eightbyte conversion subtracts and puts back as
+// the result's sign bit.  The significand is the same explicit leading bit;
+// only the biased exponent differs by one.
+#define CODEGEN_X64_F80_TWO_POWER_63_SIGNIFICAND UINT64_C(0x8000000000000000)
+#define CODEGEN_X64_F80_TWO_POWER_63_SIGN_EXPONENT UINT16_C(0x403e)
+// Rounding-control field set to "round toward zero", which is what a C
+// floating-point-to-integer conversion means.
+#define CODEGEN_X64_X87_CONTROL_TRUNCATE UINT16_C(0x0c00)
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_features(CodegenBuffer* buffer, String8 mnemonic,
+                                                            BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
+{
+    // The generated tables place every X87 row behind the same feature name
+    // the existing FLD/FSTP emission uses.
+    String8 features[] = {S8("sse2")};
+    return codegen_canonical_x64_metadata_emit_features(buffer, mnemonic, operands, operand_count,
+                                                        (BusterX86MetadataFeatureInput){.names = features, .count = BUSTER_ARRAY_LENGTH(features)});
+}
+
+// FLD/FILD from memory; `width` is 32/64/80 for FLD and 16/32/64 for FILD.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_push(CodegenBuffer* buffer, bool integer, X64Register base, s32 displacement,
+                                                        u16 width, u32* x87_depth)
+{
+    bool result;
+    if (!x87_depth || *x87_depth >= 8)
+    {
+        result = false;
+    }
+    else
+    {
+        BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_memory(base, width, displacement);
+        result = codegen_canonical_x64_x87_features(buffer, integer ? S8("FILD") : S8("FLD"), &operand, 1);
+        *x87_depth += 1;
+    }
+
+    return result;
+}
+
+// FSTP/FISTP to memory, popping the value it wrote.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_pop_store(CodegenBuffer* buffer, bool integer, X64Register base, s32 displacement,
+                                                             u16 width, u32* x87_depth)
+{
+    bool result;
+    if (!x87_depth || *x87_depth == 0)
+    {
+        result = false;
+    }
+    else
+    {
+        BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_memory(base, width, displacement);
+        result = codegen_canonical_x64_x87_features(buffer, integer ? S8("FISTP") : S8("FSTP"), &operand, 1);
+        *x87_depth -= 1;
+        if (result && !integer && width == 80)
+        {
+            codegen_canonical_x64_zero_f80_padding(buffer, base, displacement);
+            result = buffer->error == CODEGEN_ERROR_NONE;
+        }
+    }
+
+    return result;
+}
+
+// FSTP ST(0): drop the top of the stack without writing it anywhere.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_discard(CodegenBuffer* buffer, u32* x87_depth)
+{
+    bool result;
+    if (!x87_depth || *x87_depth == 0)
+    {
+        result = false;
+    }
+    else
+    {
+        BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_x87(0);
+        result = codegen_canonical_x64_x87_features(buffer, S8("FSTP"), &operand, 1);
+        *x87_depth -= 1;
+    }
+
+    return result;
+}
+
+// One two-register x87 row.  The Intel-derived tables spell the popping
+// arithmetic as ST(i), ST(0) -- the destination is the deeper slot -- and the
+// integer-flag compares as ST(0), ST(i), so both indices are explicit here
+// rather than assumed.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_pair(CodegenBuffer* buffer, String8 mnemonic, u32 first_index, u32 second_index,
+                                                        bool pops, u32* x87_depth)
+{
+    bool result;
+    if (!x87_depth || *x87_depth < 2)
+    {
+        result = false;
+    }
+    else
+    {
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            codegen_canonical_x64_metadata_x87(first_index),
+            codegen_canonical_x64_metadata_x87(second_index),
+        };
+        result = codegen_canonical_x64_x87_features(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands));
+        if (pops)
+        {
+            *x87_depth -= 1;
+        }
+    }
+
+    return result;
+}
+
+// result = left <operation> right.  The left operand is pushed first, so it
+// ends up in ST(1) and the popping forms compute ST(1) op ST(0) in the source
+// order the C expression wrote.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_binary(CodegenBuffer* buffer, IrBinaryOperation operation, s32 left_displacement,
+                                                               s32 right_displacement, s32 result_displacement, u32* x87_depth)
+{
+    String8 mnemonic = operation == IR_BINARY_FLOAT_ADD        ? S8("FADDP")
+                       : operation == IR_BINARY_FLOAT_SUBTRACT ? S8("FSUBP")
+                       : operation == IR_BINARY_FLOAT_MULTIPLY ? S8("FMULP")
+                       : operation == IR_BINARY_FLOAT_DIVIDE   ? S8("FDIVP")
+                                                               : (String8){0};
+    bool result;
+    if (!mnemonic.length)
+    {
+        result = false;
+    }
+    else
+    {
+        result = codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, left_displacement, 80, x87_depth) &&
+                 codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, right_displacement, 80, x87_depth) &&
+                 codegen_canonical_x64_x87_pair(buffer, mnemonic, 1, 0, true, x87_depth) &&
+                 codegen_canonical_x64_x87_pop_store(buffer, false, X64_REGISTER_RBP, result_displacement, 80, x87_depth);
+    }
+
+    return result;
+}
+
+// Leave EFLAGS holding the comparison of `left` against `right` with the
+// same ZF/PF/CF meaning UCOMISS/UCOMISD produce, so the SETcc sequence the
+// narrow float path already emits applies unchanged.  FUCOMIP is the quiet
+// form: a QNaN operand sets the unordered result without raising invalid,
+// which is what the C comparison operators want.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_compare(CodegenBuffer* buffer, s32 left_displacement, s32 right_displacement,
+                                                                u32* x87_depth)
+{
+    return codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, right_displacement, 80, x87_depth) &&
+           codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, left_displacement, 80, x87_depth) &&
+           codegen_canonical_x64_x87_pair(buffer, S8("FUCOMIP"), 0, 1, true, x87_depth) &&
+           codegen_canonical_x64_x87_discard(buffer, x87_depth);
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_negate(CodegenBuffer* buffer, s32 source_displacement, s32 result_displacement,
+                                                               u32* x87_depth)
+{
+    return codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, source_displacement, 80, x87_depth) &&
+           codegen_canonical_x64_x87_features(buffer, S8("FCHS"), 0, 0) &&
+           codegen_canonical_x64_x87_pop_store(buffer, false, X64_REGISTER_RBP, result_displacement, 80, x87_depth);
+}
+
+// f32/f64 to f80 and back.  FLD and FSTP convert between the memory format
+// and the register format on their own, so the widening direction is exact
+// and the narrowing direction rounds once, per the control word this backend
+// deliberately leaves at its default extended precision.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_float_convert(CodegenBuffer* buffer, u16 source_width, u16 result_width,
+                                                                      s32 source_displacement, s32 result_displacement, u32* x87_depth)
+{
+    return codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, source_displacement, source_width, x87_depth) &&
+           codegen_canonical_x64_x87_pop_store(buffer, false, X64_REGISTER_RBP, result_displacement, result_width, x87_depth);
+}
+
+// RAX already holds the integer, sign- or zero-extended to eight bytes by the
+// caller.  FILD reads it as signed, so an unsigned eightbyte whose top bit is
+// set is corrected by one exact addition of 2^64.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_from_integer(CodegenBuffer* buffer, bool unsigned_64, s32 scratch_displacement,
+                                                                     s32 result_displacement, u32* x87_depth)
+{
+    s32 integer_displacement = scratch_displacement + CODEGEN_X64_X87_SCRATCH_INTEGER_OFFSET;
+    s32 constant_displacement = scratch_displacement + CODEGEN_X64_X87_SCRATCH_FLOAT_OFFSET;
+    BusterX86MetadataPhysicalOperand store_operands[2] = {
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, integer_displacement),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+    };
+    bool result = codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_operands, BUSTER_ARRAY_LENGTH(store_operands)) &&
+                  codegen_canonical_x64_x87_push(buffer, true, X64_REGISTER_RBP, integer_displacement, 64, x87_depth);
+    if (result && unsigned_64)
+    {
+        BusterX86MetadataPhysicalOperand test_operands[2] = {
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+        };
+        BusterX86MetadataPhysicalOperand nonnegative_branch = codegen_canonical_x64_metadata_relative(0, 8);
+        result = codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), test_operands, BUSTER_ARRAY_LENGTH(test_operands));
+        u32 branch_offset = (u32)buffer->count;
+        result = result && codegen_canonical_x64_metadata_emit(buffer, S8("JNS"), &nonnegative_branch, 1) &&
+                 codegen_canonical_x64_store_f80_constant(buffer, constant_displacement, CODEGEN_X64_F80_TWO_POWER_64_SIGNIFICAND,
+                                                          CODEGEN_X64_F80_TWO_POWER_64_SIGN_EXPONENT) &&
+                 codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, constant_displacement, 80, x87_depth) &&
+                 codegen_canonical_x64_x87_pair(buffer, S8("FADDP"), 1, 0, true, x87_depth);
+        if (result && buffer->bytes && branch_offset + 2 <= buffer->count)
+        {
+            s8 delta = (s8)((s32)buffer->count - (s32)(branch_offset + 2));
+            memcpy(buffer->bytes + branch_offset + 1, &delta, sizeof(delta));
+        }
+        else if (result)
+        {
+            result = false;
+        }
+    }
+
+    return result && codegen_canonical_x64_x87_pop_store(buffer, false, X64_REGISTER_RBP, result_displacement, 80, x87_depth);
+}
+
+// x87 stores integers under the rounding-control field rather than through a
+// dedicated truncating opcode, so a C conversion switches the control word to
+// round-toward-zero for the store and restores it afterwards.  The SSE3
+// FISTTP form is deliberately not used: it is not in the x86-64 baseline this
+// backend targets.  PC (precision) is left alone -- extended precision is what
+// long double wants.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_truncate_begin(CodegenBuffer* buffer, s32 scratch_displacement)
+{
+    BusterX86MetadataPhysicalOperand saved_control =
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, scratch_displacement + CODEGEN_X64_X87_SCRATCH_CONTROL_OFFSET);
+    BusterX86MetadataPhysicalOperand truncate_control =
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, scratch_displacement + CODEGEN_X64_X87_SCRATCH_TRUNCATE_OFFSET);
+    BusterX86MetadataPhysicalOperand read_control[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+        saved_control,
+    };
+    BusterX86MetadataPhysicalOperand set_truncate[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+        codegen_canonical_x64_metadata_immediate(CODEGEN_X64_X87_CONTROL_TRUNCATE, 32),
+    };
+    BusterX86MetadataPhysicalOperand write_truncate[2] = {
+        truncate_control,
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 16),
+    };
+    return codegen_canonical_x64_x87_features(buffer, S8("FNSTCW"), &saved_control, 1) &&
+           codegen_canonical_x64_metadata_emit(buffer, S8("MOVZX"), read_control, BUSTER_ARRAY_LENGTH(read_control)) &&
+           codegen_canonical_x64_metadata_emit(buffer, S8("OR"), set_truncate, BUSTER_ARRAY_LENGTH(set_truncate)) &&
+           codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), write_truncate, BUSTER_ARRAY_LENGTH(write_truncate)) &&
+           codegen_canonical_x64_x87_features(buffer, S8("FLDCW"), &truncate_control, 1);
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_truncate_end(CodegenBuffer* buffer, s32 scratch_displacement)
+{
+    BusterX86MetadataPhysicalOperand saved_control =
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, scratch_displacement + CODEGEN_X64_X87_SCRATCH_CONTROL_OFFSET);
+    return codegen_canonical_x64_x87_features(buffer, S8("FLDCW"), &saved_control, 1);
+}
+
+// Pop the x87 top into the scratch eightbyte and read it back into RAX.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_x87_store_integer_to_rax(CodegenBuffer* buffer, s32 scratch_displacement, u32* x87_depth)
+{
+    s32 integer_displacement = scratch_displacement + CODEGEN_X64_X87_SCRATCH_INTEGER_OFFSET;
+    BusterX86MetadataPhysicalOperand load_result[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 64, integer_displacement),
+    };
+    return codegen_canonical_x64_x87_pop_store(buffer, true, X64_REGISTER_RBP, integer_displacement, 64, x87_depth) &&
+           codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), load_result, BUSTER_ARRAY_LENGTH(load_result));
+}
+
+// RAX receives the truncated eightbyte.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_to_integer(CodegenBuffer* buffer, s32 source_displacement, s32 scratch_displacement,
+                                                                   u32* x87_depth)
+{
+    return codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, source_displacement, 80, x87_depth) &&
+           codegen_canonical_x64_x87_truncate_begin(buffer, scratch_displacement) &&
+           codegen_canonical_x64_x87_store_integer_to_rax(buffer, scratch_displacement, x87_depth) &&
+           codegen_canonical_x64_x87_truncate_end(buffer, scratch_displacement);
+}
+
+// RAX receives the truncated unsigned eightbyte.  FISTP only writes a signed
+// image, so a value at or above 2^63 is biased down by that constant, stored,
+// and the sign bit put back -- the same shape the SSE path uses, but exact,
+// because f80 carries the bias subtraction without rounding.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_emit_f80_to_unsigned_64(CodegenBuffer* buffer, s32 source_displacement, s32 scratch_displacement,
+                                                                      u32* x87_depth)
+{
+    s32 constant_displacement = scratch_displacement + CODEGEN_X64_X87_SCRATCH_FLOAT_OFFSET;
+    BusterX86MetadataPhysicalOperand bias_load[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+        codegen_canonical_x64_metadata_unsigned_immediate(CODEGEN_X64_F80_TWO_POWER_63_SIGNIFICAND, 64),
+    };
+    BusterX86MetadataPhysicalOperand bias_or[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+    };
+    BusterX86MetadataPhysicalOperand direct_branch = codegen_canonical_x64_metadata_relative(0, 8);
+    BusterX86MetadataPhysicalOperand skip_branch = codegen_canonical_x64_metadata_relative(0, 8);
+    // FUCOMIP compares 2^63 against the value, so CF=0 and ZF=0 -- JNBE -- is
+    // exactly "the value is below 2^63", which includes the unordered case
+    // going the biased way, as the SSE path's does.
+    bool result = codegen_canonical_x64_x87_truncate_begin(buffer, scratch_displacement) &&
+                  codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, source_displacement, 80, x87_depth) &&
+                  codegen_canonical_x64_store_f80_constant(buffer, constant_displacement, CODEGEN_X64_F80_TWO_POWER_63_SIGNIFICAND,
+                                                           CODEGEN_X64_F80_TWO_POWER_63_SIGN_EXPONENT) &&
+                  codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, constant_displacement, 80, x87_depth) &&
+                  codegen_canonical_x64_x87_pair(buffer, S8("FUCOMIP"), 0, 1, true, x87_depth);
+    u32 direct_branch_offset = (u32)buffer->count;
+    u32 biased_depth = x87_depth ? *x87_depth : 0;
+    result = result && codegen_canonical_x64_metadata_emit(buffer, S8("JNBE"), &direct_branch, 1) &&
+             codegen_canonical_x64_x87_push(buffer, false, X64_REGISTER_RBP, constant_displacement, 80, x87_depth) &&
+             codegen_canonical_x64_x87_pair(buffer, S8("FSUBP"), 1, 0, true, x87_depth) &&
+             codegen_canonical_x64_x87_store_integer_to_rax(buffer, scratch_displacement, x87_depth) &&
+             codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), bias_load, BUSTER_ARRAY_LENGTH(bias_load)) &&
+             codegen_canonical_x64_metadata_emit(buffer, S8("OR"), bias_or, BUSTER_ARRAY_LENGTH(bias_or));
+    u32 skip_branch_offset = (u32)buffer->count;
+    result = result && codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &skip_branch, 1);
+    u32 direct_offset = (u32)buffer->count;
+    // Both arms consume the one value that is live here, so the direct arm
+    // starts from the depth the biased arm started from rather than the one
+    // it left behind.
+    if (x87_depth)
+    {
+        *x87_depth = biased_depth;
+    }
+    result = result && codegen_canonical_x64_x87_store_integer_to_rax(buffer, scratch_displacement, x87_depth);
+    u32 restore_offset = (u32)buffer->count;
+    result = result && codegen_canonical_x64_x87_truncate_end(buffer, scratch_displacement);
+    if (result && buffer->bytes && direct_branch_offset + 2 <= buffer->count && skip_branch_offset + 2 <= buffer->count)
+    {
+        s8 direct_delta = (s8)((s32)direct_offset - (s32)(direct_branch_offset + 2));
+        s8 skip_delta = (s8)((s32)restore_offset - (s32)(skip_branch_offset + 2));
+        memcpy(buffer->bytes + direct_branch_offset + 1, &direct_delta, sizeof(direct_delta));
+        memcpy(buffer->bytes + skip_branch_offset + 1, &skip_delta, sizeof(skip_delta));
+    }
+    else
+    {
+        result = false;
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 codegen_global_assembly_trim(String8 value)
 {
     while (value.length && (value.pointer[0] == ' ' || value.pointer[0] == '\t' || value.pointer[0] == '\r'))
@@ -7561,6 +7937,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrTypeId canonical_return_type =
             canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION ? canonical_function_type->return_type : IR_TYPE_ID_INVALID;
         bool canonical_variadic = canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION && canonical_function_type->is_variadic;
+        bool canonical_function_has_f80 = false;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             bool canonical_f80_supported = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
@@ -7590,33 +7967,42 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 // we can interpret.  Reject incompatible aggregate shapes
                 // before an instruction-specific path can mistake their bytes
                 // for scalar f80 data.
-                if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, canonical_return_type) &&
-                    !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, canonical_return_type))
+                if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, canonical_return_type))
                 {
-                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                    return result;
+                    if (!codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, canonical_return_type))
+                    {
+                        result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                        return result;
+                    }
+                    canonical_function_has_f80 = true;
                 }
                 if (canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION)
                 {
                     for (u32 parameter_index = 0; parameter_index < canonical_function_type->parameter_count; parameter_index += 1)
                     {
                         IrTypeId parameter_type_id = canonical_function_type->parameter_types[parameter_index];
-                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, parameter_type_id) &&
-                            !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, parameter_type_id))
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, parameter_type_id))
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                            return result;
+                            if (!codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, parameter_type_id))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                return result;
+                            }
+                            canonical_function_has_f80 = true;
                         }
                     }
                 }
                 for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
                 {
                     IrTypeId value_type_id = function->values[value_index].canonical_type;
-                    if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, value_type_id) &&
-                        !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, value_type_id))
+                    if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, value_type_id))
                     {
-                        result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                        return result;
+                        if (!codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, value_type_id))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                            return result;
+                        }
+                        canonical_function_has_f80 = true;
                     }
                 }
             }
@@ -7642,6 +8028,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             canonical_va_save_displacement = -(s32)(frame_size_64 + 176);
             frame_size_64 += 176;
+        }
+        // Scratch for the x87 sequences: the integer image FILD and FISTP
+        // read and write, the 2^64 correction constant, and the two control
+        // words the truncating conversion swaps.  A value slot cannot answer
+        // for these, and only a function that actually carries an f80 pays
+        // for the area.
+        s32 canonical_x87_scratch_displacement = 0;
+        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && canonical_function_has_f80)
+        {
+            canonical_x87_scratch_displacement = -(s32)(frame_size_64 + CODEGEN_X64_X87_SCRATCH_SIZE);
+            frame_size_64 += CODEGEN_X64_X87_SCRATCH_SIZE;
         }
         s32 hidden_result_displacement = -(s32)(frame_size_64 + 8);
         u32 aarch64_hidden_result_offset = (u32)frame_size_64;
@@ -9754,6 +10151,91 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool source_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(
                             f80_cache, program, function->values[instruction->operands[0].value].canonical_type);
                         bool target_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type);
+                        // A conversion with exactly one scalar f80 end runs on
+                        // the x87 stack.  FLD/FSTP change format on their own,
+                        // so the float directions are one push and one pop;
+                        // the integer directions go through FILD/FISTP and the
+                        // scratch area.
+                        bool wide_source_scalar = canonical_function_has_f80 && codegen_canonical_x64_type_is_f80(source_type);
+                        bool wide_target_scalar = canonical_function_has_f80 && codegen_canonical_x64_type_is_f80(target_type);
+                        if ((wide_source_scalar || wide_target_scalar) && conversion != IR_CONVERSION_IDENTITY)
+                        {
+                            s32 wide_source_displacement = c_x64_frame_displacement(&emitter, value_offsets[instruction->operands[0].value]);
+                            s32 wide_scratch_displacement = codegen_canonical_x64_rebase_frame_displacement(
+                                &buffer, canonical_x87_scratch_displacement, canonical_x64_frame_base_offset);
+                            u32 wide_integer_width = wide_target_scalar ? source_type->bit_width : target_type->bit_width;
+                            bool wide_integer_end = (wide_target_scalar ? source_type : target_type)->kind == IR_TYPE_INTEGER &&
+                                                    (wide_integer_width == 8 || wide_integer_width == 16 || wide_integer_width == 32 ||
+                                                     wide_integer_width == 64);
+                            // Both ends f80 is the identity below, never a
+                            // conversion opcode, so it is not an arm here.
+                            bool wide_emitted = false;
+                            if (!wide_source_scalar && conversion == IR_CONVERSION_FLOAT_EXTEND && wide_target_scalar &&
+                                source_type->kind == IR_TYPE_FLOAT && (source_type->bit_width == 32 || source_type->bit_width == 64))
+                            {
+                                wide_emitted = codegen_canonical_x64_emit_f80_float_convert(&buffer, (u16)source_type->bit_width, 80,
+                                                                                            wide_source_displacement, result_displacement,
+                                                                                            &x87_stack_depth);
+                            }
+                            else if (conversion == IR_CONVERSION_FLOAT_TRUNCATE && wide_source_scalar && target_type->kind == IR_TYPE_FLOAT &&
+                                     (target_type->bit_width == 32 || target_type->bit_width == 64))
+                            {
+                                wide_emitted = codegen_canonical_x64_emit_f80_float_convert(&buffer, 80, (u16)target_type->bit_width,
+                                                                                            wide_source_displacement, result_displacement,
+                                                                                            &x87_stack_depth);
+                            }
+                            else if (wide_target_scalar && wide_integer_end &&
+                                     (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+                                      conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT))
+                            {
+                                bool wide_unsigned = conversion == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT;
+                                c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                                String8 extend_mnemonic = {0};
+                                BusterX86MetadataPhysicalOperand extend_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, wide_unsigned && wide_integer_width < 64 ? 32 : 64),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(wide_integer_width == 32 && wide_unsigned ? 32 : wide_integer_width)),
+                                };
+                                if (wide_integer_width != 64)
+                                {
+                                    extend_mnemonic = wide_unsigned ? (wide_integer_width == 32 ? S8("MOV") : S8("MOVZX"))
+                                                                    : (wide_integer_width == 32 ? S8("MOVSXD") : S8("MOVSX"));
+                                }
+                                wide_emitted = (!extend_mnemonic.length ||
+                                                codegen_canonical_x64_metadata_emit(&buffer, extend_mnemonic, extend_operands,
+                                                                                    BUSTER_ARRAY_LENGTH(extend_operands))) &&
+                                               codegen_canonical_x64_emit_f80_from_integer(&buffer, wide_unsigned && wide_integer_width == 64,
+                                                                                           wide_scratch_displacement, result_displacement,
+                                                                                           &x87_stack_depth);
+                            }
+                            else if (wide_source_scalar && wide_integer_end &&
+                                     (conversion == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+                                      conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER))
+                            {
+                                // Narrower C destinations keep the eightbyte
+                                // conversion and let the frame store narrow,
+                                // exactly as the SSE path does; only an
+                                // unsigned eightbyte destination needs the
+                                // bias, because FISTP writes a signed image.
+                                bool wide_unsigned_64 = conversion == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER && wide_integer_width == 64;
+                                wide_emitted = wide_unsigned_64
+                                                   ? codegen_canonical_x64_emit_f80_to_unsigned_64(&buffer, wide_source_displacement,
+                                                                                                   wide_scratch_displacement, &x87_stack_depth)
+                                                   : codegen_canonical_x64_emit_f80_to_integer(&buffer, wide_source_displacement,
+                                                                                               wide_scratch_displacement, &x87_stack_depth);
+                                if (wide_emitted)
+                                {
+                                    c_x64_store_result(&emitter, result_displacement);
+                                    wide_emitted = buffer.error == CODEGEN_ERROR_NONE;
+                                }
+                            }
+                            if (!wide_emitted)
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (source_contains_f80 || target_contains_f80)
                         {
                             if (conversion != IR_CONVERSION_IDENTITY || !source_contains_f80 || !target_contains_f80 ||
@@ -10370,6 +10852,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             c_x64_store_result(&emitter, result_displacement);
                             instruction_id = instruction->next;
                             continue;
+                        }
+                        else if (conversion == IR_CONVERSION_IDENTITY && source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_FLOAT &&
+                                 source_type->bit_width == target_type->bit_width &&
+                                 (source_type->bit_width == 32 || source_type->bit_width == 64))
+                        {
+                            // Two float types with the same representation but
+                            // different identity -- `double` assigned to a
+                            // `volatile double`, which the frontend spells as
+                            // an identity cast because the qualified type is
+                            // its own IrType.  The eightbyte the load above
+                            // already placed in RAX is the whole answer.
                         }
                         else
                         {
@@ -12573,6 +13066,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_UNARY)
                     {
                         IrType* canonical_unary_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        // Negation is the one unary row the x87 vocabulary
+                        // answers: FCHS toggles the sign of the loaded value.
+                        bool wide_float_negate = canonical_function_has_f80 && instruction->operand_count == 1 &&
+                                                 instruction->unary_operation == IR_UNARY_FLOAT_NEGATE &&
+                                                 codegen_canonical_x64_type_is_f80(canonical_unary_type) &&
+                                                 codegen_canonical_x64_type_is_f80(
+                                                     ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type));
+                        if (wide_float_negate)
+                        {
+                            if (!codegen_canonical_x64_emit_f80_negate(&buffer, c_x64_value_displacement(&emitter, instruction->operands[0]),
+                                                                       result_displacement, &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type) ||
                             (instruction->operand_count &&
                              codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[0].value].canonical_type)))
@@ -12769,9 +13280,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         IrTypeId operand_type = function->values[instruction->operands[0].value].canonical_type;
                         IrType* operand_type_value = ir_type_from_id(&program->types, operand_type);
-                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, operand_type) ||
-                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[1].value].canonical_type) ||
-                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        IrTypeId right_operand_type = function->values[instruction->operands[1].value].canonical_type;
+                        // Scalar f80 arithmetic and comparison run on the x87
+                        // stack below.  Every other f80 shape reaching a
+                        // binary row -- an aggregate wrapper, a mixed pair --
+                        // still has no lowering.
+                        bool wide_float_binary = canonical_function_has_f80 && codegen_canonical_x64_type_is_f80(operand_type_value) &&
+                                                 codegen_canonical_x64_type_is_f80(ir_type_from_id(&program->types, right_operand_type));
+                        if (!wide_float_binary &&
+                            (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, operand_type) ||
+                             codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, right_operand_type) ||
+                             codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type)))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
@@ -12793,16 +13312,46 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_FLOAT)
                         {
                             u32 width = operand_type_value->bit_width;
-                            if (width != 32 && width != 64)
+                            if (width != 32 && width != 64 && !wide_float_binary)
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            c_x64_load_float(&emitter, 0, instruction->operands[0], width);
-                            c_x64_load_float(&emitter, 1, instruction->operands[1], width);
                             IrBinaryOperation operation = instruction->binary_operation;
+                            bool float_arithmetic = operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE;
+                            if (wide_float_binary)
+                            {
+                                // The x87 sequence addresses its operands in
+                                // the frame, so nothing is loaded into a
+                                // register ahead of it.
+                                s32 left_displacement = c_x64_value_displacement(&emitter, instruction->operands[0]);
+                                s32 right_displacement = c_x64_value_displacement(&emitter, instruction->operands[1]);
+                                bool wide_emitted =
+                                    float_arithmetic ? codegen_canonical_x64_emit_f80_binary(&buffer, operation, left_displacement,
+                                                                                             right_displacement, result_displacement, &x87_stack_depth)
+                                                     : codegen_canonical_x64_emit_f80_compare(&buffer, left_displacement, right_displacement,
+                                                                                              &x87_stack_depth);
+                                if (!wide_emitted)
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                if (float_arithmetic)
+                                {
+                                    // The x87 store already wrote the result
+                                    // slot; a comparison continues into the
+                                    // shared SETcc tail below.
+                                    instruction_id = instruction->next;
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                c_x64_load_float(&emitter, 0, instruction->operands[0], width);
+                                c_x64_load_float(&emitter, 1, instruction->operands[1], width);
+                            }
                             String8 feature_names[] = {S8("sse"), S8("sse2")};
-                            if (operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE)
+                            if (float_arithmetic)
                             {
                                 String8 mnemonic = operation == IR_BINARY_FLOAT_ADD        ? (width == 32 ? S8("ADDSS") : S8("ADDSD"))
                                                    : operation == IR_BINARY_FLOAT_SUBTRACT   ? (width == 32 ? S8("SUBSS") : S8("SUBSD"))
@@ -12834,12 +13383,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
+                                // FUCOMIP already left the flags in the same
+                                // ZF/PF/CF encoding for the wide case.
                                 String8 compare_mnemonic = width == 32 ? S8("UCOMISS") : S8("UCOMISD");
                                 BusterX86MetadataPhysicalOperand compare_operands[2] = {
                                     codegen_canonical_x64_metadata_vector(0, (u16)width),
                                     codegen_canonical_x64_metadata_vector(1, (u16)width),
                                 };
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                if (!wide_float_binary &&
+                                    !codegen_canonical_x64_metadata_emit_features(
                                         &buffer, compare_mnemonic, compare_operands, BUSTER_ARRAY_LENGTH(compare_operands),
                                         (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
                                 {

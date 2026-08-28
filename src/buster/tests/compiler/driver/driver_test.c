@@ -5159,6 +5159,79 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
+    // image's entry point must go through libc rather than the raw exit
+    // syscall: the syscall skips stdio flushing and every atexit handler, and
+    // a program that only printed and returned produced nothing at all.  This
+    // one has to be spawned with stdout captured -- a pipe, so the stream is
+    // fully buffered and the flush is the only thing that can produce the
+    // bytes -- which is why it is not in the exit-status table above.
+    String8 main_return_flush_expected = S8("buffered stdout survives returning from main\nand so does a second buffered write\n");
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        String8 flush_path = buster_test_temporary_path(arguments->arena, S8("buster-c-main-return-flush"), S8(""));
+        String8 flush_command_line[] = {
+            c_lz4_regression_allocators[allocator_index], S8("-o"), flush_path, S8("tests/basic_c_main_return_flush.c"),
+        };
+        CompilerDriverResult flush = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flush_command_line)));
+        BUSTER_TEST(arguments, flush.error == COMPILER_DRIVER_ERROR_NONE);
+        if (flush.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 flush_arguments[] = {flush_path};
+            ProcessSpawnResult flush_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(flush_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true});
+            BUSTER_TEST(arguments, flush_spawn.handle != 0);
+            if (flush_spawn.handle)
+            {
+                ProcessWaitResult flush_wait = os_process_wait_sync(arguments->arena, flush_spawn);
+                String8 flush_output = (String8){
+                    .pointer = (char8*)flush_wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                    .length = flush_wait.streams[STANDARD_STREAM_OUTPUT].length,
+                };
+                BUSTER_TEST(arguments, flush_wait.result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, string_equal(flush_output, main_return_flush_expected));
+            }
+        }
+    }
+    // 80-bit x87 `long double` arithmetic: the conversions, the comparisons,
+    // the four operators, and the variadic `%.2Lf` call LZ4IO_toHuman needs.
+    // Every check inside the fixture is one a 53-bit significand would fail,
+    // so a lowering that quietly computed in double does not pass it.  Run it
+    // under every allocator even though only the canonical emitter has the
+    // x87 vocabulary: what the other three are being checked for is that a
+    // function carrying an f80 falls back to it rather than being selected.
+    // The fixture compiles to an empty program wherever `long double` is not
+    // the x87 format, so it stays registered on every host.
+    String8 c_long_double_allocators[] = {
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
+    {
+        String8 long_double_path = buster_test_temporary_path(arguments->arena, S8("buster-c-long-double-arithmetic"), S8(""));
+        String8 long_double_command_line[] = {
+            c_long_double_allocators[allocator_index], S8("-o"), long_double_path, S8("tests/basic_c_long_double_arithmetic.c"),
+        };
+        CompilerDriverResult long_double = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(long_double_command_line)));
+        BUSTER_TEST(arguments, long_double.error == COMPILER_DRIVER_ERROR_NONE);
+        if (long_double.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 long_double_arguments[] = {long_double_path};
+            ProcessSpawnResult long_double_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(long_double_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, long_double_spawn.handle != 0);
+            if (long_double_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, long_double_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     // A loop body that allocates nothing must carry no stack checkpoint at
     // all: the restore is what read a stale frame slot into RSP, and its
     // absence is the property the runtime fixture above cannot observe on a

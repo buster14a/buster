@@ -11,6 +11,17 @@
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing.
+//
+// One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
+// makes a return from `main` equivalent to calling `exit` with that value, so
+// a **hosted** stub calls the C runtime's `exit` and lets it terminate the
+// process. Ending in a raw exit syscall (Linux) or ExitProcess (Windows)
+// skips stdio flushing and every atexit handler, which silently discards
+// what a program printed and returned on. The raw syscall stays as the
+// **freestanding** shape, where there is no `exit` to call: the static ELF
+// writers, which are chosen exactly when nothing is undefined. Mach-O
+// synthesizes no stub at all — LC_MAIN hands the entry point to dyld, which
+// already calls `exit` with what it returns.
 
 #include <buster/lib/compiler/link/link.h>
 
@@ -296,7 +307,28 @@ BUSTER_GLOBAL_LOCAL bool link_x86_emit_push_imm32(LinkX86InstructionBuilder* bui
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_count, u32* call_displacement_offset)
+// The two shapes link_x86_build_elf_entry_stub emits.  Both sizes are named
+// because the AArch64 dynamic writer overlays its own stub on the image the
+// x86-64 dynamic writer produced and has to reproduce that layout's section
+// offsets exactly; the builder validates its own output against them.
+enum
+{
+    LINK_ELF_HOSTED_ENTRY_STUB_SIZE = 33,
+    LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
+};
+
+// C 5.1.2.2.3 makes a return from `main` equivalent to calling `exit` with
+// that value, so the entry stub of a hosted link must end in libc's `exit`
+// (`hosted` true) and never in the raw exit_group syscall: the syscall
+// terminates the process without flushing stdio and without running one
+// atexit/__cxa_atexit handler, which silently discards everything a program
+// printed and returned on.  The syscall shape stays for the freestanding link
+// (`hosted` false) — a -nostdlib image has no `exit` to call and must still
+// terminate with main's status.  `exit_displacement_offset` receives the
+// hosted shape's second rel32 field for the caller to patch, exactly like the
+// call to main; it is untouched in the freestanding shape.
+BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_count, u32* call_displacement_offset, bool hosted,
+                                                       u32* exit_displacement_offset)
 {
     LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
     BusterX86MetadataPhysicalOperand operands[2] = {0};
@@ -321,12 +353,25 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_c
     operands[0] = link_x86_register(7, 32);
     operands[1] = link_x86_register(0, 32);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
-    operands[0] = link_x86_register(0, 32);
-    operands[1] = link_x86_immediate(60, 32);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
-    if (!link_x86_emit_zero(&builder, S8("SYSCALL")) || !link_x86_emit_zero(&builder, S8("HLT"))) return false;
+    u32 expected_size = LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE;
+    if (hosted)
+    {
+        if (exit_displacement_offset) *exit_displacement_offset = builder.count + 1;
+        operands[0] = link_x86_relative(0, 32);
+        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+        expected_size = LINK_ELF_HOSTED_ENTRY_STUB_SIZE;
+    }
+    else
+    {
+        operands[0] = link_x86_register(0, 32);
+        operands[1] = link_x86_immediate(60, 32);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        if (!link_x86_emit_zero(&builder, S8("SYSCALL"))) return false;
+    }
+    // Neither `exit` nor exit_group returns; the trap catches a libc that did.
+    if (!link_x86_emit_zero(&builder, S8("HLT"))) return false;
     if (byte_count) *byte_count = builder.count;
-    return builder.count == 35;
+    return builder.count == expected_size;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8 bytes[64], u32* byte_count)
@@ -1884,7 +1929,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     buster_x86_metadata_prewarm();
-    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset))
+    // No libc in this image: every symbol is defined here, so the freestanding
+    // syscall shape is the only way to terminate (see
+    // link_x86_build_elf_entry_stub).
+    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset, false, 0))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -2105,6 +2153,48 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     return result;
 }
 
+// Both ELF dynamic writers name libc first in DT_NEEDED, so `exit` is always
+// resolvable through the PLT there.  Hand back the program with a synthetic
+// undefined `exit` appended when it has no symbol of that name, so the hosted
+// entry stub has something to call (C 5.1.2.2.3; see
+// link_x86_build_elf_entry_stub).  A program that defines its own `exit`
+// keeps it and the stub calls that definition directly.  The AArch64 writer
+// must run this before handing the object to the x86-64 writer, because it
+// re-derives the same import numbering from the same symbol table afterwards
+// and the two would otherwise disagree by one import.
+BUSTER_GLOBAL_LOCAL bool link_elf_hosted_exit_symbol(Arena* arena, ObjectFile* object, ObjectFile* hosted_out, u32* exit_symbol_index_out)
+{
+    bool valid = true;
+    *hosted_out = *object;
+    u32 exit_symbol_index = link_symbol_find(object, S8("exit"));
+    if (exit_symbol_index == UINT32_MAX)
+    {
+        if (object->symbol_count == UINT32_MAX)
+        {
+            valid = false;
+        }
+        else
+        {
+            ObjectSymbol* hosted_symbols = arena_allocate(arena, ObjectSymbol, (u64)object->symbol_count + 1);
+            if (object->symbol_count)
+            {
+                memcpy(hosted_symbols, object->symbols, sizeof(*hosted_symbols) * object->symbol_count);
+            }
+            hosted_symbols[object->symbol_count] = (ObjectSymbol){
+                .name = S8("exit"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            exit_symbol_index = object->symbol_count;
+            hosted_out->symbols = hosted_symbols;
+            hosted_out->symbol_count = object->symbol_count + 1;
+        }
+    }
+    *exit_symbol_index_out = exit_symbol_index;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options)
 {
@@ -2116,6 +2206,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u8 entry_stub[64] = {0};
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
+    u32 entry_exit_displacement_offset = 0;
     static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
     static char8 const library_name[] = "libc.so.6";
     if ((options.dynamic_library_count && !options.dynamic_libraries) || object->section_count < OBJECT_SECTION_COUNT || !object->sections ||
@@ -2125,11 +2216,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     buster_x86_metadata_prewarm();
-    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset))
+    // Whether this image needs the dynamic shape at all is decided on the
+    // program as given, before the synthetic `exit` import below could make
+    // every image look like it has one.
+    bool has_thread_local_data =
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
+    bool has_undefined_symbol = false;
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        has_undefined_symbol = has_undefined_symbol || object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED;
+    }
+    if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count)
+    {
+        return link_native_executable_elf64_x86_64(arena, object, options);
+    }
+    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset, true, &entry_exit_displacement_offset))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
+    ObjectFile hosted_object = {0};
+    u32 exit_symbol_index = 0;
+    if (!link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    object = &hosted_object;
     u32 import_count = 0;
     u64 imported_name_size = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -2155,12 +2268,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         import_kinds[import_count] = symbol->kind;
         imported_name_size += symbol->name.length + 1;
         import_count += 1;
-    }
-    bool has_thread_local_data =
-        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length != 0 || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size != 0;
-    if (!import_count && !has_thread_local_data && !options.dynamic_library_count)
-    {
-        return link_native_executable_elf64_x86_64(arena, object, options);
     }
     // Direct references to imported data (for example libc's stdin/stdout/
     // stderr variables) use copy relocations.  Reserve one pointer-sized
@@ -2417,6 +2524,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     link_write_u32(bytes, call_displacement_offset, (u32)(s32)call_displacement);
+    // The stub's second call: `exit` through its PLT entry when it is
+    // imported, or straight to the program's own definition when it has one.
+    ObjectSymbol* exit_symbol = &object->symbols[exit_symbol_index];
+    u64 exit_address = 0;
+    if (exit_symbol->section == OBJECT_SECTION_UNDEFINED)
+    {
+        u32 exit_import_index = import_indices[exit_symbol_index];
+        if (exit_import_index == UINT32_MAX)
+        {
+            result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result.symbol = exit_symbol->name;
+            return result;
+        }
+        exit_address = plt_address + ((u64)exit_import_index + 1) * ELF_PLT_ENTRY_SIZE;
+    }
+    else
+    {
+        exit_address = image_base + section_offsets[exit_symbol->section] + exit_symbol->value;
+    }
+    u64 exit_displacement_offset = entry_stub_offset + entry_exit_displacement_offset;
+    s64 exit_displacement = (s64)exit_address - (s64)(image_base + exit_displacement_offset + 4);
+    if (exit_displacement < INT32_MIN || exit_displacement > INT32_MAX)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
+    link_write_u32(bytes, exit_displacement_offset, (u32)(s32)exit_displacement);
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -2944,11 +3078,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     {
         ELF_DYNAMIC_COUNT = 12,
     };
+    // ldr x0,[sp] / add x1,sp,#8 / add x2,x1,x0,lsl #3 / add x2,x2,#8 —
+    // argc, argv and envp — then `bl main`, `bl exit` and a trap.  The hosted
+    // shape calls libc's exit for the reason link_x86_build_elf_entry_stub
+    // states; the freestanding writer above keeps `mov x8,#93 / svc #0`.
+    // main's status is already in w0 where exit wants it.
     static u32 const entry_stub[] = {
-        0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0xd2800ba8, 0xd4000001, 0xd4200000,
+        0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0x94000000, 0xd4200000,
     };
     static char8 const interpreter[] = "/lib/ld-linux-aarch64.so.1";
     NativeExecutableLinkResult result = {0};
+    ObjectFile hosted_object = {0};
+    u32 exit_symbol_index = 0;
+    if (!link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    object = &hosted_object;
     ObjectRelocation* converted_relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
@@ -2983,7 +3130,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 entry_stub_offset = align_forward(header_end, 16);
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
-    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + 35, object->sections[OBJECT_SECTION_TEXT].alignment);
+    // The layout below has to be the one the x86-64 dynamic writer produced,
+    // so the stub slot is that writer's hosted stub size, not this stub's.
+    section_offsets[OBJECT_SECTION_TEXT] =
+        align_forward(entry_stub_offset + LINK_ELF_HOSTED_ENTRY_STUB_SIZE, object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 import_count = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -2997,6 +3147,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     }
     u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
     memset(bytes + plt_offset, 0, plt_size);
+    // Clear the whole slot: this stub is shorter than the x86-64 one it
+    // replaces, and leaving that tail behind would put x86 bytes past the
+    // trap.
+    memset(bytes + entry_stub_offset, 0, LINK_ELF_HOSTED_ENTRY_STUB_SIZE);
     memcpy(bytes + entry_stub_offset, entry_stub, sizeof(entry_stub));
     memcpy(bytes + link_read_u64(bytes, ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE + 8), interpreter, sizeof(interpreter));
     link_write_u16(bytes, 18, 183);
@@ -3062,6 +3216,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     link_write_u32(bytes, call_offset, call_instruction);
+    // The stub's second BL: `exit` through its PLT thunk when imported, or the
+    // program's own definition when it has one.
+    ObjectSymbol* exit_symbol = &object->symbols[exit_symbol_index];
+    u64 exit_address = 0;
+    if (exit_symbol->section == OBJECT_SECTION_UNDEFINED)
+    {
+        u32 exit_import_index = import_indices[exit_symbol_index];
+        if (exit_import_index == UINT32_MAX)
+        {
+            result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result.symbol = exit_symbol->name;
+            return result;
+        }
+        exit_address = image_base + plt_offset + ((u64)exit_import_index + 1) * ELF_PLT_ENTRY_SIZE;
+    }
+    else
+    {
+        exit_address = image_base + section_offsets[exit_symbol->section] + exit_symbol->value;
+    }
+    u64 exit_call_offset = entry_stub_offset + 5 * sizeof(u32);
+    u32 exit_instruction = 0;
+    if (!link_aarch64_branch_encode(A64_OPCODE_BL, (s64)exit_address - (s64)(image_base + exit_call_offset), &exit_instruction))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
+    link_write_u32(bytes, exit_call_offset, exit_instruction);
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -3284,8 +3465,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         0xa9bf7bfd, 0x910003fd, 0x94000000, 0x94000000, 0xd4200000,
     };
     static char8 const runtime_library[] = "ucrtbase.dll";
-    static char8 const kernel_library[] = "kernel32.dll";
-    static char8 const exit_name[] = "ExitProcess";
+    // The entry stub terminates through the C runtime's `exit`, not through
+    // kernel32's ExitProcess, because C 5.1.2.2.3 makes a return from `main`
+    // equivalent to calling `exit`: ExitProcess ends the process without
+    // flushing a single CRT stream or running one atexit/`_onexit` handler,
+    // so everything a program printed and returned on is discarded.  This is
+    // a second import descriptor naming the same DLL as `runtime_library`
+    // rather than a fourth entry in `startup_names`, because the terminating
+    // import is the one the AArch64 stub also uses and that path builds no
+    // startup imports at all; the layout below is shared by both.
+    static char8 const terminate_library[] = "ucrtbase.dll";
+    static char8 const exit_name[] = "exit";
     static String8 const startup_names[] = {
         S8_INITIALIZER("_configure_narrow_argv"),
         S8_INITIALIZER("__p___argc"),
@@ -3777,20 +3967,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     {
         runtime_address_offset = runtime_lookup_offset + (u64)total_import_slots * sizeof(u64);
     }
-    u64 kernel_lookup_offset = 0;
+    u64 terminate_lookup_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        kernel_lookup_offset = runtime_address_offset + (u64)total_import_slots * sizeof(u64);
+        terminate_lookup_offset = runtime_address_offset + (u64)total_import_slots * sizeof(u64);
     }
-    u64 kernel_address_offset = 0;
+    u64 terminate_address_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        kernel_address_offset = kernel_lookup_offset + 2 * sizeof(u64);
+        terminate_address_offset = terminate_lookup_offset + 2 * sizeof(u64);
     }
     u64 import_name_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        import_name_offset = kernel_address_offset + 2 * sizeof(u64);
+        import_name_offset = terminate_address_offset + 2 * sizeof(u64);
     }
     u64*library_name_offsets = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -3817,15 +4007,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
         }
     }
-    u64 kernel_library_offset = 0;
+    u64 terminate_library_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        kernel_library_offset = library_name_cursor;
+        terminate_library_offset = library_name_cursor;
     }
     u64 exit_import_name_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        exit_import_name_offset = align_forward(kernel_library_offset + sizeof(kernel_library), 2);
+        exit_import_name_offset = align_forward(terminate_library_offset + sizeof(terminate_library), 2);
     }
     u64 import_virtual_size = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -4048,15 +4238,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             memcpy(bytes + import_section_raw + library_name_offsets[library_index + 1], library.pointer, library.length);
             bytes[import_section_raw + library_name_offsets[library_index + 1] + library.length] = 0;
         }
-        memcpy(bytes + import_section_raw + kernel_library_offset, kernel_library, sizeof(kernel_library));
+        memcpy(bytes + import_section_raw + terminate_library_offset, terminate_library, sizeof(terminate_library));
         memcpy(bytes + import_section_raw + exit_import_name_offset + 2, exit_name, sizeof(exit_name));
     }
     u32 exit_name_rva = 0;
     if (result.error == LINK_ERROR_NONE)
     {
         exit_name_rva = import_section_rva + (u32)exit_import_name_offset;
-        link_write_u64(bytes, import_section_raw + kernel_lookup_offset, exit_name_rva);
-        link_write_u64(bytes, import_section_raw + kernel_address_offset, exit_name_rva);
+        link_write_u64(bytes, import_section_raw + terminate_lookup_offset, exit_name_rva);
+        link_write_u64(bytes, import_section_raw + terminate_address_offset, exit_name_rva);
     }
     u64 descriptor = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -4073,9 +4263,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             link_write_u32(bytes, descriptor + 16, import_section_rva + (u32)runtime_address_offset + (u32)(group_slot_offsets[group] * sizeof(u64)));
             descriptor += PE_IMPORT_DESCRIPTOR_SIZE;
         }
-        link_write_u32(bytes, descriptor, import_section_rva + (u32)kernel_lookup_offset);
-        link_write_u32(bytes, descriptor + 12, import_section_rva + (u32)kernel_library_offset);
-        link_write_u32(bytes, descriptor + 16, import_section_rva + (u32)kernel_address_offset);
+        link_write_u32(bytes, descriptor, import_section_rva + (u32)terminate_lookup_offset);
+        link_write_u32(bytes, descriptor + 12, import_section_rva + (u32)terminate_library_offset);
+        link_write_u32(bytes, descriptor + 16, import_section_rva + (u32)terminate_address_offset);
     }
     u64 entry_rva = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -4095,7 +4285,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64 exit_iat_rva = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        exit_iat_rva = import_section_rva + kernel_address_offset;
+        exit_iat_rva = import_section_rva + terminate_address_offset;
         if (!aarch64)
         {
             u64 configure_argv_iat_rva = import_section_rva + runtime_address_offset + (u64)startup_import_slots[0] * sizeof(u64);
@@ -4593,7 +4783,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             link_write_u32(bytes, optional + 184, import_section_rva + (u32)tls_directory_offset);
             link_write_u32(bytes, optional + 188, 40);
         }
-        link_write_u32(bytes, optional + 208, import_section_rva + (u32)(total_import_slots ? runtime_address_offset : kernel_address_offset));
+        link_write_u32(bytes, optional + 208, import_section_rva + (u32)(total_import_slots ? runtime_address_offset : terminate_address_offset));
         link_write_u32(bytes, optional + 212, (u32)(total_import_slots ? ((u64)total_import_slots + 4) * sizeof(u64) : 2 * sizeof(u64)));
         if (emit_debug)
         {

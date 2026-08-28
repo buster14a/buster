@@ -9418,7 +9418,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 3 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 1 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -9437,7 +9437,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 {
                     continue;
                 }
-                bool expected_rejected = f80_sysv ? (function_index == 2 || function_index == 5 || function_index == 6) : wide_long_double;
+                // System V passes a variadic wide float exactly as it passes a
+                // fixed one, in a sixteen-byte overflow slot, and the
+                // single-member wrapper classifies identically, so both
+                // variadic calls lower.  The union is the one shape here
+                // whose ABI class is not the x87 pair.
+                bool expected_rejected = f80_sysv ? function_index == 2 : wide_long_double;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
                 if (expected_rejected)
                 {
@@ -9456,7 +9461,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 BUSTER_TEST(arguments, function != 0);
                 BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_DECLARATION);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 3 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 1 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);
@@ -9820,17 +9825,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
         S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
         S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
-        S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
-        S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
-        S8("long double cast_local(void) { return (long double)1; } int main(void) { return 0; }"),
-        S8("long double cast_from_double(double value) { return (long double)value; } int main(void) { return 0; }"),
         S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
         S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
-        S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
         S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
         S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
         S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
@@ -9866,6 +9866,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             if (lowered.diagnostic_count == 1)
             {
                 BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            }
+            scratch_end(temporary);
+        }
+        // The x87 vocabulary answers for these, so they must lower rather
+        // than diagnose: negation, truth conversion, the conversions to and
+        // from a wide float, and a wide float passed through a variadic call.
+        // They are checked here, beside the shapes that still refuse, so the
+        // boundary between the two stays one list to read.
+        String8 accepted[] = {
+            S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
+            S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
+            S8("long double cast_local(void) { return (long double)1; } int main(void) { return 0; }"),
+            S8("long double cast_from_double(double value) { return (long double)value; } int main(void) { return 0; }"),
+            S8("unsigned long long cast_to_unsigned(long double value) { return (unsigned long long)value; } int main(void) { return 0; }"),
+            S8("long double add(long double left, long double right) { return left + right; } int main(void) { return 0; }"),
+            S8("int compare(long double left, long double right) { return left < right; } int main(void) { return 0; }"),
+            S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(accepted); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, accepted[source_index], target_triples[target_index],
+                                                         parsed_target.target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.program != 0);
+            if (lowered.program)
+            {
+                BUSTER_TEST(arguments, lowered.program->modules->rejected_function_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
             }
             scratch_end(temporary);
         }

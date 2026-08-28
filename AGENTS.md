@@ -1269,6 +1269,29 @@ a date is a trap. Issues #537-#549 are the current examples of the form.
   objects/archives where the selected action permits them. Unknown languages,
   retired module-root options, and unsupported source extensions must fail
   explicitly rather than being forwarded or guessed.
+- **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
+  Transport, the four arithmetic operators, negation, the six comparisons,
+  truth conversion, and the conversions to and from the narrower floats and
+  every integer width all lower, and a variadic argument takes the sixteen-
+  byte, sixteen-aligned overflow slot the ABI requires. Every one of those is
+  a *closed* x87 transaction: it loads its operands from frame slots, operates,
+  stores the result back, and leaves the x87 stack as empty as it found it, so
+  no value is ever live in an ST register across a machine instruction and the
+  register allocators need no x87 class. Machine selection therefore refuses an
+  f80 function outright and it falls back per function to the canonical
+  emitter, which is where the whole vocabulary lives
+  (`codegen_canonical_x64_emit_f80_*` in `codegen.c`). Do not touch the x87
+  control word outside `codegen_canonical_x64_x87_truncate_begin/end`: its
+  default extended precision is exactly what `long double` wants, and only a
+  float-to-integer conversion may switch the rounding field, for one store.
+  Still refused with a source diagnostic: `va_arg` of a wide float, a fixed
+  wide-float parameter of a variadic *definition* (the SysV `va_start`
+  register-save area does not account for it), any aggregate whose wide-float
+  payload is not the ABI-proven single-f80 shape, and every wide float on a
+  target whose `long double` is not this format. Refused later, by codegen's
+  own `CODEGEN_ERROR_UNSUPPORTED_ABI` rather than a diagnostic, is an object
+  of more than one `long double` — `long double v[2]`, local or global —
+  because its slot is not the sixteen-byte x87 shape the value paths read.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.

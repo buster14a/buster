@@ -3728,8 +3728,19 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
                                           source_value->layout.size == target_value->layout.size;
     if (c_ir_target_supports_f80(builder->target) && (source_wide_float || target_wide_float) && !same_wide_float_representation)
     {
-        builder->failure_message = S8("C IR lowering does not yet support wide floating-point conversions");
-        return IR_VALUE_ID_INVALID;
+        // The x87 backend converts an f80 to and from the narrower floats and
+        // the integers.  A wide end paired with anything else -- a pointer, an
+        // aggregate, a vector -- has no x87 sequence and stays refused, and so
+        // does a pair of differently sized wide floats.
+        IrType* narrow_value = source_wide_float ? target_value : source_value;
+        bool wide_float_convertible = source_wide_float != target_wide_float &&
+                                      (narrow_value->kind == IR_TYPE_FLOAT || narrow_value->kind == IR_TYPE_INTEGER ||
+                                       narrow_value->kind == IR_TYPE_BOOLEAN);
+        if (!wide_float_convertible)
+        {
+            builder->failure_message = S8("C IR lowering does not yet support wide floating-point conversions");
+            return IR_VALUE_ID_INVALID;
+        }
     }
     if (c_ir_value_contains_label_provenance(builder, value))
     {
@@ -12624,9 +12635,16 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
+            // System V passes a variadic long double the same way it passes a
+            // fixed one -- a sixteen-byte, sixteen-aligned memory slot in the
+            // overflow area, never a register -- so the ABI-proven x87 shape
+            // needs nothing extra here.  Every other wide-float shape still
+            // has no argument lowering.
             if (argument_count >= signature.parameter_count &&
                 c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache,
-                                              builder->function->values[value.value].canonical_type))
+                                              builder->function->values[value.value].canonical_type) &&
+                !c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache,
+                                            builder->function->values[value.value].canonical_type, builder->target))
             {
                 c_ir_report_unsupported_signature(builder, selected->indirect ? S8("<function pointer>")
                                                                                  : c_token_spelling(builder->preprocess.spelling_base, token));
@@ -13822,9 +13840,9 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
     if (operation_type_value->kind == IR_TYPE_FLOAT && operation_type_value->bit_width > 64)
     {
         // A source-level negative literal is a constant spelling, not a
-        // request for runtime x87 arithmetic.  Fold only a direct f80
-        // constant by toggling its sign/exponent immediate; every variable
-        // negation and every binary/comparison operation remains rejected.
+        // request for runtime x87 arithmetic.  Fold a direct f80 constant by
+        // toggling its sign/exponent immediate rather than emitting FCHS
+        // against it.
         if (unary == IR_UNARY_INTEGER_NEGATE && operand_count == 1)
         {
             IrValueId operand = values[first];
@@ -13848,8 +13866,13 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 }
             }
         }
-        builder->failure_message = S8("C IR lowering does not yet support wide floating-point arithmetic");
-        return false;
+        // Only the x87 target has a wide-float arithmetic vocabulary; a wide
+        // long double elsewhere still has no lowering.
+        if (!c_ir_target_supports_f80(builder->target))
+        {
+            builder->failure_message = S8("C IR lowering does not yet support wide floating-point arithmetic");
+            return false;
+        }
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, operand_count);
     for (u32 index = 0; index < operand_count; index += 1)
@@ -14935,6 +14958,8 @@ BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builde
     return false;
 }
 
+BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
+
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -15014,6 +15039,36 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         u32 next_index = frame->as.nested_compound_literal.state->next_index;
         u32 item_start = frame->as.nested_compound_literal.state->item_start;
         u32 index = frame->as.nested_compound_literal.state->index;
+        // A brace-wrapped string initializer fills the whole character array
+        // subobject -- `struct { char n[4]; int v; } t = { {"zw"}, 9 }`.  The
+        // item walk below would otherwise take the literal as element zero
+        // and store the decayed pointer's first byte there.  Only a task that
+        // has not consumed an item yet can be the whole-string form.
+        if (type->kind == IR_TYPE_ARRAY && index == task.open + 1)
+        {
+            u32 string_end = task.close;
+            if (string_end > index && c_token_is_punctuator(&builder->preprocess.tokens[string_end - 1], C_PUNCTUATOR_COMMA))
+            {
+                string_end -= 1;
+            }
+            CIrDecodedString decoded = {0};
+            IrType* string_element = ir_type_from_id(&builder->program->types, type->element_type);
+            if (index < string_end && c_ir_tokens_are_string_literals(builder->preprocess, index, string_end) && string_element &&
+                string_element->layout.resolved &&
+                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, string_end, &decoded) &&
+                c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+            {
+                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, string_end, task.type);
+                if (string_value.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_emit_store_place(builder, task.place, task.type, string_value,
+                                           c_ir_token_source_range(builder, builder->preprocess.tokens[index])))
+                {
+                    goto c_ir_nested_compound_failed;
+                }
+                frame->as.nested_compound_literal.state->task_active = false;
+                continue;
+            }
+        }
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
@@ -15387,6 +15442,32 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
         }
         IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
         frame->as.compound_literal_machine.source = source;
+        // C permits the string initializer of a character array to be wrapped
+        // in braces -- `const char units[] = {"\0KMGTPEZY"};` -- and that
+        // spelling initializes the whole array, not its first element.  The
+        // constant path already admits it (c_ir_constant_initializer_string_range);
+        // without this the slot machine would take the string as element zero
+        // and leave the rest of the array uninitialized.
+        if (type->kind == IR_TYPE_ARRAY)
+        {
+            u32 string_start = open + 1;
+            u32 string_end = close;
+            if (string_end > string_start && c_token_is_punctuator(&builder->preprocess.tokens[string_end - 1], C_PUNCTUATOR_COMMA))
+            {
+                string_end -= 1;
+            }
+            CIrDecodedString decoded = {0};
+            IrType* string_element = ir_type_from_id(&builder->program->types, type->element_type);
+            if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end) && string_element &&
+                string_element->layout.resolved &&
+                c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &decoded) &&
+                c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+            {
+                IrValueId value = c_ir_emit_string_range_typed(builder, string_start, string_end, type_id);
+                c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+                return;
+            }
+        }
         if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION)
         {
             if (open + 1 >= close)
@@ -18718,10 +18799,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
             return IR_VALUE_ID_INVALID;
         }
     }
-    // The accepted f80 subset is a byte-preserving transport type.  Truth
-    // conversion would require x87 comparison semantics, which the canonical
-    // backend deliberately does not provide.
-    if (type->kind == IR_TYPE_FLOAT && type->bit_width > 64)
+    // Truth conversion is a comparison against a zero of the same type, so it
+    // needs the x87 comparison the canonical backend provides only for f80.
+    // A wide long double on any other target still has none.
+    if (type->kind == IR_TYPE_FLOAT && type->bit_width > 64 && !c_ir_target_supports_f80(builder->target))
     {
         builder->failure_message = S8("C IR lowering does not yet support wide floating-point truth conversion");
         return IR_VALUE_ID_INVALID;
