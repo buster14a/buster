@@ -4917,6 +4917,32 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_zlib_regressions_spawn).result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The stb compatibility harness reduced three independent frontend
+    // failures to these small runtime shapes: address-of an array/aggregate
+    // PLACE, a postfix update through a parenthesized pointer-arithmetic
+    // index, and a comma expression retained inside a conditional arm.
+    String8 c_stb_regressions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-stb-regressions"), S8(""));
+    String8 c_stb_regressions_command_line[] = {
+        S8("-o"),
+        c_stb_regressions_path,
+        S8("tests/basic_c_stb_regressions.c"),
+    };
+    CompilerDriverResult c_stb_regressions = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_stb_regressions_command_line)));
+    BUSTER_TEST(arguments, c_stb_regressions.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_stb_regressions.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_stb_regressions_arguments[] = {c_stb_regressions_path};
+        ProcessSpawnResult c_stb_regressions_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_stb_regressions_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, c_stb_regressions_spawn.handle != 0);
+        if (c_stb_regressions_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_stb_regressions_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // Hosted math headers spell NAN and the classification helpers through
     // compiler builtins.  Keep the quiet-NaN value and finite isinf result
     // observable at runtime so these are not merely accepted identifiers.

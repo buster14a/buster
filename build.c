@@ -79,6 +79,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ZLIB,
     BUILD_COMMAND_TEST_LUA,
     BUILD_COMMAND_TEST_YYJSON,
+    BUILD_COMMAND_TEST_STB,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -614,6 +615,18 @@ struct TestYyjsonOptions
 
 #define YYJSON_COMPATIBILITY_TAG "0.12.0"
 #define YYJSON_COMPATIBILITY_COMMIT "8b4a38dc994a110abaec8a400615567bd996105f"
+
+// stb is consumed from a caller-provided pristine checkout.  Keep the exact
+// upstream revision here so compatibility results remain reproducible without
+// copying or patching third-party headers in this repository.
+typedef struct TestStbOptions TestStbOptions;
+struct TestStbOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define STB_COMPATIBILITY_COMMIT "2c980bb59875b0d32144a71867fbdebb2f77cd20"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -8726,6 +8739,545 @@ BUSTER_GLOBAL_LOCAL void test_cjson_action_add(Arena* arena, TestCjsonOptions op
     TestCjsonOptions* options_copy = arena_allocate(arena, TestCjsonOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_cjson_action, .callback_data = options_copy};
+}
+
+// --- stb compatibility harness -----------------------------------------
+// The stb workflow consumes an external pristine checkout.  Nothing from that
+// checkout is copied into the repository: generated wrappers, objects, source
+// metrics, synthetic-font output and logs all stay below build/stb-*.
+typedef struct StbCommandResult StbCommandResult;
+struct StbCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL StbCommandResult stb_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture)
+{
+    StbCommandResult result = {.result = PROCESS_RESULT_FAILED};
+    ProcessRun run = {
+        .arguments = arguments,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: stb harness could not start the command above\n"));
+    }
+    else
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arena, run.spawn);
+        result = (StbCommandResult){
+            .result = wait.result,
+            .output = {
+                .pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                .length = wait.streams[STANDARD_STREAM_OUTPUT].length,
+            },
+            .error = {
+                .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                .length = wait.streams[STANDARD_STREAM_ERROR].length,
+            },
+        };
+        if (result.result != PROCESS_RESULT_SUCCESS && result.error.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_git_verify(Arena* arena, String8 source_directory)
+{
+    bool result = false;
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_stb requires git in PATH\n"));
+    }
+    else
+    {
+        String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+        StbCommandResult head = stb_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true);
+        String8 commit = cjson_trim_ascii_space(head.output);
+        if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(STB_COMPATIBILITY_COMMIT)))
+        {
+            string_print(S8("error: test_stb requires pristine stb commit {S8}; found {S8}\n"), S8(STB_COMPATIBILITY_COMMIT), commit);
+        }
+        else
+        {
+            String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+            StbCommandResult status = stb_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true);
+            if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+            {
+                string_print(S8("error: test_stb checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+                if (status.output.length)
+                {
+                    os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+                }
+            }
+            else
+            {
+                string_print(S8("STB_SOURCE commit={S8} pristine=1 path={S8}\n"), commit, source_directory);
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
+typedef struct StbSourceMetrics StbSourceMetrics;
+struct StbSourceMetrics
+{
+    u64 unique_files;
+    u64 unique_bytes;
+    u64 lexed_files;
+    u64 lexed_bytes;
+    u64 preprocessed_tokens;
+    u64 preprocessed_spelling_bytes;
+};
+
+BUSTER_GLOBAL_LOCAL bool stb_source_metrics_read(Arena* arena, String8 path, StbSourceMetrics* metrics)
+{
+    bool result = false;
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    if (bytes.length)
+    {
+        String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+        String8 line = {0};
+        while (text_next_line(&text, &line))
+        {
+            String8 key = {0};
+            String8 value = {0};
+            if (text_split_field(line, &key, &value))
+            {
+                u64 parsed = 0;
+                if (text_parse_u64(value, &parsed))
+                {
+                    if (string_equal(key, S8("unique.files")))
+                    {
+                        metrics->unique_files = parsed;
+                    }
+                    else if (string_equal(key, S8("unique.bytes")))
+                    {
+                        metrics->unique_bytes = parsed;
+                    }
+                    else if (string_equal(key, S8("lexed.files")))
+                    {
+                        metrics->lexed_files = parsed;
+                    }
+                    else if (string_equal(key, S8("lexed.bytes")))
+                    {
+                        metrics->lexed_bytes = parsed;
+                    }
+                    else if (string_equal(key, S8("preprocessed.tokens")))
+                    {
+                        metrics->preprocessed_tokens = parsed;
+                    }
+                    else if (string_equal(key, S8("preprocessed.spelling_bytes")))
+                    {
+                        metrics->preprocessed_spelling_bytes = parsed;
+                    }
+                }
+            }
+        }
+        result = metrics->unique_files && metrics->unique_bytes && metrics->lexed_files && metrics->lexed_bytes && metrics->preprocessed_tokens &&
+                 metrics->preprocessed_spelling_bytes;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_metrics_report(Arena* arena, String8 mode, String8 unit, String8 path, u64 elapsed_us)
+{
+    bool result = false;
+    StbSourceMetrics metrics = {0};
+    if (stb_source_metrics_read(arena, path, &metrics))
+    {
+        u64 file_amplification = metrics.unique_files ? (metrics.lexed_files * 1000 + metrics.unique_files / 2) / metrics.unique_files : 0;
+        u64 byte_amplification = metrics.unique_bytes ? (metrics.lexed_bytes * 1000 + metrics.unique_bytes / 2) / metrics.unique_bytes : 0;
+        string_print(S8("STB_METRIC allocator={S8} unit={S8} elapsed_us={u64} unique_files={u64} unique_bytes={u64} lexed_files={u64} lexed_bytes={u64} "
+                        "include_amplification_files={u64}.{u64:width=[0,3]} include_amplification_bytes={u64}.{u64:width=[0,3]} "
+                        "preprocessed_tokens={u64} preprocessed_spelling_bytes={u64}\n"),
+                     mode, unit, elapsed_us, metrics.unique_files, metrics.unique_bytes, metrics.lexed_files, metrics.lexed_bytes, file_amplification / 1000,
+                     file_amplification % 1000, byte_amplification / 1000, byte_amplification % 1000, metrics.preprocessed_tokens,
+                     metrics.preprocessed_spelling_bytes);
+        result = true;
+    }
+    else
+    {
+        string_print(S8("warning: stb compiler metrics missing for allocator={S8} unit={S8}: {S8}\n"), mode, unit, path);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_compile_buster(Arena* arena, String8 ide, String8 source_directory, String8 source, String8 output, String8 metrics,
+                                             String8 mode, SliceString8 extra_arguments, u64* elapsed_us, bool verbose)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    String8 mode_flag = cjson_mode_flag(arena, mode);
+    String8 metric_flag = cjson_metric_flag(arena, metrics);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, ide);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-DSTBI_NO_SIMD"));
+    os_argument_builder_append(&builder, mode_flag);
+    os_argument_builder_append(&builder, metric_flag);
+    for (u64 index = 0; index < extra_arguments.length; index += 1)
+    {
+        os_argument_builder_append(&builder, extra_arguments.pointer[index]);
+    }
+    if (verbose)
+    {
+        os_argument_builder_append(&builder, S8("-v"));
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    u64 start = os_now_microseconds();
+    StbCommandResult command = stb_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    *elapsed_us = os_now_microseconds() - start;
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_compile_clang(Arena* arena, String8 clang, String8 source_directory, String8 source, String8 output, SliceString8 extra_arguments)
+{
+    String8 include_root = string_format(arena, S8("-I{S8}"), source_directory);
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-g0"));
+    os_argument_builder_append(&builder, include_root);
+    os_argument_builder_append(&builder, S8("-DSTBI_NO_SIMD"));
+    for (u64 index = 0; index < extra_arguments.length; index += 1)
+    {
+        os_argument_builder_append(&builder, extra_arguments.pointer[index]);
+    }
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, source);
+    StbCommandResult command = stb_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_link_clang(Arena* arena, String8 clang, String8 output, String8* objects, u64 object_count)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-no-pie"));
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, S8("-lm"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    StbCommandResult command = stb_command(arena, os_argument_builder_flush(&builder), S8("."), false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_run_binary(Arena* arena, String8 binary, String8 working_directory, String8* output)
+{
+    String8 arguments[] = {binary};
+    StbCommandResult command = stb_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true);
+    if (output)
+    {
+        *output = command.output;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_hash_file(Arena* arena, String8 path, u64* hash_out, u64* size_out)
+{
+    bool result = false;
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    if (bytes.length)
+    {
+        if (hash_out)
+        {
+            *hash_out = buster_hash_64(bytes.pointer, bytes.length);
+        }
+        if (size_out)
+        {
+            *size_out = bytes.length;
+        }
+        result = true;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_write_wrapper(String8 path, String8 header, String8 implementation)
+{
+    String8 source = string_format(program_state->arena, S8("#define {S8}\n#include \"{S8}\"\n"), implementation, header);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_write_ds_churn_wrapper(Arena* arena, String8 path, String8 test_source)
+{
+    String8 parts[] = {
+        S8("#include \""),
+        test_source,
+        S8("\"\n"
+           "int main(void)\n"
+           "{\n"
+           "    churn(0, 100, 1);\n"
+           "    churn(3, 7, 50000);\n"
+           "    churn(3, 15, 50000);\n"
+           "    churn(16, 48, 25000);\n"
+           "    churn(10, 15, 25000);\n"
+           "    churn(200, 500, 5000);\n"
+           "    churn(2000, 5000, 500);\n"
+           "    churn(20000, 50000, 50);\n"
+           "    return 0;\n"
+           "}\n"),
+    };
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+}
+
+BUSTER_GLOBAL_LOCAL bool stb_compare_upstream_outputs(Arena* arena, String8 left_directory, String8 right_directory)
+{
+    String8 names[] = {
+        S8("wr6x5_regular.png"), S8("wr6x5_regular.bmp"), S8("wr6x5_regular.tga"), S8("wr6x5_regular.jpg"), S8("wr6x5_regular.hdr"),
+        S8("wr6x5_flip.png"), S8("wr6x5_flip.bmp"), S8("wr6x5_flip.tga"), S8("wr6x5_flip.jpg"), S8("wr6x5_flip.hdr"),
+    };
+    bool result = true;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        String8 left = path_join(arena, left_directory, path_join(arena, S8("output"), names[index]));
+        String8 right = path_join(arena, right_directory, path_join(arena, S8("output"), names[index]));
+        u64 left_hash = 0;
+        u64 right_hash = 0;
+        u64 left_size = 0;
+        u64 right_size = 0;
+        bool present = stb_hash_file(arena, left, &left_hash, &left_size) && stb_hash_file(arena, right, &right_hash, &right_size);
+        bool equal = present && left_size == right_size && left_hash == right_hash;
+        result = result && equal;
+        string_print(S8("STB_IMAGE_WRITE_OUTPUT name={S8} bytes={u64} hash={u64:x} equal_clang={u32}\n"), names[index], left_size, left_hash, equal);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
+{
+    ProcessResult action_result = PROCESS_RESULT_FAILED;
+    TestStbOptions options = *(TestStbOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_stb requires an external nothings/stb checkout path\n"));
+        string_print(S8("usage: ./build/build test_stb [--config Debug|Release] /path/to/stb\n"));
+        goto stb_action_done;
+    }
+
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    String8 headers[] = {S8("stb_image.h"), S8("stb_image_write.h"), S8("stb_ds.h"), S8("stb_truetype.h")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(headers); index += 1)
+    {
+        if (!path_exists(arena, path_join(arena, source_directory, headers[index])))
+        {
+            string_print(S8("error: test_stb checkout is missing {S8}\n"), headers[index]);
+            goto stb_action_done;
+        }
+    }
+    String8 image_write_test_source = path_join(arena, source_directory, S8("tests/image_write_test.c"));
+    String8 ds_test_source = path_join(arena, source_directory, S8("tests/test_ds.c"));
+    if (!path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) || !stb_git_verify(arena, source_directory))
+    {
+        string_print(S8("error: test_stb checkout is missing applicable tests or is not pristine\n"));
+        goto stb_action_done;
+    }
+
+    String8 ide = cjson_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_stb requires a built ide executable and clang in PATH\n"));
+        goto stb_action_done;
+    }
+
+    String8 output_directory = string_format_z(arena, S8("build/stb-{u64}-{u64}"), buster_hash_64((u8*)STB_COMPATIBILITY_COMMIT, sizeof(STB_COMPATIBILITY_COMMIT) - 1),
+                                               os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
+    String8 wrappers_directory = path_join(arena, output_directory, S8("wrappers"));
+    make_directory_recursive(arena, metrics_directory);
+    make_directory_recursive(arena, wrappers_directory);
+    string_print(S8("STB_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+
+    String8 wrapper_names[] = {S8("stb_image_impl.c"), S8("stb_image_write_impl.c"), S8("stb_ds_impl.c"), S8("stb_truetype_impl.c")};
+    String8 wrapper_macros[] = {S8("STB_IMAGE_IMPLEMENTATION"), S8("STB_IMAGE_WRITE_IMPLEMENTATION"), S8("STB_DS_IMPLEMENTATION"),
+                                S8("STB_TRUETYPE_IMPLEMENTATION")};
+    String8 wrapper_clang_objects[BUSTER_ARRAY_LENGTH(headers)] = {0};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(headers); index += 1)
+    {
+        String8 wrapper_source = path_join(arena, wrappers_directory, wrapper_names[index]);
+        wrapper_clang_objects[index] = path_join(arena, output_directory, string_format(arena, S8("{S8}-clang.o"), wrapper_names[index]));
+        if (!stb_write_wrapper(wrapper_source, headers[index], wrapper_macros[index]))
+        {
+            string_print(S8("error: failed to write stb implementation wrapper {S8}\n"), wrapper_source);
+            goto stb_action_done;
+        }
+        if (!stb_compile_clang(arena, clang, source_directory, wrapper_source, wrapper_clang_objects[index], (SliceString8){0}))
+        {
+            goto stb_action_done;
+        }
+    }
+
+    String8 ds_churn_wrapper = path_join(arena, wrappers_directory, S8("stb_ds_churn_test.c"));
+    if (!stb_write_ds_churn_wrapper(arena, ds_churn_wrapper, ds_test_source))
+    {
+        string_print(S8("error: failed to write stb_ds churn wrapper {S8}\n"), ds_churn_wrapper);
+        goto stb_action_done;
+    }
+
+    String8 combined_extra_values[] = {
+        S8("-DSTB_IMAGE_IMPLEMENTATION"), S8("-DSTB_IMAGE_WRITE_IMPLEMENTATION"), S8("-DSTB_DS_IMPLEMENTATION"), S8("-DSTB_TRUETYPE_IMPLEMENTATION"),
+    };
+    SliceString8 combined_extra = (SliceString8)BUSTER_ARRAY_TO_SLICE(combined_extra_values);
+    String8 clang_probe_object = path_join(arena, output_directory, S8("probe-clang.o"));
+    if (!stb_compile_clang(arena, clang, source_directory, S8("tests/basic_stb_compat.c"), clang_probe_object, combined_extra))
+    {
+        goto stb_action_done;
+    }
+    String8 clang_probe_binary = path_join(arena, output_directory, S8("probe-clang"));
+    // The combined probe already contains every implementation, so only its
+    // object belongs in the reference link.  Keeping a one-object link avoids
+    // duplicate stb symbols while still compiling each implementation wrapper
+    // independently above.
+    String8 clang_probe_link_objects[] = {clang_probe_object};
+    if (!stb_link_clang(arena, clang, clang_probe_binary, clang_probe_link_objects, BUSTER_ARRAY_LENGTH(clang_probe_link_objects)))
+    {
+        goto stb_action_done;
+    }
+    String8 clang_probe_output = {0};
+    if (!stb_run_binary(arena, clang_probe_binary, S8("."), &clang_probe_output))
+    {
+        goto stb_action_done;
+    }
+
+    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    bool harness_ok = true;
+    for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+    {
+        String8 mode = allocator_modes[mode_index];
+        String8 mode_directory = path_join(arena, output_directory, mode);
+        String8 mode_metrics = path_join(arena, metrics_directory, mode);
+        make_directory_recursive(arena, mode_directory);
+        make_directory_recursive(arena, mode_metrics);
+        bool mode_ok = true;
+        for (u64 unit_index = 0; unit_index < BUSTER_ARRAY_LENGTH(wrapper_names); unit_index += 1)
+        {
+            String8 object = path_join(arena, mode_directory, wrapper_names[unit_index]);
+            object = string_format(arena, S8("{S8}.o"), object);
+            String8 metric = path_join(arena, mode_metrics, string_format(arena, S8("{S8}.metrics"), wrapper_names[unit_index]));
+            u64 elapsed_us = 0;
+            mode_ok = mode_ok && stb_compile_buster(arena, ide, source_directory, path_join(arena, wrappers_directory, wrapper_names[unit_index]), object,
+                                                     metric, mode, (SliceString8){0}, &elapsed_us, mode_index == 0) &&
+                      stb_metrics_report(arena, mode, wrapper_names[unit_index], metric, elapsed_us);
+        }
+
+        String8 probe_object = path_join(arena, mode_directory, S8("probe.o"));
+        String8 probe_metric = path_join(arena, mode_metrics, S8("probe.metrics"));
+        u64 probe_elapsed_us = 0;
+        mode_ok = mode_ok && stb_compile_buster(arena, ide, source_directory, S8("tests/basic_stb_compat.c"), probe_object, probe_metric, mode, combined_extra,
+                                                 &probe_elapsed_us, mode_index == 0) &&
+                   stb_metrics_report(arena, mode, S8("basic_stb_compat.c"), probe_metric, probe_elapsed_us);
+
+        String8 probe_binary = path_join(arena, mode_directory, S8("probe"));
+        String8 probe_objects[] = {probe_object};
+        mode_ok = mode_ok && stb_link_clang(arena, clang, probe_binary, probe_objects, 1);
+        String8 probe_output = {0};
+        mode_ok = mode_ok && stb_run_binary(arena, probe_binary, S8("."), &probe_output);
+        bool probe_equal = mode_ok && string_equal(probe_output, clang_probe_output);
+        string_print(S8("STB_PROBE allocator={S8} equal_clang={u32} output={S8}"), mode, probe_equal, cjson_trim_ascii_space(probe_output));
+        string_print(S8("\n"));
+        harness_ok = harness_ok && probe_equal;
+
+        if (mode_index == 0)
+        {
+            String8 buster_test_directory = path_join(arena, mode_directory, S8("image-write-buster"));
+            String8 clang_test_directory = path_join(arena, mode_directory, S8("image-write-clang"));
+            String8 buster_output_directory = path_join(arena, buster_test_directory, S8("output"));
+            String8 clang_output_directory = path_join(arena, clang_test_directory, S8("output"));
+            make_directory_recursive(arena, buster_output_directory);
+            make_directory_recursive(arena, clang_output_directory);
+            String8 buster_test_object = path_join(arena, buster_test_directory, S8("image_write_test.o"));
+            String8 buster_test_metric = path_join(arena, mode_metrics, S8("image_write_test.metrics"));
+            String8 image_write_defines[] = {S8("-DIWT_TEST")};
+            u64 test_elapsed_us = 0;
+            bool tests_ok = stb_compile_buster(arena, ide, source_directory, image_write_test_source, buster_test_object, buster_test_metric, mode,
+                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(image_write_defines), &test_elapsed_us, false) &&
+                            stb_metrics_report(arena, mode, S8("tests/image_write_test.c"), buster_test_metric, test_elapsed_us);
+            String8 buster_test_binary = path_join(arena, buster_test_directory, S8("image_write_test"));
+            String8 buster_test_objects[] = {buster_test_object};
+            tests_ok = tests_ok && stb_link_clang(arena, clang, buster_test_binary, buster_test_objects, 1);
+            String8 unused_output = {0};
+            tests_ok = tests_ok && stb_run_binary(arena, buster_test_binary, buster_test_directory, &unused_output);
+
+            String8 clang_test_object = path_join(arena, clang_test_directory, S8("image_write_test.o"));
+            tests_ok = tests_ok && stb_compile_clang(arena, clang, source_directory, image_write_test_source, clang_test_object,
+                                                      (SliceString8)BUSTER_ARRAY_TO_SLICE(image_write_defines));
+            String8 clang_test_binary = path_join(arena, clang_test_directory, S8("image_write_test"));
+            String8 clang_test_objects[] = {clang_test_object};
+            tests_ok = tests_ok && stb_link_clang(arena, clang, clang_test_binary, clang_test_objects, 1);
+            tests_ok = tests_ok && stb_run_binary(arena, clang_test_binary, clang_test_directory, &unused_output);
+            tests_ok = tests_ok && stb_compare_upstream_outputs(arena, buster_test_directory, clang_test_directory);
+            string_print(S8("STB_TEST suite=image_write status={S8}\n"), tests_ok ? S8("pass") : S8("fail"));
+            mode_ok = mode_ok && tests_ok;
+
+            String8 ds_object = path_join(arena, mode_directory, S8("stb_ds_churn_test.o"));
+            String8 ds_metric = path_join(arena, mode_metrics, S8("stb_ds_churn_test.metrics"));
+            u64 ds_elapsed_us = 0;
+            bool ds_ok = stb_compile_buster(arena, ide, source_directory, ds_churn_wrapper, ds_object, ds_metric, mode,
+                                             (SliceString8){0}, &ds_elapsed_us, false) &&
+                         stb_metrics_report(arena, mode, S8("stb_ds_churn_test.c"), ds_metric, ds_elapsed_us);
+            String8 ds_binary = path_join(arena, mode_directory, S8("stb_ds_churn_test"));
+            String8 ds_objects[] = {ds_object};
+            ds_ok = ds_ok && stb_link_clang(arena, clang, ds_binary, ds_objects, 1);
+            String8 ds_output = {0};
+            ds_ok = ds_ok && stb_run_binary(arena, ds_binary, S8("."), &ds_output);
+            String8 ds_clang_object = path_join(arena, mode_directory, S8("stb_ds_churn_test-clang.o"));
+            ds_ok = ds_ok && stb_compile_clang(arena, clang, source_directory, ds_churn_wrapper, ds_clang_object, (SliceString8){0});
+            String8 ds_clang_binary = path_join(arena, mode_directory, S8("stb_ds_churn_test-clang"));
+            String8 ds_clang_objects[] = {ds_clang_object};
+            ds_ok = ds_ok && stb_link_clang(arena, clang, ds_clang_binary, ds_clang_objects, 1);
+            String8 ds_clang_output = {0};
+            ds_ok = ds_ok && stb_run_binary(arena, ds_clang_binary, S8("."), &ds_clang_output);
+            ds_ok = ds_ok && string_equal(ds_output, ds_clang_output);
+            string_print(S8("STB_TEST suite=stb_ds status={S8} output={S8}\n"), ds_ok ? S8("pass") : S8("fail"), cjson_trim_ascii_space(ds_output));
+            mode_ok = mode_ok && ds_ok;
+        }
+        harness_ok = harness_ok && mode_ok;
+        if (!mode_ok)
+        {
+            string_print(S8("error: stb compatibility allocator {S8} failed\n"), mode);
+            goto stb_action_done;
+        }
+    }
+
+    string_print(S8("STB_RESULT commit={S8} implementations={u64} allocators={u64} upstream_tests=2 status={S8}\n"), S8(STB_COMPATIBILITY_COMMIT),
+                 BUSTER_ARRAY_LENGTH(headers), BUSTER_ARRAY_LENGTH(allocator_modes), harness_ok ? S8("pass") : S8("fail"));
+    action_result = harness_ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+stb_action_done:
+    return action_result;
+}
+
+BUSTER_GLOBAL_LOCAL void test_stb_action_add(Arena* arena, TestStbOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestStbOptions* options_copy = arena_allocate(arena, TestStbOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_stb_action, .callback_data = options_copy};
 }
 
 // --- zlib compatibility harness -----------------------------------------
@@ -23645,6 +24197,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_ZLIB] = S8_INITIALIZER("test_zlib"),
         [BUILD_COMMAND_TEST_LUA] = S8_INITIALIZER("test_lua"),
         [BUILD_COMMAND_TEST_YYJSON] = S8_INITIALIZER("test_yyjson"),
+        [BUILD_COMMAND_TEST_STB] = S8_INITIALIZER("test_stb"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -23718,6 +24271,7 @@ ProcessResult process_arguments(void)
     TestZlibOptions test_zlib_options = {0};
     TestLuaOptions test_lua_options = {0};
     TestYyjsonOptions test_yyjson_options = {0};
+    TestStbOptions test_stb_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -23841,6 +24395,12 @@ ProcessResult process_arguments(void)
                      !string_starts_with_sequence(argument, S8("--")))
             {
                 test_yyjson_options.source_directory = argument;
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_TEST_STB && !test_stb_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_stb_options.source_directory = argument;
                 argument_i += 1;
             }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
@@ -24102,6 +24662,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_YYJSON)
                 {
                     test_yyjson_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_STB)
+                {
+                    test_stb_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -24652,6 +25216,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_YYJSON:
         {
             test_yyjson_action_add(arena, test_yyjson_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_STB:
+        {
+            test_stb_action_add(arena, test_stb_options);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

@@ -8011,37 +8011,33 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             }
             if (depth || nested_end != nested_start + 1)
             {
-                // If the unary star fronts a complex cast/arithmetic base,
-                // lower the complete postfix operand as a value and recover
-                // its final load into a place.  Lua's `getlock` macro expands
-                // to exactly this shape (`*(((T*)(((void*)((char*)p -
-                // sizeof(T)))))->field)`).
-                if (dereference_count && start < end)
+                // A parenthesized arithmetic/cast base can still form a
+                // perfectly valid postfix place, for example
+                // `((int *)data - 2)[1]++`.  Lower the complete operand as a
+                // value and recover its final load's source place when the
+                // child returns.  The same path handles the older
+                // dereference-over-complex-base shape used by Lua.
+                frame->as.place.local = 0;
+                frame->as.place.place = IR_VALUE_ID_INVALID;
+                frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
+                frame->as.place.start = start;
+                frame->as.place.end = end;
+                frame->as.place.index = end;
+                frame->as.place.close = end;
+                frame->as.place.dereference_count = dereference_count;
+                frame->as.place.continuation = C_IR_PLACE_CONTINUATION_EXPRESSION;
+                frame->stage = C_IR_LOWER_STAGE_CHILD;
+                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                        .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                        .as.expression =
+                                                            {
+                                                                .start = start,
+                                                                .end = end,
+                                                            },
+                                                    }))
                 {
-                    frame->as.place.local = 0;
-                    frame->as.place.place = IR_VALUE_ID_INVALID;
-                    frame->as.place.source = c_ir_token_source_range(builder, builder->preprocess.tokens[start]);
-                    frame->as.place.start = start;
-                    frame->as.place.end = end;
-                    frame->as.place.index = end;
-                    frame->as.place.close = end;
-                    frame->as.place.dereference_count = dereference_count;
-                    frame->as.place.continuation = C_IR_PLACE_CONTINUATION_EXPRESSION;
-                    frame->stage = C_IR_LOWER_STAGE_CHILD;
-                    if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
-                                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                            .as.expression =
-                                                                {
-                                                                    .start = start,
-                                                                    .end = end,
-                                                                },
-                                                        }))
-                    {
-                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                    }
-                    return;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 }
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
             base_index = nested_start;
@@ -8206,6 +8202,23 @@ c_ir_place_base_resolved:
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_EXPRESSION)
         {
             IrValueId place = machine->child_result.value;
+            // Expression lowering normally returns a loaded value.  Recover
+            // the addressable source from that load for complex postfix
+            // operands such as `(ptr - 2)[index]++`; plain arithmetic values
+            // remain invalid places and are rejected below.
+            if (place.value < builder->function->value_count && builder->function->values[place.value].category != IR_VALUE_PLACE)
+            {
+                IrInstructionId definition = builder->function->values[place.value].definition;
+                if (definition.value < builder->function->instruction_count)
+                {
+                    IrInstruction* materialization = builder->function->instructions + definition.value;
+                    if ((materialization->opcode == IR_OPCODE_LOAD || materialization->opcode == IR_OPCODE_ATOMIC_LOAD) &&
+                        materialization->operand_count == 1)
+                    {
+                        place = materialization->operands[0];
+                    }
+                }
+            }
             while (place.value != IR_ID_UNDERLYING_INVALID && frame->as.place.dereference_count)
             {
                 IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
@@ -13098,21 +13111,32 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         IrValueId result = IR_VALUE_ID_INVALID;
         if (operation == C_CONDITIONAL_ADDRESS_OF)
         {
-            IrInstruction* materialization = &builder->function->instructions[builder->function->values[operand.value].definition.value];
             IrType* operand_type_value = ir_type_from_id(&builder->program->types, operand_type);
-            if (materialization->opcode == IR_OPCODE_FUNCTION && operand_type_value && operand_type_value->kind == IR_TYPE_POINTER)
+            // Most scalar lvalues are loaded while the expression is walked;
+            // recover their place from that load below.  Array and aggregate
+            // lvalues intentionally remain places (there is no scalar load to
+            // materialize), so address-of must accept the place directly.
+            if (builder->function->values[operand.value].category == IR_VALUE_PLACE)
             {
-                result = operand;
-            }
-            else if ((materialization->opcode != IR_OPCODE_LOAD && materialization->opcode != IR_OPCODE_ATOMIC_LOAD) || materialization->operand_count != 1)
-            {
-                return false;
+                result = c_ir_emit_address_of_place(builder, operand, operand_type, pointer_source);
             }
             else
             {
-                IrValueId place = materialization->operands[0];
-                IrTypeId place_type = builder->function->values[place.value].canonical_type;
-                result = c_ir_emit_address_of_place(builder, place, place_type, pointer_source);
+                IrInstruction* materialization = &builder->function->instructions[builder->function->values[operand.value].definition.value];
+                if (materialization->opcode == IR_OPCODE_FUNCTION && operand_type_value && operand_type_value->kind == IR_TYPE_POINTER)
+                {
+                    result = operand;
+                }
+                else if ((materialization->opcode != IR_OPCODE_LOAD && materialization->opcode != IR_OPCODE_ATOMIC_LOAD) || materialization->operand_count != 1)
+                {
+                    return false;
+                }
+                else
+                {
+                    IrValueId place = materialization->operands[0];
+                    IrTypeId place_type = builder->function->values[place.value].canonical_type;
+                    result = c_ir_emit_address_of_place(builder, place, place_type, pointer_source);
+                }
             }
         }
         else
@@ -13742,6 +13766,12 @@ BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token)
     return c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &operation);
 }
 
+// Type-only queries also serve GNU `typeof` operands.  Keep the declaration
+// near the type-name parser because stb_ds (and other GNU headers) use
+// `__typeof__((object)->field)`, whose operand is a full expression rather
+// than the identifier-only chain handled by the fast path below.
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32 start, u32 end, u32* index_out, CType* qualifiers_out)
 {
     if (start >= end)
@@ -13792,88 +13822,99 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             type = builder->nullptr_type;
             index = close + 1;
         }
-        else if (close < end && index + 2 < close && builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+        else if (close < end && index + 2 < close)
         {
-            CEntityId operand_entity = c_ir_identifier_entity(builder, index + 2);
-            CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
-            if (!local)
+            if (builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
             {
-                for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
+                CEntityId operand_entity = c_ir_identifier_entity(builder, index + 2);
+                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
+                if (!local)
                 {
-                    CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                    if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2])))
+                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
                     {
-                        local = candidate;
-                        break;
+                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
+                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2])))
+                        {
+                            local = candidate;
+                            break;
+                        }
                     }
                 }
-            }
-            if (local)
-            {
-                type = local->type;
-            }
-            else if (operand_entity.value < builder->parse.entity_count)
-            {
-                CTypeId c_type = builder->parse.entities[operand_entity.value].type;
-                if (c_type.value < builder->parse.type_count)
+                if (local)
                 {
-                    type = builder->c_type_ir_map[c_type.value];
+                    type = local->type;
                 }
-            }
-            u32 postfix = index + 3;
-            while (type.value != IR_ID_UNDERLYING_INVALID && postfix < close)
-            {
-                IrType* base = ir_type_from_id(&builder->program->types, type);
-                if (!base)
+                else if (operand_entity.value < builder->parse.entity_count)
                 {
-                    type = IR_TYPE_ID_INVALID;
-                    break;
+                    CTypeId c_type = builder->parse.entities[operand_entity.value].type;
+                    if (c_type.value < builder->parse.type_count)
+                    {
+                        type = builder->c_type_ir_map[c_type.value];
+                    }
                 }
-                if (c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_LEFT_BRACKET))
+                u32 postfix = index + 3;
+                while (type.value != IR_ID_UNDERLYING_INVALID && postfix < close)
                 {
-                    u32 bracket_close = c_ir_matching_delimiter_cached(builder, postfix, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                    if (bracket_close >= close || (base->kind != IR_TYPE_ARRAY && base->kind != IR_TYPE_POINTER))
+                    IrType* base = ir_type_from_id(&builder->program->types, type);
+                    if (!base)
                     {
                         type = IR_TYPE_ID_INVALID;
                         break;
                     }
-                    type = base->element_type;
-                    postfix = bracket_close + 1;
-                    continue;
-                }
-                bool arrow = c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_ARROW);
-                if (!arrow && !c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_DOT))
-                {
-                    type = IR_TYPE_ID_INVALID;
-                    break;
-                }
-                if (arrow)
-                {
-                    if (base->kind != IR_TYPE_POINTER)
+                    if (c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_LEFT_BRACKET))
+                    {
+                        u32 bracket_close = c_ir_matching_delimiter_cached(builder, postfix, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                        if (bracket_close >= close || (base->kind != IR_TYPE_ARRAY && base->kind != IR_TYPE_POINTER))
+                        {
+                            type = IR_TYPE_ID_INVALID;
+                            break;
+                        }
+                        type = base->element_type;
+                        postfix = bracket_close + 1;
+                        continue;
+                    }
+                    bool arrow = c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_ARROW);
+                    if (!arrow && !c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_DOT))
                     {
                         type = IR_TYPE_ID_INVALID;
                         break;
                     }
-                    type = base->element_type;
-                    base = ir_type_from_id(&builder->program->types, type);
-                }
-                if (!base || (base->kind != IR_TYPE_STRUCT && base->kind != IR_TYPE_UNION) || postfix + 1 >= close ||
-                    builder->preprocess.tokens[postfix + 1].kind != C_TOKEN_IDENTIFIER)
-                {
-                    type = IR_TYPE_ID_INVALID;
-                    break;
-                }
-                IrTypeId member_type = IR_TYPE_ID_INVALID;
-                for (u32 field_index = 0; field_index < base->field_count; field_index += 1)
-                {
-                    if (string_equal(base->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[postfix + 1])))
+                    if (arrow)
                     {
-                        member_type = base->fields[field_index].type;
+                        if (base->kind != IR_TYPE_POINTER)
+                        {
+                            type = IR_TYPE_ID_INVALID;
+                            break;
+                        }
+                        type = base->element_type;
+                        base = ir_type_from_id(&builder->program->types, type);
+                    }
+                    if (!base || (base->kind != IR_TYPE_STRUCT && base->kind != IR_TYPE_UNION) || postfix + 1 >= close ||
+                        builder->preprocess.tokens[postfix + 1].kind != C_TOKEN_IDENTIFIER)
+                    {
+                        type = IR_TYPE_ID_INVALID;
                         break;
                     }
+                    IrTypeId member_type = IR_TYPE_ID_INVALID;
+                    for (u32 field_index = 0; field_index < base->field_count; field_index += 1)
+                    {
+                        if (string_equal(base->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[postfix + 1])))
+                        {
+                            member_type = base->fields[field_index].type;
+                            break;
+                        }
+                    }
+                    type = member_type;
+                    postfix += 2;
                 }
-                type = member_type;
-                postfix += 2;
+            }
+            // A parenthesized or otherwise compound operand (for example
+            // `(map)->key`) needs the full expression type walker.  Unlike
+            // lowering, typeof does not evaluate the operand, so this query
+            // is side-effect free and preserves array/function types.
+            if (type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
             }
             index = close + 1;
         }
@@ -17420,6 +17461,30 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
+            // Parentheses after sizeof are ambiguous: `(T)` is a type name,
+            // while `(expression)->field` (and `(expression)[index]`) is a
+            // parenthesized value with postfix operators.  The old shortcut
+            // stopped at the inner `)` for the latter and left `->field` in
+            // the enclosing expression, which then failed in the logical-core
+            // lowerer.  Probe the type-name shape and, when it is not one,
+            // let the normal unary walker consume the complete postfix chain.
+            bool has_postfix_after_parenthesized = operand_end + 1 < end &&
+                                                   (c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_DOT) ||
+                                                    c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_ARROW) ||
+                                                    c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACKET) ||
+                                                    c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+            if (is_sizeof && parenthesized && literal_end == UINT32_MAX && has_postfix_after_parenthesized &&
+                c_ir_type_name(builder, operand_start, operand_end).value == IR_ID_UNDERLYING_INVALID)
+            {
+                parenthesized = false;
+                operand_start = index + 1;
+                operand_end = c_ir_unary_expression_end(builder, operand_start, end);
+                if (operand_end > end || operand_start >= operand_end)
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+            }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
             if (is_sizeof && builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER)
             {
@@ -18437,7 +18502,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
-    bool conditional_tail = false;
+    u32 conditional_depth = 0;
     bool top_level_comma = false;
     CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
     for (u32 index = start; index < end; index += 1)
@@ -18469,9 +18534,13 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         }
         else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
         {
-            conditional_tail = true;
+            conditional_depth += 1;
         }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        else if (!parentheses && !brackets && !braces && conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            conditional_depth -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && !conditional_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
         {
             // An assignment in a comma expression is not the condition
             // leaf's root assignment.  Let the full expression machine split
@@ -18481,7 +18550,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
             assignment = end;
             operation = C_CONDITIONAL_OPERATOR_COUNT;
         }
-        else if (!conditional_tail && !top_level_comma && !parentheses && !brackets && !braces &&
+        else if (!conditional_depth && !top_level_comma && !parentheses && !brackets && !braces &&
                  assignment == end &&
                  (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &operation)))
         {
@@ -20004,6 +20073,7 @@ BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u3
             narrowed = true;
         }
         u32 last_comma = UINT32_MAX;
+        u32 conditional_depth = 0;
         for (u32 index = start; index < end; index += 1)
         {
             u32 punctuator = builder->preprocess.tokens[index].punctuator;
@@ -20016,7 +20086,15 @@ BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u3
             {
                 break;
             }
-            if (punctuator == C_PUNCTUATOR_COMMA)
+            if (punctuator == C_PUNCTUATOR_QUESTION)
+            {
+                conditional_depth += 1;
+            }
+            else if (punctuator == C_PUNCTUATOR_COLON && conditional_depth)
+            {
+                conditional_depth -= 1;
+            }
+            else if (punctuator == C_PUNCTUATOR_COMMA && !conditional_depth)
             {
                 last_comma = index;
             }
@@ -21491,7 +21569,13 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 u32 assignment_start = cast_close + 2;
                 u32 assignment_close = c_ir_matching_delimiter_cached(builder, cast_close + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                                       C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                if (assignment_close == end - 1)
+                // The void cast fast path is only valid for a single
+                // assignment expression.  A macro such as stb_ds's
+                // `((void)(map = get(), temp), ...)` has a comma in the
+                // parenthesized operand; routing that whole range through the
+                // assignment statement machine would assign `temp` rather
+                // than the call result to `map`.
+                if (assignment_close == end - 1 && !c_ir_has_top_level_comma(builder, assignment_start, assignment_close))
                 {
                     u32 assignment_index = assignment_close;
                     u32 parentheses = 0;
@@ -21566,6 +21650,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         u32 comma_parentheses = 0;
         u32 comma_brackets = 0;
         u32 comma_braces = 0;
+        u32 comma_conditionals = 0;
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
@@ -21593,7 +21678,15 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             {
                 comma_braces -= 1;
             }
-            else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!comma_parentheses && !comma_brackets && !comma_braces && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                comma_conditionals += 1;
+            }
+            else if (!comma_parentheses && !comma_brackets && !comma_braces && comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+            {
+                comma_conditionals -= 1;
+            }
+            else if (!comma_parentheses && !comma_brackets && !comma_braces && !comma_conditionals && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
             {
                 last_comma = index;
             }
