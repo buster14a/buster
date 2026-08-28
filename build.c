@@ -16132,8 +16132,8 @@ struct MuslManifest
 // the hash of the newline-joined sorted failing paths is pinned beside it. Both
 // are printed on a mismatch along with the whole failing list, which is what a
 // deliberate rebaseline needs.
-#define MUSL_EXPECTED_COMPILED_UNITS 1192
-#define MUSL_EXPECTED_FAILURE_HASH 0x29957f2aab210b24ull
+#define MUSL_EXPECTED_COMPILED_UNITS 1246
+#define MUSL_EXPECTED_FAILURE_HASH 0x94e6948c2ef0cbbeull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {

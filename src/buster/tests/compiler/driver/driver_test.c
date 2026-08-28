@@ -5508,6 +5508,133 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(static_initializer_temporary);
     }
+    // An aggregate carrying an 80-bit x87 payload.  musl's `union ldshape`
+    // -- a `long double` overlaid with `struct { uint64_t m; uint16_t se; }`
+    // -- is what essentially every `long double` routine in musl's src/math
+    // reads a value's sign, exponent and mantissa through, and System V's
+    // merger algorithm gives INTEGER precedence over x87, so it rides two
+    // general-purpose registers rather than going to memory.  The fixture
+    // also covers the shapes the merger cannot reconcile (memory whole), a
+    // `long double` array as a local and as a global, and the address of an
+    // object of incomplete type, which is how musl's src/include/stdio.h
+    // reaches `stderr`.  Every allocator runs it for the same reason the
+    // arithmetic fixture above does: what the other three are checked for is
+    // that a function carrying an f80 falls back to the canonical emitter.
+    // The fixture compiles to an empty program wherever `long double` is not
+    // the x87 format, so it stays registered on every host.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
+    {
+        TemporalArena aggregate_temporary = scratch_begin(&arguments->arena, 1);
+        String8 aggregate_path = buster_test_temporary_path(aggregate_temporary.arena, S8("buster-c-long-double-aggregate"), S8(""));
+        String8 aggregate_command_line[] = {
+            c_long_double_allocators[allocator_index], S8("-o"), aggregate_path, S8("tests/basic_c_long_double_aggregate.c"),
+        };
+        CompilerDriverResult aggregate = compiler_driver_execute_invocation(
+            aggregate_temporary.arena,
+            compiler_driver_parse_arguments(aggregate_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aggregate_command_line)));
+        BUSTER_TEST(arguments, aggregate.error == COMPILER_DRIVER_ERROR_NONE);
+        if (aggregate.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 aggregate_arguments[] = {aggregate_path};
+            ProcessSpawnResult aggregate_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(aggregate_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, aggregate_spawn.handle != 0);
+            if (aggregate_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(aggregate_temporary.arena, aggregate_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(aggregate_temporary);
+    }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    // The single translation unit above cannot see an ABI disagreement: a
+    // caller and a callee this compiler produced agree with each other
+    // whatever they agree on.  Pair the halves with the host compiler in both
+    // directions, which is the only thing that pins the classification to the
+    // platform's.  Verified by removing the INTEGER-over-x87 merge precedence:
+    // the one-file fixture and the Buster/Buster link still pass while both
+    // mixed links fail.
+    {
+        TemporalArena pair_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* pair_arena = pair_temporary.arena;
+        String8 host_callee_path = buster_test_temporary_path(pair_arena, S8("buster-c-ld-aggregate-host-callee"), S8(".o"));
+        String8 host_caller_path = buster_test_temporary_path(pair_arena, S8("buster-c-ld-aggregate-host-caller"), S8(".o"));
+        // -fno-pic for the same reason the clang object fixture above uses it:
+        // this linker has no GOT model, and -g0 keeps clang's newer debug
+        // sections outside the object reader's narrow model.
+        String8 host_callee_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_callee_path,
+            S8("tests/basic_c_long_double_aggregate_callee.c"),
+        };
+        String8 host_caller_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_caller_path,
+            S8("tests/basic_c_long_double_aggregate_caller.c"),
+        };
+        ProcessSpawnOptions host_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult host_callee_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_callee_command), (SliceString8){0}, (SliceString8){0}, host_options);
+        ProcessSpawnResult host_caller_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_caller_command), (SliceString8){0}, (SliceString8){0}, host_options);
+        bool host_callee_compiled = host_callee_spawn.handle && os_process_wait_sync(pair_arena, host_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool host_caller_compiled = host_caller_spawn.handle && os_process_wait_sync(pair_arena, host_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_callee_compiled && host_caller_compiled);
+        for (u64 allocator_index = 0; host_callee_compiled && host_caller_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators);
+             allocator_index += 1)
+        {
+            String8 buster_callee_path = buster_test_temporary_path(pair_arena, S8("buster-c-ld-aggregate-callee"), S8(".o"));
+            String8 buster_caller_path = buster_test_temporary_path(pair_arena, S8("buster-c-ld-aggregate-caller"), S8(".o"));
+            String8 buster_callee_command[] = {
+                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_callee_path,
+                S8("tests/basic_c_long_double_aggregate_callee.c"),
+            };
+            String8 buster_caller_command[] = {
+                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_caller_path,
+                S8("tests/basic_c_long_double_aggregate_caller.c"),
+            };
+            CompilerDriverResult buster_callee = compiler_driver_execute_invocation(
+                pair_arena, compiler_driver_parse_arguments(pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_callee_command)));
+            CompilerDriverResult buster_caller = compiler_driver_execute_invocation(
+                pair_arena, compiler_driver_parse_arguments(pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_caller_command)));
+            BUSTER_TEST(arguments, buster_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            if (buster_callee.error != COMPILER_DRIVER_ERROR_NONE || buster_caller.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                continue;
+            }
+            String8 mixed_object_pairs[2][2] = {
+                {buster_caller_path, host_callee_path},
+                {host_caller_path, buster_callee_path},
+            };
+            for (u64 direction = 0; direction < BUSTER_ARRAY_LENGTH(mixed_object_pairs); direction += 1)
+            {
+                String8 mixed_path = buster_test_temporary_path(pair_arena, S8("buster-c-ld-aggregate-pair"), S8(""));
+                String8 mixed_link_command[] = {
+                    S8("-o"), mixed_path, mixed_object_pairs[direction][0], mixed_object_pairs[direction][1],
+                };
+                CompilerDriverResult mixed_link = compiler_driver_execute_invocation(
+                    pair_arena, compiler_driver_parse_arguments(pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_link_command)));
+                BUSTER_TEST(arguments, mixed_link.error == COMPILER_DRIVER_ERROR_NONE);
+                if (mixed_link.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    continue;
+                }
+                String8 mixed_arguments[] = {mixed_path};
+                ProcessSpawnResult mixed_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, mixed_spawn.handle != 0);
+                if (mixed_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(pair_arena, mixed_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+        scratch_end(pair_temporary);
+    }
+#endif
     // A loop body that allocates nothing must carry no stack checkpoint at
     // all: the restore is what read a stale frame slot into RSP, and its
     // absence is the property the runtime fixture above cannot observe on a

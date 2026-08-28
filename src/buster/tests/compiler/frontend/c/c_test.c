@@ -9320,7 +9320,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 3 : wide_long_double ? 6 : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 0 : wide_long_double ? 6 : 0));
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -9342,8 +9342,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 {
                     continue;
                 }
-                bool expected_rejected = (f80_sysv && (function_index == 2 || function_index == 4 || function_index == 5)) ||
-                                         (!f80_sysv && wide_long_double && function_index < 6);
+                // Every one of these lowers on System V.  The single-member
+                // wrapper and its nestings are the x87 pair; the union and
+                // both arrays classify without an x87 class at all -- the
+                // union because System V's merger prefers INTEGER over x87
+                // and its X87_UP tail is then unaccompanied, the arrays
+                // because they are larger than two eightbytes -- so they
+                // travel as ordinary memory-class aggregates.  Clang compiles
+                // all five to byval/sret against the same declarations.
+                bool expected_rejected = !f80_sysv && wide_long_double && function_index < 6;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
             }
             if (wide_long_double)
@@ -9362,8 +9369,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                                                           ir_abi_convention_for_target(target), IR_ABI_USE_RESULT);
                 BUSTER_TEST(arguments, struct_abi.part_count != 0);
                 BUSTER_TEST(arguments, large_abi.part_count != 0 && large_abi.indirect);
+                if (f80_sysv)
+                {
+                    IrFunction* union_function = c_test_find_ir_function(module, S8("union_round_trip"));
+                    IrType* union_function_type = union_function ? ir_type_from_id(&lowered.program->types, union_function->canonical_type) : 0;
+                    IrTypeId union_type_id = union_function_type ? union_function_type->return_type : IR_TYPE_ID_INVALID;
+                    IrAbiValue union_argument = ir_type_abi_value(lowered.program, union_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64,
+                                                                   IR_ABI_USE_ARGUMENT);
+                    IrAbiValue union_result = ir_type_abi_value(lowered.program, union_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64,
+                                                                 IR_ABI_USE_RESULT);
+                    // `union { long double; int; }` merges to INTEGER in the
+                    // first eightbyte and leaves X87_UP alone in the second,
+                    // which the post-merge cleanup sends to memory whole.
+                    BUSTER_TEST(arguments, union_argument.memory && !union_argument.indirect);
+                    BUSTER_TEST(arguments, union_result.indirect && !union_result.memory);
+                    BUSTER_TEST(arguments, !ir_abi_value_has_x87_part(lowered.program, union_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64,
+                                                                       IR_ABI_USE_ARGUMENT));
+                    BUSTER_TEST(arguments, !ir_abi_value_has_x87_part(lowered.program, union_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64,
+                                                                       IR_ABI_USE_RESULT));
+                }
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 3 : wide_long_double ? 6 : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 0 : wide_long_double ? 6 : 0));
         }
         scratch_end(temporary);
     }
@@ -9451,7 +9477,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 1 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 0 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -9473,9 +9499,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 // System V passes a variadic wide float exactly as it passes a
                 // fixed one, in a sixteen-byte overflow slot, and the
                 // single-member wrapper classifies identically, so both
-                // variadic calls lower.  The union is the one shape here
-                // whose ABI class is not the x87 pair.
-                bool expected_rejected = f80_sysv ? function_index == 2 : wide_long_double;
+                // variadic calls lower.  The union's classification carries no
+                // x87 class at all, so it lowers as a memory-class aggregate.
+                bool expected_rejected = !f80_sysv && wide_long_double;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
                 if (expected_rejected)
                 {
@@ -9494,7 +9520,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 BUSTER_TEST(arguments, function != 0);
                 BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_DECLARATION);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 1 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 0 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);

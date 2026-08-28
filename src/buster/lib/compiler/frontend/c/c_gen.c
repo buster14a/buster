@@ -913,6 +913,31 @@ BUSTER_C_INTERNAL bool c_ir_type_is_f80_x87_shape(IrProgram* program, CIrWideFlo
            abi.parts[0].size == 8 && abi.parts[1].size == 8;
 }
 
+// A type can carry an 80-bit x87 payload and still cross a function boundary
+// as an ordinary aggregate.  System V's merger algorithm gives INTEGER
+// precedence over x87, so musl's `union ldshape` -- a `long double` overlaid
+// with `struct { uint64_t m; uint16_t se; }` -- classifies as two INTEGER
+// eightbytes and rides two general-purpose registers, and a union whose
+// alternatives the merger cannot reconcile goes to memory whole.  Neither
+// shape asks anyone to interpret the payload as a float: its bytes are
+// copied.  Only a classification that really carries an X87 class needs the
+// x87 vocabulary, which is what the shape predicate above identifies.
+BUSTER_C_INTERNAL bool c_ir_type_is_f80_opaque_aggregate(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id, Target target)
+{
+    if (!program || !c_ir_target_supports_f80(target) || !c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
+    {
+        return false;
+    }
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || type->is_atomic || !type->layout.resolved ||
+        (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY))
+    {
+        return false;
+    }
+    return !ir_abi_value_has_x87_part(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT) &&
+           !ir_abi_value_has_x87_part(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+}
+
 BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id,
                                                        bool result_type, Target target)
 {
@@ -933,13 +958,18 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
     if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
     {
-        if (!c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
+        if (c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
         {
-            return false;
+            // SysV passes both scalar f80 and ABI-proven wrappers by value in
+            // a sixteen-byte stack slot.  Results use the x87 pair checked
+            // above.
+            if (!result_type &&
+                (!abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_MEMORY || abi.parts[0].size != 16))
+            {
+                return false;
+            }
         }
-        // SysV passes both scalar f80 and ABI-proven wrappers by value in a
-        // sixteen-byte stack slot.  Results use the x87 pair checked above.
-        if (!result_type && (!abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_MEMORY || abi.parts[0].size != 16))
+        else if (!c_ir_type_is_f80_opaque_aggregate(program, wide_float_cache, type_id, target))
         {
             return false;
         }
@@ -13497,13 +13527,16 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             // System V passes a variadic long double the same way it passes a
             // fixed one -- a sixteen-byte, sixteen-aligned memory slot in the
             // overflow area, never a register -- so the ABI-proven x87 shape
-            // needs nothing extra here.  Every other wide-float shape still
-            // has no argument lowering.
+            // needs nothing extra here, and neither does an aggregate whose
+            // classification carries no x87 class at all.  Every other
+            // wide-float shape still has no argument lowering.
             if (argument_count >= signature.parameter_count &&
                 c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache,
                                               builder->function->values[value.value].canonical_type) &&
                 !c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache,
-                                            builder->function->values[value.value].canonical_type, builder->target))
+                                            builder->function->values[value.value].canonical_type, builder->target) &&
+                !c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache,
+                                                   builder->function->values[value.value].canonical_type, builder->target))
             {
                 c_ir_report_unsupported_signature(builder, selected->indirect ? S8("<function pointer>")
                                                                                  : c_token_spelling(builder->preprocess.spelling_base, token));

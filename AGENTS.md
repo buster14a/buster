@@ -848,24 +848,28 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 157
+harness compiles the portable C instead and lists each one. The remaining 103
 are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
-for `_Complex` arithmetic, which the frontend has no type for; 54 that reach
-code generation and fail there, nearly all of them x87 `long double`, either a
-`union` holding one passed by value or an operation the emitter has no shape
-for; 5 static initializers; 2 startup objects; 2 conflicting declarations; and
-26 singletons (measured 2026-08-29).
+for `_Complex` arithmetic, which the frontend has no type for, and which is
+every remaining unit under `src/complex`; 7 static initializers, none of them
+`long double` any more; 3 that reach code generation and fail on an inline
+assembly block; 2 conflicting declarations; and 23 singletons
+(measured 2026-08-29).
 
-Seventeen of those code-generation failures were static initializers until the
-folder learned the two shapes musl writes. `floorl`, `ceill`, `roundl`,
-`truncl`, `rintl`, `modfl` and `__rem_pio2l` open with
+`long double` is no longer among them. Seventeen units were static
+initializers until the folder learned the two shapes musl writes -- `floorl`,
+`ceill`, `roundl`, `truncl`, `rintl`, `modfl` and `__rem_pio2l` open with
 `static const long double toint = 1/LDBL_EPSILON;`, and `atanl`, `expl`,
 `logl`, `log2l`, `log10l`, `log1pl`, `powl`, `tgammal`, `erfl` and `exp10l`
-carry `long double` coefficient tables; both fold now. What stops them instead
-is the canonical emitter, which rejects a whole function when one of its values
-has a type that contains an x87 `long double` without being one, so an array of
-them is refused whether or not it carries an initializer at all. The compiled
-count therefore did not move.
+carry `long double` coefficient tables -- and then stopped in the canonical
+emitter instead, which rejected a whole function when one of its values had a
+type that *contained* an x87 `long double` without *being* one, so an array of
+them was refused whether or not it carried an initializer. Classifying those
+aggregates by the ABI rather than by that shape test released them along with
+every unit reaching a value through musl's `union ldshape`: 54 units, 1192 to
+1246, and the whole x87 code-generation class with them. The three left in
+that class are inline assembly: `crt/rcrt1` and `ldso/dlstart` on
+`GETFUNCSYM`, described below, and `src/thread/__unmapself`.
 
 musl's startup objects are their own report now that module-level assembly
 goes through the real assembler. `crt/crt1.c` and `crt/Scrt1.c` compile, and
@@ -1828,6 +1832,17 @@ on a commit you already know is incomplete tells nobody anything.
 - Source diagnostics in shared layers use canonical `IrSourceRange` and
   `IrSourcePosition`. Do not reintroduce parser-specific source-range APIs into
   codegen, debug information, object writing, or the linker.
+- A value defined by `IR_OPCODE_GLOBAL` is a *place*: its frame slot holds the
+  object's address, so it is an eightbyte whether or not the object's type has
+  a resolved layout. That is what lets C's `extern struct opaque object;` be
+  addressed without ever being completed, and musl's `src/include/stdio.h`
+  depends on it — it suppresses the definition of `struct _IO_FILE` and then
+  declares `extern FILE __stderr_FILE`, so every `stderr` in the tree takes
+  the address of an incomplete object. Codegen's two value-sizing loops
+  therefore require a resolved layout of every value *except* a global place;
+  requiring it of all of them cost eight musl units with an
+  `INVALID_IR` blamed on whichever function happened to be first in the
+  module.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
@@ -1887,14 +1902,33 @@ on a commit you already know is incomplete tells nobody anything.
   control word outside `codegen_canonical_x64_x87_truncate_begin/end`: its
   default extended precision is exactly what `long double` wants, and only a
   float-to-integer conversion may switch the rounding field, for one store.
+  An **aggregate** carrying an f80 payload takes one of two paths, and which
+  one is the ABI classification's answer, never a walk of the fields. System
+  V's merger algorithm orders its rules equal, NO_CLASS, MEMORY, INTEGER, x87,
+  SSE — **INTEGER beats x87** — so musl's `union ldshape`, an f80 overlaid
+  with `struct { uint64_t m; uint16_t se; }`, classifies as two INTEGER
+  eightbytes and rides two general-purpose registers, which is what clang
+  compiles it to (`{ i64, i64 }`) and is not what a literal "an x87 class
+  makes the value MEMORY" reading produces. A shape the merger cannot
+  reconcile — `union { long double; unsigned long; }`, whose X87_UP tail is
+  then unaccompanied, or `union { long double; double; }`, or anything past
+  two eightbytes — goes to memory whole, byval in and sret out. Neither asks
+  anything of the x87 stack: their bytes are copied. Only a classification
+  that really carries an X87/X87_UP part needs the x87 vocabulary, and
+  `ir_abi_value_has_x87_part` is the predicate every gate asks. Objects of
+  more than one `long double` — `long double v[2]`, local or global — lower
+  the same way, because the array is memory-class and its elements are reached
+  one f80 at a time. `tests/basic_c_long_double_aggregate.c` covers the
+  semantics under all four allocators; the ABI itself is only pinned by
+  `tests/basic_c_long_double_aggregate_{caller,callee}.c`, linked against the
+  host compiler in both directions, because a caller and a callee this
+  compiler produced agree with each other whatever they agree on.
   Still refused with a source diagnostic: `va_arg` of a wide float, a fixed
   wide-float parameter of a variadic *definition* (the SysV `va_start`
-  register-save area does not account for it), any aggregate whose wide-float
-  payload is not the ABI-proven single-f80 shape, and every wide float on a
-  target whose `long double` is not this format. Refused later, by codegen's
-  own `CODEGEN_ERROR_UNSUPPORTED_ABI` rather than a diagnostic, is an object
-  of more than one `long double` — `long double v[2]`, local or global —
-  because its slot is not the sixteen-byte x87 shape the value paths read.
+  register-save area does not account for it), an aggregate whose
+  classification carries an X87 class without being the ABI-proven single-f80
+  shape, and every wide float on a target whose `long double` is not this
+  format.
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives

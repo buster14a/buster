@@ -722,6 +722,13 @@ BUSTER_F_DECL IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type, Ir
 // placement cannot silently diverge; results use the fixed X0:X1 pair and do
 // not need the argument-file alignment rule.
 BUSTER_F_DECL bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
+// True when a System V x86-64 value never puts an 80-bit x87 payload in an
+// x87 class -- either because the merger resolved its eightbytes to INTEGER
+// (musl's `union ldshape`, an f80 overlaid with an integer pair) or because
+// the whole value went to memory.  Such a value is an ordinary aggregate to
+// every backend: its bytes are copied, never loaded onto the x87 stack.  Only
+// a classification that really carries X87/X87_UP needs the x87 vocabulary.
+BUSTER_F_DECL bool ir_abi_value_has_x87_part(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
 BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol);
 BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);

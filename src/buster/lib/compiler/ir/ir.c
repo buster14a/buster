@@ -2600,16 +2600,23 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_class_is_x87(IrAbiClass abi_class)
 }
 
 // Merge one field's class into an eightbyte using the System V AMD64
-// post-merge precedence.  The existing IR model has one SSE-like FLOAT class
-// (rather than separate SSE/SSEUP classes); preserve that behavior while
-// making x87 classes explicit.  An x87 class may only merge with the same
-// x87 class.  Any other overlap is MEMORY, which also invalidates an X87_UP
-// tail that no longer accompanies X87.
+// merger algorithm's precedence, which is ordered: equal classes, NO_CLASS,
+// MEMORY, INTEGER, x87, and SSE last.  The existing IR model has one SSE-like
+// FLOAT class (rather than separate SSE/SSEUP classes); preserve that
+// behavior while making x87 classes explicit.
+//
+// INTEGER beating x87 is the order the psABI writes and the order clang
+// compiles, and it is what makes musl's `union ldshape` -- an 80-bit
+// `long double` overlaid with `struct { uint64_t m; uint16_t se; }` -- an
+// INTEGER pair that rides two general-purpose registers rather than a MEMORY
+// value.  An x87 class surviving next to anything else is MEMORY, and an
+// X87_UP tail that no longer accompanies X87 is caught by the post-merge
+// cleanup in the classifier's caller.
 BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAbiClass right)
 {
-    if (left == IR_ABI_CLASS_MEMORY || right == IR_ABI_CLASS_MEMORY)
+    if (left == right)
     {
-        return IR_ABI_CLASS_MEMORY;
+        return left;
     }
     if (left == IR_ABI_CLASS_NONE)
     {
@@ -2619,9 +2626,13 @@ BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAb
     {
         return left;
     }
-    if (left == right)
+    if (left == IR_ABI_CLASS_MEMORY || right == IR_ABI_CLASS_MEMORY)
     {
-        return left;
+        return IR_ABI_CLASS_MEMORY;
+    }
+    if (left == IR_ABI_CLASS_INTEGER || right == IR_ABI_CLASS_INTEGER)
+    {
+        return IR_ABI_CLASS_INTEGER;
     }
     if (ir_system_v_abi_class_is_x87(left) || ir_system_v_abi_class_is_x87(right))
     {
@@ -3364,6 +3375,18 @@ IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConventi
             ir_resolve_type_abi(program, type_id, convention);
         }
         result = type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
+    }
+
+    return result;
+}
+
+bool ir_abi_value_has_x87_part(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
+{
+    IrAbiValue abi = ir_type_abi_value(program, type_id, convention, use);
+    bool result = false;
+    for (u32 part = 0; part < abi.part_count && part < IR_ABI_MAX_PARTS; part += 1)
+    {
+        result |= ir_system_v_abi_class_is_x87(abi.parts[part].abi_class);
     }
 
     return result;
