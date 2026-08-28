@@ -5427,6 +5427,49 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(long_double_temporary);
     }
+    // Static 80-bit x87 initialization: a folded constant expression and an
+    // aggregate of them, which is the pair musl's src/math needs and the
+    // shapes a bare-literal path refused.  The fixture compares each object
+    // against the bytes Clang emits for the same declaration, so a fold that
+    // is one ulp off fails it while a printed decimal would not.  It runs
+    // under every allocator for the same reason the arithmetic fixture above
+    // does, and compiles to an empty program wherever `long double` is not
+    // the x87 format.
+    String8 c_long_double_static_allocators[] = {
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_static_allocators); allocator_index += 1)
+    {
+        TemporalArena static_initializer_temporary = scratch_begin(&arguments->arena, 1);
+        String8 static_initializer_path =
+            buster_test_temporary_path(static_initializer_temporary.arena, S8("buster-c-long-double-static-initializer"), S8(""));
+        String8 static_initializer_command_line[] = {
+            c_long_double_static_allocators[allocator_index], S8("-o"), static_initializer_path,
+            S8("tests/basic_c_long_double_static_initializer.c"),
+        };
+        CompilerDriverResult static_initializer = compiler_driver_execute_invocation(
+            static_initializer_temporary.arena,
+            compiler_driver_parse_arguments(static_initializer_temporary.arena,
+                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(static_initializer_command_line)));
+        BUSTER_TEST(arguments, static_initializer.error == COMPILER_DRIVER_ERROR_NONE);
+        if (static_initializer.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 static_initializer_arguments[] = {static_initializer_path};
+            ProcessSpawnResult static_initializer_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(static_initializer_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, static_initializer_spawn.handle != 0);
+            if (static_initializer_spawn.handle)
+            {
+                BUSTER_TEST(arguments,
+                            os_process_wait_sync(static_initializer_temporary.arena, static_initializer_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(static_initializer_temporary);
+    }
     // A loop body that allocates nothing must carry no stack checkpoint at
     // all: the restore is what read a stale frame slot into RSP, and its
     // absence is the property the runtime fixture above cannot observe on a

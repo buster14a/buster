@@ -5188,6 +5188,62 @@ BUSTER_C_INTERNAL u32 c_ir_ext80_big_bit_length(CIrExt80Big const* value)
     return (value->count - 1) * 32 + bits;
 }
 
+// Operand-to-operand addition and multiplication.  A single literal only ever
+// scaled its rational by a small constant, so mul_small and add_small were
+// enough for it; folding `a * b` or `a + b` over two literals needs the whole
+// products and sums.  Limbs above `count` are always zero here -- every writer
+// in this bignum either starts from a cleared value or normalizes down through
+// zeros -- so the shorter operand reads as zero without a length test.
+BUSTER_C_INTERNAL bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right)
+{
+    u32 count = left->count > right->count ? left->count : right->count;
+    u64 carry = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u64 sum = (u64)left->limbs[index] + right->limbs[index] + carry;
+        left->limbs[index] = (u32)sum;
+        carry = sum >> 32;
+    }
+    left->count = count;
+    if (carry)
+    {
+        if (count >= C_IR_EXT80_BIG_LIMBS)
+        {
+            return false;
+        }
+        left->limbs[count] = (u32)carry;
+        left->count = count + 1;
+    }
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out)
+{
+    memset(product_out, 0, sizeof(*product_out));
+    if (!left->count || !right->count)
+    {
+        return true;
+    }
+    if (left->count > C_IR_EXT80_BIG_LIMBS - right->count)
+    {
+        return false;
+    }
+    for (u32 left_index = 0; left_index < left->count; left_index += 1)
+    {
+        u64 carry = 0;
+        for (u32 right_index = 0; right_index < right->count; right_index += 1)
+        {
+            u64 product = (u64)left->limbs[left_index] * right->limbs[right_index] + product_out->limbs[left_index + right_index] + carry;
+            product_out->limbs[left_index + right_index] = (u32)product;
+            carry = product >> 32;
+        }
+        product_out->limbs[left_index + right->count] = (u32)carry;
+    }
+    product_out->count = left->count + right->count;
+    c_ir_ext80_big_normalize(product_out);
+    return true;
+}
+
 // Divide a non-negative integer by another while retaining only the 65
 // quotient bits needed for a 64-bit significand.  The remainder is kept in
 // the local copy, so the final comparison implements round-to-nearest-even.
@@ -6013,61 +6069,193 @@ BUSTER_C_INTERNAL bool c_ir_ext80_parse_integer(String8 spelling, u64* value_out
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
+// One folded x87 value: the 64-bit significand carrying its explicit integer
+// bit and the 16-bit sign/exponent field, which is exactly the pair the object
+// writer stores.  Every leaf is rounded to its own declared type and every
+// binary operation is rounded back into this form, so the folder reproduces
+// C's per-operation rounding rather than an idealized exact result, and no
+// intermediate needs to survive as an unbounded rational.
+typedef struct CIrExt80Value CIrExt80Value;
+struct CIrExt80Value
 {
-    TargetDataLayout layout = target_data_layout(target);
-    return c_ir_target_supports_f80(target) && type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 &&
-           type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+    u64 significand;
+    u16 exponent_sign;
+    // The operand's own arithmetic rank, which decides where an operation on
+    // it would round.  See c_ir_ext80_fold_apply.
+    u8 rank;
+};
+
+enum
+{
+    C_IR_EXT80_RANK_INTEGER = 0,
+    C_IR_EXT80_RANK_FLOAT = 1,
+    C_IR_EXT80_RANK_DOUBLE = 2,
+    C_IR_EXT80_RANK_LONG_DOUBLE = 3,
+};
+
+// The x87 value occupies the first ten bytes of its sixteen-byte slot and the
+// remaining six are ABI padding that stays zero.  Emitting the two fields a
+// byte at a time keeps the encoding independent of the host's own long double,
+// which the aggregate element path needs as much as the scalar one.
+BUSTER_C_INTERNAL void c_ir_ext80_store_bytes(u8* bytes, u64 significand, u16 exponent_sign)
+{
+    memset(bytes, 0, 16);
+    for (u32 index = 0; index < 8; index += 1)
+    {
+        bytes[index] = (u8)(significand >> (index * 8));
+    }
+    bytes[8] = (u8)exponent_sign;
+    bytes[9] = (u8)(exponent_sign >> 8);
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end,
-                                                   IrGlobal* global)
+// Reopen an encoded value as the exact rational significand * 2^exponent it
+// denotes, so the next operation can combine two of them without losing bits.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_rational(CIrExt80Value value, CIrExt80Big* numerator_out, s32* binary_exponent_out, bool* negative_out)
 {
-    if (!builder || !type || !global || start >= end)
+    u32 exponent_field = value.exponent_sign & 0x7fff;
+    if (exponent_field == 0x7fff)
+    {
+        // Infinities and NaNs never enter the folder: every producer of a
+        // value here rejects them at their source.
+        return false;
+    }
+    c_ir_ext80_big_set_u64(numerator_out, value.significand);
+    // A zero exponent field is the subnormal encoding, whose significand is
+    // scaled at the minimum normal exponent instead of at its own.
+    *binary_exponent_out = exponent_field ? (s32)exponent_field - 16383 - 63 : -16382 - 63;
+    *negative_out = (value.exponent_sign & 0x8000) != 0;
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    CIrExt80Big left_numerator = {0};
+    CIrExt80Big right_numerator = {0};
+    s32 left_exponent = 0;
+    s32 right_exponent = 0;
+    bool left_negative = false;
+    bool right_negative = false;
+    if (!c_ir_ext80_value_rational(left, &left_numerator, &left_exponent, &left_negative) ||
+        !c_ir_ext80_value_rational(right, &right_numerator, &right_exponent, &right_negative))
     {
         return false;
     }
-    if (builder->function)
-    {
-        builder->failure_message = S8("x86 long double static initialization is only supported at file scope");
-        builder->failure_token_index = start;
-        return false;
-    }
-    while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close != end - 1)
-        {
-            break;
-        }
-        start += 1;
-        end -= 1;
-    }
+    CIrExt80Big denominator = {0};
+    c_ir_ext80_big_set_u64(&denominator, 1);
     bool negative = false;
-    if (end == start + 2 && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
-                             c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
+    bool valid = false;
+    s64 exponent = 0;
+    if (op == C_PUNCTUATOR_STAR)
     {
-        negative = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS);
-        start += 1;
+        CIrExt80Big product = {0};
+        valid = c_ir_ext80_big_multiply(&left_numerator, &right_numerator, &product);
+        left_numerator = product;
+        negative = left_negative != right_negative;
+        exponent = (s64)left_exponent + right_exponent;
     }
-    if (end != start + 1 || builder->preprocess.tokens[start].kind != C_TOKEN_PREPROCESSING_NUMBER)
+    else if (op == C_PUNCTUATOR_SLASH)
+    {
+        // Division is the one operation that keeps a denominator: the rounding
+        // in c_ir_ext80_from_rational is what turns the exact quotient into
+        // the 64-bit significand, which is why `1/LDBL_EPSILON` needs no
+        // numeric core beyond what a single literal already used.
+        valid = right_numerator.count != 0;
+        denominator = right_numerator;
+        negative = left_negative != right_negative;
+        exponent = (s64)left_exponent - right_exponent;
+    }
+    else if (op == C_PUNCTUATOR_PLUS || op == C_PUNCTUATOR_MINUS)
+    {
+        right_negative = op == C_PUNCTUATOR_MINUS ? !right_negative : right_negative;
+        s32 common = left_exponent < right_exponent ? left_exponent : right_exponent;
+        if (!c_ir_ext80_big_shift_left(&left_numerator, (u32)(left_exponent - common)) ||
+            !c_ir_ext80_big_shift_left(&right_numerator, (u32)(right_exponent - common)))
+        {
+            return false;
+        }
+        exponent = common;
+        if (left_negative == right_negative)
+        {
+            valid = c_ir_ext80_big_add(&left_numerator, &right_numerator);
+            negative = left_negative;
+        }
+        else
+        {
+            // Opposite signs subtract the smaller magnitude from the larger and
+            // keep that operand's sign.  Operands that cancel exactly give
+            // positive zero under round-to-nearest, which is why the sign only
+            // survives while a difference remains.
+            s32 comparison = c_ir_ext80_big_compare(&left_numerator, &right_numerator);
+            if (comparison >= 0)
+            {
+                negative = left_negative && comparison > 0;
+                valid = c_ir_ext80_big_subtract_shifted(&left_numerator, &right_numerator, 0);
+            }
+            else
+            {
+                CIrExt80Big difference = right_numerator;
+                valid = c_ir_ext80_big_subtract_shifted(&difference, &left_numerator, 0);
+                left_numerator = difference;
+                negative = right_negative;
+            }
+        }
+    }
+    if (!valid || exponent > INT32_MAX || exponent < INT32_MIN)
     {
         return false;
     }
-    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
+    u64 significand = 0;
+    u16 exponent_sign = 0;
+    if (!c_ir_ext80_from_rational(left_numerator, denominator, (s32)exponent, negative, &significand, &exponent_sign))
+    {
+        return false;
+    }
+    *result_out = (CIrExt80Value){
+        .significand = significand,
+        .exponent_sign = exponent_sign,
+        .rank = C_IR_EXT80_RANK_LONG_DOUBLE,
+    };
+    return true;
+}
+
+// The usual arithmetic conversions decide where an operation rounds.  Only a
+// long double operand makes the result round in this format; narrower floating
+// arithmetic would round at its own precision first and integer arithmetic
+// would not round at all, so neither is folded here and both keep the refusal.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    u8 rank = left.rank > right.rank ? left.rank : right.rank;
+    if (rank != C_IR_EXT80_RANK_LONG_DOUBLE)
+    {
+        return false;
+    }
+    return c_ir_ext80_value_binary(op, left, right, result_out);
+}
+
+// One numeric token as the long double value it converts to.  The three cases
+// are the literal's own type: an L-suffixed spelling is already this format, a
+// plain or f-suffixed spelling rounds to double or float first and widens
+// exactly, and an integer spelling converts from its own integer type, where a
+// leading minus on an unsigned literal wraps before the widening.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 token_index, bool negative, CIrExt80Value* value_out)
+{
+    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
     u64 significand = 0;
     u16 exponent_sign = 0;
     bool floating = c_ir_number_is_float(spelling);
     char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
     bool long_suffix = suffix == 'l' || suffix == 'L';
     bool valid = false;
+    u8 rank = C_IR_EXT80_RANK_INTEGER;
     if (floating && long_suffix)
     {
+        rank = C_IR_EXT80_RANK_LONG_DOUBLE;
         valid = c_ir_ext80_parse_long_literal(spelling, negative, &significand, &exponent_sign);
     }
     else if (floating)
     {
         bool single = suffix == 'f' || suffix == 'F';
+        rank = single ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
         CIrExt80Big numerator = {0};
         CIrExt80Big denominator = {0};
         s32 binary_exponent = 0;
@@ -6099,8 +6287,6 @@ BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDe
             IrType* integer_type = ir_type_from_id(&builder->program->types, integer_type_id);
             if (!integer_type || !c_ir_constant_type_is_integer(integer_type))
             {
-                builder->failure_message = S8("unsupported integer in x86 long double static initializer");
-                builder->failure_token_index = start;
                 return false;
             }
             if (negative)
@@ -6130,8 +6316,219 @@ BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDe
     }
     if (!valid)
     {
-        builder->failure_message = S8("unsupported x86 long double static initializer");
-        builder->failure_token_index = start;
+        return false;
+    }
+    *value_out = (CIrExt80Value){
+        .significand = significand,
+        .exponent_sign = exponent_sign,
+        .rank = rank,
+    };
+    return true;
+}
+
+// The initializer expression itself, as a recursive descent over the token
+// range with the two ordinary precedence levels.  Values are ten bytes, so the
+// recursion carries no bignum; the bounded ones live inside a single operation.
+typedef struct CIrExt80Fold CIrExt80Fold;
+struct CIrExt80Fold
+{
+    CIntegerIrBuilder* builder;
+    u32 cursor;
+    u32 limit;
+    u32 depth;
+    // The token the refusal names, kept separate from the cursor because the
+    // failing operator is behind it by the time an operation reports.
+    u32 blame;
+};
+
+#define C_IR_EXT80_FOLD_DEPTH_LIMIT 64
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* value_out);
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
+    if (fold->cursor >= fold->limit || fold->depth >= C_IR_EXT80_FOLD_DEPTH_LIMIT)
+    {
+        fold->blame = fold->cursor < fold->limit ? fold->cursor : (fold->limit ? fold->limit - 1 : 0);
+        return false;
+    }
+    CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+    if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
+    {
+        bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
+        fold->cursor += 1;
+        if (fold->cursor < fold->limit && fold->builder->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            // A sign directly on a literal converts in that literal's own
+            // type, which is where the unsigned wrap has to happen.
+            u32 number = fold->cursor;
+            fold->cursor += 1;
+            if (!c_ir_ext80_fold_number(fold->builder, number, negative, value_out))
+            {
+                fold->blame = number;
+                return false;
+            }
+            return true;
+        }
+        fold->depth += 1;
+        bool folded = c_ir_ext80_fold_primary(fold, value_out);
+        fold->depth -= 1;
+        if (!folded)
+        {
+            return false;
+        }
+        value_out->exponent_sign ^= negative ? UINT16_C(0x8000) : 0;
+        return true;
+    }
+    if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter(fold->builder->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                            C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close == UINT32_MAX)
+        {
+            fold->blame = fold->cursor;
+            return false;
+        }
+        CIrExt80Fold inner = *fold;
+        inner.cursor = fold->cursor + 1;
+        inner.limit = close;
+        inner.depth = fold->depth + 1;
+        bool folded = c_ir_ext80_fold_sum(&inner, value_out);
+        if (!folded || inner.cursor != close)
+        {
+            fold->blame = folded ? inner.cursor : inner.blame;
+            return false;
+        }
+        fold->cursor = close + 1;
+        return true;
+    }
+    if (token->kind == C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        u32 number = fold->cursor;
+        fold->cursor += 1;
+        if (!c_ir_ext80_fold_number(fold->builder, number, false, value_out))
+        {
+            fold->blame = number;
+            return false;
+        }
+        return true;
+    }
+    fold->blame = fold->cursor;
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_term(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
+    CIrExt80Value left = {0};
+    if (!c_ir_ext80_fold_primary(fold, &left))
+    {
+        return false;
+    }
+    while (fold->cursor < fold->limit)
+    {
+        CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+        bool multiply = c_token_is_punctuator(token, C_PUNCTUATOR_STAR);
+        if (!multiply && !c_token_is_punctuator(token, C_PUNCTUATOR_SLASH))
+        {
+            break;
+        }
+        u32 operator_index = fold->cursor;
+        fold->cursor += 1;
+        CIrExt80Value right = {0};
+        if (!c_ir_ext80_fold_primary(fold, &right))
+        {
+            return false;
+        }
+        if (!c_ir_ext80_fold_apply(multiply ? C_PUNCTUATOR_STAR : C_PUNCTUATOR_SLASH, left, right, &left))
+        {
+            fold->blame = operator_index;
+            return false;
+        }
+    }
+    *value_out = left;
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* value_out)
+{
+    CIrExt80Value left = {0};
+    if (!c_ir_ext80_fold_term(fold, &left))
+    {
+        return false;
+    }
+    while (fold->cursor < fold->limit)
+    {
+        CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+        bool add = c_token_is_punctuator(token, C_PUNCTUATOR_PLUS);
+        if (!add && !c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
+        {
+            break;
+        }
+        u32 operator_index = fold->cursor;
+        fold->cursor += 1;
+        CIrExt80Value right = {0};
+        if (!c_ir_ext80_fold_term(fold, &right))
+        {
+            return false;
+        }
+        if (!c_ir_ext80_fold_apply(add ? C_PUNCTUATOR_PLUS : C_PUNCTUATOR_MINUS, left, right, &left))
+        {
+            fold->blame = operator_index;
+            return false;
+        }
+    }
+    *value_out = left;
+    return true;
+}
+
+// The entry point both static x87 writers use: the scalar global and one
+// element of an aggregate.  Anything the grammar above does not cover keeps
+// the refusal, with the diagnostic naming the token it stopped at.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_initializer(CIntegerIrBuilder* builder, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out)
+{
+    CIrExt80Fold fold = {
+        .builder = builder,
+        .cursor = start,
+        .limit = end,
+        .blame = start,
+    };
+    CIrExt80Value value = {0};
+    bool folded = start < end && c_ir_ext80_fold_sum(&fold, &value);
+    if (!folded || fold.cursor != end)
+    {
+        u32 blame = folded ? fold.cursor : fold.blame;
+        String8 spelling = blame < builder->preprocess.token_count
+                               ? c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[blame])
+                               : (String8){0};
+        builder->failure_message =
+            spelling.length ? string_format(builder->arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
+                            : S8("unsupported x86 long double static initializer");
+        builder->failure_token_index = blame;
+        return false;
+    }
+    *significand_out = value.significand;
+    *exponent_sign_out = value.exponent_sign;
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    return c_ir_target_supports_f80(target) && type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 &&
+           type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end,
+                                                   IrGlobal* global)
+{
+    if (!builder || !type || !global || start >= end)
+    {
+        return false;
+    }
+    u64 significand = 0;
+    u16 exponent_sign = 0;
+    if (!c_ir_ext80_fold_initializer(builder, start, end, &significand, &exponent_sign))
+    {
         return false;
     }
     u8* bytes = arena_allocate(builder->arena, u8, 16);
@@ -6139,10 +6536,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDe
     {
         return false;
     }
-    memset(bytes, 0, 16);
-    memcpy(bytes, &significand, sizeof(significand));
-    bytes[8] = (u8)exponent_sign;
-    bytes[9] = (u8)(exponent_sign >> 8);
+    c_ir_ext80_store_bytes(bytes, significand, exponent_sign);
     global->bytes = (ByteSlice){.pointer = bytes, .length = 16};
     global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
     // Signed zero is observable in x87 storage.  Only the ordinary mutable
@@ -28994,6 +29388,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     return false;
                 }
             }
+            // The width test stands in front of the target query so that the
+            // ordinary element -- an integer, a pointer, an f32 or an f64 --
+            // pays one compare rather than a data-layout lookup per slot.
+            if (type->bit_width == 80 && c_ir_ext80_static_scalar_target(builder->target, type))
+            {
+                // An x87 element carries more significand than the f64 the
+                // constant evaluator below works in, so it takes the same
+                // folder the scalar global does and writes its ten bytes
+                // straight into the slot.  The slot is sixteen bytes wide and
+                // the task loop already proved it is in range; the six padding
+                // bytes stay zero, matching the scalar encoding.
+                u64 significand = 0;
+                u16 exponent_sign = 0;
+                if (task.is_bit_field || !c_ir_ext80_fold_initializer(builder, task.start, task.end, &significand, &exponent_sign))
+                {
+                    return false;
+                }
+                c_ir_ext80_store_bytes(bytes + task.offset, significand, exponent_sign);
+                continue;
+            }
             CIrConstantValue evaluated = {0};
             if (type->kind == IR_TYPE_POINTER)
             {
@@ -33772,10 +34186,10 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
     }
     if (c_ir_ext80_static_scalar_target(builder->target, type))
     {
-        // This deliberately covers only file-scope objects.  Local static
-        // declarations still take the ordinary lowering path and therefore
-        // remain rejected along with arithmetic, casts, aggregates, calls,
-        // and all other wide-float uses.
+        // A scalar x87 object, at file scope or as a function-local static:
+        // both reach here with an IrGlobal to fill in, and the aggregate path
+        // already treated them alike, so the folder does too.  Casts, calls
+        // and every other wide-float initializer shape stay rejected.
         return c_ir_ext80_global_literal(builder, declaration, type, start, end, global);
     }
     if (type->kind == IR_TYPE_POINTER)

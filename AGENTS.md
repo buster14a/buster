@@ -848,12 +848,22 @@ Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
 harness compiles the portable C instead and lists each one. The remaining 159
 are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 68
-for `_Complex` arithmetic, which the frontend has no type for; 37 that reach
+for `_Complex` arithmetic, which the frontend has no type for; 54 that reach
 code generation and fail there, nearly all of them x87 `long double`, either a
 `union` holding one passed by value or an operation the emitter has no shape
-for; 22 static initializers, 17 of which are a `long double` constant or an
-array of them; 4 startup objects; 2 conflicting declarations; and 26
-singletons.
+for; 5 static initializers; 4 startup objects; 2 conflicting declarations; and
+26 singletons.
+
+Seventeen of those code-generation failures were static initializers until the
+folder learned the two shapes musl writes. `floorl`, `ceill`, `roundl`,
+`truncl`, `rintl`, `modfl` and `__rem_pio2l` open with
+`static const long double toint = 1/LDBL_EPSILON;`, and `atanl`, `expl`,
+`logl`, `log2l`, `log10l`, `log1pl`, `powl`, `tgammal`, `erfl` and `exp10l`
+carry `long double` coefficient tables; both fold now. What stops them instead
+is the canonical emitter, which rejects a whole function when one of its values
+has a type that contains an x87 `long double` without being one, so an array of
+them is refused whether or not it carries an initializer at all. The compiled
+count therefore did not move.
 
 One of those deserves its own note. musl's startup objects -- `crt/crt1.c`
 and its siblings -- are written as module-level assembly, and Buster's
@@ -1465,6 +1475,17 @@ validate the fix (which oracle, which harness, which counters), and a
 definition of done. State what was measured and when, so a stale claim is
 recognisable as stale; the tree moves fast enough that a count quoted without
 a date is a trap. Issues #537-#549 are the current examples of the form.
+
+**Push a rebase before you re-verify it.** A rebase onto a moved `main` is
+followed by a full local pass — `test_all`, `test_self_host`, whichever compat
+harness the change touches — and that pass takes longer than CI takes to start.
+Push the rebased branch first, as long as the runners are not already saturated
+with other work, so the matrix runs while the local pass runs; the two agree
+almost always, and when they disagree you have both answers sooner. Force-push
+with `--force-with-lease`, never a bare `--force`, so a branch someone else
+advanced is not overwritten. This is a rebase rule, not a general one: a branch
+whose content is still changing waits for the local pass, because a red CI run
+on a commit you already know is incomplete tells nobody anything.
 
 ## Core rules
 

@@ -9853,11 +9853,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("x86_64-apple-ios"),
     };
     String8 sources[] = {
-        S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
-        S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
         S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
-        S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
-        S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
+        S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"),
+        S8("long double narrow_arithmetic = 1.0 + 2.0; int main(void) { return 0; }"),
+        S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"),
+        S8("long double divide_by_zero = 1.0L/0.0L; int main(void) { return 0; }"),
         S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
         S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
@@ -9904,9 +9904,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         }
         // The x87 vocabulary answers for these, so they must lower rather
         // than diagnose: negation, truth conversion, the conversions to and
-        // from a wide float, and a wide float passed through a variadic call.
-        // They are checked here, beside the shapes that still refuse, so the
-        // boundary between the two stays one list to read.
+        // from a wide float, a wide float passed through a variadic call, and
+        // the static initializers the constant folder covers -- an arithmetic
+        // expression over literals, parenthesized or not, and an aggregate of
+        // them.  They are checked here, beside the shapes that still refuse,
+        // so the boundary between the two stays one list to read.
         String8 accepted[] = {
             S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
             S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
@@ -9916,6 +9918,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("long double add(long double left, long double right) { return left + right; } int main(void) { return 0; }"),
             S8("int compare(long double left, long double right) { return left < right; } int main(void) { return 0; }"),
             S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
+            S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
+            S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
+            S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
+            S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
         };
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(accepted); source_index += 1)
         {
@@ -10074,6 +10080,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArgum
             IrGlobal* brace_trailing = c_test_find_ir_global(module, lowered.program, S8("brace_trailing"));
             BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace, expected, sizeof(expected)));
             BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace_trailing, expected, sizeof(expected)));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// An x87 aggregate global carries one flat byte payload rather than the scalar
+// pair, so it is checked against the whole run instead of against the ten-byte
+// value plus its padding.
+BUSTER_GLOBAL_LOCAL bool c_test_ext80_aggregate_bytes(IrGlobal* global, u8 const* expected, u32 length)
+{
+    bool bytes_match = global && global->bytes.pointer && global->bytes.length == length &&
+                       global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES;
+    for (u32 index = 0; bytes_match && index < length; index += 1)
+    {
+        bytes_match = global->bytes.pointer[index] == expected[index];
+    }
+    return bytes_match;
+}
+
+// A static x87 initializer is a constant expression over literals, and an
+// aggregate of them is one too.  These are the shapes musl's src/math needs:
+// `1/LDBL_EPSILON` in floorl.c and the coefficient tables in atanl.c.
+//
+// The expected payloads are what Clang emits for the same declarations.  What
+// they pin is that the fold rounds once per operation in the operation's own
+// format rather than accumulating through a double: `1/LDBL_EPSILON` is
+// exactly 2^63 only because LDBL_EPSILON rounds to 2^-63 first, and
+// folded_from_float and folded_from_double differ from each other and from the
+// long double nearest 0.1 for the same reason.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("long double folded_quotient = 1/1.0842021724855044340e-19L;"
+                        " long double folded_chain = 3.0L*1.0L/7.0L;"
+                        " long double folded_sum = 1.0L + 1.0L/3.0L;"
+                        " long double folded_difference = 1.0L - 1.0L/3.0L;"
+                        " long double folded_grouped = (2.0L*(3.0L + 4.0L))/5.0L;"
+                        " long double folded_negation = -(1.0L/3.0L);"
+                        " long double folded_from_float = 0.1f*1.0L;"
+                        " long double folded_from_double = 0.1*1.0L;"
+                        " long double folded_from_unsigned = -1U*1.0L;"
+                        " long double folded_subnormal = 0x1p-16445L*1.0L;"
+                        " long double table[3] = {1.0L/3.0L, -2.5L, 0x1p-16445L};"
+                        " struct Pair { long double head; long double tail; };"
+                        " struct Pair pair = {1.0L/7.0L, -1.0L/9.0L};"
+                        " int main(void) { return 0; }");
+    String8 names[] = {
+        S8("folded_quotient"),
+        S8("folded_chain"),
+        S8("folded_sum"),
+        S8("folded_difference"),
+        S8("folded_grouped"),
+        S8("folded_negation"),
+        S8("folded_from_float"),
+        S8("folded_from_double"),
+        S8("folded_from_unsigned"),
+        S8("folded_subnormal"),
+    };
+    u8 expected[][16] = {
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x6e, 0xdb, 0xb6, 0x6d, 0xdb, 0xb6, 0x6d, 0xdb, 0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfe, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0xb3, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfd, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0xcd, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0xd0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x1e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    };
+    u8 expected_table[] = {
+        0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    u8 expected_pair[] = {
+        0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, 0x92, 0xfc, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x8e, 0xe3, 0x38, 0x8e, 0xe3, 0x38, 0x8e, 0xe3, 0xfb, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+        S8("x86_64-apple-ios"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(names); global_index += 1)
+            {
+                IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[global_index]);
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
+            }
+            IrGlobal* table = c_test_find_ir_global(module, lowered.program, S8("table"));
+            IrGlobal* pair = c_test_find_ir_global(module, lowered.program, S8("pair"));
+            BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(table, expected_table, sizeof(expected_table)));
+            BUSTER_TEST(arguments, c_test_ext80_aggregate_bytes(pair, expected_pair, sizeof(expected_pair)));
         }
         scratch_end(temporary);
     }
@@ -10312,6 +10431,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_wide_float_android_rejection(arguments));
     c_test_result_add(&result, c_test_wide_float_global_boundaries(arguments));
     c_test_result_add(&result, c_test_wide_float_global_braces(arguments));
+    c_test_result_add(&result, c_test_wide_float_global_folding(arguments));
     c_test_result_add(&result, c_test_constant_entity_lookup(arguments));
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
