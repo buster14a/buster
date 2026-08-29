@@ -41,12 +41,30 @@ struct LinkObjectResult
 };
 
 typedef struct NativeExecutableLinkOptions NativeExecutableLinkOptions;
+typedef struct NativeDynamicDataSymbol NativeDynamicDataSymbol;
+// One data object a shared library exports, as its own dynamic symbol table
+// spells it.  A copy relocation reserves executable-owned storage for such an
+// object, and both fields are what the reservation needs that the referencing
+// name alone does not carry: the address groups the names the library exports
+// for one object (glibc publishes `environ`, `_environ` and `__environ` at one
+// address), and the size states how much the loader may write into the slot.
+struct NativeDynamicDataSymbol
+{
+    String8 name;
+    u64 address;
+    u64 size;
+};
+
 typedef struct NativeDynamicLibrary NativeDynamicLibrary;
 struct NativeDynamicLibrary
 {
     String8 name;
     String8* exported_symbols;
+    // ELF only, and read only for links that import data: the PE writers
+    // resolve imports by name and need no address.
+    NativeDynamicDataSymbol* exported_data_symbols;
     u32 exported_symbol_count;
+    u32 exported_data_symbol_count;
     bool exports_known;
     u8 reserved[3];
 };
@@ -62,12 +80,17 @@ struct NativeExecutableLinkOptions
     String8* linker_arguments;
     NativeDynamicLibrary* dynamic_libraries;
     String8* runtime_exported_symbols;
+    // The implicit runtime library's exports: ucrtbase.dll for hosted Windows,
+    // libc.so.6 for hosted ELF.  Neither appears in dynamic_libraries because
+    // the writers name it themselves.
+    NativeDynamicDataSymbol* runtime_data_symbols;
     u32 library_path_count;
     u32 framework_path_count;
     u32 framework_count;
     u32 linker_argument_count;
     u32 dynamic_library_count;
     u32 runtime_exported_symbol_count;
+    u32 runtime_data_symbol_count;
     bool runtime_exports_known;
     bool debug_info;
     u8 reserved[6];

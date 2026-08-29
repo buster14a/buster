@@ -13123,36 +13123,6 @@ struct SbaseUtilityStatus
     u8 reserved[4];
 };
 
-// `env` and `find` are the two utilities whose Buster build does not behave
-// like the Clang build, and both fail for one linker reason rather than a
-// codegen one: they read `extern char **environ`. Imported data reaches a
-// non-PIE executable through a copy relocation, and the copy is taken by the
-// dynamic loader before glibc's startup code stores the environment pointer,
-// so the program reads a null environment and dereferences it. GNU ld avoids
-// this by defining the whole alias set (`environ`, `_environ`, `__environ`)
-// at the copy slot: glibc writes through `__environ`, that write lands in the
-// executable's copy, and the program sees it. Buster's linker does not read
-// the shared library's symbol table, so it cannot know which names alias the
-// one it was asked for. Recorded here rather than hidden: the harness expects
-// exactly these two to differ, and reports a stale expectation if one starts
-// matching.
-BUSTER_GLOBAL_LOCAL String8 sbase_copy_relocation_gaps[] = {
-    S8_INITIALIZER("env"),
-    S8_INITIALIZER("find"),
-};
-
-BUSTER_GLOBAL_LOCAL bool sbase_is_copy_relocation_gap(String8 name)
-{
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sbase_copy_relocation_gaps); index += 1)
-    {
-        if (string_equal(name, sbase_copy_relocation_gaps[index]))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 BUSTER_GLOBAL_LOCAL SbaseCommandResult sbase_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
     ProcessRun run = {
@@ -14154,7 +14124,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
                 }
             }
         }
-        u32 gaps = 0;
         u32 mismatches = 0;
         u32 matched = 0;
         if (built)
@@ -14169,24 +14138,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
                 SbaseCommandResult probe = sbase_run_script(arena, shell, sbase_utilities[index].probe, bin);
                 statuses[index].probed = true;
                 statuses[index].matched = sbase_results_match(reference_probes[index], probe);
-                bool known_gap = sbase_is_copy_relocation_gap(name);
-                if (statuses[index].matched == known_gap)
+                if (!statuses[index].matched)
                 {
-                    // Either a utility differs that should not, or one of the
-                    // two documented copy-relocation gaps has started
-                    // matching and the expectation above is stale. Both are
-                    // reported; only the first is a mismatch to chase.
-                    if (known_gap)
-                    {
-                        string_print(S8("error: sbase utility '{S8}' now matches the Clang reference; the documented copy-relocation gap is stale\n"), name);
-                    }
-                    else
-                    {
-                        sbase_report_mismatch(S8("utility"), name, reference_probes[index], probe);
-                    }
+                    sbase_report_mismatch(S8("utility"), name, reference_probes[index], probe);
                     mismatches += 1;
                 }
-                gaps += known_gap;
                 matched += statuses[index].matched;
             }
         }
@@ -14196,10 +14152,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
             bool selected = mode.complete || sbase_is_sampled(name);
             String8 compile_status = !selected ? S8("skipped") : statuses[index].compiled ? S8("ok") : S8("failed");
             String8 link_status = !selected || !statuses[index].compiled ? S8("skipped") : statuses[index].linked ? S8("ok") : S8("failed");
-            String8 probe_status = !statuses[index].probed              ? S8("skipped")
-                                   : statuses[index].matched            ? S8("ok")
-                                   : sbase_is_copy_relocation_gap(name) ? S8("known-copy-relocation-gap")
-                                                                        : S8("differs");
+            String8 probe_status = !statuses[index].probed ? S8("skipped") : statuses[index].matched ? S8("ok") : S8("differs");
             string_print(S8("SBASE_UTILITY allocator={S8} name={S8} compile={S8} link={S8} probe={S8}\n"), mode.name, name, compile_status, link_status,
                          probe_status);
         }
@@ -14245,9 +14198,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
             }
         }
         string_print(S8("SBASE_SUMMARY allocator={S8} coverage={S8} units={u32} unit_failures={u32} linked={u32} link_failures={u32} probes_matched={u32} "
-                        "known_gaps={u32} probe_mismatches={u32} case_mismatches={u32} upstream_passed={u32} upstream_mismatches={u32} status={S8}\n"),
+                        "probe_mismatches={u32} case_mismatches={u32} upstream_passed={u32} upstream_mismatches={u32} status={S8}\n"),
                      mode.name, mode.complete ? S8("complete") : S8("sampled"), build.compiled_units, build.failed_units, build.linked_utilities,
-                     build.failed_links, matched, gaps, mismatches, case_mismatches, test_passes, test_mismatches,
+                     build.failed_links, matched, mismatches, case_mismatches, test_passes, test_mismatches,
                      built && !mismatches && !case_mismatches && !test_mismatches ? S8("pass") : S8("fail"));
         passed = built && !mismatches && !case_mismatches && !test_mismatches;
     }

@@ -22,6 +22,17 @@
 // writers, which are chosen exactly when nothing is undefined. Mach-O
 // synthesizes no stub at all — LC_MAIN hands the entry point to dyld, which
 // already calls `exit` with what it returns.
+//
+// A second rule crosses the dynamic ELF writers: imported data reaches a
+// non-PIE executable through a copy relocation, and the slot that relocation
+// fills stands for the shared library's object, not for the name the program
+// referenced. When the driver was able to read the library's symbol table
+// (NativeDynamicDataSymbol), the writer defines every name exported at that
+// address on the slot, sizes the slot from the library, and gives two imported
+// names for one object one slot; see link_elf_exported_data_find. Defining
+// only the referenced name leaves the library binding its own post-startup
+// stores — glibc's `__environ = ev` — to its own storage while the program
+// reads a copy taken before startup ran.
 
 #include <buster/lib/compiler/link/link.h>
 
@@ -2287,6 +2298,23 @@ BUSTER_GLOBAL_LOCAL bool link_elf_hosted_exit_symbol(Arena* arena, ObjectFile* o
     return valid;
 }
 
+// The shared library's own entry for an imported data name, or nothing when
+// the driver could not read the library.  Callers use the entry's address to
+// find the other names the library exports for that one object.
+BUSTER_GLOBAL_LOCAL NativeDynamicDataSymbol* link_elf_exported_data_find(NativeDynamicDataSymbol* symbols, u32 symbol_count, String8 name)
+{
+    NativeDynamicDataSymbol* result = 0;
+    for (u32 index = 0; !result && index < symbol_count; index += 1)
+    {
+        if (string_equal(symbols[index].name, name))
+        {
+            result = symbols + index;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options)
 {
@@ -2340,6 +2368,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
     ObjectSymbolKind* import_kinds = arena_allocate(arena, ObjectSymbolKind, object->symbol_count);
     u32* import_name_offsets = arena_allocate(arena, u32, object->symbol_count);
+    String8* import_names = arena_allocate(arena, String8, object->symbol_count);
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
@@ -2358,28 +2387,141 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         import_indices[symbol_index] = import_count;
         import_kinds[import_count] = symbol->kind;
+        import_names[import_count] = symbol->name;
         imported_name_size += symbol->name.length + 1;
         import_count += 1;
     }
     // Direct references to imported data (for example libc's stdin/stdout/
-    // stderr variables) use copy relocations.  Reserve one pointer-sized
-    // local slot for each imported object so the PC-relative references in
-    // non-PIC upstream objects remain within the executable's image; the
-    // dynamic loader fills those slots from the shared library.
-    u32 data_import_count = 0;
+    // stderr variables) use copy relocations.  Reserve local storage for each
+    // imported object so the PC-relative references in non-PIC upstream
+    // objects remain within the executable's image; the dynamic loader fills
+    // those slots from the shared library.
+    //
+    // What is reserved is the library's object, not the one name this program
+    // spelled.  A shared library exports one object under every name it was
+    // aliased to — glibc publishes `environ`, `_environ` and `__environ` at
+    // one address — and a definition in the executable takes precedence over
+    // the library's own for all of them.  An executable that defines only the
+    // referenced name therefore leaves libc writing `__environ` into libc's
+    // storage while the program reads a copy taken before startup ran, which
+    // is how `extern char **environ` came to read null.  So each slot carries
+    // every exported name at its address, takes the library's own size, and is
+    // shared by two imports that name one object.  When the library's symbol
+    // table was not read, the slot keeps the pointer-sized shape it had.
+    u64 exported_data_total = options.runtime_data_symbol_count;
+    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+    {
+        exported_data_total += options.dynamic_libraries[library_index].exported_data_symbol_count;
+    }
+    String8* alias_names = arena_allocate(arena, String8, exported_data_total + 1);
+    u32* import_alias_first = arena_allocate(arena, u32, import_count);
+    u32* import_alias_counts = arena_allocate(arena, u32, import_count);
+    u32* import_copy_owners = arena_allocate(arena, u32, import_count);
+    u64* import_copy_sizes = arena_allocate(arena, u64, import_count);
+    NativeDynamicDataSymbol** import_export_tables = arena_allocate(arena, NativeDynamicDataSymbol*, import_count);
+    u64* import_export_addresses = arena_allocate(arena, u64, import_count);
+    u32 alias_count = 0;
+    u32 copy_slot_count = 0;
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        if (import_kinds[import_index] == OBJECT_SYMBOL_DATA)
+        import_alias_first[import_index] = alias_count;
+        import_alias_counts[import_index] = 0;
+        import_copy_owners[import_index] = UINT32_MAX;
+        import_copy_sizes[import_index] = 0;
+        import_export_tables[import_index] = 0;
+        import_export_addresses[import_index] = 0;
+        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
         {
-            if (data_import_count == UINT32_MAX)
-            {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
-            }
-            data_import_count += 1;
+            continue;
         }
+        NativeDynamicDataSymbol* table = 0;
+        u32 table_count = 0;
+        NativeDynamicDataSymbol* definition =
+            link_elf_exported_data_find(options.runtime_data_symbols, options.runtime_data_symbol_count, import_names[import_index]);
+        if (definition)
+        {
+            table = options.runtime_data_symbols;
+            table_count = options.runtime_data_symbol_count;
+        }
+        for (u32 library_index = 0; !definition && library_index < options.dynamic_library_count; library_index += 1)
+        {
+            NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
+            definition = link_elf_exported_data_find(library->exported_data_symbols, library->exported_data_symbol_count, import_names[import_index]);
+            if (definition)
+            {
+                table = library->exported_data_symbols;
+                table_count = library->exported_data_symbol_count;
+            }
+        }
+        u64 slot_size = sizeof(u64);
+        if (definition)
+        {
+            import_export_tables[import_index] = table;
+            import_export_addresses[import_index] = definition->address;
+            slot_size = definition->size ? definition->size : sizeof(u64);
+            for (u32 previous = 0; previous < import_index; previous += 1)
+            {
+                if (import_export_tables[previous] == table && import_export_addresses[previous] == definition->address)
+                {
+                    import_copy_owners[import_index] = import_copy_owners[previous];
+                    break;
+                }
+            }
+        }
+        if (import_copy_owners[import_index] != UINT32_MAX)
+        {
+            continue;
+        }
+        if (copy_slot_count == UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        import_copy_owners[import_index] = import_index;
+        copy_slot_count += 1;
+        for (u32 export_index = 0; definition && export_index < table_count; export_index += 1)
+        {
+            NativeDynamicDataSymbol* exported = table + export_index;
+            if (exported->address != definition->address || string_equal(exported->name, import_names[import_index]) || !exported->name.length ||
+                exported->name.length > UINT32_MAX || imported_name_size > UINT32_MAX - exported->name.length - 1)
+            {
+                continue;
+            }
+            // Two names the executable would then define twice: one this
+            // program has a global symbol for already — an import of its own,
+            // which carries a dynamic symbol pointing at this same shared
+            // slot, or a definition of its own, which the program means to
+            // use instead — and one this group already collected, because a
+            // library publishes a versioned object once per version symbol
+            // (glibc's `_sys_errlist` appears four times at one address).
+            bool defined = false;
+            for (u32 other = 0; !defined && other < object->symbol_count; other += 1)
+            {
+                defined = object->symbols[other].global && string_equal(object->symbols[other].name, exported->name);
+            }
+            for (u32 other = import_alias_first[import_index]; !defined && other < alias_count; other += 1)
+            {
+                defined = string_equal(alias_names[other], exported->name);
+            }
+            if (defined)
+            {
+                continue;
+            }
+            slot_size = BUSTER_MAX(slot_size, exported->size);
+            alias_names[alias_count] = exported->name;
+            alias_count += 1;
+            imported_name_size += exported->name.length + 1;
+        }
+        if (slot_size > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            result.symbol = import_names[import_index];
+            return result;
+        }
+        import_alias_counts[import_index] = alias_count - import_alias_first[import_index];
+        import_copy_sizes[import_index] = slot_size;
     }
-    u32 dynamic_data_relocation_count = data_import_count;
+    u32 dynamic_data_relocation_count = copy_slot_count;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -2455,9 +2597,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32 first_symbol_name_offset = 1 + (u32)library_name_size;
     u64 dynamic_string_size = 1 + library_name_size + imported_name_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
-    u64 dynamic_symbol_size = (u64)(import_count + 1) * ELF_SYMBOL_SIZE;
+    u64 dynamic_symbol_count = (u64)import_count + 1 + alias_count;
+    if (dynamic_symbol_count > UINT32_MAX)
+    {
+        // The hash table states its chain length in one 32-bit word.
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u64 dynamic_symbol_size = dynamic_symbol_count * ELF_SYMBOL_SIZE;
     u64 hash_offset = align_forward(dynamic_symbol_offset + dynamic_symbol_size, 4);
-    u64 hash_size = (u64)(2 + 1 + import_count + 1) * sizeof(u32);
+    u64 hash_size = (2 + 1 + dynamic_symbol_count) * sizeof(u32);
     u64 relocation_offset = align_forward(hash_offset + hash_size, 8);
     u64 plt_relocation_size = (u64)import_count * ELF_RELOCATION_SIZE;
     u64 relocation_size = (u64)(import_count + dynamic_data_relocation_count) * ELF_RELOCATION_SIZE;
@@ -2473,18 +2622,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] = align_forward(file_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
     u64 thread_local_memory_end = section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
     section_offsets[OBJECT_SECTION_ZERO] = align_forward(thread_local_memory_end, object->sections[OBJECT_SECTION_ZERO].alignment);
-    u64 copy_data_offset = align_forward(section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size, 8);
-    u64 copy_data_size = (u64)data_import_count * sizeof(u64);
-    u64 writable_memory_end = copy_data_offset + copy_data_size;
-    u32 copy_slot_cursor = 0;
+    u64 copy_data_offset = align_forward(section_offsets[OBJECT_SECTION_ZERO] + object->sections[OBJECT_SECTION_ZERO].virtual_size, 16);
+    u64 copy_slot_cursor = copy_data_offset;
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        if (import_kinds[import_index] == OBJECT_SYMBOL_DATA)
+        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
         {
-            copy_slot_addresses[import_index] = image_base + copy_data_offset + (u64)copy_slot_cursor * sizeof(u64);
-            copy_slot_cursor += 1;
+            continue;
         }
+        u32 owner = import_copy_owners[import_index];
+        if (owner != import_index)
+        {
+            copy_slot_addresses[import_index] = copy_slot_addresses[owner];
+            continue;
+        }
+        copy_slot_cursor = align_forward(copy_slot_cursor, import_copy_sizes[import_index] >= 16 ? 16 : 8);
+        copy_slot_addresses[import_index] = image_base + copy_slot_cursor;
+        copy_slot_cursor += import_copy_sizes[import_index];
     }
+    u64 writable_memory_end = copy_slot_cursor;
     if (file_size > UINT32_MAX)
     {
         result.error = LINK_ERROR_INVALID_INPUT;
@@ -2539,15 +2695,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // retaining the imported name used by the R_X86_64_COPY entry.
             link_write_u16(bytes, symbol_offset + 6, 0xfff1);
             link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
-            link_write_u64(bytes, symbol_offset + 16, sizeof(u64));
+            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_copy_owners[import_index]]);
+        }
+    }
+    // The library's other names for each copy-relocated object, defined at the
+    // same slot so the library's own post-startup stores through them land in
+    // the executable's copy.
+    u64 alias_symbol_index = (u64)import_count + 1;
+    for (u32 import_index = 0; import_index < import_count; import_index += 1)
+    {
+        for (u32 alias_index = 0; alias_index < import_alias_counts[import_index]; alias_index += 1)
+        {
+            String8 alias = alias_names[import_alias_first[import_index] + alias_index];
+            u64 symbol_offset = dynamic_symbol_offset + alias_symbol_index * ELF_SYMBOL_SIZE;
+            link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
+            memcpy(bytes + dynamic_name_cursor, alias.pointer, alias.length);
+            dynamic_name_cursor += alias.length + 1;
+            bytes[symbol_offset + 4] = 0x11;
+            link_write_u16(bytes, symbol_offset + 6, 0xfff1);
+            link_write_u64(bytes, symbol_offset + 8, copy_slot_addresses[import_index]);
+            link_write_u64(bytes, symbol_offset + 16, import_copy_sizes[import_index]);
+            alias_symbol_index += 1;
         }
     }
     link_write_u32(bytes, hash_offset, 1);
-    link_write_u32(bytes, hash_offset + 4, import_count + 1);
+    link_write_u32(bytes, hash_offset + 4, (u32)dynamic_symbol_count);
     link_write_u32(bytes, hash_offset + 8, 1);
-    for (u32 import_index = 1; import_index <= import_count; import_index += 1)
+    for (u64 chain_index = 1; chain_index < dynamic_symbol_count; chain_index += 1)
     {
-        link_write_u32(bytes, hash_offset + (u64)(3 + import_index) * sizeof(u32), import_index == import_count ? 0 : import_index + 1);
+        link_write_u32(bytes, hash_offset + (3 + chain_index) * sizeof(u32), chain_index + 1 == dynamic_symbol_count ? 0 : (u32)chain_index + 1);
     }
     u64 got_address = image_base + got_offset;
     u64 plt_address = image_base + plt_offset;
@@ -2783,7 +2959,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32 copy_relocation_cursor = 0;
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA)
+        if (import_kinds[import_index] != OBJECT_SYMBOL_DATA || import_copy_owners[import_index] != import_index)
         {
             continue;
         }

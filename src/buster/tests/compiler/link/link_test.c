@@ -126,6 +126,92 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 nam
     return false;
 }
 
+// One dynamic symbol of a linked ELF image, by name.  Copy relocations are
+// checked through this: the alias set they define is a set of dynamic symbols
+// at one address, which is not visible anywhere else in the image.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_dynamic_symbol(ByteSlice image, String8 name, u64* value, u64* size, u16* section)
+{
+    bool result = false;
+    u64 symbol_header = 0;
+    u64 string_header = 0;
+    u64 symbol_offset = 0;
+    u64 symbol_size = 0;
+    u64 string_offset = 0;
+    u64 string_size = 0;
+    if (link_test_elf_section_find(image, S8(".dynsym"), 0, &symbol_header) && link_test_elf_section_find(image, S8(".dynstr"), 0, &string_header))
+    {
+        symbol_offset = link_read_u64(image.pointer, symbol_header + 24);
+        symbol_size = link_read_u64(image.pointer, symbol_header + 32);
+        string_offset = link_read_u64(image.pointer, string_header + 24);
+        string_size = link_read_u64(image.pointer, string_header + 32);
+        if (symbol_offset > image.length || symbol_size > image.length - symbol_offset || string_offset > image.length ||
+            string_size > image.length - string_offset)
+        {
+            symbol_size = 0;
+        }
+    }
+    for (u64 entry = 0; !result && entry + 24 <= symbol_size; entry += 24)
+    {
+        u32 name_offset = link_read_u32(image.pointer, symbol_offset + entry);
+        if (!name_offset || name_offset >= string_size)
+        {
+            continue;
+        }
+        u64 length = 0;
+        while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+        {
+            length += 1;
+        }
+        String8 entry_name = {.pointer = (char8*)image.pointer + string_offset + name_offset, .length = length};
+        if (!string_equal(entry_name, name))
+        {
+            continue;
+        }
+        if (value)
+        {
+            *value = link_read_u64(image.pointer, symbol_offset + entry + 8);
+        }
+        if (size)
+        {
+            *size = link_read_u64(image.pointer, symbol_offset + entry + 16);
+        }
+        if (section)
+        {
+            u16 entry_section = 0;
+            memcpy(&entry_section, image.pointer + symbol_offset + entry + 6, sizeof(entry_section));
+            *section = entry_section;
+        }
+        result = true;
+    }
+
+    return result;
+}
+
+// How many relocations of one type the image carries.  The ELF writer keeps
+// its jump-slot and copy relocations in one `.rela.plt`.
+BUSTER_GLOBAL_LOCAL u32 link_test_elf_relocation_count(ByteSlice image, u32 type)
+{
+    u32 result = 0;
+    u64 relocation_header = 0;
+    u64 offset = 0;
+    u64 size = 0;
+    if (link_test_elf_section_find(image, S8(".rela.plt"), 0, &relocation_header))
+    {
+        offset = link_read_u64(image.pointer, relocation_header + 24);
+        size = link_read_u64(image.pointer, relocation_header + 32);
+        if (offset > image.length || size > image.length - offset)
+        {
+            size = 0;
+        }
+    }
+    for (u64 entry = 0; entry + 24 <= size; entry += 24)
+    {
+        result += (u32)(link_read_u64(image.pointer, offset + entry + 8) & 0xffffffff) == type;
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 segment_name, String8 section_name, u64* section_header)
 {
     if (image.length >= 32 && link_read_u32(image.pointer, 0) == 0xfeedfacf)
@@ -2622,6 +2708,183 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, relocation_header && link_read_u32(aarch64_libc_executable.executable.pointer, relocation_header + 40) == dynamic_symbol_index &&
                                link_read_u32(aarch64_libc_executable.executable.pointer, relocation_header + 44) == got_index);
     BUSTER_TEST(arguments, dynamic_header && link_read_u32(aarch64_libc_executable.executable.pointer, dynamic_header + 40) == dynamic_string_index);
+    // Copy relocations against a shared library whose symbol table the driver
+    // read.  The reservation stands for the library's object, so every name
+    // the library exports at that address is defined at the slot, the slot is
+    // the library's own size rather than a pointer, and two imported names for
+    // one object share one slot and one relocation.  Without the alias set,
+    // glibc's post-startup store through `__environ` misses the executable's
+    // copy of `environ` and the program reads null.
+    Target copy_alias_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    u8 copy_alias_text[] = {
+        0x48, 0x8b, 0x05, 0, 0, 0, 0, 0x48, 0x8b, 0x0d, 0, 0, 0, 0, 0xc3,
+    };
+    ObjectSymbol copy_alias_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(copy_alias_text),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("environ"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("tzname"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectRelocation copy_alias_relocations[] = {
+        {
+            .addend = -4,
+            .offset = 3,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_X86_64_PC32,
+        },
+        {
+            .addend = -4,
+            .offset = 10,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 2,
+            .kind = OBJECT_RELOCATION_X86_64_PC32,
+        },
+    };
+    NativeDynamicDataSymbol copy_alias_exports[] = {
+        {.name = S8("environ"), .address = 0x220de8, .size = 8},
+        {.name = S8("_environ"), .address = 0x220de8, .size = 8},
+        {.name = S8("__environ"), .address = 0x220de8, .size = 8},
+        {.name = S8("tzname"), .address = 0x221240, .size = 16},
+        {.name = S8("__tzname"), .address = 0x221240, .size = 16},
+        // A versioned object appears once per version symbol under the same
+        // name, and glibc has four of `sys_errlist`.  One alias, not four.
+        {.name = S8("__tzname"), .address = 0x221240, .size = 16},
+        {.name = S8("stdout"), .address = 0x221300, .size = 8},
+    };
+    ObjectFile copy_alias_object =
+        link_test_object_make(arguments->arena, copy_alias_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(copy_alias_text), copy_alias_symbols,
+                              BUSTER_ARRAY_LENGTH(copy_alias_symbols), copy_alias_relocations, BUSTER_ARRAY_LENGTH(copy_alias_relocations));
+    NativeExecutableLinkResult copy_alias_executable = link_native_executable(arguments->arena, &copy_alias_object,
+                                                                             (NativeExecutableLinkOptions){
+                                                                                 .entry_symbol = S8("main"),
+                                                                                 .runtime_data_symbols = copy_alias_exports,
+                                                                                 .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
+                                                                             });
+    BUSTER_TEST(arguments, copy_alias_executable.error == LINK_ERROR_NONE);
+    u64 copy_alias_environ = 0;
+    u64 copy_alias_environ_alias = 0;
+    u64 copy_alias_environ_underscore = 0;
+    u64 copy_alias_environ_size = 0;
+    u16 copy_alias_environ_section = 0;
+    u64 copy_alias_tzname = 0;
+    u64 copy_alias_tzname_alias = 0;
+    u64 copy_alias_tzname_size = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("environ"), &copy_alias_environ, &copy_alias_environ_size,
+                                                        &copy_alias_environ_section));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("__environ"), &copy_alias_environ_alias, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("_environ"), &copy_alias_environ_underscore, 0, 0));
+    BUSTER_TEST(arguments, copy_alias_environ && copy_alias_environ == copy_alias_environ_alias && copy_alias_environ == copy_alias_environ_underscore);
+    BUSTER_TEST(arguments, copy_alias_environ_size == 8 && copy_alias_environ_section == 0xfff1);
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("tzname"), &copy_alias_tzname, &copy_alias_tzname_size, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("__tzname"), &copy_alias_tzname_alias, 0, 0));
+    BUSTER_TEST(arguments, copy_alias_tzname && copy_alias_tzname == copy_alias_tzname_alias && copy_alias_tzname_size == 16);
+    // A name the library exports but this program does not reference, and
+    // whose address no import names, stays out of the image.
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_executable.executable, S8("stdout"), 0, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(copy_alias_executable.executable, 5) == 2);
+    u64 copy_alias_hash_header = 0;
+    u64 copy_alias_symbol_header = 0;
+    BUSTER_TEST(arguments, link_test_elf_section_find(copy_alias_executable.executable, S8(".hash"), 0, &copy_alias_hash_header) &&
+                               link_test_elf_section_find(copy_alias_executable.executable, S8(".dynsym"), 0, &copy_alias_symbol_header));
+    if (copy_alias_hash_header && copy_alias_symbol_header)
+    {
+        u64 copy_alias_hash_offset = link_read_u64(copy_alias_executable.executable.pointer, copy_alias_hash_header + 24);
+        u64 copy_alias_symbol_size = link_read_u64(copy_alias_executable.executable.pointer, copy_alias_symbol_header + 32);
+        // Three imports — environ, tzname and the hosted stub's exit — three
+        // aliases and the null entry: the hash table has to grow with the
+        // alias set or the loader stops walking before it reaches one.
+        BUSTER_TEST(arguments, copy_alias_symbol_size / 24 == 7);
+        BUSTER_TEST(arguments, link_read_u32(copy_alias_executable.executable.pointer, copy_alias_hash_offset + 4) == copy_alias_symbol_size / 24);
+    }
+    // Both names of one object imported: one slot, one relocation, and no
+    // second dynamic symbol for the alias.
+    ObjectSymbol copy_alias_pair_symbols[] = {
+        copy_alias_symbols[0],
+        copy_alias_symbols[1],
+        {
+            .name = S8("__environ"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectFile copy_alias_pair_object = copy_alias_object;
+    copy_alias_pair_object.symbols = copy_alias_pair_symbols;
+    NativeExecutableLinkResult copy_alias_pair_executable =
+        link_native_executable(arguments->arena, &copy_alias_pair_object,
+                               (NativeExecutableLinkOptions){
+                                   .entry_symbol = S8("main"),
+                                   .runtime_data_symbols = copy_alias_exports,
+                                   .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
+                               });
+    BUSTER_TEST(arguments, copy_alias_pair_executable.error == LINK_ERROR_NONE);
+    u64 copy_alias_pair_first = 0;
+    u64 copy_alias_pair_second = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_pair_executable.executable, S8("environ"), &copy_alias_pair_first, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_pair_executable.executable, S8("__environ"), &copy_alias_pair_second, 0, 0));
+    BUSTER_TEST(arguments, copy_alias_pair_first && copy_alias_pair_first == copy_alias_pair_second);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(copy_alias_pair_executable.executable, 5) == 1);
+    // A name the program defines itself is left alone: the executable must
+    // not carry two definitions of one name, and the program's own is the one
+    // it means to use.
+    ObjectSymbol copy_alias_defined_symbols[] = {
+        copy_alias_symbols[0],
+        copy_alias_symbols[1],
+        copy_alias_symbols[2],
+        {
+            .name = S8("_environ"),
+            .size = sizeof(u64),
+            .section = OBJECT_SECTION_ZERO,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectFile copy_alias_defined_object = copy_alias_object;
+    ObjectSection* copy_alias_defined_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+    memcpy(copy_alias_defined_sections, copy_alias_object.sections, (u64)OBJECT_SECTION_COUNT * sizeof(*copy_alias_defined_sections));
+    copy_alias_defined_sections[OBJECT_SECTION_ZERO].virtual_size = sizeof(u64);
+    copy_alias_defined_object.sections = copy_alias_defined_sections;
+    copy_alias_defined_object.symbols = copy_alias_defined_symbols;
+    copy_alias_defined_object.symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_defined_symbols);
+    NativeExecutableLinkResult copy_alias_defined_executable =
+        link_native_executable(arguments->arena, &copy_alias_defined_object,
+                               (NativeExecutableLinkOptions){
+                                   .entry_symbol = S8("main"),
+                                   .runtime_data_symbols = copy_alias_exports,
+                                   .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
+                               });
+    BUSTER_TEST(arguments, copy_alias_defined_executable.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_defined_executable.executable, S8("__environ"), 0, 0, 0));
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_defined_executable.executable, S8("_environ"), 0, 0, 0));
+    // A library the driver could not read keeps the pointer-sized slot the
+    // writer reserved before alias sets existed.
+    NativeExecutableLinkResult copy_alias_unknown_executable =
+        link_native_executable(arguments->arena, &copy_alias_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, copy_alias_unknown_executable.error == LINK_ERROR_NONE);
+    u64 copy_alias_unknown_size = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(copy_alias_unknown_executable.executable, S8("tzname"), 0, &copy_alias_unknown_size, 0));
+    BUSTER_TEST(arguments, copy_alias_unknown_size == 8);
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_unknown_executable.executable, S8("__tzname"), 0, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(copy_alias_unknown_executable.executable, 5) == 2);
     ObjectFile aarch64_tls_object = aarch64_libc_object;
     ObjectSection* aarch64_tls_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
     memcpy(aarch64_tls_sections, aarch64_libc_object.sections, sizeof(*aarch64_tls_sections) * OBJECT_SECTION_COUNT);

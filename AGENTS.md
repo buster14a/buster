@@ -530,21 +530,15 @@ driver gate runs upstream's own makefile with `CC` set to `ide cc` against a
 clean `git archive` export of the pinned commit, which covers make's implicit
 rules, its generated header, its yacc source and its recursive sub-make.
 
-98 of the 100 utilities match the Clang build byte for byte. `env` and `find`
-do not, and both fail for one linker reason rather than a codegen one: they
-read `extern char **environ`. Imported data reaches a non-PIE executable
-through a copy relocation, and the loader takes that copy before glibc's
-startup code stores the environment pointer, so the program reads a null
-environment and dereferences it. GNU ld avoids this by defining the whole
-alias set (`environ`, `_environ`, `__environ`) at the copy slot: glibc writes
-through `__environ`, that write lands in the executable's copy, and the
-program sees it. Buster's linker does not read the shared library's symbol
-table, so it cannot know which names alias the one it was asked for. The
-harness expects exactly these two to differ and reports a stale expectation if
-one starts matching. Generated objects, archives, metrics, corpora, the
-per-allocator run directories and the makefile export remain under
-`build/sbase-<pid>/`, which is about 37 MB and is not cleaned up on the way
-out.
+All 100 utilities match the Clang build. `env` and `find` were the last two
+that did not, and both failed for one linker reason rather than a codegen one:
+they read `extern char **environ`, which reached the non-PIE executable through
+a copy relocation whose slot the loader filled before glibc's startup code
+stored the environment pointer. That is fixed by the alias sets described under
+the driver below, and the two are ordinary passing rows now. Generated objects,
+archives, metrics, corpora, the per-allocator run directories and the makefile
+export remain under `build/sbase-<pid>/`, which is about 37 MB and is not
+cleaned up on the way out.
 
 The opt-in DoomGeneric compatibility harness takes an external, pristine
 DoomGeneric checkout and a WAD the caller supplies separately; upstream sources
@@ -1277,6 +1271,26 @@ inputs. It writes `<input>.bc` by default, accepts `-o` for a single
 input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
+
+A hosted ELF link that references imported data reads the shared libraries'
+own dynamic symbol tables. `compiler_driver_elf_library_exports` looks
+`libc.so.6` and each requested library up where the loader would — the `-L`
+paths, then the sysroot or host `lib`/`usr/lib` roots, multiarch first — and
+rejects a file whose ELF machine disagrees with the target, so a cross link
+never reads the host's own libc. It collects the defined global and weak
+objects with their addresses and sizes into `NativeDynamicDataSymbol` arrays,
+and `link.c` uses them to reserve copy-relocation slots: a slot stands for the
+library's object rather than the one name the program spelled, so it carries
+every name the library exports at that address, takes the library's own size,
+and is shared by two imported names for one object. The alias set is what makes
+`extern char **environ` work. A definition in the executable takes precedence
+over the library's for every one of its names, and glibc stores the environment
+through `__environ` after startup; an executable that defined only `environ`
+left that store in libc's own storage while the program read a copy taken
+before startup ran, which is to say null. The read is skipped entirely for a
+link with no undefined data symbol, which is nearly all of them, and a library
+that cannot be found or parsed leaves the pointer-sized slots the writer
+reserved before alias sets existed.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
