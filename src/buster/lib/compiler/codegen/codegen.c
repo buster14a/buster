@@ -8067,6 +8067,22 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_float_to_i128(CodegenBuffer* buff
     return result && buffer && buffer->error == CODEGEN_ERROR_NONE;
 }
 
+// Which data section a global's bytes belong in. `const` is the frontend's
+// answer and the read-only section is its usual home, but an object that
+// carries a relocation cannot stay there: those bytes are written when the
+// program is relocated, and in a shared object that write lands on a page the
+// loader mapped read-only, which is a DT_TEXTREL the loader has to undo or
+// refuse. Clang answers the same question with a fourth data section,
+// `.data.rel.ro`; this writer has three, so a read-only object holding a
+// relocation is laid out with the writable ones. Nothing in the C object model
+// moves with it -- writing through a `const` lvalue is undefined either way --
+// and a static link, whose relocations are all resolved before the program
+// runs, cannot tell the difference.
+BUSTER_GLOBAL_LOCAL bool codegen_global_is_read_only(IrGlobal* global)
+{
+    return global->is_read_only && !global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -8103,11 +8119,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_INVALID_IR;
             return result;
         }
-        bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        bool read_only = codegen_global_is_read_only(global);
+        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
         u64* capacity = zero_fill && global->is_thread_local ? &thread_local_zero_capacity
                         : zero_fill                           ? &zero_fill_capacity
                         : global->is_thread_local ? &thread_local_capacity
-                        : global->is_read_only    ? &read_only_capacity
+                        : read_only               ? &read_only_capacity
                                                   : &writable_capacity;
         u64 remainder = *capacity % global_alignment;
         if (remainder)
@@ -8143,7 +8160,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             IrGlobal* global = module->globals + global_index;
             IrType* type = ir_type_from_id(&program->types, global->type);
-            bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+            bool zero_fill = !codegen_global_is_read_only(global) && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
             bool large = type->layout.size >= CODEGEN_LARGE_ZERO_FILL_THRESHOLD;
             if (zero_fill && !global->is_thread_local && large == (layout_pass == 1))
             {
@@ -8167,8 +8184,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrGlobal* global = module->globals + global_index;
         IrType* type = ir_type_from_id(&program->types, global->type);
         u32 global_alignment = global->alignment ? global->alignment : type->layout.alignment;
-        bool zero_fill = !global->is_read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
-        u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : global->is_read_only ? read_only_bytes : writable_bytes;
+        bool read_only = codegen_global_is_read_only(global);
+        bool zero_fill = !read_only && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+        u8* bytes = zero_fill ? 0 : global->is_thread_local ? thread_local_bytes : read_only ? read_only_bytes : writable_bytes;
         u32 offset;
         if (zero_fill && !global->is_thread_local)
         {
@@ -8178,7 +8196,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             u64* count = zero_fill                ? &thread_local_zero_count
                          : global->is_thread_local ? &thread_local_count
-                         : global->is_read_only    ? &read_only_count
+                         : read_only               ? &read_only_count
                                                    : &writable_count;
             u64 remainder = *count % global_alignment;
             if (remainder)
@@ -8193,7 +8211,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             .offset = offset,
             .size = (u32)type->layout.size,
             .alignment = global_alignment,
-            .read_only = global->is_read_only,
+            .read_only = read_only,
             .is_thread_local = global->is_thread_local,
             .zero_fill = zero_fill,
         };
