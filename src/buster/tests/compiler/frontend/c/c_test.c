@@ -8845,6 +8845,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         }
     }
     {
+        // A GNU `aligned(N)` only ever raises, so a request the type already
+        // satisfies is the no-op GCC and Clang make of it rather than a
+        // rejection -- which used to leave the aggregate with no layout at
+        // all, and the folded `sizeof` four bytes short of the object it
+        // sizes (#689).  The static assertion is the parse-side folding
+        // engine's answer and the field offsets are the IR one's; they run
+        // over the same records and must agree.
+        String8 ignored_alignment_sources[] = {
+            S8("struct Aligned { char byte; __attribute__((aligned(2))) int value; };\n"
+               "_Static_assert(sizeof(struct Aligned) == 8, \"specifier position\");\n"),
+            S8("struct Aligned { char byte; int value __attribute__((aligned(2))); };\n"
+               "_Static_assert(sizeof(struct Aligned) == 8, \"declarator position\");\n"),
+            S8("struct Aligned { char byte; int value; } __attribute__((aligned(2)));\n"
+               "_Static_assert(sizeof(struct Aligned) == 8, \"aggregate position\");\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(ignored_alignment_sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult ignored_tokens = c_preprocess(temporary.arena, ignored_alignment_sources[source_index], (CPreprocessOptions){0});
+            CParseResult ignored_parse = c_parse(temporary.arena, ignored_tokens);
+            CIRLowerResult ignored_ir = c_lower_to_ir(temporary.arena, S8("ignored-alignment.c"), ignored_tokens, ignored_parse, target_native);
+            BUSTER_TEST(arguments, ignored_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, ignored_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, ignored_ir.diagnostic_count == 0);
+            bool found_aligned_record = false;
+            for (u32 type_index = 0; ignored_ir.program && type_index < ignored_ir.program->types.count; type_index += 1)
+            {
+                IrType* type = ignored_ir.program->types.types + type_index;
+                found_aligned_record |= type->kind == IR_TYPE_STRUCT && type->field_count == 2 && type->layout.size == 8 &&
+                                        type->layout.alignment == 4 && type->fields[1].offset == 4;
+            }
+            BUSTER_TEST(arguments, found_aligned_record);
+            scratch_end(temporary);
+        }
+    }
+    {
+        // An object declarator asking for less than its type already has is
+        // accepted for the same reason, and is placed at the type's own
+        // alignment.  `_Alignas` mixed in raises the maximum above the natural
+        // alignment, which is what Clang measures the request by.
+        String8 ignored_object_sources[] = {
+            S8("int value __attribute__((aligned(2)));\n"),
+            S8("_Alignas(8) _Alignas(2) int value;\n"),
+            S8("_Alignas(2) __attribute__((aligned(8))) int value;\n"),
+        };
+        u32 ignored_object_alignments[] = {4, 8, 8};
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(ignored_object_sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult ignored_tokens = c_preprocess(temporary.arena, ignored_object_sources[source_index], (CPreprocessOptions){0});
+            CParseResult ignored_parse = c_parse(temporary.arena, ignored_tokens);
+            CIRLowerResult ignored_ir = c_lower_to_ir(temporary.arena, S8("ignored-object-alignment.c"), ignored_tokens, ignored_parse, target_native);
+            BUSTER_TEST(arguments, ignored_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, ignored_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, ignored_ir.diagnostic_count == 0);
+            bool found_object = false;
+            if (ignored_ir.program)
+            {
+                IrModule* module = &ignored_ir.program->modules[0];
+                for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                {
+                    found_object |= module->globals[global_index].alignment == ignored_object_alignments[source_index];
+                }
+            }
+            BUSTER_TEST(arguments, found_object);
+            scratch_end(temporary);
+        }
+    }
+    {
+        // `_Alignas` is the other rule: C requires a declaration's alignment
+        // to be at least the natural one, so a smaller request is reported
+        // against the specifier rather than left for a later component to
+        // blame a missing layout on.  One diagnostic per rejected
+        // declaration, at every position one can be written.
+        String8 below_natural_alignas_sources[] = {
+            S8("_Alignas(2) int value;\n"),
+            S8("struct Value { char byte; _Alignas(2) int value; }; struct Value object;\n"),
+            S8("int function(void) { _Alignas(2) int value; return value; }\n"),
+            S8("struct Value { char byte; __attribute__((aligned(3))) int value; }; struct Value object;\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(below_natural_alignas_sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult below_tokens = c_preprocess(temporary.arena, below_natural_alignas_sources[source_index], (CPreprocessOptions){0});
+            CParseResult below_parse = c_parse(temporary.arena, below_tokens);
+            CIRLowerResult below_ir = c_lower_to_ir(temporary.arena, S8("below-natural-alignment.c"), below_tokens, below_parse, target_native);
+            BUSTER_TEST(arguments, below_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, below_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, below_ir.diagnostic_count == 1);
+            if (below_ir.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, below_ir.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+            }
+            scratch_end(temporary);
+        }
+    }
+    {
         String8 valid_flexible_array_source = S8("struct Packet {"
                                                  " unsigned short tag;"
                                                  " unsigned char bytes[];"

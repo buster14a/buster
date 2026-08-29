@@ -63,6 +63,11 @@ BUSTER_C_EXTERN bool c_conditional_number(String8 spelling, u64* value);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
+BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
+// Whether an alignment record was spelled `_Alignas` rather than as a GNU
+// `aligned` attribute; see the definition for why the answer is read back out
+// of the token stream instead of stored in the record.
+BUSTER_C_EXTERN bool c_alignment_specifier_is_standard(CPreprocessResult preprocess, CAlignmentSpecifier specifier);
 BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);

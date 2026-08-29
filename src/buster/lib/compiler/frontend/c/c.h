@@ -746,6 +746,13 @@ struct CMember
     u8 reserved[2];
 };
 
+// One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
+// names or the token range of its constant expression. Which of the two
+// spellings wrote it is not stored: token_start is always two tokens past the
+// keyword -- the keyword and its `(` -- so c_alignment_specifier_is_standard
+// reads it back out of the token stream, and this table is sized at one record
+// per token of the translation unit, where a flag word would commit four more
+// bytes per token for a fact only a rejected request ever asks about.
 typedef struct CAlignmentSpecifier CAlignmentSpecifier;
 struct CAlignmentSpecifier
 {

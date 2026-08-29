@@ -45,5 +45,15 @@ int main(void)
         return 12;
     }
     if ((unsigned long long)(void *)packed_layout_aligned_object % 64) return 13;
+
+    // The ignored request, in both halves and across the value passed between
+    // them: an aggregate the other compiler laid out at six bytes is read at
+    // the wrong offset here.
+    if (sizeof(struct below_natural_record) != 8) return 14;
+    if (packed_layout_below_natural_size() != sizeof(struct below_natural_record)) return 15;
+    if (packed_layout_below_natural_offset() != 4) return 16;
+    struct below_natural_record below = packed_layout_make_below_natural('b', -1234567);
+    if (below.tag != 'b' || below.value != -1234567) return 17;
+    if (packed_layout_below_natural_object != 31337) return 18;
     return 0;
 }

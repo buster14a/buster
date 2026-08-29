@@ -1608,8 +1608,24 @@ struct CIrQueryMachine
     u8 reserved[3];
 };
 
-BUSTER_C_INTERNAL bool c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
-                                                 u32* alignment_out);
+// What a run of alignment specifiers answered. The distinction that matters is
+// between an answer that is not available *yet* -- a specifier naming a type
+// the table has not laid out -- and one that never will be: the first sends
+// the aggregate back to a later pass of the fixed point, the second is a
+// program error that has to be reported against the attribute the program
+// wrote. Before this split every rejection simply left the layout unresolved,
+// and each consumer invented its own message about a layout that never
+// arrived: a folded sizeof silently short, `_Alignof` refusing to lower, and a
+// definition blamed for its C type id (issue #689).
+typedef enum CIrAlignmentStatus
+{
+    C_IR_ALIGNMENT_RESOLVED,
+    C_IR_ALIGNMENT_PENDING,
+    C_IR_ALIGNMENT_REJECTED,
+} CIrAlignmentStatus;
+
+BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
+                                                             u32* alignment_out, String8* rejection_out);
 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 
@@ -2110,6 +2126,12 @@ struct CIntegerIrBuilder
     IrInstructionId previous_instruction;
     bool previous_instruction_known;
     String8 failure_message;
+    // The CDiagnosticKind `failure_message` deserves, biased by one so a
+    // zero-initialized builder still means the funnel's own
+    // C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS. A rejected alignment specifier is
+    // the one body-level failure that is a constraint violation with a name of
+    // its own rather than a construct this frontend has not implemented.
+    u32 failure_kind_plus_one;
     u32 failure_token_index;
     u32 declaration_index;
     CIntegerIrLocal* locals;
@@ -25546,12 +25568,15 @@ BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder
         IrTypeId local_type = builder->c_type_ir_map[value->type.value];
         IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
         u32 alignment = local_type_value ? local_type_value->layout.alignment : 0;
+        String8 rejection = {0};
         if (!local_type_value || !local_type_value->layout.resolved ||
-            !c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment) ||
+            c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment, &rejection) != C_IR_ALIGNMENT_RESOLVED ||
             c_ir_emit_local(builder, builder->preprocess.tokens[declaration_token], local_type, entity, alignment).value == IR_ID_UNDERLYING_INVALID)
         {
             builder->failure_message =
-                string_format(builder->arena, S8("could not declare local '{S8}', which precedes the first case label of a switch"), value->name);
+                rejection.length ? rejection
+                                 : string_format(builder->arena, S8("could not declare local '{S8}', which precedes the first case label of a switch"), value->name);
+            builder->failure_kind_plus_one = rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
             builder->failure_token_index = declaration_token;
             return false;
         }
@@ -26416,10 +26441,13 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         local_thread_local |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Thread_local")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__thread"));
     }
     u32 local_alignment = local_type_value ? local_type_value->layout.alignment : 0;
+    String8 local_alignment_rejection = {0};
     if (!local_type_value || !local_type_value->layout.resolved ||
-        !c_ir_alignment_evaluate(builder, local_entity->alignment_start, local_entity->alignment_count, local_alignment, &local_alignment))
+        c_ir_alignment_evaluate(builder, local_entity->alignment_start, local_entity->alignment_count, local_alignment, &local_alignment,
+                                &local_alignment_rejection) != C_IR_ALIGNMENT_RESOLVED)
     {
-        builder->failure_message = S8("automatic local declaration has an invalid alignment");
+        builder->failure_message = local_alignment_rejection.length ? local_alignment_rejection : S8("automatic local declaration has an invalid alignment");
+        builder->failure_kind_plus_one = local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
         return false;
     }
     if (local_extern && !local_static)
@@ -26466,6 +26494,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
             .is_thread_local = local_thread_local,
         };
         builder->failure_message = (String8){0};
+        builder->failure_kind_plus_one = 0;
         builder->failure_token_index = UINT32_MAX;
         CDeclaration local_declaration = {
             .name = c_token_spelling(builder->preprocess.spelling_base, name),
@@ -30130,12 +30159,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
                 IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
                 u32 local_alignment = variable_element ? variable_element->layout.alignment : local_type_value ? local_type_value->layout.alignment : 0;
+                String8 local_alignment_rejection = {0};
                 if (!local_type_value || !local_type_value->layout.resolved ||
                     (variable_length_array && (!variable_element || !variable_element->layout.resolved || !variable_element->layout.size)) ||
-                    !c_ir_alignment_evaluate(builder, builder->parse.entities[entity.value].alignment_start,
-                                             builder->parse.entities[entity.value].alignment_count, local_alignment, &local_alignment))
+                    c_ir_alignment_evaluate(builder, builder->parse.entities[entity.value].alignment_start,
+                                            builder->parse.entities[entity.value].alignment_count, local_alignment, &local_alignment,
+                                            &local_alignment_rejection) != C_IR_ALIGNMENT_RESOLVED)
                 {
-                    builder->failure_message = S8("local declaration has an invalid alignment");
+                    builder->failure_message = local_alignment_rejection.length ? local_alignment_rejection : S8("local declaration has an invalid alignment");
+                    builder->failure_kind_plus_one = local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
                     return false;
                 }
                 bool local_extern = false;
@@ -30302,6 +30334,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .is_thread_local = local_thread_local,
                     };
                     builder->failure_message = (String8){0};
+                    builder->failure_kind_plus_one = 0;
                     builder->failure_token_index = UINT32_MAX;
                     bool initialized =
                         symbol.value != IR_ID_UNDERLYING_INVALID &&
@@ -36503,16 +36536,35 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CAr
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
-                                                 u32* alignment_out)
+// Answers the alignment the specifiers in [alignment_start, alignment_count)
+// ask for: the maximum of `natural_alignment` and every request. The sizeof
+// folding in c_parse_layout_alignment_specifiers walks the same records and
+// must reach the same number.
+//
+// A GNU `aligned(N)` only ever raises, so an N the type already satisfies is
+// exactly the no-op the maximum computes on its own -- a header defending
+// itself with `aligned(2)` on an already 4-aligned member keeps its layout.
+// `_Alignas` carries the opposite rule, since C requires a declaration's
+// alignment to be at least the natural one, and Clang measures the largest
+// request in the declaration rather than each one: `_Alignas(2)
+// __attribute__((aligned(8))) int` is accepted, `_Alignas(2) int` is not.
+//
+// A rejected run still fills *alignment_out with the usable maximum, so the
+// caller can finish the layout and report `*rejection_out` against the
+// attribute instead of leaving a type nothing downstream can name.
+BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
+                                                             u32* alignment_out, String8* rejection_out)
 {
     IrProgram* program = builder->program;
     CParseResult parse = builder->parse;
     IrTypeId* c_type_ir_map = builder->c_type_ir_map;
     u32 alignment = natural_alignment;
+    u64 requested_maximum = 0;
+    bool standard_below_natural = false;
+    CIrAlignmentStatus status = C_IR_ALIGNMENT_RESOLVED;
     if (alignment_start > parse.alignment_count || alignment_count > parse.alignment_count - alignment_start)
     {
-        return false;
+        return C_IR_ALIGNMENT_PENDING;
     }
     for (u32 index = 0; index < alignment_count; index += 1)
     {
@@ -36524,7 +36576,7 @@ BUSTER_C_INTERNAL bool c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 a
             IrType* value = ir_type_from_id(&program->types, type);
             if (!value || !value->layout.resolved)
             {
-                return false;
+                return C_IR_ALIGNMENT_PENDING;
             }
             requested = value->layout.alignment;
         }
@@ -36534,20 +36586,36 @@ BUSTER_C_INTERNAL bool c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 a
                                             },
                                             &requested))
         {
-            return false;
+            return C_IR_ALIGNMENT_PENDING;
         }
         if (!requested)
         {
             continue;
         }
-        if (requested > UINT32_MAX || (requested & (requested - 1)) || requested < natural_alignment)
+        if (requested > UINT32_MAX || (requested & (requested - 1)))
         {
-            return false;
+            if (status == C_IR_ALIGNMENT_RESOLVED)
+            {
+                *rejection_out = string_format(builder->arena, S8("alignment specifier requests {u64}, which is not a power of two the target can align to"), requested);
+                status = C_IR_ALIGNMENT_REJECTED;
+            }
+            continue;
         }
+        // Only a request under the natural alignment can be the maximum that
+        // violates the `_Alignas` rule, so the spelling -- a token load and a
+        // compare -- is asked for only on that path.
+        standard_below_natural |= requested < natural_alignment && c_alignment_specifier_is_standard(builder->preprocess, specifier);
+        requested_maximum = BUSTER_MAX(requested_maximum, requested);
         alignment = BUSTER_MAX(alignment, (u32)requested);
     }
+    if (status == C_IR_ALIGNMENT_RESOLVED && standard_below_natural && requested_maximum < natural_alignment)
+    {
+        *rejection_out = string_format(builder->arena, S8("_Alignas requests alignment {u64}, which is less than the minimum alignment of {u32} for the declared type"),
+                                       requested_maximum, natural_alignment);
+        status = C_IR_ALIGNMENT_REJECTED;
+    }
     *alignment_out = alignment;
-    return true;
+    return status;
 }
 
 // Marks every array type that some struct uses as its flexible array member.
@@ -37206,6 +37274,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 }
                 bool packed_fields = false;
                 bool fields_resolved = true;
+                // One report per aggregate, whatever the definition got wrong:
+                // the diagnostic budget allows one diagnostic per type, and the
+                // straddling-bit-field report below shares it. The member that
+                // carried the rejected specifier is kept as an index rather
+                // than as a location, so an aggregate that lays out cleanly --
+                // every aggregate of a working translation unit -- does not
+                // recover a source location it will not use. The out-of-line
+                // rejection string is written only on rejection, which is why
+                // it is initialized once here rather than per member.
+                String8 alignment_rejection = {0};
+                String8 member_rejection = {0};
+                u32 alignment_rejection_member = UINT32_MAX;
                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
                 {
                     CMember* member = &parse.members[c_type->member_start + field_index];
@@ -37265,10 +37345,27 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
                     }
                     packed_fields |= packed_field;
-                    if (!c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment, &field_alignment))
+                    // A rejected specifier still hands back the alignment the
+                    // member can be laid out with, so the definition finishes
+                    // and the program hears about the attribute it wrote
+                    // rather than about a type that never got a layout.
+                    // Almost no member carries a specifier at all, and the
+                    // evaluation answers the alignment it was handed for the
+                    // ones that do not; asking first keeps the call itself off
+                    // the path every other member takes.
+                    CIrAlignmentStatus member_status =
+                        member->alignment_count ? c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment,
+                                                                          &field_alignment, &member_rejection)
+                                                : C_IR_ALIGNMENT_RESOLVED;
+                    if (member_status == C_IR_ALIGNMENT_PENDING)
                     {
                         fields_resolved = false;
                         break;
+                    }
+                    if (member_status == C_IR_ALIGNMENT_REJECTED && !alignment_rejection.length)
+                    {
+                        alignment_rejection = member_rejection;
+                        alignment_rejection_member = field_index;
                     }
                     u32 member_bit_width = member->bit_width;
                     if (member->is_bit_field && member->bit_width_token_count)
@@ -37390,10 +37487,28 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 }
                 // The definition's own `aligned(N)` raises the aggregate above
                 // what its members ask for, and the size rounds up to it.
-                if (!c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count, alignment,
-                                             &alignment))
+                String8 aggregate_rejection = {0};
+                CIrAlignmentStatus aggregate_status = c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start,
+                                                                              aggregate_attributes.alignment_count, alignment, &alignment, &aggregate_rejection);
+                if (aggregate_status == C_IR_ALIGNMENT_PENDING)
                 {
                     continue;
+                }
+                if (aggregate_status == C_IR_ALIGNMENT_REJECTED && !alignment_rejection.length)
+                {
+                    alignment_rejection = aggregate_rejection;
+                }
+                if (alignment_rejection.length)
+                {
+                    result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                        .message = alignment_rejection,
+                        .location = alignment_rejection_member < c_type->member_count
+                                        ? parse.members[c_type->member_start + alignment_rejection_member].location
+                                    : c_type->definition_start < preprocess.token_count
+                                        ? c_preprocess_token_location(&preprocess, preprocess.tokens[c_type->definition_start])
+                                        : (CSourceLocation){0},
+                        .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                    };
                 }
                 u64 size = (bit_position + 7) / 8;
                 u64 remainder = size % alignment;
@@ -37432,7 +37547,14 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         // One report per aggregate: the diagnostic budget is
                         // counted per declaration and per type, not per
                         // member, and the first field names the layout the
-                        // whole definition cannot have.
+                        // whole definition cannot have. A definition that
+                        // already spent its slot on a rejected alignment
+                        // specifier keeps that report and still slides the
+                        // unit back, which is the layout it would have had.
+                        if (alignment_rejection.length)
+                        {
+                            break;
+                        }
                         CMember* member = &parse.members[c_type->member_start + field_index];
                         result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
                             .message = string_format(arena, S8("packed bit-field '{S8}' straddles every storage unit of its declared type"), member->name),
@@ -38103,6 +38225,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         u32 object_alignment = type_value->layout.alignment;
         bool has_alignment = false;
         bool alignment_valid = true;
+        String8 alignment_rejection = {0};
         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
             CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
@@ -38111,8 +38234,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 continue;
             }
             u32 declaration_alignment = type_value->layout.alignment;
-            if (!c_ir_alignment_evaluate(&constant_builder, declaration->alignment_start, declaration->alignment_count, type_value->layout.alignment,
-                                         &declaration_alignment) ||
+            if (c_ir_alignment_evaluate(&constant_builder, declaration->alignment_start, declaration->alignment_count, type_value->layout.alignment,
+                                        &declaration_alignment, &alignment_rejection) != C_IR_ALIGNMENT_RESOLVED ||
                 (has_alignment && declaration_alignment != object_alignment))
             {
                 alignment_valid = false;
@@ -38128,7 +38251,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         if (!alignment_valid)
         {
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                .message = S8("invalid object alignment"),
+                // The specifier names itself when it was the thing at fault;
+                // "invalid object alignment" is left for the declarations that
+                // disagree with each other, where no single request is wrong.
+                .message = alignment_rejection.length ? alignment_rejection : S8("invalid object alignment"),
                 .location = definition->location,
                 .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
             };
@@ -38784,7 +38910,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                declaration.name, failure_token)
                                : string_format(arena, S8("in function '{S8}': unsupported C function-body statement or expression"), declaration.name),
                 .location = failure_location,
-                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                .kind = builder.failure_kind_plus_one ? (CDiagnosticKind)(builder.failure_kind_plus_one - 1) : C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;
             program->rejected_function_count += 1;

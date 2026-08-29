@@ -630,10 +630,42 @@ BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CPar
     return valid;
 }
 
+// The C keyword, which C23's `alignas` is respelled to before the parse. It
+// is the half of c_parse_alignment_word that cannot be ignored: a `_Alignas`
+// below the natural alignment is a constraint violation, where the GNU
+// spellings below only ever raise.
+BUSTER_C_SHARED bool c_parse_alignas_word(String8 spelling)
+{
+    return string_equal(spelling, S8("_Alignas"));
+}
+
 BUSTER_C_INTERNAL bool c_parse_alignment_word(String8 spelling)
 {
-    return string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("aligned")) || string_equal(spelling, S8("__aligned")) ||
+    return c_parse_alignas_word(spelling) || string_equal(spelling, S8("aligned")) || string_equal(spelling, S8("__aligned")) ||
            string_equal(spelling, S8("__aligned__"));
+}
+
+// Which spelling produced this record, which decides what a request below the
+// natural alignment means: GNU `aligned(N)` only ever raises, so a smaller N
+// is the no-op both reference compilers make of it, while C requires a
+// declaration's alignment to be at least the natural one and a smaller
+// `_Alignas` is a constraint violation to report.
+//
+// The spelling is recovered from the token stream rather than stored in the
+// record. Both sites that append one -- c_type_parse_alignment_step and
+// c_parse_layout_attributes -- set token_start two tokens past the keyword,
+// with the `(` in between, and the table is sized at one record per token of
+// the translation unit: a flag word would commit four more bytes for every
+// token of the unit to carry a fact that a handful of specifiers per unit ever
+// ask about.
+BUSTER_C_SHARED bool c_alignment_specifier_is_standard(CPreprocessResult preprocess, CAlignmentSpecifier specifier)
+{
+    if (specifier.token_start < 2 || specifier.token_start - 2 >= preprocess.token_count)
+    {
+        return false;
+    }
+    CToken keyword = preprocess.tokens[specifier.token_start - 2];
+    return keyword.kind == C_TOKEN_IDENTIFIER && c_parse_alignas_word(c_token_spelling(preprocess.spelling_base, keyword));
 }
 
 BUSTER_C_SHARED bool c_parse_alignof_word(String8 spelling)
@@ -894,10 +926,18 @@ struct CParseLayoutContext
 
 // Raises `*alignment` to each alignment specifier of [start, start + count),
 // which is what c_ir_alignment_evaluate does for the IR layout; the two run
-// over the same records and must agree. Answers false when a specifier names
-// a type whose own layout is still unresolved, which sends the aggregate back
-// to a later pass, or when the request is not a power of two at least as
-// large as the natural alignment.
+// over the same records and must agree on the number. Answers false only when
+// a specifier names a type whose own layout is still unresolved, which sends
+// the aggregate back to a later pass.
+//
+// A request the alignment already satisfies is ignored rather than refused:
+// GNU `aligned(N)` only ever raises, so `aligned(2)` on an already 4-aligned
+// member is the no-op GCC and Clang make of it. A request this engine cannot
+// use at all -- not a power of two, or wider than a u32 -- is ignored here
+// too, as is a below-natural `_Alignas`, which C does forbid: the IR side
+// evaluates the same records, reports those by name, and lays the type out
+// with this same maximum, and refusing the fold here only replaced that
+// diagnostic with whatever a caller says when a sizeof will not fold.
 BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, u32 start, u32 count, u32* alignment, bool* provisional_out)
 {
     bool valid = true;
@@ -962,11 +1002,9 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 }
             }
         }
-        if (requested_alignment > UINT32_MAX || (requested_alignment && (requested_alignment & (requested_alignment - 1))) ||
-            requested_alignment < *alignment)
+        if (requested_alignment > UINT32_MAX || (requested_alignment & (requested_alignment - 1)))
         {
-            valid = false;
-            break;
+            continue;
         }
         *alignment = BUSTER_MAX(*alignment, (u32)requested_alignment);
     }

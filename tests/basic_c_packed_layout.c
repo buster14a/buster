@@ -187,6 +187,39 @@ struct packed_member_pointer
     int tail;
 };
 
+// GNU `aligned(N)` only ever raises, so a request the member already satisfies
+// is a no-op rather than an error -- a header writing `aligned(2)` on an
+// already 4-aligned field is ordinary defensive style, and refusing it left
+// the aggregate with no layout at all and a folded `sizeof` of 4 (#689).  All
+// three attribute positions reach the same two layout engines, so all three
+// are pinned here.
+struct specifier_below_natural
+{
+    char byte;
+    __attribute__((aligned(2))) int value;
+};
+
+struct declarator_below_natural
+{
+    char byte;
+    int value __attribute__((aligned(2)));
+};
+
+struct aggregate_below_natural
+{
+    char byte;
+    int value;
+} __attribute__((aligned(2)));
+
+// The same request written on a member whose natural alignment is under it,
+// which is the direction that does move: the maximum that ignores the shapes
+// above is what places `pad` here.
+struct member_below_and_above
+{
+    char byte;
+    __attribute__((aligned(2))) char pad[3];
+};
+
 #pragma pack(push, 1)
 struct pragma_packed
 {
@@ -217,6 +250,13 @@ static char before_file_pointer = 2;
 static void (*file_pointer_aligned)(int) __attribute__((aligned(64)));
 static char after_file_pointer = 3;
 
+// An object whose declarator asks for less than its type already has, which
+// both reference compilers accept and this one rejected as an invalid object
+// alignment (#689).  What it is placed at is the type's own alignment, so the
+// test is that the object exists, holds its value, and is at least as aligned
+// as it asked to be.
+static int object_below_natural __attribute__((aligned(2))) = 7;
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -241,6 +281,10 @@ int main(void)
     if (sizeof(struct packed_list_declarator) != 12 || _Alignof(struct packed_list_declarator) != 4) return 48;
     if (sizeof(struct packed_shared_specifier) != 9 || _Alignof(struct packed_shared_specifier) != 1) return 49;
     if (sizeof(struct packed_member_pointer) != 16 || _Alignof(struct packed_member_pointer) != 4) return 50;
+    if (sizeof(struct specifier_below_natural) != 8 || _Alignof(struct specifier_below_natural) != 4) return 68;
+    if (sizeof(struct declarator_below_natural) != 8 || _Alignof(struct declarator_below_natural) != 4) return 69;
+    if (sizeof(struct aggregate_below_natural) != 8 || _Alignof(struct aggregate_below_natural) != 4) return 70;
+    if (sizeof(struct member_below_and_above) != 6 || _Alignof(struct member_below_and_above) != 2) return 71;
 
     // Offsets, read through addresses so a size that happens to match cannot
     // hide a member in the wrong place.
@@ -365,5 +409,18 @@ int main(void)
     if ((unsigned long long)(void *)&list_second % 32) return 65;
     if (local_pointer_aligned != 0 || list_first != 1 || list_second != 2) return 66;
     if (before_file_pointer != 2 || after_file_pointer != 3 || local_pad[0] != 4 || local_pad_two[0] != 5) return 67;
+
+    // The ignored requests, read through addresses: a member the attribute
+    // was allowed to lower would sit at offset 2 rather than 4.
+    struct specifier_below_natural specifier_below;
+    if ((char *)&specifier_below.value - (char *)&specifier_below != 4) return 72;
+    struct declarator_below_natural declarator_below;
+    if ((char *)&declarator_below.value - (char *)&declarator_below != 4) return 73;
+    struct aggregate_below_natural aggregate_below;
+    if ((char *)&aggregate_below.value - (char *)&aggregate_below != 4) return 74;
+    struct member_below_and_above below_and_above;
+    if ((char *)&below_and_above.pad - (char *)&below_and_above != 2) return 75;
+    if ((unsigned long long)(void *)&object_below_natural % 2) return 76;
+    if (object_below_natural != 7) return 77;
     return 0;
 }

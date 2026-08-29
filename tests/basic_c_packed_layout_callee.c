@@ -6,6 +6,8 @@
 
 char packed_layout_aligned_object[3] __attribute__((aligned(64)));
 
+int packed_layout_below_natural_object __attribute__((aligned(2))) = 31337;
+
 unsigned long long packed_layout_record_size(void)
 {
     return sizeof(struct packed_record);
@@ -30,6 +32,25 @@ unsigned long long packed_layout_aligned_record_alignment(void)
 unsigned long long packed_layout_bit_record_size(void)
 {
     return sizeof(struct packed_bit_record);
+}
+
+unsigned long long packed_layout_below_natural_size(void)
+{
+    return sizeof(struct below_natural_record);
+}
+
+unsigned long long packed_layout_below_natural_offset(void)
+{
+    struct below_natural_record record;
+    return (unsigned long long)((char *)&record.value - (char *)&record);
+}
+
+struct below_natural_record packed_layout_make_below_natural(char tag, int value)
+{
+    struct below_natural_record record;
+    record.tag = tag;
+    record.value = value;
+    return record;
 }
 
 struct packed_record packed_layout_make_record(char tag, int value, short trailer)
