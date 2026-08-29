@@ -17123,7 +17123,14 @@ struct LibcTestSubsetTotals
 // them, and reaching the closing brace of `main` returns 0 (C 5.1.2.2.3) where
 // every other function's fall-off is undefined: both had run correctly and
 // then died on the trap terminating the body, SIGILL. `functional/strftime`
-// came in ahead of that change and is not attributable to it. The remaining
+// came in ahead of that change: it is collateral of #719, which is why this
+// number had already moved once without a rebaseline. musl formats every
+// specifier through `const char *__strftime_fmt_1(char (*s)[100], ...)`, which
+// snprintfs into `*s` and returns it, and `*p` on a pointer to an array
+// lowered as an rvalue load, which copies the array into a frame temporary --
+// so every format landed in a copy the caller could not read and the returned
+// pointer named a dead frame. All 64 of the unit's checks reported a mismatch.
+// `tests/basic_c_pointer_to_array_place.c` pins the shape. The remaining
 // two are `functional/tgmath` and `functional/fcntl`, which are issue #728's
 // last open entries.
 // 2026-08-29: 241 -> 242. The nine units upstream ships a sibling .mk for

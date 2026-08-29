@@ -1420,8 +1420,27 @@ gets the implicit zero, decided once with its signature rather than by
 matching a name at the terminator, and `tests/basic_c_main_implicit_return.c`
 pins it under all four allocators: exit zero is reachable in that fixture only
 by falling off the closing brace, so a trap faults and a bare `ret` exits with
-what the last call left behind. `functional/strftime` came in separately and
-is not attributable to that change.
+what the last call left behind.
+
+`functional/strftime` came in separately and is collateral of #719, which is
+why the passing count had already moved once without a rebaseline. musl
+formats every specifier through
+`const char *__strftime_fmt_1(char (*s)[100], size_t *l, ...)`, which
+`snprintf`s into `*s` and returns it, and `__strftime_l` calls it with `&buf`
+of its own `char buf[100]`. The C frontend lowered `*p` on a pointer to an
+array as an rvalue load, which copies the whole array into a frame temporary,
+so the decayed argument named the copy, `snprintf` filled a buffer nobody
+could read, and the returned pointer named a frame that was already gone: all
+64 of the unit's checks reported a mismatch, most of them against the empty
+string, the rest against the padding `__strftime_l` writes into its own output
+before the `memcpy` that reads the stale pointer. An array lvalue is never
+loaded (C 6.5.3.2p4). The bisect is the one this stage is for and it lands on
+one object -- building musl's own `src/time/strftime.c` with the compiler from
+before the fix and dropping it ahead of `libc-buster.a` puts the whole
+transcript back -- and `tests/basic_c_pointer_to_array_place.c` pins the shape
+under all four allocators: the pointee crossing a call boundary by decay and
+the place surviving the return, beside the three store spellings
+`tests/basic_c_packed_layout.c` already carries.
 
 `regression/malloc-oom`, `regression/malloc-brk-fail`,
 `regression/setenv-oom` and `regression/pthread_create-oom` used to sit here
@@ -2498,7 +2517,12 @@ on a commit you already know is incomplete tells nobody anything.
   `c_gen.c` returns the place from its dereference arm for the same reason its
   address-of arm accepts one; `tests/basic_c_packed_layout.c` runs all three
   spellings of the store and `c_test_frontend_global_types` pins that no lowered
-  function holds a load of array type.
+  function holds a load of array type. The decay is the half a libc trips
+  over: musl's strftime writes into `*s` through `snprintf` and returns it from
+  a `char (*s)[100]` parameter, so the copy took every formatted specifier with
+  it and libc-test's `functional/strftime` failed all 64 of its checks.
+  `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
+  register allocators.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.

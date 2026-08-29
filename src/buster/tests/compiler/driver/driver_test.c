@@ -7510,6 +7510,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(main_implicit_return_temporary);
         }
     }
+    // Dereferencing a pointer to an array under every allocator.  `*p`
+    // designates the array object, so the walk hands its place back instead of
+    // loading it; a load would copy the whole array into a frame temporary and
+    // everything downstream -- a subscript store, a decay into a call, a
+    // returned pointer -- would address the copy.  That is the shape musl's
+    // strftime is written in, and it is what made libc-test's
+    // `functional/strftime` disagree with the reference on every format.  It
+    // exits non-zero on the first wrong answer, naming the case.
+    {
+        String8 pointer_to_array_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(pointer_to_array_allocators); allocator_index += 1)
+        {
+            Arena* pointer_to_array_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena pointer_to_array_temporary = scratch_begin(pointer_to_array_conflicts, BUSTER_ARRAY_LENGTH(pointer_to_array_conflicts));
+            Arena* pointer_to_array_arena = pointer_to_array_temporary.arena;
+            String8 pointer_to_array_path = buster_test_temporary_path(pointer_to_array_arena, S8("buster-c-pointer-to-array-place"),
+                                                                      string_format(pointer_to_array_arena, S8("-{u32}"), allocator_index));
+            String8 pointer_to_array_command_line[] = {
+                string_format(pointer_to_array_arena, S8("-fregister-allocator={S8}"), pointer_to_array_allocators[allocator_index]),
+                S8("-o"),
+                pointer_to_array_path,
+                S8("tests/basic_c_pointer_to_array_place.c"),
+            };
+            CompilerDriverResult pointer_to_array = compiler_driver_execute_invocation(
+                pointer_to_array_arena,
+                compiler_driver_parse_arguments(pointer_to_array_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pointer_to_array_command_line)));
+            BUSTER_TEST(arguments, pointer_to_array.error == COMPILER_DRIVER_ERROR_NONE);
+            if (pointer_to_array.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {pointer_to_array_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(pointer_to_array_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(pointer_to_array_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
