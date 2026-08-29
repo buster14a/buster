@@ -6558,8 +6558,54 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_rational(CIrExt80Value value, CIrExt80Bi
     return true;
 }
 
+// The invalid operations, which have no exact rational to round and so are
+// answered from the operand classes alone.  A static initializer folds them
+// for the same reason the in-function path does (see
+// c_ir_fold_float_invalid_operation): the x87 hardware's own answer carries
+// the negative sign, and Clang's folded bytes carry the positive one.  Only
+// zero over zero can reach here today -- the folder refuses an infinity at
+// every producer -- but the operand classes are read the same way the runtime
+// fold reads them so the two cannot drift apart.
+BUSTER_C_INTERNAL bool c_ir_ext80_value_invalid_operation(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+{
+    u32 left_exponent = left.exponent_sign & 0x7fff;
+    u32 right_exponent = right.exponent_sign & 0x7fff;
+    bool left_nan = left_exponent == 0x7fff && (left.significand << 1) != 0;
+    bool right_nan = right_exponent == 0x7fff && (right.significand << 1) != 0;
+    if (left_nan || right_nan)
+    {
+        return false;
+    }
+    bool left_infinite = left_exponent == 0x7fff;
+    bool right_infinite = right_exponent == 0x7fff;
+    bool left_zero = left_exponent == 0 && left.significand == 0;
+    bool right_zero = right_exponent == 0 && right.significand == 0;
+    bool left_negative = (left.exponent_sign & 0x8000) != 0;
+    bool right_negative = (right.exponent_sign & 0x8000) != 0;
+    bool invalid = op == C_PUNCTUATOR_SLASH  ? (left_zero && right_zero) || (left_infinite && right_infinite)
+                   : op == C_PUNCTUATOR_STAR ? (left_zero && right_infinite) || (left_infinite && right_zero)
+                   : op == C_PUNCTUATOR_PLUS ? left_infinite && right_infinite && left_negative != right_negative
+                   : op == C_PUNCTUATOR_MINUS
+                       ? left_infinite && right_infinite && left_negative == right_negative
+                       : false;
+    if (!invalid)
+    {
+        return false;
+    }
+    *result_out = (CIrExt80Value){
+        .significand = UINT64_C(0xc000000000000000),
+        .exponent_sign = UINT16_C(0x7fff),
+        .rank = C_IR_EXT80_RANK_LONG_DOUBLE,
+    };
+    return true;
+}
+
 BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
 {
+    if (c_ir_ext80_value_invalid_operation(op, left, right, result_out))
+    {
+        return true;
+    }
     CIrExt80Big left_numerator = {0};
     CIrExt80Big right_numerator = {0};
     s32 left_exponent = 0;
@@ -15662,6 +15708,170 @@ BUSTER_C_INTERNAL bool c_ir_value_integer_constant_evaluate(CIntegerIrBuilder* b
 #undef C_IR_VALUE_CONSTANT_RETURN
 }
 
+// The IEEE class of one constant float operand, which is all the
+// invalid-operation fold below needs to know about it.  The three predicates
+// are exclusive; `is_negative` is the encoded sign bit, which a zero carries
+// as observably as a finite value does.
+typedef struct CIrFloatConstantClass CIrFloatConstantClass;
+struct CIrFloatConstantClass
+{
+    bool is_nan;
+    bool is_infinite;
+    bool is_zero;
+    bool is_negative;
+};
+
+// Classifies a value that a IR_OPCODE_CONSTANT_FLOAT row defines, in whichever
+// of the three encodings canonical IR uses: f32 and f64 hold their bits in one
+// immediate, and the x87 f80 holds the significand and the sign/exponent field
+// as the pair the object writer stores.  A negate over a constant is walked
+// through rather than refused: `-0.0f` is one f32 constant and a separate
+// negate row, since only the f80 spelling folds its sign into the constant.
+BUSTER_C_INTERNAL bool c_ir_float_constant_class(CIntegerIrBuilder* builder, IrValueId value, CIrFloatConstantClass* class_out)
+{
+    bool negated = false;
+    IrInstruction* constant = 0;
+    // Bounded because the walk is a chain of rows, not a fixed shape; SSA
+    // cannot make it a cycle, and no real spelling stacks more than a few.
+    for (u32 step = 0; step < 8; step += 1)
+    {
+        if (value.value >= builder->function->value_count)
+        {
+            return false;
+        }
+        IrInstructionId definition = builder->function->values[value.value].definition;
+        if (definition.value >= builder->function->instruction_count)
+        {
+            return false;
+        }
+        IrInstruction* row = builder->function->instructions + definition.value;
+        if (row->opcode == IR_OPCODE_UNARY && row->unary_operation == IR_UNARY_FLOAT_NEGATE && row->operand_count == 1 && row->operands)
+        {
+            negated = !negated;
+            value = row->operands[0];
+            continue;
+        }
+        // A conversion between two float widths is walked through as well.
+        // The three classes below are the ones every such conversion carries
+        // exactly, sign included; a finite operand that would overflow to an
+        // infinity or underflow to a zero is classified as the finite it
+        // still is here, which refuses the fold rather than misreading it.
+        if (row->opcode == IR_OPCODE_CAST && row->operand_count == 1 && row->operands &&
+            (row->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || row->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE))
+        {
+            value = row->operands[0];
+            continue;
+        }
+        constant = row;
+        break;
+    }
+    if (!constant || constant->opcode != IR_OPCODE_CONSTANT_FLOAT || !constant->immediates)
+    {
+        return false;
+    }
+    IrType* type = ir_type_from_id(&builder->program->types, constant->canonical_type);
+    if (!type || type->kind != IR_TYPE_FLOAT)
+    {
+        return false;
+    }
+    if (type->bit_width == 80)
+    {
+        if (constant->immediate_count != 2)
+        {
+            return false;
+        }
+        u64 significand = constant->immediates[0];
+        u16 sign_exponent = (u16)constant->immediates[1];
+        u32 exponent = sign_exponent & 0x7fff;
+        // The x87 significand carries its integer bit explicitly, so an
+        // infinity is exactly 0x8000000000000000 and every other significand
+        // at the reserved exponent is a NaN.
+        *class_out = (CIrFloatConstantClass){
+            .is_nan = exponent == 0x7fff && (significand << 1) != 0,
+            .is_infinite = exponent == 0x7fff && (significand << 1) == 0,
+            .is_zero = exponent == 0 && significand == 0,
+            .is_negative = ((sign_exponent & 0x8000) != 0) != negated,
+        };
+        return true;
+    }
+    if (constant->immediate_count != 1 || (type->bit_width != 32 && type->bit_width != 64))
+    {
+        return false;
+    }
+    u32 significand_bits = type->bit_width == 32 ? 23 : 52;
+    u64 bits = type->bit_width == 32 ? (constant->immediates[0] & UINT32_MAX) : constant->immediates[0];
+    u64 significand = bits & (((u64)1 << significand_bits) - 1);
+    u64 exponent = (bits >> significand_bits) & (type->bit_width == 32 ? UINT64_C(0xff) : UINT64_C(0x7ff));
+    u64 exponent_maximum = type->bit_width == 32 ? UINT64_C(0xff) : UINT64_C(0x7ff);
+    *class_out = (CIrFloatConstantClass){
+        .is_nan = exponent == exponent_maximum && significand != 0,
+        .is_infinite = exponent == exponent_maximum && significand == 0,
+        .is_zero = exponent == 0 && significand == 0,
+        .is_negative = ((bits >> (type->bit_width - 1)) != 0) != negated,
+    };
+    return true;
+}
+
+/* Folds the four floating operations that create a NaN out of operands that
+   are not NaN: 0/0 and inf/inf, 0*inf, inf-inf, and inf+(-inf).  IEEE-754
+   leaves the sign of an invalid operation's NaN unspecified, and x86 hardware
+   answers with the negative default NaN, so leaving these to run would print
+   `-nan` where Clang -- which folds them to the positive quiet NaN -- prints
+   `nan`.  musl's <math.h> spells `NAN` as `(0.0f/0.0f)` whenever `__GNUC__` is
+   undefined, which is every buster compile, so the whole library's NAN took
+   the hardware sign.  Only the invalid operations fold here: ordinary constant
+   arithmetic is left to the backend, which is not an optimizer.  */
+BUSTER_C_INTERNAL IrValueId c_ir_fold_float_invalid_operation(CIntegerIrBuilder* builder, IrBinaryOperation binary, IrValueId left, IrValueId right,
+                                                                IrTypeId type_id, IrSourceRange source)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    if (!type || type->kind != IR_TYPE_FLOAT)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    CIrFloatConstantClass left_class = {0};
+    CIrFloatConstantClass right_class = {0};
+    if (!c_ir_float_constant_class(builder, left, &left_class) || !c_ir_float_constant_class(builder, right, &right_class))
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (left_class.is_nan || right_class.is_nan)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    bool invalid = false;
+    switch (binary)
+    {
+    case IR_BINARY_FLOAT_ADD:
+        invalid = left_class.is_infinite && right_class.is_infinite && left_class.is_negative != right_class.is_negative;
+        break;
+    case IR_BINARY_FLOAT_SUBTRACT:
+        invalid = left_class.is_infinite && right_class.is_infinite && left_class.is_negative == right_class.is_negative;
+        break;
+    case IR_BINARY_FLOAT_MULTIPLY:
+        invalid = (left_class.is_zero && right_class.is_infinite) || (left_class.is_infinite && right_class.is_zero);
+        break;
+    case IR_BINARY_FLOAT_DIVIDE:
+        invalid = (left_class.is_zero && right_class.is_zero) || (left_class.is_infinite && right_class.is_infinite);
+        break;
+    default:
+        break;
+    }
+    if (!invalid)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    u64 bits = type->bit_width == 32   ? UINT64_C(0x7fc00000)
+               : type->bit_width == 64 ? UINT64_C(0x7ff8000000000000)
+               : type->bit_width == 80 ? UINT64_C(0xc000000000000000)
+                                       : 0;
+    if (!bits)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    return c_ir_emit_builtin_float_bits(builder, type_id, bits, source, S8("NAN"));
+}
+
 BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
                                               IrSourceRange source, IrTypeId cast_type)
 {
@@ -16238,6 +16448,18 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             break;
         default:
             return false;
+        }
+        // An operation that creates a NaN from constant operands takes the
+        // positive quiet NaN here rather than the hardware's negative default
+        // one.  See c_ir_fold_float_invalid_operation.
+        if (operand_count == 2)
+        {
+            IrValueId folded = c_ir_fold_float_invalid_operation(builder, binary, operands[0], operands[1], operation_type, source);
+            if (folded.value != IR_ID_UNDERLYING_INVALID)
+            {
+                values[(*value_count)++] = folded;
+                return true;
+            }
         }
     }
     else if (!operation_type_value->is_signed)

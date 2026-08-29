@@ -6413,9 +6413,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // The musl singleton fixtures. Each one is a shape musl uses that the
-    // frontend refused, and each answer is observable at run time rather than
-    // only in a diagnostic, so they run rather than merely compile -- and run
-    // under every register allocator, because the value a subscript or a
+    // frontend refused -- or, for the last one, answered with the wrong sign
+    // -- and each answer is observable at run time rather than only in a
+    // diagnostic, so they run rather than merely compile -- and run under
+    // every register allocator, because the value a subscript or a
     // typeof-declared call produces must not depend on which one placed it.
     String8 c_musl_shape_fixture_paths[] = {
         S8("tests/basic_c_reversed_subscript.c"),
@@ -6428,6 +6429,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_unparenthesized_sizeof_initializer.c"),
         S8("tests/basic_c_incrementing_assignment_condition.c"),
         S8("tests/basic_c_null_pointer_offsetof.c"),
+        S8("tests/basic_c_created_nan_sign.c"),
     };
     String8 c_musl_shape_fixture_names[] = {
         S8("buster-c-reversed-subscript"),
@@ -6440,6 +6442,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-unparenthesized-sizeof-initializer"),
         S8("buster-c-incrementing-assignment-condition"),
         S8("buster-c-null-pointer-offsetof"),
+        S8("buster-c-created-nan-sign"),
     };
     String8 c_musl_shape_allocator_flags[] = {
         S8("-fregister-allocator=none"),

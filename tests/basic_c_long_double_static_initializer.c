@@ -53,6 +53,13 @@ static const long double from_unsigned = -1U*1.0L;
 static const long double hex_scaled = 0x1.23456789abcdefp+5L/0x1p-3L;
 static const long double cancels = 1.0L - 1.0L;
 static const long double negative_zero = -0.0L;
+// An invalid operation creates a NaN whose sign IEEE-754 leaves unspecified.
+// The x87 hardware answers with the negative one and Clang folds to the
+// positive quiet NaN, so these bytes are the compatibility choice rather than
+// a rounding result.  musl reaches the same fold through <math.h>, which
+// spells NAN as `(0.0f/0.0f)` for a compiler that does not define __GNUC__.
+static const long double created_nan = 0.0L/0.0L;
+static const long double created_nan_negative_operand = -0.0L/0.0L;
 
 // The table musl's atanl.c opens with, an array whose elements are folded
 // rather than spelled, a designated one, and a struct that mixes x87 members
@@ -95,6 +102,7 @@ static const unsigned char expected_from_unsigned[16] = {0x00, 0x00, 0x00, 0x00,
 static const unsigned char expected_hex_scaled[16] = {0x80, 0xf7, 0xe6, 0xd5, 0xc4, 0xb3, 0xa2, 0x91, 0x07, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const unsigned char expected_cancels[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const unsigned char expected_negative_zero[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const unsigned char expected_created_nan[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const unsigned char expected_atanhi[64] = {
     0x45, 0x7b, 0xda, 0x0d, 0x2b, 0x38, 0x63, 0xed,
     0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -162,6 +170,8 @@ int main(void)
         {(const unsigned char*)&hex_scaled, expected_hex_scaled, 16},
         {(const unsigned char*)&cancels, expected_cancels, 16},
         {(const unsigned char*)&negative_zero, expected_negative_zero, 16},
+        {(const unsigned char*)&created_nan, expected_created_nan, 16},
+        {(const unsigned char*)&created_nan_negative_operand, expected_created_nan, 16},
         {(const unsigned char*)atanhi, expected_atanhi, 64},
         {(const unsigned char*)coefficients, expected_coefficients, 48},
         {(const unsigned char*)sparse, expected_sparse, 64},
