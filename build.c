@@ -17197,6 +17197,19 @@ struct LibcTestSubsetTotals
 // its parent held as not held. Both prepasses share one deferral scan now;
 // `tests/basic_c_lazy_operand_argument.c` pins the class under all four
 // allocators.
+// 2026-08-29: 243 -> PLACEHOLDER_PASSING, and it is mostly the reference's
+// reach that moved rather than Buster's. Both archives and both shared objects
+// hold musl's own x86-64 assembly now, so `fenv` is the real one, `clone` is
+// present and `setjmp` is not a trap: `src/math`'s exception-flag units stop
+// being `excluded-reference` (144 -> 31, 55 -> 168 passing), the thread tests
+// stop hanging out their ten-second deadline and the `dlopen` tests become
+// reachable. A few units newly reach Buster and stop there, which is what
+// raising the ceiling was for: `functional/pthread_cancel-points` and
+// `functional/setjmp` do not compile (issues 736 and 735),
+// `functional/pthread_robust` and `regression/pthread-robust-detach` answer
+// differently (issue 737), and `functional/tls_align_dlopen` and
+// `functional/tls_init_dlopen` join the local-exec TLS group that was already
+// there. Nothing that passed before stopped passing.
 #define LIBC_TEST_EXPECTED_PASSING 243
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x788ca45669f24411ull
 

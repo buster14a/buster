@@ -1287,10 +1287,10 @@ sides do, not written down:
 - `excluded-reference` — the Clang-built musl of this same configuration
   cannot compile, link or run it green. It says nothing about Buster, so it is
   held out of the comparison. This used to be most of the suite -- musl's
-  x86-64 assembly was in neither archive, so `fenv` was a stub and every
-  `src/math` unit checking a floating-point exception flag failed on both
-  sides, and `clone` was absent so the thread tests hung out their ten-second
-  deadline -- and building the assembly is what released it: 144 of the 199
+  x86-64 assembly was in neither archive nor either shared object, so `fenv`
+  was a stub, `clone` was absent and the thread tests hung out their
+  ten-second deadline, and `setjmp` was a trap so nothing that called `dlopen`
+  could run -- and building the assembly is what released it: 144 of the 199
   `src/math` units and 34 of the 69 `regression` ones left this state, 31 and
   1 remain, and the suite's run time fell from 53,6 seconds to 3,9.
 - `blocked-compile` — Buster cannot compile the test itself.
@@ -1308,14 +1308,16 @@ sides do, not written down:
 - `pass` — it ran and matched; in `src/api` it compiled; in a shared-object
   unit both sides built the library.
 
-Five units are what building the assembly newly put in front of Buster, and
-each is filed rather than absorbed: `functional/setjmp` and
+Six units are what building the assembly newly put in front of Buster, and
+each is filed rather than absorbed. `functional/setjmp` and
 `functional/pthread_cancel-points` do not compile (issues 735 and 736 -- an
 aggregate assigned to a `volatile`-qualified object, and a file-scope
-designated initializer), and `functional/pthread_robust`,
-`regression/pthread-robust-detach` and `regression/sem_close-unmap` run and
-answer differently from the reference (issue 737). Nothing that passed before
-stopped passing.
+designated initializer). `functional/pthread_robust` and
+`regression/pthread-robust-detach` run and answer differently from the
+reference (issue 737). And `functional/tls_align_dlopen` and
+`functional/tls_init_dlopen` join the local-exec TLS group that was already
+there, which is the model rather than anything new. 242 to 375 passing, and
+nothing that passed before stopped passing.
 
 One difference from a native musl build is left, and it is not assembly:
 musl's `ARCH_SRCS` also covers the architecture subdirectories' `.c` files --
