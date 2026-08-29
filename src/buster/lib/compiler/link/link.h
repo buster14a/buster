@@ -75,18 +75,26 @@ typedef struct NativeDynamicLibrary NativeDynamicLibrary;
 struct NativeDynamicLibrary
 {
     String8 name;
+    // PE only: the names the DLL's export directory lists.  The ELF export
+    // list is `versioned_symbols`, which carries the same names and the
+    // version each is published under, so ELF needs no second copy.
     String8* exported_symbols;
     // ELF only, and read only for links that import data: the PE writers
     // resolve imports by name and need no address.
     NativeDynamicDataSymbol* exported_data_symbols;
     // ELF only: every name this library defines, with its version.  Read for
     // every hosted ELF link, because an unversioned reference to a name whose
-    // definitions are all non-default has nothing to bind to and the image
-    // has to record the version of every reference that does bind.
+    // definitions are all non-default has nothing to bind to, the image has
+    // to record the version of every reference that does bind, and a weak
+    // reference to a name no library defines resolves to zero.
     NativeDynamicVersionedSymbol* versioned_symbols;
     u32 exported_symbol_count;
     u32 exported_data_symbol_count;
     u32 versioned_symbol_count;
+    // Whether the driver read this library at all.  An empty export list is
+    // not evidence that the library defines nothing: a library that was never
+    // found on disk exports whatever it happens to export, so only a link
+    // whose libraries were all read may read an absent name as absent.
     bool exports_known;
     u8 reserved[3];
 };

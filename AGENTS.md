@@ -2173,14 +2173,20 @@ on a commit you already know is incomplete tells nobody anything.
   writers and by the two that number imports; they must not disagree, because
   the AArch64 dynamic writer re-derives the x86-64 writer's import numbering.
   Merging inputs follows ELF: a symbol only references name is weak while
-  every one of them is, and one hidden occurrence makes it hidden. The gap
-  left is that a default-visibility weak reference no library actually
-  defines still comes out non-zero — a PLT thunk or a copy slot — because the
-  writer cannot tell it from one libc does define. The information is there
-  now — `compiler_driver_elf_dynamic_symbols` records every defined global and
-  weak entry of every shared library on every hosted ELF link, functions
-  included, for the symbol versions — but nothing consults it to decide a weak
-  reference's fate yet (issue #656).
+  every one of them is, and one hidden occurrence makes it hidden.
+  A default-visibility reference is promoted to an import **only when a
+  library the image names is known to define the name** with a default
+  version, which is the same question `link_elf_symbol_version` answers for
+  the version to record; asking the loader for a name nothing has is how such
+  a reference came back as its own PLT thunk or copy slot. What knows is
+  `compiler_driver_elf_dynamic_symbols`, which records every defined global
+  and weak entry of every shared library on every hosted ELF link, functions
+  included, and sets `exports_known`: `versioned_symbols` is the ELF export
+  list, `exported_symbols` stays PE's. Absence is evidence only when **every**
+  library was read — `link_elf_exports_complete` — because a library the
+  driver could not open exports whatever it happens to export; a link missing
+  one of them keeps the import it made before, which is also why a target
+  whose libraries are never read, Android today, is unchanged.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

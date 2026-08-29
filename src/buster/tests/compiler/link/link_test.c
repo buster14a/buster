@@ -3481,9 +3481,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, link_read_u64(weak_hosted.executable.pointer, weak_hosted_dynamic_symbols + 32) == 3 * 24);
         }
 
-        // Default visibility instead: the reference stays an import, and it is
-        // STB_WEAK (0x2 over STT_OBJECT) so that a loader which finds no
-        // definition answers zero rather than refusing the image.
+        // Default visibility instead, in a link that knows nothing about what
+        // its libraries export -- these options name none, so `exports_known`
+        // is false and an absent name is ignorance rather than evidence. The
+        // reference stays an import, and it is STB_WEAK (0x2 over STT_OBJECT)
+        // so that a loader which finds no definition answers zero rather than
+        // refusing the image.
         ObjectSymbol weak_visible_symbols[BUSTER_ARRAY_LENGTH(weak_symbols)];
         memcpy(weak_visible_symbols, weak_symbols, sizeof(weak_symbols));
         weak_visible_symbols[1].hidden = false;
@@ -3504,6 +3507,92 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             u64 dynamic_symbol_offset = link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 24);
             BUSTER_TEST(arguments, link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 32) == 3 * 24);
             BUSTER_TEST(arguments, weak_visible.executable.pointer[dynamic_symbol_offset + 24 + 4] == 0x21);
+        }
+
+        // The same reference once the link has read its libraries. Nothing
+        // exports `weak_absent`, so there is no loader to ask and the linker
+        // owes it the zero `ld` gives it: it leaves .dynsym entirely, which
+        // is what keeps its own copy slot from being the non-zero answer
+        // (issue #656). `imported` is strong and stays an import either way,
+        // which is what makes this a rule about weak references rather than
+        // about undefined ones.
+        NativeDynamicVersionedSymbol weak_known_exports[] = {
+            {.name = S8("unrelated"), .has_default = true},
+            {.name = S8("imported"), .has_default = true},
+        };
+        NativeExecutableLinkOptions weak_known_options = {
+            .entry_symbol = S8("main"),
+            .runtime_versioned_symbols = weak_known_exports,
+            .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(weak_known_exports),
+            .runtime_exports_known = true,
+        };
+        // Three symbols, so that `imported` keeps the image dynamic whatever
+        // the weak reference resolves to: this is a test about which of them
+        // reaches .dynsym, not about which writer runs.
+        ObjectFile weak_visible_hosted_object = weak_visible_object;
+        weak_visible_hosted_object.symbol_count = BUSTER_ARRAY_LENGTH(weak_visible_symbols);
+        NativeExecutableLinkResult weak_known = link_native_executable(arguments->arena, &weak_visible_hosted_object, weak_known_options);
+        BUSTER_TEST(arguments, weak_known.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_known.executable, weak_relocation.offset, weak_relocation.addend) == 0);
+        u64 weak_known_dynamic_symbols = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(weak_known.executable, S8(".dynsym"), 0, &weak_known_dynamic_symbols));
+        if (weak_known_dynamic_symbols)
+        {
+            BUSTER_TEST(arguments, link_read_u64(weak_known.executable.pointer, weak_known_dynamic_symbols + 32) == 3 * 24);
+        }
+
+        // And a library that does define it: the loader can answer, so the
+        // reference is promoted back to an import. This is the half that must
+        // not regress -- a weak reference to `puts` still has to reach libc.
+        NativeDynamicVersionedSymbol weak_defined_exports[] = {
+            {.name = S8("weak_absent"), .has_default = true},
+        };
+        NativeExecutableLinkOptions weak_defined_options = weak_known_options;
+        weak_defined_options.runtime_versioned_symbols = weak_defined_exports;
+        weak_defined_options.runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(weak_defined_exports);
+        NativeExecutableLinkResult weak_defined = link_native_executable(arguments->arena, &weak_visible_hosted_object, weak_defined_options);
+        BUSTER_TEST(arguments, weak_defined.error == LINK_ERROR_NONE);
+        u64 weak_defined_dynamic_symbols = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(weak_defined.executable, S8(".dynsym"), 0, &weak_defined_dynamic_symbols));
+        if (weak_defined_dynamic_symbols)
+        {
+            u64 dynamic_symbol_offset = link_read_u64(weak_defined.executable.pointer, weak_defined_dynamic_symbols + 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_defined.executable.pointer, weak_defined_dynamic_symbols + 32) == 4 * 24);
+            BUSTER_TEST(arguments, weak_defined.executable.pointer[dynamic_symbol_offset + 24 + 4] == 0x21);
+        }
+
+        // A definition an unversioned reference cannot bind to is not a
+        // definition. Every `name@VER` glibc publishes for `sys_errlist` is
+        // non-default, and a strong reference to such a name is refused with
+        // LINK_ERROR_SYMBOL_VERSION; a weak one is worth zero instead, which
+        // is the same answer as for a name no library has at all.
+        NativeDynamicVersionedSymbol weak_hidden_version_exports[] = {
+            {.name = S8("weak_absent"), .version = S8("GLIBC_2.2.5")},
+        };
+        NativeExecutableLinkOptions weak_hidden_version_options = weak_known_options;
+        weak_hidden_version_options.runtime_versioned_symbols = weak_hidden_version_exports;
+        weak_hidden_version_options.runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(weak_hidden_version_exports);
+        NativeExecutableLinkResult weak_hidden_version = link_native_executable(arguments->arena, &weak_visible_hosted_object, weak_hidden_version_options);
+        BUSTER_TEST(arguments, weak_hidden_version.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments,
+                    link_test_elf_relative_symbol_address(weak_hidden_version.executable, weak_relocation.offset, weak_relocation.addend) == 0);
+
+        // A library the driver could not read is what `exports_known` is for:
+        // one unread library and the link is back to not knowing, whatever
+        // the runtime's own list says.
+        NativeDynamicLibrary weak_unread_library = {
+            .name = S8("libunread.so.1"),
+        };
+        NativeExecutableLinkOptions weak_unread_options = weak_known_options;
+        weak_unread_options.dynamic_libraries = &weak_unread_library;
+        weak_unread_options.dynamic_library_count = 1;
+        NativeExecutableLinkResult weak_unread = link_native_executable(arguments->arena, &weak_visible_hosted_object, weak_unread_options);
+        BUSTER_TEST(arguments, weak_unread.error == LINK_ERROR_NONE);
+        u64 weak_unread_dynamic_symbols = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(weak_unread.executable, S8(".dynsym"), 0, &weak_unread_dynamic_symbols));
+        if (weak_unread_dynamic_symbols)
+        {
+            BUSTER_TEST(arguments, link_read_u64(weak_unread.executable.pointer, weak_unread_dynamic_symbols + 32) == 4 * 24);
         }
 
         // AArch64 asks the question of two more writers. The static one
@@ -3569,6 +3658,19 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, weak_aarch64_hosted.error == LINK_ERROR_NONE);
         BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_aarch64_hosted.executable, 8, 0) == 0);
         BUSTER_TEST(arguments, link_test_elf_branch_symbol_address(weak_aarch64_hosted.executable, 0) == 0);
+        // Default visibility and a read export list that lacks the name, on
+        // the writer that re-derives the x86-64 writer's import numbering:
+        // the branch has to reach zero here too, and it can only do that if
+        // both writers agreed the reference is not an import.
+        ObjectSymbol weak_aarch64_visible_symbols[BUSTER_ARRAY_LENGTH(weak_aarch64_symbols)];
+        memcpy(weak_aarch64_visible_symbols, weak_aarch64_symbols, sizeof(weak_aarch64_symbols));
+        weak_aarch64_visible_symbols[1].hidden = false;
+        ObjectFile weak_aarch64_visible_object = weak_aarch64_hosted_object;
+        weak_aarch64_visible_object.symbols = weak_aarch64_visible_symbols;
+        NativeExecutableLinkResult weak_aarch64_known = link_native_executable(arguments->arena, &weak_aarch64_visible_object, weak_known_options);
+        BUSTER_TEST(arguments, weak_aarch64_known.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_aarch64_known.executable, 8, 0) == 0);
+        BUSTER_TEST(arguments, link_test_elf_branch_symbol_address(weak_aarch64_known.executable, 0) == 0);
 
         // What merging inputs does with the two bits. One strong reference is
         // what makes a symbol required, whichever object it arrives in, and a

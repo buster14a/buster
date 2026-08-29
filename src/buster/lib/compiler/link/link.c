@@ -37,12 +37,17 @@
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
 // address zero rather than a dynamic import, which is what a startup object
-// reads to tell a static program from a dynamic one.
+// reads to tell a static program from a dynamic one. A default-visibility
+// reference is the one exception, and only when some library in the link is
+// known to define the name -- otherwise the loader is being asked for a
+// symbol nothing has and the import's own thunk or slot is what answers.
 // link_elf_symbol_resolves_to_zero and link_elf_symbol_needs_dynamic_import,
 // above the first ELF writer, are the single form of that question; the
 // writers, the dispatcher at the bottom, and the Android writer all ask it,
 // and the AArch64 dynamic writer re-derives the x86-64 writer's import
-// numbering from it, so the two cannot be allowed to disagree.
+// numbering from it, so the two cannot be allowed to disagree. The dynamic
+// writers ask it once per symbol and then read their own import numbering,
+// because the answer costs a scan of every library's exports.
 
 #include <buster/lib/compiler/link/link.h>
 
@@ -2107,6 +2112,75 @@ enum
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
 };
 
+// The version one library publishes a name's default definition under, and
+// whether the library defines the name at all.  A library that defines it only
+// as `name@VER` reports `defined` without a definition: an unversioned
+// reference has nothing there to bind to, which is what makes GNU ld refuse
+// glibc's `sys_errlist`.
+BUSTER_GLOBAL_LOCAL NativeDynamicVersionedSymbol* link_elf_versioned_find(NativeDynamicVersionedSymbol* symbols, u32 symbol_count, String8 name,
+                                                                         bool* defined)
+{
+    NativeDynamicVersionedSymbol* result = 0;
+    for (u32 index = 0; !result && index < symbol_count; index += 1)
+    {
+        if (string_equal(symbols[index].name, name))
+        {
+            *defined = true;
+            result = symbols[index].has_default ? symbols + index : 0;
+        }
+    }
+
+    return result;
+}
+
+// The same question across every library the image will name, in the order the
+// writers put them in DT_NEEDED -- the runtime first, then the requested ones
+// -- because that is the order the loader searches.  `no_default` separates
+// the two ways this fails: a name no library defines records no version, which
+// is also the only honest answer for a library the driver could not read,
+// while a name that is defined but never as a default is the divergence worth
+// refusing.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(NativeExecutableLinkOptions options, String8 name, u32* library_index, String8* version, bool* no_default)
+{
+    bool result = false;
+    bool defined = false;
+    for (u32 index = 0; !result && index < options.dynamic_library_count + 1; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbols = index ? options.dynamic_libraries[index - 1].versioned_symbols : options.runtime_versioned_symbols;
+        u32 symbol_count = index ? options.dynamic_libraries[index - 1].versioned_symbol_count : options.runtime_versioned_symbol_count;
+        NativeDynamicVersionedSymbol* found = link_elf_versioned_find(symbols, symbol_count, name, &defined);
+        if (found)
+        {
+            *library_index = index;
+            *version = found->version;
+            result = true;
+        }
+    }
+    *no_default = !result && defined;
+
+    return result;
+}
+
+// Whether the absence of a name from the export lists above means the name is
+// absent.  Every library this image will name has to have been read for that:
+// one the driver could not open exports whatever it happens to define, so a
+// link missing even one of them knows nothing about any name it did not find.
+// `exports_known` is what the driver sets per library once it has read that
+// library's dynamic symbol table, so the answer is the same on every machine
+// that has the same libraries in the same places -- and false for a target
+// whose libraries are never read at all, which is where the weak references
+// below keep the answer they had before there was an export list.
+BUSTER_GLOBAL_LOCAL bool link_elf_exports_complete(NativeExecutableLinkOptions options)
+{
+    bool result = options.runtime_exports_known && !(options.dynamic_library_count && !options.dynamic_libraries);
+    for (u32 index = 0; result && index < options.dynamic_library_count; index += 1)
+    {
+        result = options.dynamic_libraries[index].exports_known;
+    }
+
+    return result;
+}
+
 // An undefined symbol only weak references name resolves to address zero
 // rather than to anything in the image: ELF gives an unresolved weak
 // reference the value 0, which is how a program asks whether a symbol is
@@ -2118,25 +2192,44 @@ enum
 // Whether the answer is decided here or by the dynamic loader is exactly the
 // question of whether the reference can be preempted. Hidden visibility says
 // it cannot, and a static image has no loader to ask, so both resolve to zero
-// at link time. A default-visibility weak reference in a dynamic image stays
-// an import instead: the loader binds it when a shared library defines it,
-// and leaves it zero -- rather than failing the load -- when none does,
-// because .dynsym records it as STB_WEAK.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(ObjectSymbol const* symbol, bool dynamic_image)
+// at link time, whatever any library exports.
+//
+// A default-visibility weak reference can be preempted, so the loader is the
+// party that answers it -- but only if some library the image names actually
+// defines it. Asking the loader for a name nothing has is how a reference
+// nothing defines came out non-zero: the import's own PLT thunk or copy slot
+// is what answers. So such a reference is promoted to an import only when a
+// library in the link publishes a default definition of the name, which is
+// the same question `link_elf_symbol_version` answers for the version to
+// record; a name defined only as `name@VER` has nothing an unversioned
+// reference can bind to and is worth zero too. Where the link could not read
+// every one of its libraries, an absent name proves nothing -- ignorance is
+// not evidence of absence -- so the reference stays the import it was before
+// there was an export list to consult.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(NativeExecutableLinkOptions options, ObjectSymbol const* symbol, bool dynamic_image)
 {
-    return symbol->section == OBJECT_SECTION_UNDEFINED && symbol->weak && (symbol->hidden || !dynamic_image);
+    bool result = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->weak;
+    if (result && dynamic_image && !symbol->hidden)
+    {
+        u32 library_index = 0;
+        String8 version = {0};
+        bool no_default = false;
+        result = link_elf_exports_complete(options) && !link_elf_symbol_version(options, symbol->name, &library_index, &version, &no_default);
+    }
+
+    return result;
 }
 
 // Whether an undefined symbol is one the image needs the dynamic shape for.
-// A weak hidden reference is not: it resolves to zero wherever it is linked,
-// so a program whose only undefined symbol is one of those stays the static
-// image it would have been without it. Every ELF path that chooses between
-// the static and dynamic writers asks this, and the dynamic writers ask it
-// again to number their imports, so the two cannot disagree about which
-// symbols reach .dynsym.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(ObjectSymbol const* symbol)
+// A weak reference that resolves to zero is not: it is worth zero wherever it
+// is linked, so a program whose only undefined symbols are those stays the
+// static image it would have been without them. Every ELF path that chooses
+// between the static and dynamic writers asks this, and the dynamic writers
+// ask it again to number their imports, so the two cannot disagree about
+// which symbols reach .dynsym.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLinkOptions options, ObjectSymbol const* symbol)
 {
-    return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, true);
+    return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, true);
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
@@ -2164,7 +2257,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, false))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
@@ -2261,7 +2354,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         // Address zero is the answer for a reference nothing defines and
         // nothing can define; every other undefined symbol was rejected above.
-        bool absent_weak = link_elf_symbol_resolves_to_zero(symbol, false);
+        bool absent_weak = link_elf_symbol_resolves_to_zero(options, symbol, false);
         if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -2457,54 +2550,6 @@ BUSTER_GLOBAL_LOCAL u32 link_elf_hash(String8 name)
     return result;
 }
 
-// The version one library publishes a name's default definition under, and
-// whether the library defines the name at all.  A library that defines it only
-// as `name@VER` reports `defined` without a definition: an unversioned
-// reference has nothing there to bind to, which is what makes GNU ld refuse
-// glibc's `sys_errlist`.
-BUSTER_GLOBAL_LOCAL NativeDynamicVersionedSymbol* link_elf_versioned_find(NativeDynamicVersionedSymbol* symbols, u32 symbol_count, String8 name,
-                                                                         bool* defined)
-{
-    NativeDynamicVersionedSymbol* result = 0;
-    for (u32 index = 0; !result && index < symbol_count; index += 1)
-    {
-        if (string_equal(symbols[index].name, name))
-        {
-            *defined = true;
-            result = symbols[index].has_default ? symbols + index : 0;
-        }
-    }
-
-    return result;
-}
-
-// The same question across every library the image will name, in the order the
-// writers put them in DT_NEEDED -- the runtime first, then the requested ones
-// -- because that is the order the loader searches.  `no_default` separates
-// the two ways this fails: a name no library defines is left alone, since a
-// library the driver could not read defines nothing either, while a name that
-// is defined but never as a default is the divergence worth refusing.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(NativeExecutableLinkOptions options, String8 name, u32* library_index, String8* version, bool* no_default)
-{
-    bool result = false;
-    bool defined = false;
-    for (u32 index = 0; !result && index < options.dynamic_library_count + 1; index += 1)
-    {
-        NativeDynamicVersionedSymbol* symbols = index ? options.dynamic_libraries[index - 1].versioned_symbols : options.runtime_versioned_symbols;
-        u32 symbol_count = index ? options.dynamic_libraries[index - 1].versioned_symbol_count : options.runtime_versioned_symbol_count;
-        NativeDynamicVersionedSymbol* found = link_elf_versioned_find(symbols, symbol_count, name, &defined);
-        if (found)
-        {
-            *library_index = index;
-            *version = found->version;
-            result = true;
-        }
-    }
-    *no_default = !result && defined;
-
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options)
 {
@@ -2534,7 +2579,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     bool has_undefined_symbol = false;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
-        has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]);
+        has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]);
     }
     if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count)
     {
@@ -2563,7 +2608,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(symbol))
+        if (!link_elf_symbol_needs_dynamic_import(options, symbol))
         {
             continue;
         }
@@ -2725,7 +2770,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        if (link_elf_symbol_needs_dynamic_import(symbol) && symbol->kind == OBJECT_SYMBOL_DATA &&
+        // Asked of the numbering above rather than of the symbol again: an
+        // undefined symbol that was not numbered is one that resolves to
+        // zero, and re-deriving that per relocation would rescan every
+        // library's exports for every reference to an absent weak name.
+        if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
             relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -3181,11 +3230,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 symbol_address = 0;
-        if (link_elf_symbol_resolves_to_zero(symbol, true))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && import_indices[relocation->symbol] == UINT32_MAX)
         {
             // Nothing in the image and nothing the loader can reach defines
             // it, so the reference is worth zero and the relocation is
-            // applied against that address like any other.
+            // applied against that address like any other. An undefined
+            // symbol the numbering above left unimported is exactly one
+            // link_elf_symbol_resolves_to_zero answered for, and asking the
+            // numbering is what keeps the export scan to one per symbol.
             symbol_address = 0;
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA)
@@ -3467,7 +3519,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, false))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
@@ -3565,7 +3617,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         // Address zero is the answer for a reference nothing defines and
         // nothing can define; every other undefined symbol was rejected above.
-        bool absent_weak = link_elf_symbol_resolves_to_zero(symbol, false);
+        bool absent_weak = link_elf_symbol_resolves_to_zero(options, symbol, false);
         if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -3767,7 +3819,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
-        if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
+        if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
         {
             import_indices[symbol_index] = import_count++;
         }
@@ -3941,11 +3993,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             continue;
         }
         u64 symbol_address = 0;
-        if (link_elf_symbol_resolves_to_zero(symbol, true))
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && import_indices[relocation->symbol] == UINT32_MAX)
         {
             // No PLT thunk for a reference nothing can define: the branch is
             // relocated against address zero, which is what the program asked
-            // for by declaring the symbol weak.
+            // for by declaring the symbol weak. The numbering above is what
+            // decided that, exactly as in the x86-64 writer.
             symbol_address = 0;
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
@@ -8181,7 +8234,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     bool has_import = options.dynamic_library_count != 0;
     for (u32 index = 0; index < object->symbol_count; index += 1)
     {
-        if (link_elf_symbol_needs_dynamic_import(&object->symbols[index]))
+        if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[index]))
         {
             has_import = true;
             break;
@@ -8298,7 +8351,7 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         }
         for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
         {
-            if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
+            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
             {
                 return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
             }
@@ -8335,7 +8388,7 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         }
         for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
         {
-            if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
+            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
             {
                 return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
             }

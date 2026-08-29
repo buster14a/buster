@@ -1846,6 +1846,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 };
             }
         }
+        // Every name this library defines is now recorded, so the linker may
+        // read the absence of a name from `versioned_symbols` as the library
+        // not defining it -- which is what makes an undefined weak reference
+        // to a name nothing exports resolve to zero rather than becoming an
+        // import.  The ELF export list is `versioned_symbols` itself rather
+        // than a second copy of the same names in `exported_symbols`, which
+        // stays the PE side's.
+        library->exports_known = true;
         result = true;
     }
 
@@ -1902,6 +1910,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
         }
         else
         {
+            library->exports_known = false;
             library->exported_data_symbols = 0;
             library->exported_data_symbol_count = 0;
             library->versioned_symbols = 0;
