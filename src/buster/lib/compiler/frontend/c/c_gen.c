@@ -1031,6 +1031,20 @@ BUSTER_C_INTERNAL bool c_ir_type_is_f80_opaque_aggregate(IrProgram* program, CIr
            !ir_abi_value_has_x87_part(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
 }
 
+// A `long double _Complex`.  System V x86-64 returns it under the psABI's
+// COMPLEX_X87 class -- the real half in ST(0) and the imaginary half in
+// ST(1) -- where the equivalent `struct { long double a, b; }` is returned in
+// memory, so the two-field aggregate model is the layout here but not the
+// result convention.  The classifier is asked rather than the shape: only a
+// value the language calls complex takes the pair, which is what clang
+// compiles.  Its argument position is the 32-byte memory slot the size rule
+// already gives it.
+BUSTER_C_INTERNAL bool c_ir_type_is_f80_complex(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id, Target target)
+{
+    return program && c_ir_target_supports_f80(target) && c_ir_type_contains_wide_float(program, wide_float_cache, type_id) &&
+           ir_abi_value_is_complex_x87_result(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+}
+
 BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id,
                                                        bool result_type, Target target)
 {
@@ -1047,23 +1061,6 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
     {
         return true;
     }
-    // A `long double _Complex` result on System V x86-64 comes back in
-    // ST(0)/ST(1) under the psABI's COMPLEX_X87 class, not in memory the way
-    // the equivalent `struct { long double a, b; }` does, and no backend here
-    // emits that pair. The two-field aggregate the complex types are modelled
-    // as is the ABI for every other complex shape -- including this one in
-    // argument position, which is a sixteen-aligned memory slot either way,
-    // and including AArch64's fp128 complex, which is a homogeneous aggregate
-    // in both models -- so the refusal is exactly this result and is keyed on
-    // the x87 element rather than on the width.
-    if (result_type && type->is_complex)
-    {
-        IrType* element = ir_type_from_id(&program->types, type->element_type);
-        if (element && element->kind == IR_TYPE_FLOAT && element->bit_width == 80)
-        {
-            return false;
-        }
-    }
     IrAbiConvention convention = ir_abi_convention_for_target(target);
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
     if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
@@ -1071,10 +1068,21 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
         if (c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
         {
             // SysV passes both scalar f80 and ABI-proven wrappers by value in
-            // a sixteen-byte stack slot.  Results use the x87 pair checked
-            // above.
+            // a sixteen-byte stack slot.  Results come back as the x87 pair.
             if (!result_type &&
                 (!abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_MEMORY || abi.parts[0].size != 16))
+            {
+                return false;
+            }
+        }
+        else if (c_ir_type_is_f80_complex(program, wide_float_cache, type_id, target))
+        {
+            // The COMPLEX_X87 result is the classifier's four-part x87 pair,
+            // which the predicate above already proved; the argument is a
+            // thirty-two-byte memory slot, which is what a `cabsl` or `cargl`
+            // parameter has always been.
+            if (!result_type &&
+                (!abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_MEMORY || abi.parts[0].size != 32))
             {
                 return false;
             }
@@ -10696,9 +10704,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 //
 // System V x86-64 returns a `long double _Complex` in ST(0)/ST(1) (the psABI's
 // COMPLEX_X87 class) where the equivalent struct is returned in memory. That
-// is the one place the aggregate model is not the ABI, so a complex value
-// whose element is the 80-bit x87 type is refused at the signature boundary
-// rather than passed under a shape no other compiler would accept.
+// is the one place the aggregate model is not the ABI, and it is the only
+// thing the backends had to learn about complex: the classifier gives that
+// result four X87/X87_UP eightbyte parts, the canonical x86-64 emitter pushes
+// the imaginary half and then the real one before its RET and pops them in
+// that order after a call, and every other position -- the argument, the
+// loads, the stores, the copies -- is the two-field aggregate unchanged.
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_unary_value(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, IrUnaryOperation operation,
                                                     IrSourceRange source)
@@ -10912,34 +10923,35 @@ BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrT
     return c_ir_emit_load_place(builder, place, complex_type, source);
 }
 
-// Whether a complex value of this type can be computed with here. The only
-// shape that cannot is one whose element is the 80-bit x87 type: System V
-// x86-64 returns a `long double _Complex` in ST(0)/ST(1) (the psABI's
-// COMPLEX_X87 class) where the equivalent struct goes to memory, so such a
-// value cannot cross a call boundary under the aggregate model, and the bit
-// punning the magnitude below needs has no ten-byte integer to work in.
-// Independently of both, the backends refuse a 32-byte aggregate of x87
-// values outright today -- a plain `struct { long double a, b; }` fails the
-// same way -- so nothing downstream depends on this refusal being the only
-// one.
+// Whether a complex value of this type can be computed with here.  Every
+// float element this frontend has is admitted; the 80-bit x87 one reaches the
+// magnitude below through its sign/exponent halfword rather than through a
+// whole-value integer, which is the same view musl's `union ldshape` takes.
 BUSTER_C_INTERNAL bool c_ir_complex_element_supported(CIntegerIrBuilder* builder, IrType* complex_type)
 {
     IrType* element = complex_type ? ir_type_from_id(&builder->program->types, complex_type->element_type) : 0;
-    return element && element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64);
+    return element && element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64 || element->bit_width == 80);
 }
 
 // |x|, branchless: clear the sign bit through the same stack-slot punning the
 // signbit builtin uses, because there is no absolute-value opcode and calling
 // libm would make complex division depend on a library.
+//
+// The 80-bit x87 spelling has no integer of its own width, so it is punned
+// one halfword at a time: the sign bit is bit 15 of the sixteen-bit
+// sign/exponent field at byte eight, which is exactly the `se` member of
+// musl's `union ldshape`, and the ten-byte significand below it is left
+// alone.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
 {
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64))
+    if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64 && type->bit_width != 80))
     {
         return IR_VALUE_ID_INVALID;
     }
     u32 bit_width = type->bit_width;
-    IrTypeId bits_type = c_ir_builder_scalar_type(builder, bit_width == 32 ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_LONG_LONG);
+    CTypeKind bits_kind = bit_width == 32 ? C_TYPE_UNSIGNED_INT : bit_width == 64 ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_SHORT;
+    IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
     IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
     if (bits_type.value == IR_ID_UNDERLYING_INVALID || slot.value == IR_ID_UNDERLYING_INVALID ||
         !c_ir_emit_store_place(builder, slot, type_id, value, source))
@@ -10951,10 +10963,28 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder
     IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
                                  ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
                                  : IR_VALUE_ID_INVALID;
-    IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
+    IrValueId bits_place = IR_VALUE_ID_INVALID;
+    if (bits_address.value != IR_ID_UNDERLYING_INVALID)
+    {
+        if (bit_width == 80)
+        {
+            // The fifth halfword of the sixteen-byte slot: byte eight, where
+            // the x87 format keeps the sign and the exponent.
+            IrValueId halfword_index = c_ir_emit_integer_value_typed(builder, 4, false, (CToken){0}, builder->s32_type);
+            bits_place = halfword_index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, bits_address, halfword_index, source)
+                                                                         : IR_VALUE_ID_INVALID;
+        }
+        else
+        {
+            bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
+        }
+    }
     IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
-    IrValueId mask = c_ir_emit_integer_value_typed(builder, bit_width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff), false, (CToken){0},
-                                                   bits_type);
+    IrValueId mask = c_ir_emit_integer_value_typed(builder,
+                                                   bit_width == 32   ? UINT64_C(0x7fffffff)
+                                                   : bit_width == 64 ? UINT64_C(0x7fffffffffffffff)
+                                                                     : UINT64_C(0x7fff),
+                                                   false, (CToken){0}, bits_type);
     if (bits.value == IR_ID_UNDERLYING_INVALID || mask.value == IR_ID_UNDERLYING_INVALID)
     {
         return IR_VALUE_ID_INVALID;
@@ -11292,7 +11322,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_complex_operation(CIntegerIrBuilder* builder, 
         }
         if (!c_ir_complex_element_supported(builder, result_complex))
         {
-            builder->failure_message = S8("C IR lowering does not yet support long double complex multiplication or division");
+            builder->failure_message = S8("C IR lowering does not yet support this complex multiplication or division");
             return false;
         }
         if (!left_complex)
@@ -14811,6 +14841,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                                               builder->function->values[value.value].canonical_type) &&
                 !c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache,
                                             builder->function->values[value.value].canonical_type, builder->target) &&
+                !c_ir_type_is_f80_complex(builder->program, builder->wide_float_cache,
+                                          builder->function->values[value.value].canonical_type, builder->target) &&
                 !c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache,
                                                    builder->function->values[value.value].canonical_type, builder->target))
             {

@@ -5785,6 +5785,106 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(complex_temporary);
     }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    // The COMPLEX_X87 result: System V x86-64 hands a `long double _Complex`
+    // back on the x87 stack, ST(0) real over ST(1) imaginary, where the
+    // identically laid out `struct { long double a, b; }` is returned in
+    // memory through a hidden pointer. That is the one place the two-field
+    // aggregate model of a complex value is not the ABI, so a single
+    // translation unit cannot see a disagreement about it -- a caller and a
+    // callee this compiler produced agree with each other whatever they agree
+    // on. Pair the halves with the host compiler in both directions, which is
+    // what pins the pair to the platform's. Verified by returning the two
+    // halves in the other order: the one-file fixture in
+    // basic_c_complex_arithmetic.c and the Buster/Buster link still pass while
+    // both mixed links fail.
+    {
+        TemporalArena complex_pair_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* complex_pair_arena = complex_pair_temporary.arena;
+        String8 host_complex_callee_path = buster_test_temporary_path(complex_pair_arena, S8("buster-c-complex-x87-host-callee"), S8(".o"));
+        String8 host_complex_caller_path = buster_test_temporary_path(complex_pair_arena, S8("buster-c-complex-x87-host-caller"), S8(".o"));
+        // -fno-pic because this linker has no GOT model, and -g0 to keep
+        // clang's newer debug sections outside the object reader's model, the
+        // same two reasons the x87 aggregate pair above passes them.
+        String8 host_complex_callee_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_complex_callee_path,
+            S8("tests/basic_c_complex_x87_callee.c"),
+        };
+        String8 host_complex_caller_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_complex_caller_path,
+            S8("tests/basic_c_complex_x87_caller.c"),
+        };
+        ProcessSpawnOptions host_complex_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult host_complex_callee_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_complex_callee_command),
+                                                                       (SliceString8){0}, (SliceString8){0}, host_complex_options);
+        ProcessSpawnResult host_complex_caller_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_complex_caller_command),
+                                                                       (SliceString8){0}, (SliceString8){0}, host_complex_options);
+        bool host_complex_callee_compiled =
+            host_complex_callee_spawn.handle && os_process_wait_sync(complex_pair_arena, host_complex_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool host_complex_caller_compiled =
+            host_complex_caller_spawn.handle && os_process_wait_sync(complex_pair_arena, host_complex_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_complex_callee_compiled && host_complex_caller_compiled);
+        for (u64 allocator_index = 0;
+             host_complex_callee_compiled && host_complex_caller_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_complex_allocators);
+             allocator_index += 1)
+        {
+            String8 buster_complex_callee_path = buster_test_temporary_path(complex_pair_arena, S8("buster-c-complex-x87-callee"), S8(".o"));
+            String8 buster_complex_caller_path = buster_test_temporary_path(complex_pair_arena, S8("buster-c-complex-x87-caller"), S8(".o"));
+            String8 buster_complex_callee_command[] = {
+                c_complex_allocators[allocator_index], S8("-c"), S8("-o"), buster_complex_callee_path,
+                S8("tests/basic_c_complex_x87_callee.c"),
+            };
+            String8 buster_complex_caller_command[] = {
+                c_complex_allocators[allocator_index], S8("-c"), S8("-o"), buster_complex_caller_path,
+                S8("tests/basic_c_complex_x87_caller.c"),
+            };
+            CompilerDriverResult buster_complex_callee = compiler_driver_execute_invocation(
+                complex_pair_arena,
+                compiler_driver_parse_arguments(complex_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_complex_callee_command)));
+            CompilerDriverResult buster_complex_caller = compiler_driver_execute_invocation(
+                complex_pair_arena,
+                compiler_driver_parse_arguments(complex_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_complex_caller_command)));
+            BUSTER_TEST(arguments,
+                        buster_complex_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_complex_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            if (buster_complex_callee.error != COMPILER_DRIVER_ERROR_NONE || buster_complex_caller.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                continue;
+            }
+            String8 complex_object_pairs[2][2] = {
+                {buster_complex_caller_path, host_complex_callee_path},
+                {host_complex_caller_path, buster_complex_callee_path},
+            };
+            for (u64 direction = 0; direction < BUSTER_ARRAY_LENGTH(complex_object_pairs); direction += 1)
+            {
+                String8 complex_mixed_path = buster_test_temporary_path(complex_pair_arena, S8("buster-c-complex-x87-pair"), S8(""));
+                String8 complex_mixed_link_command[] = {
+                    S8("-o"), complex_mixed_path, complex_object_pairs[direction][0], complex_object_pairs[direction][1],
+                };
+                CompilerDriverResult complex_mixed_link = compiler_driver_execute_invocation(
+                    complex_pair_arena,
+                    compiler_driver_parse_arguments(complex_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(complex_mixed_link_command)));
+                BUSTER_TEST(arguments, complex_mixed_link.error == COMPILER_DRIVER_ERROR_NONE);
+                if (complex_mixed_link.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    continue;
+                }
+                String8 complex_mixed_arguments[] = {complex_mixed_path};
+                ProcessSpawnResult complex_mixed_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(complex_mixed_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, complex_mixed_spawn.handle != 0);
+                if (complex_mixed_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(complex_pair_arena, complex_mixed_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+        scratch_end(complex_pair_temporary);
+    }
+#endif
     // `__attribute__((packed))` and `__attribute__((aligned(N)))` decide
     // object representation, so a compiler that parses and ignores them lays
     // out a different object than every other compiler on the target while

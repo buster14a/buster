@@ -838,6 +838,20 @@ that looks like a Buster gap can be a branch Clang never took, so check what
 the unit actually preprocessed to (`ide cc -E` with the same flags) before
 naming a construct.
 
+One flag the reference carries and Buster does not is
+`-fcomplex-arithmetic=improved`. Clang's default for C lowers a complex
+multiply or divide to the compiler-runtime helpers -- `__mulxc3`, `__divxc3`
+and their siblings -- which live in libgcc or compiler-rt, and this harness
+links neither, so a reference object that calls one cannot be linked at all;
+musl's `cpowl` is such an object. `improved` is the inline Smith form the
+Buster frontend emits, bit-identical to it over the operand matrix described
+under `_Complex` below, so the flag is the reference-side counterpart of the
+probe's `-mstackrealign`: it makes the comparison possible rather than
+changing what is compared. It is the one option in the set that dates the
+reference compiler -- Clang grew `-fcomplex-arithmetic=` in 20 -- and an
+older one rejects it as an unknown option rather than miscompiling, which the
+reference build reports before any Buster invocation runs.
+
 The Clang reference build runs first and every unit must compile — a musl unit
 Clang cannot build under this flag set is a broken workspace, not a Buster
 defect, and finding that out before a thousand Buster invocations keeps the two
@@ -871,11 +885,13 @@ of any kind: it is compiled `-nostdinc` against musl's own headers, entered at
 `_start`, and linked with `ld -static` and nothing else, so no compiler driver,
 no startup file and no host libc are on the link line and everything it
 resolves comes out of the musl archive. It exercises the string, memory,
-search and character routines, and the seventeen x87 `long double` units named
-below -- sixteen of them called directly and `__rem_pio2l` through `sinl`, each
-wide result recorded as the sign, exponent and significand fields of musl's own
-`union ldshape` so that a result one ulp off cannot pass -- and writes a
-transcript through raw `write` and `exit` system calls; the Clang-built and Buster-built transcripts must be
+search and character routines, the seventeen x87 `long double` units named
+below -- sixteen of them called directly and `__rem_pio2l` through `sinl` --
+and the twenty-two under `src/complex` that take or return a
+`long double _Complex`, each wide result recorded as the sign, exponent and
+significand fields of musl's own `union ldshape` so that a result one ulp off
+cannot pass, and a complex one recorded as both of its halves that way. It
+writes a transcript through raw `write` and `exit` system calls; the Clang-built and Buster-built transcripts must be
 identical byte for byte, so a routine that computes a different answer fails
 the run where a link-and-exit check would not. The probe runs under FAST, NONE,
 MIR_STACK and QUALITY against the one Buster-built archive, because the four
@@ -913,17 +929,21 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 23
-are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 18
-for a `long double _Complex` result, which is every remaining unit under
-`src/complex` and is described with the type below; 1 static initializer
-(`src/misc/ioctl`'s `compat_map`); and 4 singletons -- `res_msend` (an
-over-aligned automatic), `lsearch` (a pointer to a VLA), and
+harness compiles the portable C instead and lists each one. The remaining 5
+are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 1
+static initializer (`src/misc/ioctl`'s `compat_map`); and 4 singletons --
+`res_msend` (an over-aligned automatic), `lsearch` (a pointer to a VLA), and
 `vfprintf`/`vfwprintf` (wide floating-point `va_arg`). Inline assembly is no
 longer a class: `crt/rcrt1`, `ldso/dlstart`, `ldso/dynlink` and
 `src/thread/__unmapself` were the four units that reached code generation and
 stopped on a template, and they compile now that the inline path relocates a
-symbol reference and takes musl's two hand-off shapes. Conflicting
+symbol reference and takes musl's two hand-off shapes.
+
+`src/complex` is no longer a class either. Eighteen units returned a
+`long double _Complex` and were refused at the signature boundary until the
+System V COMPLEX_X87 result class reached the canonical emitter, described
+with the type below: 1326 to 1344, and `functional/tgmath` in libc-test moved
+from `blocked-compile` to the `vfprintf` link blocker with it. Conflicting
 declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
 `long f();` compatible with a non-variadic prototype for the same function,
 which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write
@@ -937,12 +957,25 @@ cross-probed against Clang for System V x86-64, Win64, AAPCS64 and Darwin
 AArch64, and differenced against a Clang build across the boundary on the
 first three. The exception is System V x86-64's `long double _Complex`
 *result*, which the psABI returns in ST(0)/ST(1) under its COMPLEX_X87 class
-where the equivalent `struct { long double a, b; }` is returned in memory. No
-backend here emits that pair, so `c_ir_signature_type_supported` refuses the
-result rather than emitting a shape no other compiler would accept; the
-argument position is a sixteen-aligned memory slot under the same psABI and
-goes through, which is why `cabsl`, `cargl`, `creall` and `cimagl` compile and
-the eighteen that return one do not.
+where the equivalent `struct { long double a, b; }` is returned in memory
+through a hidden pointer. It is the one place the aggregate model is not the
+ABI, and it is keyed on the type being complex rather than on its shape,
+because the two spellings have identical layouts and different conventions --
+which is what Clang compiles, and what `ir_classify_abi_value` now keys the
+class on. The classifier gives that result four eightbyte parts, one
+X87/X87_UP pair per half in layout order; `ir_abi_value_is_complex_x87_result`
+is the predicate over that shape and the only thing the backends ask. The
+canonical x86-64 emitter pushes the imaginary half and then the real one
+before its `RET`, so the real half is on top, and pops them in that order into
+the result slot after a call. Every other position is the two-field aggregate
+unchanged: the argument is a thirty-two-byte memory slot under the same psABI,
+which is why `cabsl`, `cargl`, `creall` and `cimagl` compiled before any of
+this, and the loads, stores and copies move bytes.
+`tests/basic_c_complex_x87_caller.c` and its callee are the pair compiled by
+one compiler and linked against the other in both directions, which is the
+only thing that pins the register order to the platform's; the single
+translation unit in `tests/basic_c_complex_arithmetic.c` cannot see a
+disagreement about it.
 
 Multiplication and division are lowered inline -- the naive product and
 Smith's algorithm, which is what Clang emits for
@@ -950,8 +983,15 @@ Smith's algorithm, which is what Clang emits for
 calls Clang emits by default, because this toolchain neither ships nor links a
 compiler runtime to resolve them. Against `improved` the two agree bit for bit
 over an operand matrix covering the signed zeroes, the subnormal and overflow
-edges and the infinities; `c_ir_emit_complex_divide` in `c_gen.c` records
-where the default's library helpers differ. GNU's imaginary literal suffix
+edges and the infinities, `long double` included;
+`c_ir_emit_complex_divide` in `c_gen.c` records where the default's library
+helpers differ. Smith's algorithm compares the magnitudes of the two
+denominator halves, and there is no absolute-value opcode, so
+`c_ir_emit_float_magnitude` clears the sign bit through a stack slot. The
+80-bit x87 spelling has no integer of its own width to pun through, so it is
+punned one halfword at a time -- bit 15 of the sixteen-bit sign/exponent field
+at byte eight, the `se` member of musl's own `union ldshape` -- rather than
+whole, which is what lets `cpowl` compile with the other seventeen. GNU's imaginary literal suffix
 comes with the type, in both orders and both letters, because it is the only
 way a `<complex.h>` can define `I`: musl spells `_Complex_I` as
 `(0.0f+1.0fi)` and glibc as `(1.0iF)`. Two shapes stay unsupported and
@@ -1153,26 +1193,27 @@ one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
 too. The seventy-ninth is the first runtime test to link and run green, in
 `src/regression`. The rest of the three runtime subsets still does not link:
-`src/functional` is 7 dynamic, 15 excluded-reference, 2 blocked-compile and 53
+`src/functional` is 7 dynamic, 15 excluded-reference, 1 blocked-compile and 54
 blocked-link; `src/math` is 144 excluded-reference, 21 blocked-compile and 34
 blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference, 1
 blocked-compile and 53 blocked-link.
 
-The ranked blocker is now `vfprintf` (140 tests), then a tail of ones.
+The ranked blocker is now `vfprintf` (141 tests), then a tail of ones.
 `__libc_start_main` (141) and `__syscall_cp` (107) headed this list until the
 singleton fixes above let their units compile, which is what turned the stage
 from three walls into one: `src/stdio/vfprintf.c` stops on wide floating-point
-`va_arg`, and it alone gates 140 of the 424. `__procfdname` (15) stood second
+`va_arg`, and it alone gates 141 of the 424. `__procfdname` (15) stood second
 until a `[static N]` array parameter stopped making its function's definition
-internal; removing it moved no unit, because all 15 wanted `vfprintf` as well.
-That is the shape of this list while one symbol gates a third of the suite —
-a blocker can be real, fixed, and still not move the passing count.
+internal, and `__unmapself` until the inline-assembly fix above; removing
+either moved no unit, because everything that wanted them wanted `vfprintf`
+as well. That is the shape of this list while one symbol gates a third of the
+suite — a blocker can be real, fixed, and still not move the passing count.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
-Buster pass spent 57,8 seconds of child time over 1349 units — 43 ms each — for
-113,6 MB of preprocessed source, 4.183.300 lines and 4.975.374 tokens, and
-produced 1320 archive members in 5.472.818 bytes against Clang's 1344 in
-2.600.782. Both counts are the manifest minus its `crt/` and `ldso/` units,
+Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
+116,0 MB of preprocessed source, 4.273.705 lines and 5.125.840 tokens, and
+produced 1339 archive members in 5.582.884 bytes against Clang's 1344 in
+2.600.342. Both counts are the manifest minus its `crt/` and `ldso/` units,
 which the startup-object and archive notes above keep out. The Buster archive
 is the larger of the two despite holding fewer members, which is what an
 emitter that spills through the frame rather than through registers looks like

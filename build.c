@@ -16105,8 +16105,13 @@ struct MuslManifest
 // the hash of the newline-joined sorted failing paths is pinned beside it. Both
 // are printed on a mismatch along with the whole failing list, which is what a
 // deliberate rebaseline needs.
-#define MUSL_EXPECTED_COMPILED_UNITS 1326
-#define MUSL_EXPECTED_FAILURE_HASH 0x544af5036925a477ull
+// 2026-08-29: 1326 -> 1344, the eighteen units under src/complex that return a
+// `long double _Complex`, released by the System V x86-64 COMPLEX_X87 result
+// class (ST(0) real over ST(1) imaginary) reaching the canonical emitter.
+// cpowl came with them once the inline Smith division learned to take the
+// magnitude of an x87 value through its sign/exponent halfword.
+#define MUSL_EXPECTED_COMPILED_UNITS 1344
+#define MUSL_EXPECTED_FAILURE_HASH 0xbd789c126b3c6dd5ull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16665,6 +16670,16 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, clang);
     musl_append_common_flags(&builder, flags);
+    // Clang's default for C lowers a complex multiply or divide to the
+    // compiler-runtime helpers -- __mulxc3, __divdc3 and their siblings --
+    // which live in libgcc or compiler-rt, neither of which this harness
+    // links. A reference object that calls one cannot be linked at all, which
+    // is what musl's cpowl does. `improved` is the inline Smith form the
+    // Buster frontend emits, and the two are bit-identical over the operand
+    // matrix c_ir_emit_complex_divide records, so this is the reference-side
+    // counterpart of the probe's -mstackrealign: the flag that makes the
+    // comparison possible rather than one that changes what is compared.
+    os_argument_builder_append(&builder, S8("-fcomplex-arithmetic=improved"));
     if (extra.length)
     {
         os_argument_builder_append(&builder, extra);
@@ -16891,8 +16906,12 @@ struct LibcTestSubsetTotals
 // sorted by unit name, so the file system's order cannot move it. Both are
 // printed on the LIBCTEST_INVENTORY line, which is what a deliberate
 // rebaseline needs.
+// 2026-08-29: one state moved, `functional/tgmath` from blocked-compile to
+// blocked-link, when the COMPLEX_X87 result class let its `long double
+// _Complex` calls through the frontend. It is now behind `vfprintf` with the
+// other 139, so the passing count is unchanged.
 #define LIBC_TEST_EXPECTED_PASSING 79
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x5922c7a2030c94b5ull
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x9f218339bcb337a8ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

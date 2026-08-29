@@ -2643,6 +2643,24 @@ BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAb
     return IR_ABI_CLASS_INTEGER;
 }
 
+// System V x86-64's COMPLEX_X87 class.  A `long double _Complex` result comes
+// back on the x87 stack -- ST(0) carries the real half and ST(1) the imaginary
+// one -- where the equivalent `struct { long double a, b; }` is returned in
+// memory through a hidden pointer.  The class is keyed on the type being
+// complex, which is what the psABI keys it on and what clang compiles: the
+// two shapes have identical layouts and different result conventions.  Only
+// the result direction differs; an argument is the 32-byte memory slot the
+// size rule already gives it.
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_is_complex_x87(IrProgram* program, IrType* type)
+{
+    if (!program || !type || !type->is_complex || !type->layout.resolved || type->layout.size != 32 || type->layout.alignment != 16)
+    {
+        return false;
+    }
+    IrType* element = ir_type_from_id(&program->types, type->element_type);
+    return element && element->kind == IR_TYPE_FLOAT && element->bit_width == 80 && element->layout.resolved && element->layout.size == 16;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
@@ -3249,6 +3267,27 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 }
                 return value;
             }
+            if (is_result && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && ir_system_v_abi_is_complex_x87(program, type))
+            {
+                // COMPLEX_X87: one X87/X87_UP eightbyte pair per half, in
+                // layout order, so parts[0] is the real half in ST(0) and
+                // parts[2] the imaginary half in ST(1).
+                value.part_count = 4;
+                for (u32 half = 0; half < 2; half += 1)
+                {
+                    value.parts[half * 2] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_X87,
+                        .value_offset = half * 16,
+                        .size = 8,
+                    };
+                    value.parts[half * 2 + 1] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_X87_UP,
+                        .value_offset = half * 16 + 8,
+                        .size = 8,
+                    };
+                }
+                return value;
+            }
             if (size > 16)
             {
                 value.part_count = 1;
@@ -3390,6 +3429,19 @@ bool ir_abi_value_has_x87_part(IrProgram* program, IrTypeId type_id, IrAbiConven
     }
 
     return result;
+}
+
+bool ir_abi_value_is_complex_x87_result(IrProgram* program, IrTypeId type_id, IrAbiConvention convention)
+{
+    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
+    if (convention != IR_ABI_CONVENTION_SYSTEMV_X86_64 || !ir_system_v_abi_is_complex_x87(program, type))
+    {
+        return false;
+    }
+    IrAbiValue abi = ir_type_abi_value(program, type_id, convention, IR_ABI_USE_RESULT);
+    return !abi.memory && !abi.indirect && abi.part_count == 4 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
+           abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP && abi.parts[2].abi_class == IR_ABI_CLASS_X87 &&
+           abi.parts[3].abi_class == IR_ABI_CLASS_X87_UP && abi.parts[0].value_offset == 0 && abi.parts[2].value_offset == 16;
 }
 
 bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)

@@ -67,6 +67,38 @@ extern long double exp10l(long double);
 // The seventeenth is __rem_pio2l, the argument reduction the wide trigonometric
 // routines share, which no caller outside src/math names directly.
 extern long double sinl(long double);
+// The eighteen units under src/complex that return a `long double _Complex`.
+// System V x86-64 hands that result back in ST(0)/ST(1) under the psABI's
+// COMPLEX_X87 class rather than in memory, so every call below crosses the
+// one calling-convention shape a plain `struct { long double a, b; }` does
+// not have, in both directions: the probe reads the pair these return, and
+// musl's own `cacoshl` into `cacosl`, `cexpl` into `cexp` and `clogl` into
+// `cabsl` push and pop it inside the archive.  The four that only take one --
+// `cabsl`, `cargl`, `creall`, `cimagl` -- have always compiled and are here
+// as the argument side of the same convention.
+typedef long double _Complex wide_complex;
+extern long double cabsl(wide_complex);
+extern long double cargl(wide_complex);
+extern long double creall(wide_complex);
+extern long double cimagl(wide_complex);
+extern wide_complex cacoshl(wide_complex);
+extern wide_complex cacosl(wide_complex);
+extern wide_complex casinhl(wide_complex);
+extern wide_complex casinl(wide_complex);
+extern wide_complex catanhl(wide_complex);
+extern wide_complex catanl(wide_complex);
+extern wide_complex ccoshl(wide_complex);
+extern wide_complex ccosl(wide_complex);
+extern wide_complex cexpl(wide_complex);
+extern wide_complex clogl(wide_complex);
+extern wide_complex conjl(wide_complex);
+extern wide_complex cpowl(wide_complex, wide_complex);
+extern wide_complex cprojl(wide_complex);
+extern wide_complex csinhl(wide_complex);
+extern wide_complex csinl(wide_complex);
+extern wide_complex csqrtl(wide_complex);
+extern wide_complex ctanhl(wide_complex);
+extern wide_complex ctanl(wide_complex);
 
 void _start(void);
 
@@ -148,17 +180,35 @@ union wide_shape
 
 // The significand goes out as two 32-bit halves because append_signed takes a
 // long, and a normalized x87 significand has its top bit set.
-static void record_wide(const char* name, long double value)
+static void append_wide(long double value)
 {
     union wide_shape shape;
     shape.f = value;
-    append(name);
-    append("=");
     append_signed((long)(shape.i.m >> 32));
     append(":");
     append_signed((long)(shape.i.m & 0xffffffffUL));
     append(":");
     append_signed((long)shape.i.se);
+}
+
+static void record_wide(const char* name, long double value)
+{
+    append(name);
+    append("=");
+    append_wide(value);
+    append("\n");
+}
+
+// Both halves of a complex result, each through the same field view as a wide
+// scalar, so a real or an imaginary part one ulp off fails the comparison.
+// Nothing here renders a decimal.
+static void record_wide_complex(const char* name, wide_complex value)
+{
+    append(name);
+    append("=");
+    append_wide(__real__ value);
+    append("|");
+    append_wide(__imag__ value);
     append("\n");
 }
 
@@ -273,6 +323,57 @@ static void run(void)
     record_wide("exp10l", exp10l(wide_input));
     wide_input = 1.0L;
     record_wide("sinl", sinl(wide_input));
+
+    // The complex routines.  The operand is assembled from volatile halves so
+    // that neither compiler folds a call away, and every result below comes
+    // back in ST(0)/ST(1): the transcript is what proves the two compilers
+    // agree on which register holds which half and on what musl computed into
+    // them.
+    volatile long double complex_real;
+    volatile long double complex_imaginary;
+    wide_complex operand;
+    complex_real = 0.5L;
+    complex_imaginary = 0.25L;
+    __real__ operand = complex_real;
+    __imag__ operand = complex_imaginary;
+    record_wide("cabsl", cabsl(operand));
+    record_wide("cargl", cargl(operand));
+    record_wide("creall", creall(operand));
+    record_wide("cimagl", cimagl(operand));
+    record_wide_complex("conjl", conjl(operand));
+    record_wide_complex("cprojl", cprojl(operand));
+    record_wide_complex("cexpl", cexpl(operand));
+    record_wide_complex("clogl", clogl(operand));
+    record_wide_complex("csqrtl", csqrtl(operand));
+    record_wide_complex("csinl", csinl(operand));
+    record_wide_complex("ccosl", ccosl(operand));
+    record_wide_complex("ctanl", ctanl(operand));
+    record_wide_complex("csinhl", csinhl(operand));
+    record_wide_complex("ccoshl", ccoshl(operand));
+    record_wide_complex("ctanhl", ctanhl(operand));
+    record_wide_complex("casinl", casinl(operand));
+    record_wide_complex("cacosl", cacosl(operand));
+    record_wide_complex("catanl", catanl(operand));
+    record_wide_complex("casinhl", casinhl(operand));
+    record_wide_complex("cacoshl", cacoshl(operand));
+    record_wide_complex("catanhl", catanhl(operand));
+    // cpowl is clogl times its second operand fed back through cexpl, so it
+    // is the one call that carries the pair three times over and the only one
+    // whose body multiplies two complex values.
+    wide_complex exponent;
+    complex_real = 2.0L;
+    complex_imaginary = -0.75L;
+    __real__ exponent = complex_real;
+    __imag__ exponent = complex_imaginary;
+    record_wide_complex("cpowl", cpowl(operand, exponent));
+    // An infinite half is the branch cprojl exists for, and the one shape
+    // that makes conjl's sign handling observable on a zero.
+    complex_real = 1.0L;
+    complex_imaginary = 0.0L;
+    __real__ operand = complex_real / 0.0L;
+    __imag__ operand = -complex_imaginary;
+    record_wide_complex("cprojl_infinite", cprojl(operand));
+    record_wide_complex("conjl_negative_zero", conjl(operand));
 
     append("hello from a Buster-built musl\n");
 }

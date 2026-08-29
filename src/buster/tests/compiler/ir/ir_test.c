@@ -183,6 +183,30 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         .field_count = 1,
         .layout = {.size = 16, .alignment = 16, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
     });
+    // `long double _Complex` and the identically laid out plain struct: the
+    // two differ only in `is_complex`, which is what System V's COMPLEX_X87
+    // class is keyed on, so the pair is the whole test.
+    IrField* abi_complex_f80_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_complex_f80_fields[0] = (IrField){.type = abi_f80, .offset = 0};
+    abi_complex_f80_fields[1] = (IrField){.type = abi_f80, .offset = 16};
+    IrTypeId abi_complex_f80 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = abi_complex_f80_fields,
+        .element_type = abi_f80,
+        .field_count = 2,
+        .is_complex = true,
+        .layout = {.size = 32, .alignment = 16, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
+    IrField* abi_pair_f80_fields = arena_allocate(arguments->arena, IrField, 2);
+    abi_pair_f80_fields[0] = (IrField){.type = abi_f80, .offset = 0};
+    abi_pair_f80_fields[1] = (IrField){.type = abi_f80, .offset = 16};
+    IrTypeId abi_pair_f80 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = abi_pair_f80_fields,
+        .element_type = abi_f80,
+        .field_count = 2,
+        .layout = {.size = 32, .alignment = 16, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true},
+    });
     IrField* abi_union_same_f80_fields = arena_allocate(arguments->arena, IrField, 2);
     abi_union_same_f80_fields[0] = (IrField){.type = abi_f80, .offset = 0};
     abi_union_same_f80_fields[1] = (IrField){.type = abi_f80, .offset = 0};
@@ -322,6 +346,31 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, abi_struct_f80_result.part_count == 2 && !abi_struct_f80_result.memory && !abi_struct_f80_result.indirect);
     BUSTER_TEST(arguments, abi_struct_f80_result.parts[0].abi_class == IR_ABI_CLASS_X87 && abi_struct_f80_result.parts[0].value_offset == 0 && abi_struct_f80_result.parts[0].size == 8);
     BUSTER_TEST(arguments, abi_struct_f80_result.parts[1].abi_class == IR_ABI_CLASS_X87_UP && abi_struct_f80_result.parts[1].value_offset == 8 && abi_struct_f80_result.parts[1].size == 8);
+
+    // COMPLEX_X87: four eightbyte parts, one X87/X87_UP pair per half, in
+    // layout order, so parts[0] is the real half that comes back in ST(0) and
+    // parts[2] the imaginary half in ST(1). The argument stays the 32-byte
+    // memory slot the size rule gives it, which is what clang passes.
+    IrAbiValue abi_complex_f80_argument = ir_type_abi_value(&abi_program, abi_complex_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_complex_f80_result = ir_type_abi_value(&abi_program, abi_complex_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, abi_complex_f80_argument.part_count == 1 && abi_complex_f80_argument.memory && !abi_complex_f80_argument.indirect);
+    BUSTER_TEST(arguments, abi_complex_f80_argument.parts[0].abi_class == IR_ABI_CLASS_MEMORY && abi_complex_f80_argument.parts[0].size == 32);
+    BUSTER_TEST(arguments, abi_complex_f80_result.part_count == 4 && !abi_complex_f80_result.memory && !abi_complex_f80_result.indirect);
+    BUSTER_TEST(arguments, abi_complex_f80_result.parts[0].abi_class == IR_ABI_CLASS_X87 && abi_complex_f80_result.parts[0].value_offset == 0);
+    BUSTER_TEST(arguments, abi_complex_f80_result.parts[1].abi_class == IR_ABI_CLASS_X87_UP && abi_complex_f80_result.parts[1].value_offset == 8);
+    BUSTER_TEST(arguments, abi_complex_f80_result.parts[2].abi_class == IR_ABI_CLASS_X87 && abi_complex_f80_result.parts[2].value_offset == 16);
+    BUSTER_TEST(arguments, abi_complex_f80_result.parts[3].abi_class == IR_ABI_CLASS_X87_UP && abi_complex_f80_result.parts[3].value_offset == 24);
+    BUSTER_TEST(arguments, ir_abi_value_is_complex_x87_result(&abi_program, abi_complex_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64));
+    // The same two fields without `is_complex` are returned in memory through
+    // a hidden pointer, which is what clang compiles for the plain struct.
+    IrAbiValue abi_pair_f80_result = ir_type_abi_value(&abi_program, abi_pair_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, abi_pair_f80_result.part_count == 1 && abi_pair_f80_result.indirect && !abi_pair_f80_result.memory);
+    BUSTER_TEST(arguments, abi_pair_f80_result.parts[0].abi_class == IR_ABI_CLASS_POINTER && abi_pair_f80_result.parts[0].size == 8);
+    BUSTER_TEST(arguments, !ir_abi_value_is_complex_x87_result(&abi_program, abi_pair_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64));
+    // Only System V has the class: Win64 returns the same value through a
+    // hidden pointer, and the predicate answers for the convention it is
+    // asked about rather than for the type alone.
+    BUSTER_TEST(arguments, !ir_abi_value_is_complex_x87_result(&abi_program, abi_complex_f80, IR_ABI_CONVENTION_WIN64_X86_64));
 
     IrAbiValue abi_union_same_f80_argument = ir_type_abi_value(&abi_program, abi_union_same_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
     IrAbiValue abi_union_same_f80_result = ir_type_abi_value(&abi_program, abi_union_same_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);

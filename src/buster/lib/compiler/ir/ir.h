@@ -729,6 +729,12 @@ BUSTER_F_DECL bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program,
 // every backend: its bytes are copied, never loaded onto the x87 stack.  Only
 // a classification that really carries X87/X87_UP needs the x87 vocabulary.
 BUSTER_F_DECL bool ir_abi_value_has_x87_part(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
+// True when a value's result classification is System V x86-64's COMPLEX_X87
+// class: the two 80-bit halves of a `long double _Complex` come back on the
+// x87 stack, ST(0) real and ST(1) imaginary, as four eightbyte parts spelled
+// X87/X87_UP per half.  The classifier is the authority for the shape; a
+// backend asks this rather than re-deriving it from the type.
+BUSTER_F_DECL bool ir_abi_value_is_complex_x87_result(IrProgram* program, IrTypeId type, IrAbiConvention convention);
 BUSTER_F_DECL IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol);
 BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource source);
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);

@@ -9,11 +9,12 @@
 // compiler folds the arithmetic away: the point is the emitted sequences, not
 // the constant folder.
 //
-// `long double _Complex` is deliberately absent. System V x86-64 returns one
-// in ST(0)/ST(1) (the psABI's COMPLEX_X87 class) rather than in memory the
-// way the equivalent struct is returned, and this backend refuses that shape
-// rather than emitting an incompatible one, so a fixture using it would be
-// testing the refusal.
+// `long double _Complex` is here in both positions, including the result,
+// which System V x86-64 returns in ST(0)/ST(1) under the psABI's COMPLEX_X87
+// class rather than in memory the way the equivalent struct is returned.
+// basic_c_complex_x87_caller.c is the same shapes across a translation-unit
+// boundary against the host compiler; this file is what one compiler agrees
+// with itself about.
 
 typedef double _Complex complex_double;
 typedef float _Complex complex_float;
@@ -56,12 +57,14 @@ complex_double complex_widen(complex_float a) { return a; }
 complex_float complex_float_multiply(complex_float a, complex_float b) { return a * b; }
 complex_float complex_float_add(complex_float a, complex_float b) { return a + b; }
 
-// `long double _Complex` in the one position every target agrees on. System V
-// x86-64 returns it in ST(0)/ST(1) rather than in memory, which this backend
-// refuses, but an argument is a sixteen-aligned memory slot under the same
-// psABI and matches the two-field aggregate exactly -- and it is the shape
-// musl's `cabsl`, `cargl`, `creall` and `cimagl` have. Where `long double` is
-// `double` -- Win64 and Apple AArch64 -- every position works.
+// `long double _Complex` in both positions. An argument is a sixteen-aligned
+// memory slot under System V, which matches the two-field aggregate exactly
+// and is the shape musl's `cabsl`, `cargl`, `creall` and `cimagl` have; the
+// result is the psABI's COMPLEX_X87 class, ST(0) carrying the real half over
+// ST(1) carrying the imaginary one, which is the one place the aggregate
+// model is not the ABI and is what musl's eighteen other src/complex units
+// return. Where `long double` is `double` -- Win64 and Apple AArch64 -- both
+// are ordinary aggregate positions.
 //
 // AArch64 outside Apple is the exception, and not because of complex: there
 // `long double` is the 128-bit format, which this frontend refuses in a
@@ -84,6 +87,27 @@ int complex_long_truth(complex_long_double z) { return z ? 5 : 11; }
 int complex_long_equal(complex_long_double a, complex_long_double b) { return a == b; }
 long double complex_long_add(complex_long_double a, complex_long_double b) { return __real__ (a + b) + __imag__ (a - b); }
 long double complex_long_scale(complex_long_double a, long double s) { return __real__ (a * s) + __imag__ (a / s); }
+// The result position. `complex_long_relay` is the one that returns what a
+// call returned: on System V it pops the pair the callee left on the x87
+// stack and pushes it back, which no other shape in this file does.
+complex_long_double complex_long_compose(long double r, long double i)
+{
+    complex_long_double z;
+    __real__ z = r;
+    __imag__ z = i;
+    return z;
+}
+
+complex_long_double complex_long_conjugate(complex_long_double z)
+{
+    __imag__ z = -__imag__ z;
+    return z;
+}
+
+complex_long_double complex_long_sum(complex_long_double a, complex_long_double b) { return a + b; }
+complex_long_double complex_long_product(complex_long_double a, complex_long_double b) { return a * b; }
+complex_long_double complex_long_quotient(complex_long_double a, complex_long_double b) { return a / b; }
+complex_long_double complex_long_relay(complex_long_double z) { return complex_long_conjugate(z); }
 #endif
 
 // `__real__` and `__imag__` as places, which is the half of the GNU operators
@@ -131,6 +155,13 @@ static int check_float(complex_float value, float real, float imaginary)
 {
     return __real__ value == real && __imag__ value == imaginary;
 }
+
+#if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
+static int check_long(complex_long_double value, long double real, long double imaginary)
+{
+    return __real__ value == real && __imag__ value == imaginary;
+}
+#endif
 
 int main(void)
 {
@@ -282,6 +313,22 @@ int main(void)
     if (complex_long_add(la, lb) != 0.75L) return 71;
     // real(la * 2) + imag(la / 2) = 7 + (-0.625)
     if (complex_long_scale(la, 2.0L) != 6.375L) return 72;
+
+    // The result position. The quotient's denominator is 4 + 4i so that
+    // Smith's algorithm divides by 8 and every half stays exact: the answer
+    // is (9 - 19i)/32, which no rounding can reach from the wrong formula.
+    complex_long_double lc = complex_long_compose(4.0L, 4.0L);
+    if (!check_long(lc, 4.0L, 4.0L)) return 73;
+    if (!check_long(complex_long_conjugate(la), 3.5L, 1.25L)) return 74;
+    if (!check_long(complex_long_relay(la), 3.5L, 1.25L)) return 75;
+    if (!check_long(complex_long_sum(la, lc), 7.5L, 2.75L)) return 76;
+    if (!check_long(complex_long_product(la, lc), 19.0L, 9.0L)) return 77;
+    if (!check_long(complex_long_quotient(la, lc), 0.28125L, -0.59375L)) return 78;
+    // A signed zero survives the pair: the imaginary half of the conjugate of
+    // +0 is -0, which compares equal to +0 and divides to the other infinity.
+    complex_long_double lz = complex_long_conjugate(complex_long_compose(1.0L, 0.0L));
+    if (__imag__ lz != 0.0L) return 79;
+    if (1.0L / __imag__ lz > 0.0L) return 80;
 #endif
 
     return 0;
