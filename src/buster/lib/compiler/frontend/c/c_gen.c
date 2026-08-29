@@ -37478,11 +37478,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     // definition failures, one per deferred static assertion, a second per
     // declaration for an __attribute__((alias)) naming a target this unit
     // never declares -- which is diagnosed before the entity's own pass runs
-    // and so cannot share that budget -- and one per type for an aggregate
-    // whose packed bit-field has no storage unit, which is reported while the
-    // type table resolves and before any declaration is lowered.
+    // and so cannot share that budget -- one per type for the type table
+    // reports, which are made while the type table resolves and before any
+    // declaration is lowered, and one per array bound for an array whose
+    // element size is not a multiple of its alignment. That last report counts
+    // on the bound rather than on the type because a qualified array and a
+    // typedef of one are copies carrying the same bound record, and one report
+    // per written `[N]` is what Clang produces; counting it on the bound is
+    // also what keeps it out of the per-type budget the aggregate and alias
+    // reports share.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count + 1);
+                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                            parse.array_bound_count + 1);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -38523,6 +38530,65 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             c_ir_infer_incomplete_array_bounds(&constant_builder, &result);
         }
+    }
+    // An array element has to be addressable at its own alignment in every
+    // slot, which requires its size to be a multiple of that alignment:
+    // `typedef int cache_line __attribute__((aligned(64)))` puts the second
+    // element of `cache_line a[2]` four bytes in, at an address the element
+    // type says it may not occupy, so every access through `a[1]` is
+    // misaligned for the type that reaches it. Eight bytes is the honest
+    // product, and that is precisely why the declaration is refused instead of
+    // laid out; Clang and GCC both refuse it too.
+    //
+    // Only c_ir_add_aligned_type can produce a size that is not a multiple of
+    // its alignment: a scalar's alignment divides its size by construction, an
+    // aggregate rounds its size up to its own `aligned`, and a vector's size
+    // is its alignment. Its one request comes from
+    // CParseResult.type_alignments, so a translation unit that wrote no
+    // aligned typedef -- almost every one -- skips the scan on a single
+    // compare. The scan runs after the mapping rounds, over a settled table,
+    // which is what makes one report per array automatic -- a type mapped in
+    // an earlier round is not revisited -- and it reaches a typedef no object
+    // ever names.
+    //
+    // The bound a report is counted on rather than the type: a qualified array
+    // and a typedef of an array are copies of it that carry its bound record,
+    // so scanning the types alone reports one written `[N]` as many times as
+    // it was aliased, where Clang reports it once.
+    bool* reported_array_bounds = parse.type_alignment_count && parse.array_bound_count
+                                      ? arena_allocate(temporary_arena, bool, parse.array_bound_count)
+                                      : 0;
+    if (reported_array_bounds)
+    {
+        memset(reported_array_bounds, 0, sizeof(*reported_array_bounds) * parse.array_bound_count);
+    }
+    for (u32 type_index = 0; reported_array_bounds && type_index < parse.type_count; type_index += 1)
+    {
+        CType* c_type = &parse.types[type_index];
+        if (c_type->kind != C_TYPE_ARRAY || c_type->element_type.value >= parse.type_count || c_type->array_bound >= parse.array_bound_count ||
+            reported_array_bounds[c_type->array_bound])
+        {
+            continue;
+        }
+        IrType* element_type = ir_type_from_id(&program->types, c_type_ir_map[c_type->element_type.value]);
+        if (!element_type || !element_type->layout.resolved || !element_type->layout.alignment ||
+            element_type->layout.size % element_type->layout.alignment == 0)
+        {
+            continue;
+        }
+        reported_array_bounds[c_type->array_bound] = true;
+        // c_parse_array_suffixes records token_start as the token after the
+        // opening bracket, so the bracket is the token before it -- which is
+        // where Clang's own caret points, and is a real token even for the
+        // empty bound `[]`, whose token_start is the closing bracket.
+        u32 bracket = parse.array_bounds[c_type->array_bound].token_start;
+        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
+                                     element_type->layout.size, element_type->layout.alignment),
+            .location = bracket && bracket <= preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[bracket - 1])
+                                                                     : (CSourceLocation){0},
+            .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+        };
     }
     for (u32 deferred_index = 0; deferred_index < parse.deferred_static_assert_count; deferred_index += 1)
     {

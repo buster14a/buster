@@ -11355,6 +11355,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     }
     scratch_end(straddle_temporary);
 
+    // An array element has to be addressable at its own alignment in every
+    // slot, so its size has to be a multiple of that alignment. A typedef's
+    // `aligned` is the one spelling that can break that -- every other type is
+    // sized at a multiple of its alignment by construction -- and it breaks it
+    // in every spelling that names an array of such a scalar: the typedef, the
+    // object declarator, the member, and a single-element array, which Clang
+    // and GCC refuse as well since the element itself would still be laid out
+    // in a slot narrower than it claims. The column is the opening bracket,
+    // which is where Clang's own caret points.
+    struct
+    {
+        String8 source;
+        String8 path;
+        u32 line;
+        u32 column;
+    } over_aligned_elements[] = {
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "typedef cache_line cache_array[2];\n"),
+         S8("over-aligned-typedef.c"), 2, 31},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "cache_line object[2];\n"),
+         S8("over-aligned-object.c"), 2, 18},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "struct holder { cache_line field[2]; };\n"
+            "struct holder holder_object;\n"),
+         S8("over-aligned-member.c"), 2, 33},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "cache_line single[1];\n"),
+         S8("over-aligned-single.c"), 2, 18},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(over_aligned_elements); index += 1)
+    {
+        TemporalArena over_aligned_temporary = scratch_begin(0, 0);
+        CPreprocessResult over_aligned_preprocess = {0};
+        CParseResult over_aligned_parse = {0};
+        CIRLowerResult over_aligned = c_test_lower_source(over_aligned_temporary.arena, over_aligned_elements[index].source, over_aligned_elements[index].path,
+                                                          target_native, &over_aligned_preprocess, &over_aligned_parse);
+        BUSTER_TEST(arguments, over_aligned_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, over_aligned_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, over_aligned.diagnostic_count == 1);
+        if (over_aligned.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, over_aligned.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+            BUSTER_STRING_TEST(arguments, over_aligned.diagnostics[0].message,
+                               S8("size of array element (4 bytes) is not a multiple of the alignment of 64 that __attribute__((aligned)) gave its type"));
+            BUSTER_TEST(arguments, over_aligned.diagnostics[0].location.line == over_aligned_elements[index].line &&
+                                       over_aligned.diagnostics[0].location.column == over_aligned_elements[index].column);
+        }
+        scratch_end(over_aligned_temporary);
+    }
+
+    // The neighbouring shapes that stay well-formed, and the reason the rule
+    // is "size is not a multiple of the alignment" rather than "alignment
+    // above the size": an aggregate's own `aligned` rounds its *size* up to
+    // the alignment, so it tiles; a typedef that lowers an alignment leaves a
+    // size that still divides; and a request the type already satisfies moves
+    // nothing. All three are accepted by Clang and GCC.
+    TemporalArena tiling_temporary = scratch_begin(0, 0);
+    CPreprocessResult tiling_preprocess = {0};
+    CParseResult tiling_parse = {0};
+    CIRLowerResult tiling = c_test_lower_source(tiling_temporary.arena,
+                                                S8("struct __attribute__((aligned(16))) padded { char byte; };\n"
+                                                   "typedef int lowered __attribute__((aligned(2)));\n"
+                                                   "typedef int exact __attribute__((aligned(4)));\n"
+                                                   "struct padded padded_array[2];\n"
+                                                   "lowered lowered_array[2];\n"
+                                                   "exact exact_array[2];\n"
+                                                   "_Static_assert(sizeof(padded_array) == 32, \"padded array\");\n"
+                                                   "_Static_assert(sizeof(lowered_array) == 8, \"lowered array\");\n"
+                                                   "_Static_assert(sizeof(exact_array) == 8, \"exact array\");\n"),
+                                                S8("tiling-elements.c"), target_native, &tiling_preprocess, &tiling_parse);
+    BUSTER_TEST(arguments, tiling_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, tiling_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, tiling.diagnostic_count == 0);
+    if (tiling.program)
+    {
+        IrGlobal* padded_array = c_test_find_ir_global(tiling.program->modules, tiling.program, S8("padded_array"));
+        IrType* padded_array_type = padded_array ? ir_type_from_id(&tiling.program->types, padded_array->type) : 0;
+        BUSTER_TEST(arguments, padded_array_type != 0 && padded_array_type->layout.size == 32 && padded_array_type->layout.alignment == 16);
+        IrGlobal* lowered_array = c_test_find_ir_global(tiling.program->modules, tiling.program, S8("lowered_array"));
+        IrType* lowered_array_type = lowered_array ? ir_type_from_id(&tiling.program->types, lowered_array->type) : 0;
+        BUSTER_TEST(arguments, lowered_array_type != 0 && lowered_array_type->layout.size == 8 && lowered_array_type->layout.alignment == 2);
+    }
+    scratch_end(tiling_temporary);
+
     return result;
 }
 

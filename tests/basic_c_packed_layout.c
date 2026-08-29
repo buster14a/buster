@@ -488,6 +488,33 @@ static raised_scalar file_raised_object;
 static char between_typedef_objects = 7;
 static lowered_scalar file_lowered_object;
 
+// An array element has to be addressable at its own alignment in every slot,
+// so an element whose size is not a multiple of its alignment is refused by
+// GCC and Clang alike, and now here too (#703).  These are the neighbouring
+// shapes that stay well-formed, and they are the reason the rule is stated as
+// "size is not a multiple of the alignment" rather than "alignment above the
+// size": an aggregate's own `aligned` rounds its *size* up to the alignment,
+// so `padded_element` is sixteen bytes and tiles; the lowering direction
+// leaves the size alone and divides; and a request the type already satisfies
+// changes nothing at all.
+struct __attribute__((aligned(16))) padded_element
+{
+    char byte;
+};
+typedef struct padded_element padded_alias;
+typedef int exact_scalar __attribute__((aligned(4)));
+
+// The typedef spelling of the array, which is the one #703 was reported
+// against and the one that carries no object at all.
+typedef struct padded_element padded_element_pair[2];
+typedef lowered_scalar lowered_scalar_pair[2];
+typedef exact_scalar exact_scalar_pair[2];
+
+static padded_element_pair padded_element_array;
+static padded_alias padded_alias_array[2];
+static lowered_scalar_pair lowered_scalar_array;
+static exact_scalar_pair exact_scalar_array;
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -825,5 +852,21 @@ int main(void)
     if (_Alignof(block_raised) != 64 || _Alignof(block_lowered) != 1) return 104;
     if ((unsigned long long)(void *)&block_raised_object % 64) return 105;
     if (block_raised_object != 3 || block_lowered_object != 4 || between_block_objects != 8) return 106;
+
+    // Arrays of the shapes above.  The stride is the element size, so the
+    // second element of each of these lands exactly where its own alignment
+    // requires it -- which is the property an over-aligned element cannot have
+    // and is refused for.
+    if (sizeof(struct padded_element) != 16 || _Alignof(struct padded_element) != 16) return 107;
+    if (sizeof(padded_element_pair) != 32 || _Alignof(padded_element_pair) != 16) return 108;
+    if (sizeof(padded_alias_array) != 32 || _Alignof(padded_alias) != 16) return 109;
+    if (sizeof(lowered_scalar_pair) != 8 || _Alignof(lowered_scalar_pair) != 2) return 110;
+    if (sizeof(exact_scalar_pair) != 8 || _Alignof(exact_scalar_pair) != 4) return 111;
+    if ((char *)&padded_element_array[1] - (char *)&padded_element_array[0] != 16) return 112;
+    if ((char *)&lowered_scalar_array[1] - (char *)&lowered_scalar_array[0] != 4) return 113;
+    if ((char *)&padded_alias_array[1] - (char *)&padded_alias_array[0] != 16) return 114;
+    if ((char *)&exact_scalar_array[1] - (char *)&exact_scalar_array[0] != 4) return 115;
+    if ((unsigned long long)(void *)padded_element_array % 16) return 116;
+    if ((unsigned long long)(void *)lowered_scalar_array % 2) return 117;
     return 0;
 }

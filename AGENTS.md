@@ -2452,6 +2452,25 @@ on a commit you already know is incomplete tells nobody anything.
   alignment, so `struct { char tag; pair value; }` is passed in memory even
   though `value` sits where its type asked. `IrTypeLayout::natural_alignment`
   carries that, and it is zero for every type nothing lowered.
+  It is also the only way an **array element can end up over-aligned**, which
+  Clang and GCC both refuse and so does this: an element has to be addressable
+  at its own alignment in every slot, so its size has to be a multiple of that
+  alignment, and `cache_line a[2]` puts the second element four bytes into a
+  sixty-four-byte alignment. The scan is at the end of the type-mapping rounds
+  in `c_lower_to_ir`, over a settled table, which is what makes one report per
+  array type automatic and reaches a typedef no object ever names; it is
+  skipped whole on an empty `type_alignments`, because every other type is
+  sized at a multiple of its alignment by construction -- an aggregate's own
+  `aligned` rounds its size *up*, so `struct __attribute__((aligned(16))) { char c; } a[2]`
+  is thirty-two bytes and stays well-formed (issue #703). The report is counted
+  on the *bound record* rather than on the type, because a qualified array and
+  a typedef of an array are copies carrying the same bound, and one report per
+  written `[N]` is what Clang produces; two identical declarations that intern
+  to one array type therefore report once where Clang reports twice. Two
+  spellings escape it, because neither reaches the type table as a
+  `C_TYPE_ARRAY`: a parenthesized declarator's `cache_line (*p)[2]`, and an
+  array type name in an expression, `sizeof(cache_line[2])` and the compound
+  literal (issue #713).
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,
