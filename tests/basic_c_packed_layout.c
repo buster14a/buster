@@ -11,7 +11,9 @@
 // question asked by a directive and shares the ceiling this implements.
 // A member's own list has three positions of its own -- before the shared
 // specifiers, after a plain declarator, and after a parenthesized one -- and
-// a declarator that is not the first of its list has a fourth.
+// a declarator that is not the first of its list has a fourth.  Which
+// declarator of a list the attribute sits on is a separate question from
+// where in that declarator it is written, and it decides which members move.
 
 // Packed before the tag, which is how QuickJS spells its unaligned readers.
 struct __attribute__((packed)) leading
@@ -103,12 +105,46 @@ struct member_pointer_aligned
 // The attributed declarator is the second of its list, so it also pins the
 // list boundary: the attribute reaches `second` and stops there.  `first` sits
 // at offset zero, where every alignment is already satisfied, so these numbers
-// hold whether the attribute is read as this declarator's or -- as buster
-// still reads it, #680 -- as the whole segment's.
+// hold under either reading of whose attribute it is; the four shapes below
+// are the ones that separate them.
 struct list_declarator_aligned
 {
     int first, __attribute__((aligned(32))) second;
     char tail;
+};
+
+// Whose declarator an `aligned` list sits on decides which members move, and
+// the three positions disagree on every number: only the shared-specifier one
+// raises the whole list.  Reading a declarator's own list as if it had been
+// written in the shared position -- #680 -- gave all three the numbers of
+// `shared_specifier_aligned` alone, which moved `first` and the size with it.
+struct second_declarator_aligned
+{
+    char byte;
+    int first, second __attribute__((aligned(32)));
+};
+
+struct first_declarator_aligned
+{
+    char byte;
+    int first __attribute__((aligned(32))), second;
+};
+
+struct shared_specifier_aligned
+{
+    char byte;
+    __attribute__((aligned(32))) int first, second;
+};
+
+// Both positions at once, which is the shape whose member runs are not
+// contiguous: `second` takes the shared record and its own while `first`'s
+// sits between them.  The shared `aligned(4)` asks for no more than an `int`
+// already has, so a member that wrongly collected every record in the segment
+// is visible in `second` rather than hidden behind the widest one.
+struct shared_and_declarator_aligned
+{
+    char byte;
+    __attribute__((aligned(4))) int first __attribute__((aligned(64))), second __attribute__((aligned(8)));
 };
 
 #pragma pack(push, 1)
@@ -147,6 +183,10 @@ int main(void)
     if (sizeof(struct pragma_packed_two) != 6 || _Alignof(struct pragma_packed_two) != 2) return 11;
     if (sizeof(struct member_pointer_aligned) != 64 || _Alignof(struct member_pointer_aligned) != 32) return 28;
     if (sizeof(struct list_declarator_aligned) != 64 || _Alignof(struct list_declarator_aligned) != 32) return 29;
+    if (sizeof(struct second_declarator_aligned) != 64 || _Alignof(struct second_declarator_aligned) != 32) return 34;
+    if (sizeof(struct first_declarator_aligned) != 64 || _Alignof(struct first_declarator_aligned) != 32) return 35;
+    if (sizeof(struct shared_specifier_aligned) != 96 || _Alignof(struct shared_specifier_aligned) != 32) return 36;
+    if (sizeof(struct shared_and_declarator_aligned) != 128 || _Alignof(struct shared_and_declarator_aligned) != 64) return 37;
 
     // Offsets, read through addresses so a size that happens to match cannot
     // hide a member in the wrong place.
@@ -207,5 +247,18 @@ int main(void)
     if ((char *)&list_aligned.first - (char *)&list_aligned != 0) return 31;
     if ((char *)&list_aligned.second - (char *)&list_aligned != 32) return 32;
     if ((char *)&list_aligned.tail - (char *)&list_aligned != 36) return 33;
+
+    struct second_declarator_aligned second_aligned;
+    if ((char *)&second_aligned.first - (char *)&second_aligned != 4) return 38;
+    if ((char *)&second_aligned.second - (char *)&second_aligned != 32) return 39;
+    struct first_declarator_aligned first_aligned;
+    if ((char *)&first_aligned.first - (char *)&first_aligned != 32) return 40;
+    if ((char *)&first_aligned.second - (char *)&first_aligned != 36) return 41;
+    struct shared_specifier_aligned shared_aligned;
+    if ((char *)&shared_aligned.first - (char *)&shared_aligned != 32) return 42;
+    if ((char *)&shared_aligned.second - (char *)&shared_aligned != 64) return 43;
+    struct shared_and_declarator_aligned shared_and_declarator;
+    if ((char *)&shared_and_declarator.first - (char *)&shared_and_declarator != 64) return 44;
+    if ((char *)&shared_and_declarator.second - (char *)&shared_and_declarator != 72) return 45;
     return 0;
 }

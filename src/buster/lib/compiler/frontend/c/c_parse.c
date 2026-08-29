@@ -6094,6 +6094,67 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->end, true);
 }
 
+// Narrows an aggregate segment's alignment run to the records one member
+// declarator is entitled to. The segment's child alignment frame appends one
+// record per `_Alignas`/`aligned` word anywhere in the segment, in token order,
+// so the run reads as the specifiers shared by the whole declarator list
+// followed by each declarator's own -- and only the shared ones plus this
+// declarator's belong to this member. `int a, b __attribute__((aligned(32)));`
+// raises `b` alone, exactly as clang lays it out, where handing every member
+// the whole run moved `a` and the size of the aggregate with it.
+//
+// A member row names a *contiguous* run, and the kept records are contiguous
+// for the first declarator and for every declarator in a segment where no
+// declarator carries a list of its own, which is nearly all of them; only when
+// they are not does the run get rebuilt by appending copies. The copies land
+// after the segment's own run and inside the segment frame's checkpoint, so
+// c_type_parse_rollback drops them with everything else the segment appended.
+// The appends are the one place this table can grow past what its
+// token-derived capacity was sized for -- shared records are copied once per
+// attributed declarator -- so exhausting it fails the segment, which is what
+// the alignment frame itself does with the same table.
+BUSTER_C_INTERNAL bool c_parse_member_alignment_run(CParseResult* result, u32 segment_start, u32 segment_count, u32 shared_end, u32 declarator_start,
+                                                        u32 declarator_end, u32* member_start, u32* member_count)
+{
+    u32 kept = 0;
+    u32 first = 0;
+    u32 last = 0;
+    for (u32 index = 0; index < segment_count; index += 1)
+    {
+        u32 token_start = result->alignments[segment_start + index].token_start;
+        if (token_start < shared_end || (token_start >= declarator_start && token_start < declarator_end))
+        {
+            first = kept ? first : index;
+            last = index + 1;
+            kept += 1;
+        }
+    }
+    bool valid = true;
+    if (kept == last - first)
+    {
+        *member_start = segment_start + first;
+        *member_count = kept;
+    }
+    else if (kept <= result->alignment_capacity - result->alignment_count)
+    {
+        *member_start = result->alignment_count;
+        *member_count = kept;
+        for (u32 index = first; index < last; index += 1)
+        {
+            u32 token_start = result->alignments[segment_start + index].token_start;
+            if (token_start < shared_end || (token_start >= declarator_start && token_start < declarator_end))
+            {
+                result->alignments[result->alignment_count++] = result->alignments[segment_start + index];
+            }
+        }
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -6326,10 +6387,23 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         is_bit_field = true;
         declarator = frame->declarator_end;
     }
-    if (is_bit_field && frame->alignment_count)
+    // The segment's run covers every declarator it declares; this member takes
+    // the shared records plus the ones its own declarator carries. The counts
+    // are local rather than written back over the frame's, because the frame's
+    // run is what the *next* declarator of the same segment narrows in turn.
+    u32 alignment_start = frame->alignment_start;
+    u32 alignment_count = frame->alignment_count;
+    if (!c_parse_member_alignment_run(result, frame->alignment_start, frame->alignment_count, frame->shared_specifier_end, frame->declarator_start,
+                                      frame->declarator_end, &alignment_start, &alignment_count))
+    {
+        c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
+        c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    if (is_bit_field && alignment_count)
     {
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, frame->first), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("alignment specifier cannot be applied to a bit-field"));
-        frame->alignment_count = 0;
+        alignment_count = 0;
     }
     declarator_type = c_parse_apply_vector_attribute(result, preprocess, frame->scope, declarator_type, frame->declarator_start, frame->declarator_end);
     declarator = c_parse_skip_attributes(preprocess, declarator, frame->declarator_end);
@@ -6364,8 +6438,8 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_location(&preprocess, name),
         .type = declarator_type,
-        .alignment_start = frame->alignment_start,
-        .alignment_count = frame->alignment_count,
+        .alignment_start = alignment_start,
+        .alignment_count = alignment_count,
         .bit_width = bit_width,
         .bit_width_token_start = bit_width_token_start,
         .bit_width_token_count = bit_width_token_count,
