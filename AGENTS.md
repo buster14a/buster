@@ -2209,6 +2209,26 @@ on a commit you already know is incomplete tells nobody anything.
   reported as one instead of as an unbound identifier. A name nothing
   declares still reports as unbound, which is what a SIMD builtin missing
   from `c_symbol_predefined` looks like.
+- **A call to a function declared `()` supplies the parameters itself.**
+  Before C23 an empty parameter list is no prototype at all, so the arguments
+  take the default argument promotions and the *call site* is the signature.
+  `IrType.is_unprototyped` marks such a declaration's type, and
+  `c_ir_unprototyped_call_type` in `c_gen.c` gives the `IR_OPCODE_FUNCTION`
+  reference the call's own parameter types plus a trailing `...` -- Clang's
+  model, which declares `void die()` as `void (...)` and types each call site
+  `void (i32, ...)`. The `...` reaches only System V x86-64, where it sets the
+  AL vector count that a callee which really is variadic reads;
+  `int printf(); printf("%f", x);` is that program. Every argument stays
+  *named*, so Darwin AArch64 passes them in registers rather than on its
+  variadic stack, and a definition is untouched: `int main()` is still an
+  ordinary zero-parameter body with no register save area.
+  `ir_validate_instruction` therefore lets a function reference disagree with
+  its symbol's type when that type is the unprototyped one and the return
+  types agree, and Wasm64 refuses such a call, because it types every call by
+  the callee's declared signature. C23 made `()` mean `(void)`, so the marker
+  is never set in that dialect and the call is refused as an arity error --
+  which every dialect now reports by naming the callee and its parameter
+  count rather than as "could not prepare C calls" (issue #666).
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.

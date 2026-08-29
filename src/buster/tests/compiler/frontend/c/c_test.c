@@ -6113,6 +6113,161 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_ellipsis_depth(UnitTestArgu
     return result;
 }
 
+// The function type the first call in `name` takes its callee from: the type
+// of the IR_OPCODE_FUNCTION reference for a direct call, and the pointee of
+// the callee pointer for an indirect one.
+BUSTER_GLOBAL_LOCAL IrType* c_test_first_call_callee_type(IrProgram* program, IrModule* module, String8 name)
+{
+    IrType* result = 0;
+    for (u32 function_index = 0; function_index < module->function_count && !result; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (!string_equal(function->name, name))
+        {
+            continue;
+        }
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count && !result; instruction_index += 1)
+        {
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->opcode != IR_OPCODE_CALL || !instruction->operand_count ||
+                instruction->operands[0].value >= function->value_count)
+            {
+                continue;
+            }
+            IrType* callee = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+            result = callee && callee->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, callee->element_type) : callee;
+        }
+    }
+
+    return result;
+}
+
+// Whether a call-site function type names exactly these parameter types.
+BUSTER_GLOBAL_LOCAL bool c_test_call_parameters_are(IrProgram* program, IrType* call_type, IrTypeKind* kinds, u32* bit_widths, u32 parameter_count)
+{
+    bool result = call_type && call_type->kind == IR_TYPE_FUNCTION && call_type->parameter_count == parameter_count;
+    for (u32 parameter_index = 0; parameter_index < parameter_count && result; parameter_index += 1)
+    {
+        IrType* parameter = ir_type_from_id(&program->types, call_type->parameter_types[parameter_index]);
+        result = parameter && parameter->kind == kinds[parameter_index] && parameter->bit_width == bit_widths[parameter_index];
+    }
+
+    return result;
+}
+
+/* Before C23 a function declared `()` has no parameter list, so a call to it
+   supplies one: the arguments take the default argument promotions and the
+   call site -- not the declaration -- says where they go. The IR shows that
+   directly, because the reference the call takes to the symbol carries the
+   call's own signature (see IrType.is_unprototyped) with the `...` that makes
+   a System V caller set the AL vector count for a callee that turns out to be
+   variadic. These calls used to be refused outright as "could not prepare C
+   calls" whenever no later prototype in the same unit happened to replace the
+   declaration; that refusal now survives only where the callee really does
+   have a parameter list to overrun, and says so. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_call_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("void die();\n"
+                        "int side();\n"
+                        "double mix();\n"
+                        "int (*through_pointer)();\n"
+                        "int call_one(int x) { die(x); return 0; }\n"
+                        "int call_two(int x) { return side(x, x + 1); }\n"
+                        "int call_promotes(float f, char c, short s) { return (int)mix(f, c, s); }\n"
+                        "int call_none(void) { die(); return 0; }\n"
+                        "int call_pointer(int x) { return through_pointer(x, x); }\n");
+    CPreprocessResult tokens = {0};
+    CParseResult parse = {0};
+    CIRLowerResult ir = c_test_lower_source(temporary.arena, source, S8("unprototyped-call.c"), target_native, &tokens, &parse);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        IrType* one = c_test_first_call_callee_type(ir.program, module, S8("call_one"));
+        IrType* two = c_test_first_call_callee_type(ir.program, module, S8("call_two"));
+        IrType* promotes = c_test_first_call_callee_type(ir.program, module, S8("call_promotes"));
+        IrType* none = c_test_first_call_callee_type(ir.program, module, S8("call_none"));
+        IrType* pointer = c_test_first_call_callee_type(ir.program, module, S8("call_pointer"));
+        IrTypeKind one_kinds[] = {IR_TYPE_INTEGER};
+        u32 one_widths[] = {32};
+        BUSTER_TEST(arguments, c_test_call_parameters_are(ir.program, one, one_kinds, one_widths, BUSTER_ARRAY_LENGTH(one_kinds)));
+        BUSTER_TEST(arguments, one && one->is_variadic && !one->is_unprototyped);
+        IrTypeKind two_kinds[] = {IR_TYPE_INTEGER, IR_TYPE_INTEGER};
+        u32 two_widths[] = {32, 32};
+        BUSTER_TEST(arguments, c_test_call_parameters_are(ir.program, two, two_kinds, two_widths, BUSTER_ARRAY_LENGTH(two_kinds)));
+        // The default argument promotions, read off the call site: float
+        // widens to double, char and short to int.
+        IrTypeKind promotes_kinds[] = {IR_TYPE_FLOAT, IR_TYPE_INTEGER, IR_TYPE_INTEGER};
+        u32 promotes_widths[] = {64, 32, 32};
+        BUSTER_TEST(arguments, c_test_call_parameters_are(ir.program, promotes, promotes_kinds, promotes_widths, BUSTER_ARRAY_LENGTH(promotes_kinds)));
+        // An empty argument list has nothing to name, so the call keeps the
+        // declaration's own type -- and that type is the marked one.
+        BUSTER_TEST(arguments, none && none->kind == IR_TYPE_FUNCTION && !none->parameter_count && !none->is_variadic && none->is_unprototyped);
+        // Through a pointer the callee is the same call-site signature, one
+        // indirection down.
+        BUSTER_TEST(arguments, c_test_call_parameters_are(ir.program, pointer, two_kinds, two_widths, BUSTER_ARRAY_LENGTH(two_kinds)));
+        BUSTER_TEST(arguments, pointer && pointer->is_variadic);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+/* C23 made `()` mean `(void)`, so the same calls are a constraint violation
+   there, and every dialect refuses a call that overruns a real parameter list.
+   Both used to report only that the call could not be prepared, which named
+   neither the callee nor the count. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        CPreprocessDialect dialect;
+        String8 message;
+    } expected[] = {
+        {S8("void die();\nint call_one(int x) { die(x); return 0; }\n"), C_PREPROCESS_DIALECT_C23,
+         S8("in function 'call_one': too many arguments in the call to 'die': it declares no parameters")},
+        {S8("void none(void);\nint call_none(int x) { none(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_none': too many arguments in the call to 'none': it declares no parameters")},
+        {S8("void two(int a, int b);\nint call_three(int x) { two(x, x, x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_three': too many arguments in the call to 'two': it declares 2 parameters")},
+        {S8("void two(int a, int b);\nint call_partial(int x) { two(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_partial': too few arguments in the call to 'two': it declares 2 parameters")},
+        {S8("void tail(int a, ...);\nint call_empty(void) { tail(); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_empty': too few arguments in the call to 'tail': it declares at least 1 parameter")},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, expected[expected_index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = expected[expected_index].dialect,
+                                                });
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("call-arity.c"), tokens, parse, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 1);
+        if (ir.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, ir.diagnostics[0].message, expected[expected_index].message);
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 /* Function-body sizeof over an expression operand must fold through the resolved
    operand types with the usual arithmetic conversions, never through the
    type-prediction guess: narrow operands promote to int, shifts keep the promoted
@@ -10804,6 +10959,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
     c_test_result_add(&result, c_test_sizeof_function_type_name(arguments));
     c_test_result_add(&result, c_test_declarator_ellipsis_depth(arguments));
+    c_test_result_add(&result, c_test_unprototyped_call_arguments(arguments));
+    c_test_result_add(&result, c_test_call_arity_diagnostics(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));

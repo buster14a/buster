@@ -785,6 +785,11 @@ struct CIrSignature
     // __declspec(noreturn) or [[noreturn]]. A call to it terminates control
     // flow, so nothing after it in the block is reachable.
     bool is_noreturn;
+    // The callee was declared `()` before C23, so it has no parameter list of
+    // its own: a call may pass any number of arguments and names their types
+    // itself, after the default argument promotions. See
+    // IrType.is_unprototyped and c_ir_unprototyped_call_type.
+    bool is_unprototyped;
 };
 
 BUSTER_C_INTERNAL bool c_ir_va_list_parameter_decays(Target target)
@@ -1235,6 +1240,10 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
             {
                 result.returns_void = return_type->kind == C_TYPE_VOID;
                 result.is_variadic = function_type->is_variadic;
+                // The IR type carries the same marker, and it is the one the
+                // dialect was already applied to.
+                IrType* canonical_function = ir_type_from_id(&program->types, c_type_ir_map[declaration.type.value]);
+                result.is_unprototyped = canonical_function && canonical_function->kind == IR_TYPE_FUNCTION && canonical_function->is_unprototyped;
                 // A declarator with no parameter list of its own may still
                 // have a function type from its specifiers -- musl's
                 // `extern __typeof(dummy) alias;` -- and its parameters live
@@ -8021,14 +8030,31 @@ BUSTER_C_INTERNAL u32 c_ir_implicit_conversion_rank(CIntegerIrBuilder* builder, 
     return UINT32_MAX;
 }
 
+// Whether a call passing this many arguments matches the callee's signature.
+// A prototype fixes the count, `...` sets a floor, and a pre-C23 `()` sets no
+// bound at all: it declares no parameters, so the call names its own.
+BUSTER_C_INTERNAL bool c_ir_signature_accepts_arity(CIrSignature signature, u32 argument_count)
+{
+    bool result;
+    if (signature.is_variadic || signature.is_unprototyped)
+    {
+        result = argument_count >= signature.parameter_count;
+    }
+    else
+    {
+        result = argument_count == signature.parameter_count;
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, String8 name, u32* argument_starts, u32* argument_ends, u32 argument_count)
 {
     CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(builder, name);
     if (resolution && resolution->unique)
     {
         CIrSignature signature = builder->signatures[resolution->declaration_index];
-        bool arity_matches = signature.valid && ((!signature.is_variadic && argument_count == signature.parameter_count) ||
-                                                 (signature.is_variadic && argument_count >= signature.parameter_count));
+        bool arity_matches = signature.valid && c_ir_signature_accepts_arity(signature, argument_count);
         return arity_matches ? resolution->declaration_index : UINT32_MAX;
     }
     u32 best = UINT32_MAX;
@@ -8041,14 +8067,13 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, St
     {
         u32 candidate_index = builder->function_names->candidates[name_candidate].declaration_index;
         CIrSignature signature = builder->signatures[candidate_index];
-        if (!signature.valid || (!signature.is_variadic && argument_count != signature.parameter_count) ||
-            (signature.is_variadic && argument_count < signature.parameter_count))
+        if (!signature.valid || !c_ir_signature_accepts_arity(signature, argument_count))
         {
             continue;
         }
         sole_candidate = candidate_index;
         candidate_count += 1;
-        u32 rank = signature.is_variadic ? 16 : 0;
+        u32 rank = signature.is_variadic || signature.is_unprototyped ? 16 : 0;
         bool viable = true;
         for (u32 argument_index = 0; argument_index < signature.parameter_count; argument_index += 1)
         {
@@ -9864,6 +9889,32 @@ BUSTER_C_INTERNAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* buil
     return false;
 }
 
+/* Why a call's argument count does not fit its callee's declaration. Only a
+   parameter list can be miscounted, so reaching this means the callee has one:
+   a pre-C23 `()` accepts any number of arguments, and C23's `()` is the
+   zero-parameter prototype this reports as declaring none. */
+BUSTER_C_INTERNAL String8 c_ir_call_arity_message(CIntegerIrBuilder* builder, String8 name, CIrSignature signature, u32 argument_count)
+{
+    if (!name.length)
+    {
+        name = S8("<function pointer>");
+    }
+    String8 direction = argument_count > signature.parameter_count ? S8("too many") : S8("too few");
+    String8 result;
+    if (!signature.parameter_count && !signature.is_variadic)
+    {
+        result = string_format(builder->arena, S8("{S8} arguments in the call to '{S8}': it declares no parameters"), direction, name);
+    }
+    else
+    {
+        result = string_format(builder->arena, S8("{S8} arguments in the call to '{S8}': it declares {S8}{u32} parameter{S8}"), direction, name,
+                               signature.is_variadic ? S8("at least ") : (String8){0}, signature.parameter_count,
+                               signature.parameter_count == 1 ? (String8){0} : S8("s"));
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder, CIrSignature signature, String8 name)
 {
     bool result;
@@ -9947,6 +9998,67 @@ BUSTER_C_INTERNAL void c_ir_end_control_flow_after_call(CIntegerIrBuilder* build
     }
 }
 
+/* The signature one call to a pre-C23 `()` function has: the promoted types
+   of the arguments it passes, as named parameters, plus the `...` the callee
+   may in fact have been defined with. It is Clang's model -- `void die()` is
+   declared `void (...)` and each call site typed `void (i32, ...)` -- and the
+   trailing `...` is what makes a System V caller set the AL vector count that
+   a callee like an unprototyped `printf` reads. The arguments have already
+   taken the default argument promotions, so their own types are the
+   parameter types.
+
+   Structurally identical types are reused rather than appended: a translation
+   unit written before prototypes can call the same function from many places,
+   and the program's type table has a fixed capacity. */
+BUSTER_C_INTERNAL IrTypeId c_ir_unprototyped_call_type(CIntegerIrBuilder* builder, IrTypeId return_type, IrValueId* arguments, u32 argument_count)
+{
+    IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count ? argument_count : 1);
+    for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+    {
+        if (arguments[argument_index].value >= builder->function->value_count)
+        {
+            return IR_TYPE_ID_INVALID;
+        }
+        parameter_types[argument_index] = builder->function->values[arguments[argument_index].value].canonical_type;
+    }
+    for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+    {
+        IrType* candidate = builder->program->types.types + type_index;
+        if (candidate->kind != IR_TYPE_FUNCTION || !candidate->is_variadic || candidate->is_unprototyped || candidate->is_noreturn ||
+            candidate->calling_convention != IR_CALLING_CONVENTION_C || candidate->return_type.value != return_type.value ||
+            candidate->parameter_count != argument_count)
+        {
+            continue;
+        }
+        bool same = true;
+        for (u32 parameter_index = 0; parameter_index < argument_count && same; parameter_index += 1)
+        {
+            same = candidate->parameter_types[parameter_index].value == parameter_types[parameter_index].value;
+        }
+        if (same)
+        {
+            return candidate->id;
+        }
+    }
+
+    return ir_program_add_type(builder->program, (IrType){
+                                                     .name = S8("C unprototyped call"),
+                                                     .element_type = IR_TYPE_ID_INVALID,
+                                                     .return_type = return_type,
+                                                     .layout =
+                                                         {
+                                                             .size = builder->program->data_layout.pointer.size,
+                                                             .alignment = builder->program->data_layout.pointer.alignment,
+                                                             .resolved = true,
+                                                         },
+                                                     .kind = IR_TYPE_FUNCTION,
+                                                     .parameter_types = parameter_types,
+                                                     .parameter_count = argument_count,
+                                                     .calling_convention = IR_CALLING_CONVENTION_C,
+                                                     .is_variadic = true,
+                                                 });
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
                                                      IrValueId* arguments, u32 argument_count)
 {
@@ -9958,8 +10070,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     {
         return IR_VALUE_ID_INVALID;
     }
-    if ((!signature.is_variadic && argument_count != signature.parameter_count) || (signature.is_variadic && argument_count < signature.parameter_count))
+    if (!c_ir_signature_accepts_arity(signature, argument_count))
     {
+        if (!builder->failure_message.length)
+        {
+            builder->failure_message = c_ir_call_arity_message(builder, target->name, signature, argument_count);
+        }
         return IR_VALUE_ID_INVALID;
     }
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -9970,9 +10086,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
             return IR_VALUE_ID_INVALID;
         }
     }
-    IrValueId reference_result = c_ir_add_result(builder, target->canonical_type);
+    // A call that supplies its own parameters carries them on the reference:
+    // the symbol's `()` type describes no call, and the backends read the
+    // argument placement off the type the reference names.
+    IrTypeId callee_type = target->canonical_type;
+    if (signature.is_unprototyped && argument_count > signature.parameter_count)
+    {
+        callee_type = c_ir_unprototyped_call_type(builder, signature.return_type, arguments, argument_count);
+        if (callee_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
+    IrValueId reference_result = c_ir_add_result(builder, callee_type);
     IrSourceRange reference_source = c_ir_token_source_range(builder, token);
-    IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, target->canonical_type);
+    IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, callee_type);
     reference.symbol = target->symbol;
     reference.result = reference_result;
     IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
@@ -14442,10 +14570,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     .valid = true,
                     .returns_void = return_type->kind == IR_TYPE_VOID,
                     .is_variadic = function_type->is_variadic,
-                    // No declaration stands behind this call, so the marker
+                    // No declaration stands behind this call, so the markers
                     // the declarator spelled on the pointed-to function type
-                    // is the whole answer.
+                    // are the whole answer.
                     .is_noreturn = function_type->is_noreturn,
+                    .is_unprototyped = function_type->is_unprototyped,
                 };
                 signature.body_supported = c_ir_signature_body_supported(builder->program, builder->wide_float_cache, signature.return_type,
                                                                            signature.parameter_types, signature.parameter_count,
@@ -14466,6 +14595,17 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             if (declaration_index == UINT32_MAX)
             {
                 builder->failure_token_index = selected->token_index;
+                // The name may be undeclared, or it may resolve to the one
+                // declaration these arguments do not fit. Only the second is
+                // knowable here, and saying so beats reporting that the call
+                // could not be prepared.
+                String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+                CIrFunctionNameResolution* resolution = c_ir_function_name_resolution(builder, name);
+                if (!builder->failure_message.length && resolution && resolution->unique && builder->signatures[resolution->declaration_index].valid)
+                {
+                    builder->failure_message =
+                        c_ir_call_arity_message(builder, name, builder->signatures[resolution->declaration_index], predicted_argument_count);
+                }
                 return false;
             }
             signature = builder->signatures[declaration_index];
@@ -14605,9 +14745,21 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 separator += 1;
             }
-            if (separator == index || (!signature.is_variadic && argument_count >= signature.parameter_count))
+            if (separator == index)
             {
                 builder->failure_token_index = separator < argument_end ? separator : selected->open_index;
+                return false;
+            }
+            // One argument past what the callee declares. A prototype makes
+            // that a constraint violation to name; a pre-C23 `()` declares no
+            // parameter list, so the call names its own and there is nothing
+            // to exceed.
+            if (!signature.is_variadic && !signature.is_unprototyped && argument_count >= signature.parameter_count)
+            {
+                builder->failure_token_index = separator < argument_end ? separator : selected->open_index;
+                builder->failure_message = c_ir_call_arity_message(
+                    builder, selected->indirect ? (String8){0} : c_token_spelling(builder->preprocess.spelling_base, token), signature,
+                    argument_count + 1);
                 return false;
             }
             frame->as.prepared_call.state->argument_count = argument_count;
@@ -14626,6 +14778,27 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
             }
+            // The call's source range is taken before the callee, because the
+            // retyping below is emitted against it too.
+            IrSourceRange call_source = c_ir_token_source_range(builder, token);
+            // Through a pre-C23 `()` pointer the call names its own
+            // parameters, so the pointer takes the call's signature; see
+            // c_ir_unprototyped_call_type.
+            if (signature.is_unprototyped && argument_count > signature.parameter_count)
+            {
+                IrTypeId callee_type =
+                    c_ir_unprototyped_call_type(builder, signature.return_type, selected->arguments, argument_count);
+                IrTypeId callee_pointer_type = callee_type.value != IR_ID_UNDERLYING_INVALID
+                                                   ? c_ir_add_pointer_type(builder->program, builder->pointer_types, callee_type)
+                                                   : IR_TYPE_ID_INVALID;
+                indirect_callee = callee_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_cast(builder, indirect_callee, callee_pointer_type, call_source)
+                                      : IR_VALUE_ID_INVALID;
+                if (indirect_callee.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
             IrValueId result = signature.returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, signature.return_type);
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
             operands[0] = indirect_callee;
@@ -14633,7 +14806,6 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 operands[argument_index + 1] = selected->arguments[argument_index];
             }
-            IrSourceRange call_source = c_ir_token_source_range(builder, token);
             IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type);
             call.operands = operands;
             call.operand_count = argument_count + 1;
@@ -16428,12 +16600,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_parameter(CIntegerIrBuilder* builder, 
 // the function type itself, and `int (*)(void)` a pointer to one. Both carry
 // the same parameter list, so it is read here for either shape and the caller
 // adds the pointers. The list is a prototype -- an empty one is the
-// unprototyped `int ()`, which sizes and lowers the same way.
+// unprototyped `int ()`, which sizes the same way and, before C23, lets each
+// call through it name its own parameters (see IrType.is_unprototyped).
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* builder, IrTypeId return_type, u32 parameters_open, u32 parameters_close)
 {
     IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, parameters_close - parameters_open);
     u32 parameter_count = 0;
     bool variadic = false;
+    bool unprototyped = false;
     bool valid = true;
     u32 parameter_start = parameters_open + 1;
     u32 depth = 0;
@@ -16457,6 +16631,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
         u32 parameter_token_count = parameter_end - parameter_start;
         if (at_end && !parameter_token_count && parameter_start == parameters_open + 1)
         {
+            // The empty list: `int ()` leaves the parameters unspecified where
+            // `int (void)` declares that there are none.
+            unprototyped = !c_preprocess_dialect_is_c23(builder->preprocess.dialect);
             break;
         }
         bool void_list = !parameter_count && at_end && parameter_token_count == 1 &&
@@ -16497,6 +16674,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
                                                            .parameter_count = parameter_count,
                                                            .calling_convention = IR_CALLING_CONVENTION_C,
                                                            .is_variadic = variadic,
+                                                           .is_unprototyped = unprototyped,
                                                        });
     }
     return result;
@@ -36754,6 +36932,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                                  // rather than on a declaration; the indirect call
                                                                                  // site has nothing else to read it from.
                                                                                  .is_noreturn = c_parse_type_is_noreturn(&parse, (CTypeId){.value = type_index}),
+                                                                                 // C23 made `()` mean `(void)`, so the marker that
+                                                                                 // lets a call supply its own parameters is a
+                                                                                 // pre-C23 one; see IrType.is_unprototyped.
+                                                                                 .is_unprototyped = c_type->is_unprototyped &&
+                                                                                                    !c_preprocess_dialect_is_c23(preprocess.dialect),
                                                                              });
                     progress = true;
                     continue;

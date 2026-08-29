@@ -4182,8 +4182,16 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     {
         IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
         IrType* reference_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        IrType* symbol_type = symbol ? ir_type_from_id(&program->types, symbol->type) : 0;
+        // A pre-C23 `()` declaration names no parameters, so every call site
+        // supplies its own: the reference carries that call's signature and
+        // only the return type has to agree with the symbol.  See
+        // IrType.is_unprototyped.
+        bool unprototyped_call_site = symbol_type && symbol_type->kind == IR_TYPE_FUNCTION && symbol_type->is_unprototyped && reference_type &&
+                                      reference_type->kind == IR_TYPE_FUNCTION &&
+                                      reference_type->return_type.value == symbol_type->return_type.value;
         bool type_matches =
-            symbol && (symbol->type.value == instruction->canonical_type.value ||
+            symbol && (symbol->type.value == instruction->canonical_type.value || unprototyped_call_site ||
                        (reference_type && reference_type->kind == IR_TYPE_POINTER && reference_type->element_type.value == symbol->type.value));
         if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION || !type_matches || instruction->operand_count != 0 ||
             instruction->result.value == IR_ID_UNDERLYING_INVALID)

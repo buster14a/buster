@@ -351,6 +351,15 @@ struct IrType
     // a function pointer type or typedef, where the call site only ever sees
     // the type. Only the C frontend sets and reads it.
     bool is_noreturn;
+    // A function type written `()` before C23: it declares no parameter list
+    // at all, so a call supplies the parameters itself from its own promoted
+    // argument types. The reference an IR_OPCODE_CALL takes to such a symbol
+    // therefore carries that call's own signature rather than the symbol's
+    // type (see the IR_OPCODE_FUNCTION rule in ir_validate_instruction), the
+    // way Clang gives `void die()` the type `void (...)` and each call site
+    // the type `void (i32, ...)`. `(void)` and C23's `()` are ordinary
+    // zero-parameter prototypes and never set it.
+    bool is_unprototyped;
 };
 
 typedef struct IrTypeTable IrTypeTable;

@@ -2054,6 +2054,17 @@ static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* i
                     instruction->symbol);
         return;
     }
+    // Wasm types every call by the callee's own declared signature, so a call
+    // that carries a signature of its own cannot be encoded: that is what a
+    // pre-C23 `()` declaration produces, since it names no parameters and each
+    // call site supplies them (see IrType.is_unprototyped).
+    if (instruction->operand_count - 1 != record->signature.param_count)
+    {
+        wasm64_fail(emitter->context, WASM64_ERROR_VARIADIC,
+                    wasm64_s8("a call whose arguments the callee's declaration does not describe is unsupported by Wasm64"), emitter->function, 0,
+                    instruction, instruction->symbol);
+        return;
+    }
     for (u32 argument_index = 1; argument_index < instruction->operand_count; argument_index += 1)
     {
         wasm64_fe_emit_value(emitter, instruction->operands[argument_index]);

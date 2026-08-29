@@ -6300,6 +6300,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_call_abi_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A call to a function declared `()` places its arguments from its own
+    // promoted types, because the declaration names none. Only the callees'
+    // own translation unit has the prototypes, so nothing in the caller can
+    // recover them and the host's ABI decides whether each argument arrived:
+    // a wrong answer here is a wrong register or stack slot, which is exactly
+    // what the Darwin AArch64 and Win64 variadic rules would produce if the
+    // call site were lowered as a variadic tail rather than named arguments.
+    String8 c_unprototyped_path = buster_test_temporary_path(arguments->arena, S8("buster-c-unprototyped-call"), S8(""));
+    String8 c_unprototyped_command_line[] = {
+        S8("-o"),
+        c_unprototyped_path,
+        S8("tests/basic_c_unprototyped_call.c"),
+        S8("tests/basic_c_unprototyped_call_callee.c"),
+    };
+    CompilerDriverResult c_unprototyped = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_unprototyped_command_line)));
+    BUSTER_TEST(arguments, c_unprototyped.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_unprototyped.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_unprototyped_arguments[] = {
+            c_unprototyped_path,
+        };
+        ProcessSpawnResult c_unprototyped_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_unprototyped_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_unprototyped_spawn.handle != 0);
+        if (c_unprototyped_spawn.handle)
+        {
+            ProcessWaitResult c_unprototyped_wait = os_process_wait_sync(arguments->arena, c_unprototyped_spawn);
+            BUSTER_TEST(arguments, c_unprototyped_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 conversion_cross_targets[] = {
         S8("aarch64-unknown-linux-gnu"),
         S8("x86_64-pc-windows-msvc"),
