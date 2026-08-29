@@ -2412,6 +2412,19 @@ on a commit you already know is incomplete tells nobody anything.
   to 56 bits sizes the union to a width no power-of-two unit fits inside --
   three bytes hold no unit covering 24 bits -- and is diagnosed for the same
   reason the struct spelling of those widths is.
+  **A unit is never written whole.** Sliding and narrowing are what make a unit
+  reach bytes it does not own: it can cover an ordinary member -- the four-byte
+  unit of `struct __attribute__((packed)) { char c; int a : 5; int b : 7; char
+  t; }` starts at offset zero, where `c` is -- and two units can share a byte,
+  because packing narrows one field's unit and not the next one's. So every
+  writer of a bit-field is a read-modify-write, including the one inside an
+  aggregate initializer, where the members are materialized into a zero-filled
+  slot and it is tempting to treat the accumulated word as the whole unit: the
+  canonical emitters spell it `OR mem, reg` and the two `IR_OPCODE_AGGREGATE`
+  selectors seed the accumulator with a load of the unit rather than with zero.
+  Ordering the members differently does not substitute for it -- a whole-unit
+  store loses whichever neighbour ran first, and two overlapping units lose one
+  of themselves whatever the order (issue #705).
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with

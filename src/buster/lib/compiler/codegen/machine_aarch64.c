@@ -2475,19 +2475,34 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_member_write(MachineA64Selector* sel
 // register image before the unit stores once, exactly like the x86-64
 // form — but in three-address rows: each intermediate is a fresh vreg, so
 // every row stays single-definition. The shift materializes as a
-// multiply by a power of two, keeping the x86-64 structure.
+// multiply by a power of two, keeping the x86-64 structure. The image starts
+// from the unit's current bytes for the reason the x86-64 form states: a slid
+// or narrowed unit also covers an ordinary member or a second unit, and the
+// slot is zero-filled first, so merging is what keeps both.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_bit_field_unit(MachineA64Selector* selector, IrInstruction* instruction, IrType* type, u32 slot, u32 first,
                                                            u64 field_offset, u64 field_size, u16 unit_store_opcode, u8* member_emitted)
 {
     bool selected = true;
+    // The caller admitted only the sizes the sized store covers, so the load
+    // that pairs with it is total over the same four.
+    u16 unit_load_opcode = field_size == 1   ? MACHINE_A64_LOAD_PTR8
+                           : field_size == 2 ? MACHINE_A64_LOAD_PTR16
+                           : field_size == 4 ? MACHINE_A64_LOAD_PTR32
+                                             : MACHINE_A64_LOAD_PTR64;
+    // The unit's address is one row: LEA_FRAME's payload is a byte offset into
+    // the slot. The pointer loads carry no displacement of their own.
+    u32 unit_address = machine_a64_synthesize_register(selector);
+    machine_a64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_address),
+                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                         .payload = (u32)field_offset,
+                                         .opcode = MACHINE_A64_LEA_FRAME,
+                                     });
     u32 unit_register = machine_a64_synthesize_register(selector);
-    u32 zero_immediate = selector->immediates.total_count;
-    u64* zero_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-    *zero_row = 0;
     machine_a64_select_row(selector, (MachineInstruction){
                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_register),
-                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
-                                         .opcode = MACHINE_A64_MOV_RI,
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_address)},
+                                         .opcode = unit_load_opcode,
                                      });
     for (u32 sibling = first; sibling < instruction->operand_count && selected; sibling += 1)
     {

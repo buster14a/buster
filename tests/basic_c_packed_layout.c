@@ -187,6 +187,48 @@ struct __attribute__((packed)) narrow_unit_wide
 static struct narrow_unit narrow_unit_initialized = {1, -6, 2};
 static struct narrow_unit narrow_unit_designated = {.value = 5, .tail = 6};
 
+// A brace initializer for an *automatic* aggregate writes each bit-field
+// through the same unit, and packing is what lets that unit reach bytes other
+// members own: `slid_unit`'s four-byte unit at offset zero covers `lead` and
+// `tail` as well as the two fields it is the unit of, and
+// `overlapping_units` has two units sharing a byte -- five bits have no `int`
+// unit in a two-byte object and take the byte, while the nine that follow are
+// read through the `short` that covers both.  Storing such a unit whole, out
+// of an accumulator seeded with zero rather than with the bytes already in the
+// slot, zeroed whichever of those the initializer wrote first (#705).  The
+// static objects above answer a different question: they take the constant
+// fold, so only an automatic object reaches the code generator's aggregate.
+struct __attribute__((packed)) slid_unit
+{
+    char lead;
+    int first : 5;
+    int second : 7;
+    char tail;
+};
+
+// The plain member on the far side of the bit-fields, which a brace list
+// writes after the unit and a designated list can write before it: both orders
+// have to keep it.
+struct __attribute__((packed)) trailing_member
+{
+    int first : 5;
+    int second : 7;
+    int third : 12;
+    char tail;
+};
+
+struct __attribute__((packed)) overlapping_units
+{
+    int narrow : 5;
+    short wide : 9;
+};
+
+struct __attribute__((packed)) overlapping_units_reversed
+{
+    short wide : 9;
+    int narrow : 5;
+};
+
 // A member declarator may carry an attribute list of its own, in two places
 // the shared-specifier position does not cover: after a parenthesized
 // declarator, where the list follows the whole derivation rather than the
@@ -466,6 +508,10 @@ int main(void)
     if (sizeof(struct narrow_unit_member) != 3 || _Alignof(struct narrow_unit_member) != 1) return 69;
     if (sizeof(struct narrow_unit_declarator) != 3 || _Alignof(struct narrow_unit_declarator) != 1) return 80;
     if (sizeof(struct narrow_unit_wide) != 4 || _Alignof(struct narrow_unit_wide) != 1) return 70;
+    if (sizeof(struct slid_unit) != 4 || _Alignof(struct slid_unit) != 1) return 107;
+    if (sizeof(struct trailing_member) != 4 || _Alignof(struct trailing_member) != 1) return 108;
+    if (sizeof(struct overlapping_units) != 2 || _Alignof(struct overlapping_units) != 1) return 109;
+    if (sizeof(struct overlapping_units_reversed) != 2 || _Alignof(struct overlapping_units_reversed) != 1) return 110;
     if (sizeof(struct pragma_packed) != 5 || _Alignof(struct pragma_packed) != 1) return 10;
     if (sizeof(struct pragma_packed_two) != 6 || _Alignof(struct pragma_packed_two) != 2) return 11;
     if (sizeof(struct member_pointer_aligned) != 64 || _Alignof(struct member_pointer_aligned) != 32) return 28;
@@ -592,6 +638,28 @@ int main(void)
     // The fold that writes a union bit-field into static bytes reads the same
     // unit the loads above do.
     if (packed_bit_union_initialized.value != -6) return 100;
+
+    // The same units reached from an automatic object's initializer, where
+    // every member is written into one slot rather than folded into bytes.
+    // The members a unit covers are the claim: a whole-unit store loses
+    // `slid.lead`, `overlapping.narrow`, `overlapping_reversed.wide`, and --
+    // in the designated forms, which write the trailing member before the
+    // unit rather than after it -- `slid_designated.tail` and
+    // `trailing_designated.tail`.
+    struct narrow_unit narrow_automatic = {3, -7, 4};
+    if (narrow_automatic.lead != 3 || narrow_automatic.value != -7 || narrow_automatic.tail != 4) return 111;
+    struct slid_unit slid = {1, -6, 63, 2};
+    if (slid.lead != 1 || slid.first != -6 || slid.second != 63 || slid.tail != 2) return 112;
+    struct slid_unit slid_designated = {.tail = 9, .first = -6};
+    if (slid_designated.lead != 0 || slid_designated.first != -6 || slid_designated.second != 0 || slid_designated.tail != 9) return 113;
+    struct trailing_member trailing = {1, 2, 3, 4};
+    if (trailing.first != 1 || trailing.second != 2 || trailing.third != 3 || trailing.tail != 4) return 114;
+    struct trailing_member trailing_designated = {.tail = 5, .second = 6};
+    if (trailing_designated.first != 0 || trailing_designated.second != 6 || trailing_designated.third != 0 || trailing_designated.tail != 5) return 115;
+    struct overlapping_units overlapping = {13, -100};
+    if (overlapping.narrow != 13 || overlapping.wide != -100) return 116;
+    struct overlapping_units_reversed overlapping_reversed = {-100, 13};
+    if (overlapping_reversed.wide != -100 || overlapping_reversed.narrow != 13) return 117;
 
     // Objects the linker placed, and one automatic object.
     char automatic_aligned[3] __attribute__((aligned(64)));

@@ -2285,22 +2285,40 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_debug_trap(MachineX64Selector* selec
     return true;
 }
 
-// Bit-field members of one storage unit accumulate in a zeroed register — mask
-// to width, shift to position via a power-of-two multiply, or together — and
-// the unit stores once. Initializers materialize every member, so the
-// accumulated word is the whole unit.
+// Bit-field members of one storage unit accumulate in a register — mask to
+// width, shift to position via a power-of-two multiply, or together — and the
+// unit stores once. The register starts from the unit's current bytes rather
+// than from zero, because a unit is not the initializer's alone: packing
+// slides it back over an ordinary member and can leave two units sharing a
+// byte, and a whole-unit store of an accumulator seeded with zero overwrites
+// whichever of those the loop reached first. Merging is sound because the slot
+// is zero-filled before any member and every bit belongs to exactly one of
+// them — the same read-modify-write the canonical emitter spells as OR into
+// memory.
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_bit_field_unit(MachineX64Selector* selector, IrInstruction* instruction, IrType* type, u32 slot, u32 first,
                                                            u64 field_offset, u64 field_size, u16 unit_store_opcode, u8* member_emitted)
 {
     bool selected = true;
+    // The caller admitted only the sizes the sized store covers, so the load
+    // that pairs with it is total over the same four.
+    u16 unit_load_opcode = field_size == 1   ? MACHINE_X64_LOAD_PTR8
+                           : field_size == 2 ? MACHINE_X64_LOAD_PTR16
+                           : field_size == 4 ? MACHINE_X64_LOAD_PTR32
+                                             : MACHINE_X64_LOAD_PTR64;
+    // The unit's address is one row: LEA_FRAME's payload is a byte offset into
+    // the slot. The pointer loads carry no displacement of their own.
+    u32 unit_address = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_address),
+                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                         .payload = (u32)field_offset,
+                                         .opcode = MACHINE_X64_LEA_FRAME,
+                                     });
     u32 unit_register = machine_x64_synthesize_register(selector);
-    u32 zero_immediate = selector->immediates.total_count;
-    u64* zero_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-    *zero_row = 0;
     machine_x64_select_row(selector, (MachineInstruction){
                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_register),
-                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, zero_immediate)},
-                                         .opcode = MACHINE_X64_MOV_RI,
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_address)},
+                                         .opcode = unit_load_opcode,
                                      });
     for (u32 sibling = first; sibling < instruction->operand_count && selected; sibling += 1)
     {
